@@ -11,17 +11,24 @@ def cli():
 
 @cli.command("add-project")
 @click.option(
-    "--id", "project_id", required=True, help="Unique project ID (e.g. cmx-ionic)"
+    "--id",
+    "project_id",
+    required=True,
+    help="Unique project ID (e.g. cmx-ionic)",
 )
 @click.option("--root", required=True, help="Absolute path to the repo root")
 @click.option(
-    "--languages", default="", help="Comma-separated language tags (e.g. ts,vue,py)"
+    "--languages",
+    default="",
+    help="Comma-separated language tags (e.g. ts,vue,py)",
 )
 @click.option("--desc", default="", help="Short description")
 def add_project(project_id, root, languages, desc):
     """Register a new project in the registry."""
     langs = [lang.strip() for lang in languages.split(",") if lang.strip()]
-    project = Project(id=project_id, root_path=root, languages=langs, description=desc)
+    project = Project(
+        id=project_id, root_path=root, languages=langs, description=desc
+    )
     try:
         registry.add_project(project)
     except ValueError as e:
@@ -32,7 +39,9 @@ def add_project(project_id, root, languages, desc):
 
 @cli.command("update-project")
 @click.option("--id", "project_id", required=True, help="Project ID to update")
-@click.option("--root", default=None, help="New absolute path to the repo root")
+@click.option(
+    "--root", default=None, help="New absolute path to the repo root"
+)
 @click.option(
     "--languages",
     default=None,
@@ -97,7 +106,11 @@ def status(project_id):
     result = client.count(
         collection_name=settings.collection_name,
         count_filter=Filter(
-            must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+            must=[
+                FieldCondition(
+                    key="project_id", match=MatchValue(value=project_id)
+                )
+            ]
         ),
     )
     click.echo(f"Project '{project_id}': {result.count} chunks indexed")
@@ -106,7 +119,11 @@ def status(project_id):
 @cli.command("index")
 @click.option("--project-id", required=True, help="Project ID to index")
 @click.option(
-    "--full", "mode", flag_value="full", default=True, help="Full re-index (default)"
+    "--full",
+    "mode",
+    flag_value="full",
+    default=True,
+    help="Full re-index (default)",
 )
 @click.option(
     "--incremental", "mode", flag_value="incremental", help="Incremental index"
@@ -118,7 +135,11 @@ def index(project_id, mode):
         result = indexer.index_project(project_id, mode)
         msg = f"Done. Chunks indexed: {result['chunks_indexed']}"
         if mode == "incremental":
-            msg += f"  (files changed: {result.get('files_reindexed', 0)}, deleted: {result.get('files_removed', 0)})"
+            msg += (
+                "  (files changed:"
+                f" {result.get('files_reindexed', 0)},"
+                f" deleted: {result.get('files_removed', 0)})"
+            )
         click.echo(msg)
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
@@ -127,7 +148,9 @@ def index(project_id, mode):
 
 @cli.command("search")
 @click.option("--project-id", required=True, help="Project ID to search")
-@click.option("--top-k", default=5, show_default=True, help="Number of results")
+@click.option(
+    "--top-k", default=5, show_default=True, help="Number of results"
+)
 @click.argument("query")
 def search(project_id, top_k, query):
     """Search code in a project by natural language query."""
@@ -142,9 +165,12 @@ def search(project_id, top_k, query):
         click.echo("No results found.")
         return
     for i, r in enumerate(results, 1):
-        click.echo(
-            f"\n[{i}] {r.file_path}:{r.start_line}-{r.end_line}  score={r.score:.3f}  ({r.language})"
+        msg = (
+            f"\n[{i}] {r.file_path}:{r.start_line}-{r.end_line}"
+            f"  score={r.score:.3f}"
+            f"  ({r.language})"
         )
+        click.echo(msg)
         click.echo("-" * 60)
         # Print first 10 lines of content
         lines = r.content.splitlines()[:10]

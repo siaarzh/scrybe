@@ -8,7 +8,9 @@ HASHES_DIR = DATA_DIR / "hashes"
 
 
 def load_hashes(project_id: str) -> dict[str, str]:
-    """Load stored file hashes for a project. Returns {} if no hash file exists."""
+    """
+    Load stored file hashes for a project. Returns {} if no hash file exists.
+    """
     path = HASHES_DIR / f"{project_id}.json"
     if not path.exists():
         return {}

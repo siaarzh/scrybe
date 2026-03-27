@@ -70,7 +70,9 @@ SKIP_DIRS = {
     "fastlane",
 }
 
-SKIP_DIR_PREFIXES = ("Intra.Old.",)  # legacy C# code, not relevant to current work
+SKIP_DIR_PREFIXES = (
+    "Intra.Old.",
+)  # legacy C# code, not relevant to current work
 
 SKIP_EXTENSIONS = {
     ".lock",
@@ -124,7 +126,7 @@ def _load_gitignore(root: Path):
     gitignore_path = root / ".gitignore"
     if gitignore_path.exists():
         try:
-            import gitignore_parser
+            import gitignore_parser  # type: ignore[import-untyped]
 
             return gitignore_parser.parse_gitignore(gitignore_path)
         except Exception:
@@ -132,8 +134,12 @@ def _load_gitignore(root: Path):
     return None
 
 
-def _chunk_lines(lines: list[str], start_offset: int = 0) -> list[tuple[int, int, str]]:
-    """Split lines into overlapping chunks. Returns (start_line, end_line, content) tuples."""
+def _chunk_lines(
+    lines: list[str], start_offset: int = 0
+) -> list[tuple[int, int, str]]:
+    """Split lines into overlapping chunks.
+    Returns (start_line, end_line, content) tuples.
+    """
     size = settings.chunk_size
     overlap = settings.chunk_overlap
     step = size - overlap
@@ -165,7 +171,10 @@ def walk_repo_files(root_path: str) -> Iterator[tuple[str, Path]]:
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        if any(_should_skip_dir(part) for part in path.relative_to(root).parts[:-1]):
+        if any(
+            _should_skip_dir(part)
+            for part in path.relative_to(root).parts[:-1]
+        ):
             continue
         if path.name in SKIP_FILENAMES:
             continue

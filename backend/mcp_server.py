@@ -8,7 +8,7 @@ Registered in ~/.claude.json under mcpServers:
     "args": ["-m", "backend.mcp_server"],
     "env": {
       "PYTHONPATH": "/path/to/scrybe",
-      "OPENAI_API_KEY": "sk-..."   // or omit and put it in .env at the repo root
+      "OPENAI_API_KEY": "sk-..."   // or omit, put it in .env at the repo root
     }
   }
 
@@ -29,16 +29,22 @@ _NOT_FOUND = "' not found. Call list_projects() first."
 
 @mcp.tool()
 def list_projects() -> list[dict]:
-    """List all registered projects with their IDs, root paths, and languages."""
+    """
+    List all registered projects with their IDs, root paths, and languages.
+    """
     return [p.model_dump() for p in registry.list_projects()]
 
 
 @mcp.tool()
 def add_project(
-    project_id: str, root_path: str, languages: list[str] = [], description: str = ""
+    project_id: str,
+    root_path: str,
+    languages: list[str] = [],
+    description: str = "",
 ) -> dict:
     """
-    Register a new project. Errors if a project with that ID already exists — use update_project to modify it.
+    Register a new project. Errors if a project with that ID already
+    exists — use update_project to modify it.
     languages: list of language tags, e.g. ['cs'] or ['ts', 'vue'].
     """
     from .models import Project
@@ -65,7 +71,8 @@ def update_project(
 ) -> dict:
     """
     Update an existing project's root path, languages, or description.
-    Only the fields you provide are changed. Errors if the project doesn't exist — use add_project to register it.
+    Only the fields you provide are changed. Errors if the project
+    doesn't exist — use add_project to register it.
     """
     try:
         project = registry.update_project(
@@ -98,18 +105,21 @@ def search_code(project_id: str, query: str, top_k: int = 10) -> list[dict]:
 def reindex_project(project_id: str, mode: str = "full") -> dict:
     """
     Trigger re-indexing of a project in the background.
-    Returns immediately with a job_id. Poll progress with reindex_status(job_id).
+    Returns immediately with a job_id. Poll progress
+    with reindex_status(job_id).
 
     mode='incremental' (default recommendation):
       - Scans all files, compares SHA256 hashes against stored state
       - Only re-embeds files that changed, were added, or were deleted
       - Use after: git pull, branch switch, or any code change
-      - Caveat: if hash state is missing (e.g. first run, data dir wiped), treats all
-        files as new and re-embeds everything WITHOUT clearing first — use 'full' instead
+      - Caveat: if hash state is missing (e.g. first run, data
+      dir wiped), treats all files as new and re-embeds everything WITHOUT
+      clearing first — use 'full' instead
 
     mode='full':
       - Clears ALL existing vectors for this project from Qdrant, then rebuilds
-      - Use when: first index, hash file lost/corrupted, or index seems stale/wrong
+      - Use when: first index, hash file lost/corrupted, or index seems
+      stale/wrong
       - Slower and costs more API tokens, but always produces a clean state
     """
     project = registry.get_project(project_id)
@@ -135,7 +145,10 @@ def reindex_status(job_id: str) -> dict:
     status = jobs.get_status(job_id)
     if status is None:
         return {
-            "error": (f"Job '{job_id}' not found. " "Jobs are lost on server restart.")
+            "error": (
+                f"Job '{job_id}' not found. "
+                "Jobs are lost on server restart."
+            )
         }
     return status
 

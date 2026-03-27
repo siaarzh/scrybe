@@ -64,7 +64,11 @@ def search(
         collection_name=settings.collection_name,
         query=query_vector,
         query_filter=Filter(
-            must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+            must=[
+                FieldCondition(
+                    key="project_id", match=MatchValue(value=project_id)
+                )
+            ]
         ),
         limit=top_k,
         with_payload=True,
@@ -89,7 +93,11 @@ def delete_project(project_id: str) -> None:
     client.delete(
         collection_name=settings.collection_name,
         points_selector=Filter(
-            must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]
+            must=[
+                FieldCondition(
+                    key="project_id", match=MatchValue(value=project_id)
+                )
+            ]
         ),
     )
 
@@ -100,8 +108,12 @@ def delete_file_chunks(project_id: str, file_path: str) -> None:
         collection_name=settings.collection_name,
         points_selector=Filter(
             must=[
-                FieldCondition(key="project_id", match=MatchValue(value=project_id)),
-                FieldCondition(key="file_path", match=MatchValue(value=file_path)),
+                FieldCondition(
+                    key="project_id", match=MatchValue(value=project_id)
+                ),
+                FieldCondition(
+                    key="file_path", match=MatchValue(value=file_path)
+                ),
             ]
         ),
     )

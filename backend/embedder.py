@@ -32,7 +32,9 @@ def _truncate_to_token_limit(text: str) -> str:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embed a list of texts in one API call. Returns a list of float vectors."""
+    """
+    Embed a list of texts in one API call. Returns a list of float vectors.
+    """
     if not texts:
         return []
     truncated = [_truncate_to_token_limit(t) for t in texts]
@@ -40,10 +42,14 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         model=settings.embedding_model,
         input=truncated,
     )
-    return [item.embedding for item in sorted(response.data, key=lambda x: x.index)]
+    return [
+        item.embedding for item in sorted(response.data, key=lambda x: x.index)
+    ]
 
 
-def embed_batched(texts: list[str], batch_size: int | None = None) -> list[list[float]]:
+def embed_batched(
+    texts: list[str], batch_size: int | None = None
+) -> list[list[float]]:
     """Embed texts in batches to avoid hitting API limits."""
     size = batch_size or settings.embed_batch_size
     vectors: list[list[float]] = []

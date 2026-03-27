@@ -35,7 +35,8 @@ def add_project(project: Project) -> None:
     projects = _load()
     if any(p["id"] == project.id for p in projects):
         raise ValueError(
-            f"Project '{project.id}' already exists. Use update_project to modify it."
+            f"Project '{project.id}' already exists. Use update_project"
+            f" to modify it."
         )
     projects.append(project.model_dump())
     _save(projects)
