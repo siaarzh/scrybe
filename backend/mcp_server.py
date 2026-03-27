@@ -3,16 +3,38 @@ MCP server exposing scrybe tools to Claude Code.
 
 Registered in ~/.claude.json under mcpServers:
   "scrybe": {
-    "command": "cmd",
-    "args": ["/c", "docker compose up -d &&
-              .venv\\Scripts\\python.exe -m backend.mcp_server"],
-    "cwd": "c:\\Users\\serzh\\repos\\scrybe"
+    "type": "stdio",
+    "command": "/path/to/scrybe/.venv/Scripts/python.exe",
+    "args": ["-m", "backend.mcp_server"],
+    "env": { "PYTHONPATH": "/path/to/scrybe" }
   }
+
+Requires Qdrant running at QDRANT_URL (default http://localhost:6333).
+Start it once with: docker compose up -d
 """
+
+import sys
+import urllib.request
 
 from fastmcp import FastMCP
 
 from . import embedder, jobs, registry, vector_store
+from .config import settings
+
+
+def _check_qdrant() -> None:
+    try:
+        urllib.request.urlopen(f"{settings.qdrant_url}/healthz", timeout=3)
+    except Exception:
+        print(
+            f"[scrybe] ERROR: Qdrant not reachable at {settings.qdrant_url}. "
+            "Run 'docker compose up -d' in the scrybe directory.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+_check_qdrant()
 
 mcp = FastMCP("scrybe")
 

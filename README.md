@@ -71,10 +71,15 @@ Add to your Claude Code `settings.json` under `mcpServers`:
 
 ```json
 "scrybe": {
-  "command": "cmd",
-  "args": ["/c", "docker compose up -d && .venv\\Scripts\\python.exe -m backend.mcp_server"],
-  "cwd": "c:\\Users\\serzh\\repos\\scrybe"
+  "type": "stdio",
+  "command": "/path/to/scrybe/.venv/Scripts/python.exe",
+  "args": ["-m", "backend.mcp_server"],
+  "env": {
+    "PYTHONPATH": "/path/to/scrybe"
+  }
 }
 ```
 
-Claude Code will auto-start Qdrant and the MCP server on each session. Tools available: `search_code`, `reindex_project`, `list_projects`.
+Replace `/path/to/scrybe` with the absolute path to your clone. Make sure Qdrant is running (`docker compose up -d`) before starting a session.
+
+Tools available: `search_code`, `reindex_project`, `reindex_status`, `cancel_reindex`, `list_projects`.
