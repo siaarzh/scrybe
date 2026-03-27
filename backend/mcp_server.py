@@ -143,4 +143,9 @@ def cancel_reindex(job_id: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transport", default="stdio")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    mcp.run(transport=args.transport, port=args.port)
