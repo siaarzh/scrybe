@@ -27,3 +27,10 @@ scrybe = "cli:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["backend*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]

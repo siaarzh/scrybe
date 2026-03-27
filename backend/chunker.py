@@ -36,33 +36,72 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
 }
 
 SKIP_DIRS = {
-    ".git", ".svn", "node_modules", "__pycache__", ".venv", "venv",
-    "dist", "build", ".next", ".nuxt", "coverage", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", "target",
+    ".git",
+    ".svn",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "coverage",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "target",
     # C# build output
-    "bin", "obj", "packages", ".vs", "TestResults", "publish", "artifacts",
+    "bin",
+    "obj",
+    "packages",
+    ".vs",
+    "TestResults",
+    "publish",
+    "artifacts",
     # Vendored / embedded libraries
-    "~ExternalLibraries", "Dommel",
+    "~ExternalLibraries",
+    "Dommel",
     # Capacitor / mobile native
-    "android", "ios", "electron",
+    "android",
+    "ios",
+    "electron",
     # CI/CD
     "fastlane",
 }
 
-SKIP_DIR_PREFIXES = (
-    "Intra.Old.",  # legacy C# code, not relevant to current work
-)
+SKIP_DIR_PREFIXES = ("Intra.Old.",)  # legacy C# code, not relevant to current work
 
 SKIP_EXTENSIONS = {
-    ".lock", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff",
-    ".woff2", ".ttf", ".eot", ".pdf", ".zip", ".tar", ".gz", ".map",
-    ".min.js", ".min.css",
+    ".lock",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".pdf",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".map",
+    ".min.js",
+    ".min.css",
 }
 
 SKIP_FILENAMES = {
     # Lockfiles (various extensions, all auto-generated)
-    "pnpm-lock.yaml", "yarn.lock", "package-lock.json",
-    "Gemfile.lock", "Pipfile.lock", "composer.lock", "poetry.lock",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "package-lock.json",
+    "Gemfile.lock",
+    "Pipfile.lock",
+    "composer.lock",
+    "poetry.lock",
     "go.sum",
 }
 
@@ -86,15 +125,14 @@ def _load_gitignore(root: Path):
     if gitignore_path.exists():
         try:
             import gitignore_parser
+
             return gitignore_parser.parse_gitignore(gitignore_path)
         except Exception:
             pass
     return None
 
 
-def _chunk_lines(
-    lines: list[str], start_offset: int = 0
-) -> list[tuple[int, int, str]]:
+def _chunk_lines(lines: list[str], start_offset: int = 0) -> list[tuple[int, int, str]]:
     """Split lines into overlapping chunks. Returns (start_line, end_line, content) tuples."""
     size = settings.chunk_size
     overlap = settings.chunk_overlap
@@ -105,11 +143,13 @@ def _chunk_lines(
         chunk_lines = lines[i : i + size]
         content = "".join(chunk_lines).strip()
         if content:
-            chunks.append((
-                start_offset + i + 1,
-                start_offset + i + len(chunk_lines),
-                content,
-            ))
+            chunks.append(
+                (
+                    start_offset + i + 1,
+                    start_offset + i + len(chunk_lines),
+                    content,
+                )
+            )
         i += step
     return chunks
 

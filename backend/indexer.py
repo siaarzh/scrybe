@@ -45,9 +45,7 @@ def index_project(
     else:
         old_hashes = hash_store.load_hashes(project_id)
         to_remove = {p for p in old_hashes if p not in current_hashes}
-        to_reindex = {
-            p for p, h in current_hashes.items() if old_hashes.get(p) != h
-        }
+        to_reindex = {p for p, h in current_hashes.items() if old_hashes.get(p) != h}
         for rel_path in to_remove | to_reindex:
             _check_cancel()
             vector_store.delete_file_chunks(project_id, rel_path)
@@ -56,9 +54,7 @@ def index_project(
     # --- Pass 2: chunk + embed only changed files (streaming, low memory) ---
     batch: list = []
     total = 0
-    for chunk in chunk_repo(
-        project_id, project.root_path, only_files=to_reindex
-    ):
+    for chunk in chunk_repo(project_id, project.root_path, only_files=to_reindex):
         _check_cancel()
         batch.append(chunk)
         if len(batch) == 100:

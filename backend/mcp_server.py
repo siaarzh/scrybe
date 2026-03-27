@@ -21,7 +21,6 @@ Runtime data (projects, hashes, vector DB) lives in the OS user data directory:
 from fastmcp import FastMCP
 
 from . import embedder, jobs, registry, vector_store
-from .config import settings
 
 mcp = FastMCP("scrybe")
 
@@ -35,14 +34,22 @@ def list_projects() -> list[dict]:
 
 
 @mcp.tool()
-def add_project(project_id: str, root_path: str, languages: list[str] = [], description: str = "") -> dict:
+def add_project(
+    project_id: str, root_path: str, languages: list[str] = [], description: str = ""
+) -> dict:
     """
     Register a new project. Errors if a project with that ID already exists — use update_project to modify it.
     languages: list of language tags, e.g. ['cs'] or ['ts', 'vue'].
     """
     from .models import Project
+
     try:
-        project = Project(id=project_id, root_path=root_path, languages=languages, description=description)
+        project = Project(
+            id=project_id,
+            root_path=root_path,
+            languages=languages,
+            description=description,
+        )
         registry.add_project(project)
         return {"ok": True, "project_id": project_id, "root_path": root_path}
     except ValueError as e:
@@ -61,16 +68,19 @@ def update_project(
     Only the fields you provide are changed. Errors if the project doesn't exist — use add_project to register it.
     """
     try:
-        project = registry.update_project(project_id, root_path=root_path, languages=languages, description=description)
+        project = registry.update_project(
+            project_id,
+            root_path=root_path,
+            languages=languages,
+            description=description,
+        )
         return project.model_dump()
     except ValueError as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-def search_code(
-    project_id: str, query: str, top_k: int = 10
-) -> list[dict]:
+def search_code(project_id: str, query: str, top_k: int = 10) -> list[dict]:
     """
     Semantically search code in a project by natural language query.
     Returns relevant code snippets with file paths and line numbers.
@@ -125,10 +135,7 @@ def reindex_status(job_id: str) -> dict:
     status = jobs.get_status(job_id)
     if status is None:
         return {
-            "error": (
-                f"Job '{job_id}' not found. "
-                "Jobs are lost on server restart."
-            )
+            "error": (f"Job '{job_id}' not found. " "Jobs are lost on server restart.")
         }
     return status
 
@@ -144,6 +151,7 @@ def cancel_reindex(job_id: str) -> dict:
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--transport", default="stdio")
     parser.add_argument("--port", type=int, default=8765)

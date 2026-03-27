@@ -3,6 +3,7 @@ Launcher for scrybe MCP server.
 - If the HTTP server isn't running, starts it as a detached background process.
 - Then runs an in-process stdio<->SSE proxy so Claude Code connects normally.
 """
+
 import pathlib
 import socket
 import subprocess
@@ -22,15 +23,19 @@ def _is_running() -> bool:
 if not _is_running():
     subprocess.Popen(
         [
-            sys.executable, "-m", "backend.mcp_server",
-            "--transport", "sse", "--port", str(PORT),
+            sys.executable,
+            "-m",
+            "backend.mcp_server",
+            "--transport",
+            "sse",
+            "--port",
+            str(PORT),
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=(
-            subprocess.CREATE_NO_WINDOW
-            | subprocess.CREATE_NEW_PROCESS_GROUP
+            subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         ),
     )
     for _ in range(100):  # wait up to 10 s
@@ -45,4 +50,5 @@ if not _is_running():
         sys.exit(1)
 
 from fastmcp.cli.cli import app  # noqa: E402
+
 app(["run", _URL, "--transport", "stdio", "--no-banner"])

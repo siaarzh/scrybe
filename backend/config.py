@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from platformdirs import user_data_dir
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,8 +17,8 @@ class Settings(BaseSettings):
     collection_name: str = "scrybe_code"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
-    chunk_size: int = 60       # lines per chunk
-    chunk_overlap: int = 10    # overlapping lines between chunks
+    chunk_size: int = 60  # lines per chunk
+    chunk_overlap: int = 10  # overlapping lines between chunks
     embed_batch_size: int = 100
 
 

@@ -1,5 +1,6 @@
 import click
-from backend import indexer, registry, vector_store, embedder
+
+from backend import embedder, indexer, registry, vector_store
 from backend.models import Project
 
 
@@ -9,13 +10,17 @@ def cli():
 
 
 @cli.command("add-project")
-@click.option("--id", "project_id", required=True, help="Unique project ID (e.g. cmx-ionic)")
+@click.option(
+    "--id", "project_id", required=True, help="Unique project ID (e.g. cmx-ionic)"
+)
 @click.option("--root", required=True, help="Absolute path to the repo root")
-@click.option("--languages", default="", help="Comma-separated language tags (e.g. ts,vue,py)")
+@click.option(
+    "--languages", default="", help="Comma-separated language tags (e.g. ts,vue,py)"
+)
 @click.option("--desc", default="", help="Short description")
 def add_project(project_id, root, languages, desc):
     """Register a new project in the registry."""
-    langs = [l.strip() for l in languages.split(",") if l.strip()]
+    langs = [lang.strip() for lang in languages.split(",") if lang.strip()]
     project = Project(id=project_id, root_path=root, languages=langs, description=desc)
     try:
         registry.add_project(project)
@@ -28,13 +33,23 @@ def add_project(project_id, root, languages, desc):
 @cli.command("update-project")
 @click.option("--id", "project_id", required=True, help="Project ID to update")
 @click.option("--root", default=None, help="New absolute path to the repo root")
-@click.option("--languages", default=None, help="New comma-separated language tags (e.g. ts,vue,py)")
+@click.option(
+    "--languages",
+    default=None,
+    help="New comma-separated language tags (e.g. ts,vue,py)",
+)
 @click.option("--desc", default=None, help="New short description")
 def update_project(project_id, root, languages, desc):
     """Update an existing project's root path, languages, or description."""
-    langs = [l.strip() for l in languages.split(",") if l.strip()] if languages is not None else None
+    langs = (
+        [lang.strip() for lang in languages.split(",") if lang.strip()]
+        if languages is not None
+        else None
+    )
     try:
-        registry.update_project(project_id, root_path=root, languages=langs, description=desc)
+        registry.update_project(
+            project_id, root_path=root, languages=langs, description=desc
+        )
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
@@ -72,9 +87,11 @@ def status(project_id):
     if project is None:
         click.echo(f"Project '{project_id}' not found.", err=True)
         raise SystemExit(1)
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
-    from backend.vector_store import _get_client
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
     from backend.config import settings
+    from backend.vector_store import _get_client
+
     vector_store.ensure_collection()
     client = _get_client()
     result = client.count(
@@ -88,8 +105,12 @@ def status(project_id):
 
 @cli.command("index")
 @click.option("--project-id", required=True, help="Project ID to index")
-@click.option("--full", "mode", flag_value="full", default=True, help="Full re-index (default)")
-@click.option("--incremental", "mode", flag_value="incremental", help="Incremental index")
+@click.option(
+    "--full", "mode", flag_value="full", default=True, help="Full re-index (default)"
+)
+@click.option(
+    "--incremental", "mode", flag_value="incremental", help="Incremental index"
+)
 def index(project_id, mode):
     """Index a project into the vector database."""
     click.echo(f"Indexing '{project_id}' (mode={mode})...")
@@ -121,7 +142,9 @@ def search(project_id, top_k, query):
         click.echo("No results found.")
         return
     for i, r in enumerate(results, 1):
-        click.echo(f"\n[{i}] {r.file_path}:{r.start_line}-{r.end_line}  score={r.score:.3f}  ({r.language})")
+        click.echo(
+            f"\n[{i}] {r.file_path}:{r.start_line}-{r.end_line}  score={r.score:.3f}  ({r.language})"
+        )
         click.echo("-" * 60)
         # Print first 10 lines of content
         lines = r.content.splitlines()[:10]

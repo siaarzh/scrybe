@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+
 from .config import DATA_DIR
 
 HASHES_DIR = DATA_DIR / "hashes"

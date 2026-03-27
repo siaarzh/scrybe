@@ -56,7 +56,9 @@ def upsert(chunks: list[CodeChunk], vectors: list[list[float]]) -> None:
     client.upsert(collection_name=settings.collection_name, points=points)
 
 
-def search(query_vector: list[float], project_id: str, top_k: int = 10) -> list[SearchResult]:
+def search(
+    query_vector: list[float], project_id: str, top_k: int = 10
+) -> list[SearchResult]:
     client = _get_client()
     response = client.query_points(
         collection_name=settings.collection_name,

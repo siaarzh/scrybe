@@ -1,5 +1,6 @@
 import tiktoken
 from openai import OpenAI
+
 from .config import settings
 
 _client: OpenAI | None = None

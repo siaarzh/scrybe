@@ -20,7 +20,9 @@ def get_projects():
 def search(req: SearchRequest):
     project = registry.get_project(req.project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail=f"Project '{req.project_id}' not found.")
+        raise HTTPException(
+            status_code=404, detail=f"Project '{req.project_id}' not found."
+        )
     vector_store.ensure_collection()
     query_vector = embedder.embed_texts([req.query])[0]
     return vector_store.search(query_vector, req.project_id, req.top_k)
@@ -30,7 +32,9 @@ def search(req: SearchRequest):
 def index(req: IndexRequest):
     project = registry.get_project(req.project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail=f"Project '{req.project_id}' not found.")
+        raise HTTPException(
+            status_code=404, detail=f"Project '{req.project_id}' not found."
+        )
     try:
         result = indexer.index_project(req.project_id, req.mode)
     except Exception as e:

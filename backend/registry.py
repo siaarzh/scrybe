@@ -1,4 +1,5 @@
 import json
+
 from .config import DATA_DIR
 from .models import Project
 
@@ -33,7 +34,9 @@ def get_project(project_id: str) -> Project | None:
 def add_project(project: Project) -> None:
     projects = _load()
     if any(p["id"] == project.id for p in projects):
-        raise ValueError(f"Project '{project.id}' already exists. Use update_project to modify it.")
+        raise ValueError(
+            f"Project '{project.id}' already exists. Use update_project to modify it."
+        )
     projects.append(project.model_dump())
     _save(projects)
 
@@ -55,7 +58,9 @@ def update_project(
                 p["description"] = description
             _save(projects)
             return Project(**p)
-    raise ValueError(f"Project '{project_id}' not found. Use add_project to register it.")
+    raise ValueError(
+        f"Project '{project_id}' not found. Use add_project to register it."
+    )
 
 
 def remove_project(project_id: str) -> bool:

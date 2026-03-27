@@ -43,7 +43,8 @@ def submit(project_id: str, mode: str = "full") -> str:
     def _run() -> None:
         try:
             result = indexer.index_project(
-                project_id, mode,
+                project_id,
+                mode,
                 scan_cb=_scan,
                 progress_cb=_progress,
                 cancel_event=cancel_event,
@@ -66,9 +67,7 @@ def submit(project_id: str, mode: str = "full") -> str:
                 _jobs[job_id]["error"] = str(exc)
                 _jobs[job_id]["finished_at"] = time.time()
 
-    thread = threading.Thread(
-        target=_run, daemon=True, name=f"scrybe-index-{job_id}"
-    )
+    thread = threading.Thread(target=_run, daemon=True, name=f"scrybe-index-{job_id}")
     thread.start()
     return job_id
 
@@ -82,8 +81,7 @@ def cancel(job_id: str) -> dict:
         if job["status"] != "running":
             return {
                 "error": (
-                    f"Job '{job_id}' is not running "
-                    f"(status: {job['status']})."
+                    f"Job '{job_id}' is not running " f"(status: {job['status']})."
                 )
             }
         job["_cancel"].set()
