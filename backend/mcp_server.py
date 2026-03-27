@@ -6,35 +6,14 @@ Registered in ~/.claude.json under mcpServers:
     "type": "stdio",
     "command": "/path/to/scrybe/.venv/Scripts/python.exe",
     "args": ["-m", "backend.mcp_server"],
-    "env": { "PYTHONPATH": "/path/to/scrybe" }
+    "env": { "PYTHONPATH": "/path/to/scrybe", "OPENAI_API_KEY": "sk-..." }
   }
-
-Requires Qdrant running at QDRANT_URL (default http://localhost:6333).
-Start it once with: docker compose up -d
 """
-
-import sys
-import urllib.request
 
 from fastmcp import FastMCP
 
 from . import embedder, jobs, registry, vector_store
 from .config import settings
-
-
-def _check_qdrant() -> None:
-    try:
-        urllib.request.urlopen(f"{settings.qdrant_url}/healthz", timeout=3)
-    except Exception:
-        print(
-            f"[scrybe] ERROR: Qdrant not reachable at {settings.qdrant_url}. "
-            "Run 'docker compose up -d' in the scrybe directory.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-
-_check_qdrant()
 
 mcp = FastMCP("scrybe")
 
@@ -45,6 +24,39 @@ _NOT_FOUND = "' not found. Call list_projects() first."
 def list_projects() -> list[dict]:
     """List all registered projects with their IDs, root paths, and languages."""
     return [p.model_dump() for p in registry.list_projects()]
+
+
+@mcp.tool()
+def add_project(project_id: str, root_path: str, languages: list[str] = [], description: str = "") -> dict:
+    """
+    Register a new project. Errors if a project with that ID already exists — use update_project to modify it.
+    languages: list of language tags, e.g. ['cs'] or ['ts', 'vue'].
+    """
+    from .models import Project
+    try:
+        project = Project(id=project_id, root_path=root_path, languages=languages, description=description)
+        registry.add_project(project)
+        return {"ok": True, "project_id": project_id, "root_path": root_path}
+    except ValueError as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def update_project(
+    project_id: str,
+    root_path: str | None = None,
+    languages: list[str] | None = None,
+    description: str | None = None,
+) -> dict:
+    """
+    Update an existing project's root path, languages, or description.
+    Only the fields you provide are changed. Errors if the project doesn't exist — use add_project to register it.
+    """
+    try:
+        project = registry.update_project(project_id, root_path=root_path, languages=languages, description=description)
+        return project.model_dump()
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()

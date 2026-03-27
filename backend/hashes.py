@@ -1,8 +1,9 @@
 import hashlib
 import json
 from pathlib import Path
+from .config import DATA_DIR
 
-HASHES_DIR = Path(__file__).parent.parent / "hashes"
+HASHES_DIR = DATA_DIR / "hashes"
 
 
 def load_hashes(project_id: str) -> dict[str, str]:
@@ -16,7 +17,7 @@ def load_hashes(project_id: str) -> dict[str, str]:
 
 def save_hashes(project_id: str, hashes: dict[str, str]) -> None:
     """Persist file hashes for a project."""
-    HASHES_DIR.mkdir(exist_ok=True)
+    HASHES_DIR.mkdir(parents=True, exist_ok=True)
     path = HASHES_DIR / f"{project_id}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(hashes, f, indent=2, sort_keys=True)

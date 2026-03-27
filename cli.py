@@ -14,11 +14,31 @@ def cli():
 @click.option("--languages", default="", help="Comma-separated language tags (e.g. ts,vue,py)")
 @click.option("--desc", default="", help="Short description")
 def add_project(project_id, root, languages, desc):
-    """Register a project in the registry."""
+    """Register a new project in the registry."""
     langs = [l.strip() for l in languages.split(",") if l.strip()]
     project = Project(id=project_id, root_path=root, languages=langs, description=desc)
-    registry.add_project(project)
+    try:
+        registry.add_project(project)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
     click.echo(f"Added project '{project_id}' -> {root}")
+
+
+@cli.command("update-project")
+@click.option("--id", "project_id", required=True, help="Project ID to update")
+@click.option("--root", default=None, help="New absolute path to the repo root")
+@click.option("--languages", default=None, help="New comma-separated language tags (e.g. ts,vue,py)")
+@click.option("--desc", default=None, help="New short description")
+def update_project(project_id, root, languages, desc):
+    """Update an existing project's root path, languages, or description."""
+    langs = [l.strip() for l in languages.split(",") if l.strip()] if languages is not None else None
+    try:
+        registry.update_project(project_id, root_path=root, languages=langs, description=desc)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+    click.echo(f"Updated project '{project_id}'")
 
 
 @cli.command("list-projects")

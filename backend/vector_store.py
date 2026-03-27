@@ -8,7 +8,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from .config import settings
+from .config import DATA_DIR, settings
 from .models import CodeChunk, SearchResult
 
 _client: QdrantClient | None = None
@@ -17,7 +17,7 @@ _client: QdrantClient | None = None
 def _get_client() -> QdrantClient:
     global _client
     if _client is None:
-        _client = QdrantClient(url=settings.qdrant_url)
+        _client = QdrantClient(path=str(DATA_DIR / "qdrant_data"))
     return _client
 
 

@@ -18,6 +18,7 @@ dependencies = [
     "pydantic-settings>=2.5",
     "fastmcp>=2.0",
     "tiktoken>=0.7",
+    "platformdirs>=4.0",
 ]
 
 [project.scripts]

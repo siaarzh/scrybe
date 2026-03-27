@@ -1,5 +1,8 @@
 from pathlib import Path
+from platformdirs import user_data_dir
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DATA_DIR = Path(user_data_dir("scrybe"))
 
 
 class Settings(BaseSettings):
@@ -10,7 +13,6 @@ class Settings(BaseSettings):
     )
 
     openai_api_key: str = ""
-    qdrant_url: str = "http://localhost:6333"
     collection_name: str = "scrybe_code"
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536

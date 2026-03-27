@@ -53,8 +53,9 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Docker volumes (local data)
-qdrant_storage/
+# Runtime data (lives in %LOCALAPPDATA%\scrybe\scrybe\, not the repo)
+projects.json
+hashes/
 
 # Local config & sensitive data
 .claude/
