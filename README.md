@@ -5,17 +5,21 @@ Self-hosted code memory with semantic search. Index your repos into a local vect
 ## How it works
 
 ```
-Claude Code
-    ↕ MCP (auto-managed)
+Claude Code (any project)
+    ↕ MCP stdio
 backend/mcp_server.py
-    ↕ HTTP
-Qdrant (Docker)  ←  your indexed code
+    ↕
+Qdrant (embedded, in-process)  ←  your indexed code
 ```
+
+No Docker. Qdrant runs in-process. All data lives in the OS user data directory:
+- **Windows:** `%LOCALAPPDATA%\scrybe\scrybe\`
+- **Linux:** `~/.local/share/scrybe/`
+- **Mac:** `~/Library/Application Support/scrybe/`
 
 ## Requirements
 
 - Python 3.11+
-- Docker Desktop (with "Start on login" enabled)
 - OpenAI API key (for embeddings)
 
 ## Setup
@@ -26,60 +30,79 @@ cd scrybe
 
 # 2. Create virtual environment
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # Linux/Mac
 
 # 3. Install dependencies
 pip install -e .
 
 # 4. Configure environment
-copy .env.example .env
-# Edit .env and add your OPENAI_API_KEY
-
-# 5. Start Qdrant
-docker compose up -d
+copy .env.example .env   # Windows
+# cp .env.example .env   # Linux/Mac
+# Edit .env and set OPENAI_API_KEY
 ```
 
-## Indexing a project
+## CLI
 
 ```bash
 # Register a project
-python cli.py add-project --id cmx-ionic --root C:\Users\serzh\repos\cmx-ionic --languages ts,vue --desc "Frontend"
+python cli.py add-project --id myrepo --root /path/to/repo --languages ts,vue --desc "My frontend"
 
-# Index it (takes a minute or two on first run)
-python cli.py index --project-id cmx-ionic
+# Update a registered project
+python cli.py update-project --id myrepo --languages ts,vue,css
 
 # List registered projects
 python cli.py list-projects
-```
 
-## Searching
+# Index a project (full rebuild)
+python cli.py index --project-id myrepo --full
 
-```bash
-python cli.py search --project-id cmx-ionic "authentication login flow"
-```
+# Index incrementally (only changed files)
+python cli.py index --project-id myrepo --incremental
 
-## HTTP API
+# Check how many chunks are indexed
+python cli.py status --project-id myrepo
 
-```bash
-uvicorn backend.api:app --reload
-# Docs at http://localhost:8000/docs
+# Search
+python cli.py search --project-id myrepo "authentication login flow"
+
+# Remove a project from the registry
+python cli.py remove-project --id myrepo
 ```
 
 ## MCP server (Claude Code integration)
 
-Add to your Claude Code `settings.json` under `mcpServers`:
+Add to `~/.claude.json` under `mcpServers`:
 
 ```json
 "scrybe": {
   "type": "stdio",
-  "command": "/path/to/scrybe/.venv/Scripts/python.exe",
+  "command": "C:/path/to/scrybe/.venv/Scripts/python.exe",
   "args": ["-m", "backend.mcp_server"],
   "env": {
-    "PYTHONPATH": "/path/to/scrybe"
+    "PYTHONPATH": "C:/path/to/scrybe",
+    "OPENAI_API_KEY": "sk-..."
   }
 }
 ```
 
-Replace `/path/to/scrybe` with the absolute path to your clone. Make sure Qdrant is running (`docker compose up -d`) before starting a session.
+Replace `C:/path/to/scrybe` with the absolute path to your clone. `OPENAI_API_KEY` can be omitted if it's already set in `.env`.
 
-Tools available: `search_code`, `reindex_project`, `reindex_status`, `cancel_reindex`, `list_projects`.
+### Available tools
+
+| Tool | Description |
+|---|---|
+| `list_projects` | List all registered projects |
+| `add_project` | Register a new project |
+| `update_project` | Update an existing project's path, languages, or description |
+| `search_code` | Semantic search by natural language query |
+| `reindex_project` | Trigger background reindex (`full` or `incremental`) |
+| `reindex_status` | Poll a background reindex job |
+| `cancel_reindex` | Cancel a running reindex job |
+
+## HTTP API (optional)
+
+```bash
+uvicorn backend.api:app --reload
+# Interactive docs at http://localhost:8000/docs
+```

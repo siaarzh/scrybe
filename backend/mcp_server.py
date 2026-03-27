@@ -6,8 +6,16 @@ Registered in ~/.claude.json under mcpServers:
     "type": "stdio",
     "command": "/path/to/scrybe/.venv/Scripts/python.exe",
     "args": ["-m", "backend.mcp_server"],
-    "env": { "PYTHONPATH": "/path/to/scrybe", "OPENAI_API_KEY": "sk-..." }
+    "env": {
+      "PYTHONPATH": "/path/to/scrybe",
+      "OPENAI_API_KEY": "sk-..."   // or omit and put it in .env at the repo root
+    }
   }
+
+Runtime data (projects, hashes, vector DB) lives in the OS user data directory:
+  Windows: %LOCALAPPDATA%\\scrybe\\scrybe\\
+  Linux:   ~/.local/share/scrybe/
+  Mac:     ~/Library/Application Support/scrybe/
 """
 
 from fastmcp import FastMCP
@@ -83,11 +91,11 @@ def reindex_project(project_id: str, mode: str = "full") -> dict:
     Returns immediately with a job_id. Poll progress with reindex_status(job_id).
 
     mode='incremental' (default recommendation):
-      - Scans all files, compares SHA256 hashes against hashes/{project_id}.json
+      - Scans all files, compares SHA256 hashes against stored state
       - Only re-embeds files that changed, were added, or were deleted
       - Use after: git pull, branch switch, or any code change
-      - Caveat: if hashes/{project_id}.json is missing, treats all files as new
-        and re-embeds everything WITHOUT clearing Qdrant first — use 'full' instead
+      - Caveat: if hash state is missing (e.g. first run, data dir wiped), treats all
+        files as new and re-embeds everything WITHOUT clearing first — use 'full' instead
 
     mode='full':
       - Clears ALL existing vectors for this project from Qdrant, then rebuilds
