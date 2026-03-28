@@ -1,0 +1,32 @@
+{
+  "name": "scrybe",
+  "version": "0.2.0",
+  "description": "Self-hosted semantic code search with MCP",
+  "type": "module",
+  "bin": {
+    "scrybe": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build"
+  },
+  "files": [
+    "dist/"
+  ],
+  "dependencies": {
+    "@lancedb/lancedb": "^0.14.0",
+    "apache-arrow": "^17.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "openai": "^4.0.0",
+    "commander": "^12.0.0",
+    "ignore": "^5.0.0",
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

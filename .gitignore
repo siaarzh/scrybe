@@ -53,6 +53,10 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
+# Node
+node_modules/
+dist/
+
 # Runtime data (lives in %LOCALAPPDATA%\scrybe\scrybe\, not the repo)
 projects.json
 hashes/

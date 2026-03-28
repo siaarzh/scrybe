@@ -1,25 +1,25 @@
 # scrybe
 
-Self-hosted code memory with semantic search. Index your repos into a local vector database and search them by natural language — from the CLI, HTTP API, or directly inside Claude Code via MCP.
+Self-hosted code memory with semantic search. Index your repos into a local vector database and search them by natural language — from the CLI or directly inside Claude Code via MCP.
 
 ## How it works
 
 ```
 Claude Code (any project)
     ↕ MCP stdio
-backend/mcp_server.py
+src/mcp-server.ts
     ↕
-Qdrant (embedded, in-process)  ←  your indexed code
+LanceDB (embedded, in-process)  ←  your indexed code
 ```
 
-No Docker. Qdrant runs in-process. All data lives in the OS user data directory:
+No Docker. LanceDB runs in-process. All data lives in the OS user data directory:
 - **Windows:** `%LOCALAPPDATA%\scrybe\scrybe\`
 - **Linux:** `~/.local/share/scrybe/`
 - **Mac:** `~/Library/Application Support/scrybe/`
 
 ## Requirements
 
-- Python 3.11+
+- Node.js 20+
 - OpenAI API key (for embeddings)
 
 ## Setup
@@ -28,13 +28,11 @@ No Docker. Qdrant runs in-process. All data lives in the OS user data directory:
 # 1. Clone and enter the repo
 cd scrybe
 
-# 2. Create virtual environment
-python -m venv .venv
-.venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux/Mac
+# 2. Install dependencies
+npm install
 
-# 3. Install dependencies
-pip install -e .
+# 3. Build
+npm run build
 
 # 4. Configure environment
 copy .env.example .env   # Windows
@@ -46,28 +44,28 @@ copy .env.example .env   # Windows
 
 ```bash
 # Register a project
-python cli.py add-project --id myrepo --root /path/to/repo --languages ts,vue --desc "My frontend"
+node dist/index.js add-project --id myrepo --root /path/to/repo --languages ts,vue --desc "My frontend"
 
 # Update a registered project
-python cli.py update-project --id myrepo --languages ts,vue,css
+node dist/index.js update-project --id myrepo --languages ts,vue,css
 
 # List registered projects
-python cli.py list-projects
+node dist/index.js list-projects
 
 # Index a project (full rebuild)
-python cli.py index --project-id myrepo --full
+node dist/index.js index --project-id myrepo --full
 
 # Index incrementally (only changed files)
-python cli.py index --project-id myrepo --incremental
+node dist/index.js index --project-id myrepo --incremental
 
-# Check how many chunks are indexed
-python cli.py status --project-id myrepo
+# Show project info
+node dist/index.js status --project-id myrepo
 
 # Search
-python cli.py search --project-id myrepo "authentication login flow"
+node dist/index.js search --project-id myrepo "authentication login flow"
 
 # Remove a project from the registry
-python cli.py remove-project --id myrepo
+node dist/index.js remove-project --id myrepo
 ```
 
 ## MCP server (Claude Code integration)
@@ -77,16 +75,15 @@ Add to `~/.claude.json` under `mcpServers`:
 ```json
 "scrybe": {
   "type": "stdio",
-  "command": "C:/path/to/scrybe/.venv/Scripts/python.exe",
-  "args": ["-m", "backend.mcp_server"],
+  "command": "node",
+  "args": ["/absolute/path/to/scrybe/dist/index.js", "mcp"],
   "env": {
-    "PYTHONPATH": "C:/path/to/scrybe",
     "OPENAI_API_KEY": "sk-..."
   }
 }
 ```
 
-Replace `C:/path/to/scrybe` with the absolute path to your clone. `OPENAI_API_KEY` can be omitted if it's already set in `.env`.
+Replace `/absolute/path/to/scrybe` with the absolute path to your clone. `OPENAI_API_KEY` can be omitted if it's already set in `.env`.
 
 ### Available tools
 
@@ -99,10 +96,3 @@ Replace `C:/path/to/scrybe` with the absolute path to your clone. `OPENAI_API_KE
 | `reindex_project` | Trigger background reindex (`full` or `incremental`) |
 | `reindex_status` | Poll a background reindex job |
 | `cancel_reindex` | Cancel a running reindex job |
-
-## HTTP API (optional)
-
-```bash
-uvicorn backend.api:app --reload
-# Interactive docs at http://localhost:8000/docs
-```
