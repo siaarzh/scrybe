@@ -3,43 +3,16 @@
 .env.*
 !.env.example
 
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.pyw
-.Python
-*.egg-info/
-*.egg
+# Node
+node_modules/
 dist/
-build/
-wheels/
-sdist/
-.eggs/
-pip-wheel-metadata/
-MANIFEST
-
-# Type checking & linting
-.mypy_cache/
-.dmypy.json
-dmypy.json
-.ruff_cache/
-.pytype/
-
-# Testing
-.pytest_cache/
-.coverage
-.coverage.*
-coverage.xml
-htmlcov/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
 *.log
-
-# Virtual environment
-.venv/
-venv/
-env/
-ENV/
 
 # IDE
 .vscode/
@@ -50,19 +23,27 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Jupyter
-.ipynb_checkpoints/
-
-# Node
-node_modules/
-dist/
-
-# Runtime data (lives in %LOCALAPPDATA%\scrybe\scrybe\, not the repo)
-projects.json
-hashes/
-
-# Local config & sensitive data
+# Local AI tools & configs
 .claude/
-hashes/
-CLAUDE.md
-plan.md
+.claude-instant/
+.claude-code/
+.cursor/
+.cursorignore
+.windsurf/
+.windsurfignore
+.gemini/
+.copilot/
+.codeium/
+.tabnine/
+.deepseek/
+.devin/
+.openai/
+
+# AI logs, caches, scratch
+.ai_logs/
+.ai_cache/
+*.ai.log
+*.prompt-log
+*.prompt-history
+*.llm-cache
+*.llm-log
