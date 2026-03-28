@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { listProjects, getProject, addProject, updateProject } from "./registry.js";
+import { checkMeta } from "./embedding-meta.js";
 import { search } from "./vector-store.js";
 import { embedQuery } from "./embedder.js";
 import { submitJob, getJobStatus, cancelJob } from "./jobs.js";
@@ -93,6 +94,35 @@ const TOOLS = [
   },
 ];
 
+function classifyError(err: unknown): { error: string; error_type?: string } {
+  const status = (err as { status?: number })?.status;
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (status === 429 || /429/.test(message)) {
+    return {
+      error:
+        "Embedding API rate limit exceeded. The reindex or search cannot proceed right now. " +
+        "Wait a minute and retry, or check your embedding provider's rate limit tier " +
+        "(e.g. Voyage AI requires a payment method on file to unlock standard limits).",
+      error_type: "rate_limit",
+    };
+  }
+  if (status === 401 || /401|unauthorized|api.?key/i.test(message)) {
+    return {
+      error:
+        "Embedding API authentication failed. Check that EMBEDDING_API_KEY (or OPENAI_API_KEY) is set correctly.",
+      error_type: "auth",
+    };
+  }
+  if (/EMBEDDING_DIMENSIONS=\d+/.test(message)) {
+    return { error: message, error_type: "dimensions_mismatch" };
+  }
+  if (/Unknown embedding provider|EMBEDDING_MODEL is not set/.test(message)) {
+    return { error: message, error_type: "unknown_provider" };
+  }
+  return { error: message };
+}
+
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
@@ -153,6 +183,10 @@ export async function runMcpServer(): Promise<void> {
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
+          const metaError = checkMeta();
+          if (metaError) {
+            return jsonResult({ error: metaError, error_type: "embedding_config_mismatch" });
+          }
           const queryVec = await embedQuery(query);
           const results = await search(queryVec, projectId, topK);
           return jsonResult(results);
@@ -164,6 +198,12 @@ export async function runMcpServer(): Promise<void> {
             a.mode === "full" ? "full" : "incremental";
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
+          }
+          if (mode === "incremental") {
+            const metaError = checkMeta();
+            if (metaError) {
+              return jsonResult({ error: metaError, error_type: "embedding_config_mismatch" });
+            }
           }
           const jobId = submitJob(projectId, mode);
           return jsonResult({ job_id: jobId, status: "started", project_id: projectId, mode });
@@ -188,8 +228,7 @@ export async function runMcpServer(): Promise<void> {
           return jsonResult({ error: `Unknown tool: ${name}` });
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return jsonResult({ error: message });
+      return jsonResult(classifyError(err));
     }
   });
 

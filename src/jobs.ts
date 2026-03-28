@@ -63,7 +63,15 @@ export function submitJob(projectId: string, mode: IndexMode): string {
         job.status = "cancelled";
       } else {
         job.status = "failed";
-        job.error = message;
+        const status = (err as { status?: number })?.status;
+        if (status === 429 || /429/.test(message)) {
+          job.error =
+            "Embedding API rate limit exceeded. Wait a minute and retry reindex, " +
+            "or check your embedding provider's rate limit tier " +
+            "(Voyage AI requires a payment method on file to unlock standard limits).";
+        } else {
+          job.error = message;
+        }
       }
       job.finished_at = Date.now();
     });

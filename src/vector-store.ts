@@ -52,6 +52,16 @@ export async function getTable(): Promise<lancedb.Table> {
   return _table;
 }
 
+/** Drop and recreate the table (used when switching embedding dimensions). */
+export async function resetTable(): Promise<void> {
+  const db = await getDb();
+  const names = await db.tableNames();
+  if (names.includes(TABLE_NAME)) {
+    await db.dropTable(TABLE_NAME);
+  }
+  _table = await db.createEmptyTable(TABLE_NAME, makeSchema());
+}
+
 function escapeSql(value: string): string {
   return value.replace(/'/g, "''");
 }

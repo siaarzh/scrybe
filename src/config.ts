@@ -2,6 +2,7 @@ import { homedir } from "os";
 import { join, dirname } from "path";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { resolveProvider } from "./providers.js";
 
 // Load .env (dev convenience; does NOT override existing env vars)
 // Checks: cwd/.env first, then the repo root (dist/../.env) as fallback
@@ -43,22 +44,50 @@ function getDataDir(): string {
   }
 }
 
+function buildEmbeddingConfig() {
+  const baseUrl = process.env.EMBEDDING_BASE_URL ?? undefined;
+  const provider = resolveProvider(baseUrl);
+
+  const modelEnv = process.env.EMBEDDING_MODEL;
+  const dimsEnv = process.env.EMBEDDING_DIMENSIONS;
+
+  // Unknown provider with no explicit model — surface a helpful config error
+  let configError: string | null = null;
+  if (!provider && !modelEnv) {
+    const modelsUrl = baseUrl ? `${baseUrl.replace(/\/$/, "")}/models` : null;
+    configError =
+      `Unknown embedding provider for base URL "${baseUrl}". ` +
+      `EMBEDDING_MODEL is not set. ` +
+      (modelsUrl
+        ? `Fetch ${modelsUrl} to list available models, pick an embedding model, ` +
+          `then set EMBEDDING_MODEL and EMBEDDING_DIMENSIONS in your config.`
+        : `Set EMBEDDING_MODEL and EMBEDDING_DIMENSIONS in your config.`);
+  }
+
+  const model = modelEnv ?? provider?.model ?? "text-embedding-3-small";
+  const dimensions = dimsEnv
+    ? parseInt(dimsEnv, 10)
+    : (provider?.dimensions ?? 1536);
+
+  return { baseUrl, model, dimensions, configError };
+}
+
+const embedding = buildEmbeddingConfig();
+
 export const config = {
   dataDir: getDataDir(),
 
   // Embedding provider — any OpenAI-compatible endpoint
   embeddingApiKey:
-    process.env.SCRYBE_EMBEDDING_API_KEY ??
+    process.env.EMBEDDING_API_KEY ??
     process.env.OPENAI_API_KEY ??
     "",
-  embeddingBaseUrl: process.env.SCRYBE_EMBEDDING_BASE_URL ?? undefined,
-  embeddingModel:
-    process.env.SCRYBE_EMBEDDING_MODEL ?? "text-embedding-3-small",
-  embeddingDimensions: parseInt(
-    process.env.SCRYBE_EMBEDDING_DIMENSIONS ?? "1536",
-    10
-  ),
-  embedBatchSize: parseInt(process.env.SCRYBE_EMBED_BATCH_SIZE ?? "100", 10),
+  embeddingBaseUrl: embedding.baseUrl,
+  embeddingModel: embedding.model,
+  embeddingDimensions: embedding.dimensions,
+  embeddingConfigError: embedding.configError,
+  embedBatchSize: parseInt(process.env.EMBED_BATCH_SIZE ?? "100", 10),
+  embedBatchDelayMs: parseInt(process.env.EMBED_BATCH_DELAY_MS ?? "0", 10),
 
   // Chunker
   chunkSize: parseInt(process.env.SCRYBE_CHUNK_SIZE ?? "60", 10),
