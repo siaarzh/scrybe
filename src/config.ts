@@ -50,7 +50,6 @@ export const config = {
   embeddingApiKey:
     process.env.SCRYBE_EMBEDDING_API_KEY ??
     process.env.OPENAI_API_KEY ??
-    process.env.MY_SCRYBE_OPENAI_TOKEN ??
     "",
   embeddingBaseUrl: process.env.SCRYBE_EMBEDDING_BASE_URL ?? undefined,
   embeddingModel:
