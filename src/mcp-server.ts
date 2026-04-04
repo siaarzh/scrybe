@@ -6,8 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { listProjects, getProject, addProject, updateProject } from "./registry.js";
 import { checkMeta } from "./embedding-meta.js";
-import { search } from "./vector-store.js";
-import { embedQuery } from "./embedder.js";
+import { searchCode } from "./search.js";
 import { submitJob, getJobStatus, cancelJob } from "./jobs.js";
 import type { IndexMode } from "./types.js";
 
@@ -187,8 +186,7 @@ export async function runMcpServer(): Promise<void> {
           if (metaError) {
             return jsonResult({ error: metaError, error_type: "embedding_config_mismatch" });
           }
-          const queryVec = await embedQuery(query);
-          const results = await search(queryVec, projectId, topK);
+          const results = await searchCode(query, projectId, topK);
           return jsonResult(results);
         }
 

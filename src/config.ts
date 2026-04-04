@@ -72,7 +72,52 @@ function buildEmbeddingConfig() {
   return { baseUrl, model, dimensions, configError };
 }
 
+function buildRerankConfig() {
+  const enabled = process.env.SCRYBE_RERANK === "true";
+  const apiKey =
+    process.env.SCRYBE_RERANK_API_KEY ??
+    process.env.EMBEDDING_API_KEY ??
+    process.env.OPENAI_API_KEY ??
+    "";
+  const fetchMultiplier = parseInt(
+    process.env.SCRYBE_RERANK_FETCH_MULTIPLIER ?? "5",
+    10
+  );
+
+  if (!enabled) {
+    return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+  }
+
+  // Explicit custom provider
+  const explicitUrl = process.env.SCRYBE_RERANK_BASE_URL;
+  if (explicitUrl) {
+    const model = process.env.SCRYBE_RERANK_MODEL ?? "";
+    if (!model) {
+      console.error("[scrybe] SCRYBE_RERANK_BASE_URL is set but SCRYBE_RERANK_MODEL is missing. Reranking disabled.");
+      return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+    }
+    return { rerankEnabled: true, rerankBaseUrl: explicitUrl, rerankModel: model, rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+  }
+
+  // Auto-detect Voyage from embedding provider
+  const embeddingBaseUrl = process.env.EMBEDDING_BASE_URL ?? undefined;
+  const provider = resolveProvider(embeddingBaseUrl);
+  if (provider?.name === "Voyage AI") {
+    return {
+      rerankEnabled: true,
+      rerankBaseUrl: "https://api.voyageai.com/v1/rerank",
+      rerankModel: process.env.SCRYBE_RERANK_MODEL ?? "rerank-2.5",
+      rerankApiKey: apiKey,
+      rerankFetchMultiplier: fetchMultiplier,
+    };
+  }
+
+  console.error("[scrybe] SCRYBE_RERANK=true but could not resolve a reranker (set SCRYBE_RERANK_BASE_URL + SCRYBE_RERANK_MODEL, or use Voyage as embedding provider). Reranking disabled.");
+  return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+}
+
 const embedding = buildEmbeddingConfig();
+const rerank = buildRerankConfig();
 
 export const config = {
   dataDir: getDataDir(),
@@ -92,4 +137,7 @@ export const config = {
   // Chunker
   chunkSize: parseInt(process.env.SCRYBE_CHUNK_SIZE ?? "60", 10),
   chunkOverlap: parseInt(process.env.SCRYBE_CHUNK_OVERLAP ?? "10", 10),
+
+  // Reranker (optional post-retrieval step)
+  ...rerank,
 } as const;

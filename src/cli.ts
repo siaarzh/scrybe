@@ -6,8 +6,7 @@ import {
   removeProject,
   getProject,
 } from "./registry.js";
-import { search } from "./vector-store.js";
-import { embedQuery } from "./embedder.js";
+import { searchCode } from "./search.js";
 import { indexProject } from "./indexer.js";
 import { config } from "./config.js";
 
@@ -121,8 +120,7 @@ export async function runCli(): Promise<void> {
     .argument("<query>", "Search query")
     .action(async (query: string, opts: { projectId: string; topK: string }) => {
       const topK = parseInt(opts.topK, 10);
-      const queryVec = await embedQuery(query);
-      const results = await search(queryVec, opts.projectId, topK);
+      const results = await searchCode(query, opts.projectId, topK);
       for (const r of results) {
         console.log(`\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})`);
         console.log(r.content.slice(0, 300));
