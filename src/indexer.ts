@@ -1,11 +1,21 @@
 import { getProject } from "./registry.js";
-import { loadHashes, saveHashes, deleteHashes, hashFile } from "./hashes.js";
-import { walkRepoFiles, chunkRepo } from "./chunker.js";
+import { loadHashes, saveHashes, deleteHashes } from "./hashes.js";
+import { getPlugin } from "./plugins/index.js";
 import { embedBatched } from "./embedder.js";
-import { upsert, deleteProject, deleteFileChunks, resetTable, createFtsIndex } from "./vector-store.js";
+import {
+  upsert,
+  deleteProject,
+  deleteFileChunks,
+  resetTable,
+  createFtsIndex,
+  upsertKnowledge,
+  deleteKnowledgeProject,
+  deleteKnowledgeSource,
+  resetKnowledgeTable,
+} from "./vector-store.js";
 import { writeMeta } from "./embedding-meta.js";
 import { config } from "./config.js";
-import type { IndexMode, IndexResult, CodeChunk } from "./types.js";
+import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
 
 export interface IndexOptions {
   onScanProgress?: (filesScanned: number) => void;
@@ -28,70 +38,97 @@ export async function indexProject(
   const project = getProject(projectId);
   if (!project) throw new Error(`Project '${projectId}' not found`);
 
+  const sourceType = project.source_config?.type ?? "code";
+  const plugin = getPlugin(sourceType);
+  const isCode = plugin.embeddingProfile === "code";
+
   // --- Phase 1: Scan and diff ---
   checkAbort(signal);
 
   const oldHashes = mode === "full" ? {} : loadHashes(projectId);
-  const currentFiles: Record<string, string> = {};
+  const currentSources = await plugin.scanSources(project);
 
   let filesScanned = 0;
-  for (const { relPath, absPath } of walkRepoFiles(project.root_path)) {
+  for (const key of Object.keys(currentSources)) {
     checkAbort(signal);
-    currentFiles[relPath] = await hashFile(absPath);
     filesScanned++;
     onScanProgress?.(filesScanned);
   }
 
   const toRemove = new Set(
-    Object.keys(oldHashes).filter((p) => !(p in currentFiles))
+    Object.keys(oldHashes).filter((p) => !(p in currentSources))
   );
   const toReindex = new Set(
-    Object.keys(currentFiles).filter((p) => oldHashes[p] !== currentFiles[p])
+    Object.keys(currentSources).filter((p) => oldHashes[p] !== currentSources[p])
   );
 
-  // Full mode: drop and recreate the table (handles dim changes), rebuild all files
+  // Full mode: drop and recreate the table, rebuild everything
   if (mode === "full") {
-    await resetTable();
+    if (isCode) {
+      await resetTable();
+    } else {
+      await resetKnowledgeTable();
+    }
     deleteHashes(projectId);
-    for (const p of Object.keys(currentFiles)) toReindex.add(p);
+    for (const p of Object.keys(currentSources)) toReindex.add(p);
   } else {
     // Incremental: delete stale chunks
     for (const p of [...toRemove, ...toReindex]) {
       checkAbort(signal);
-      await deleteFileChunks(projectId, p);
+      if (isCode) {
+        await deleteFileChunks(projectId, p);
+      } else {
+        await deleteKnowledgeSource(projectId, p);
+      }
     }
   }
 
-  // --- Phase 2: Chunk + embed changed files ---
+  // --- Phase 2: Chunk + embed changed sources ---
   let chunksIndexed = 0;
   const batchSize = config.embedBatchSize;
-  let chunkBatch: CodeChunk[] = [];
 
-  async function flushBatch(): Promise<void> {
-    if (chunkBatch.length === 0) return;
-    const texts = chunkBatch.map((c) => c.content);
-    const vectors = await embedBatched(texts);
-    await upsert(chunkBatch, vectors);
-    chunksIndexed += chunkBatch.length;
+  let codeBatch: CodeChunk[] = [];
+  let knowledgeBatch: KnowledgeChunk[] = [];
+
+  async function flushCode(): Promise<void> {
+    if (codeBatch.length === 0) return;
+    const texts = codeBatch.map((c) => c.content);
+    const vectors = await embedBatched(texts, "code");
+    await upsert(codeBatch, vectors);
+    chunksIndexed += codeBatch.length;
     onEmbedProgress?.(chunksIndexed);
-    chunkBatch = [];
+    codeBatch = [];
   }
 
-  for (const chunk of chunkRepo(projectId, project.root_path, toReindex)) {
+  async function flushKnowledge(): Promise<void> {
+    if (knowledgeBatch.length === 0) return;
+    const texts = knowledgeBatch.map((c) => c.content);
+    const vectors = await embedBatched(texts, "text");
+    await upsertKnowledge(knowledgeBatch, vectors);
+    chunksIndexed += knowledgeBatch.length;
+    onEmbedProgress?.(chunksIndexed);
+    knowledgeBatch = [];
+  }
+
+  for await (const chunk of plugin.fetchChunks(project, toReindex)) {
     checkAbort(signal);
-    chunkBatch.push(chunk);
-    if (chunkBatch.length >= batchSize) {
-      await flushBatch();
+    if (isCode) {
+      codeBatch.push(chunk as CodeChunk);
+      if (codeBatch.length >= batchSize) await flushCode();
+    } else {
+      knowledgeBatch.push(chunk as KnowledgeChunk);
+      if (knowledgeBatch.length >= batchSize) await flushKnowledge();
     }
   }
-  await flushBatch();
+  await flushCode();
+  await flushKnowledge();
 
-  // Persist hashes and (on full reindex) record the embedding config used
-  saveHashes(projectId, currentFiles);
+  // Persist hashes and (on full reindex) record embedding config used
+  saveHashes(projectId, currentSources);
   if (mode === "full") writeMeta();
 
-  // Rebuild FTS index so hybrid search has up-to-date BM25 candidates
-  if (config.hybridEnabled) {
+  // Rebuild FTS index (code only for now; knowledge FTS added when first knowledge project lands)
+  if (isCode && config.hybridEnabled) {
     try {
       await createFtsIndex();
     } catch (err) {
@@ -108,3 +145,6 @@ export async function indexProject(
     files_removed: toRemove.size,
   };
 }
+
+// Keep legacy re-export for any external callers
+export { deleteProject, deleteKnowledgeProject };

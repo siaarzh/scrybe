@@ -108,7 +108,7 @@ function shouldSkipDir(name: string): boolean {
   return SKIP_DIR_PREFIXES.some((p) => name.startsWith(p));
 }
 
-function getLanguage(filename: string): string | null {
+export function getLanguage(filename: string): string | null {
   const name = basename(filename);
   if (name.endsWith(".min.js") || name.endsWith(".min.css")) return null;
   const ext = extname(name).toLowerCase();
@@ -128,7 +128,7 @@ function loadGitignore(rootPath: string): IgnoreManager | null {
   }
 }
 
-function chunkLines(
+export function chunkLines(
   lines: string[],
   startOffset = 0
 ): Array<{ start: number; end: number; content: string }> {

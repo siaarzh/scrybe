@@ -122,7 +122,8 @@ export async function runCli(): Promise<void> {
       const topK = parseInt(opts.topK, 10);
       const results = await searchCode(query, opts.projectId, topK);
       for (const r of results) {
-        console.log(`\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})`);
+        const sym = r.symbol_name ? ` · ${r.symbol_name}` : "";
+        console.log(`\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})${sym}`);
         console.log(r.content.slice(0, 300));
       }
     });
