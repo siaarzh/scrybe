@@ -116,6 +116,20 @@ function buildRerankConfig() {
   return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
 }
 
+function buildTextEmbeddingConfig() {
+  const baseUrl = process.env.SCRYBE_TEXT_EMBEDDING_BASE_URL ?? undefined;
+  const model = process.env.SCRYBE_TEXT_EMBEDDING_MODEL ?? "text-embedding-3-small";
+  const dimensions = process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS
+    ? parseInt(process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS, 10)
+    : 1536;
+  const apiKey =
+    process.env.SCRYBE_TEXT_EMBEDDING_API_KEY ??
+    process.env.EMBEDDING_API_KEY ??
+    process.env.OPENAI_API_KEY ??
+    "";
+  return { baseUrl, model, dimensions, apiKey };
+}
+
 function buildHybridConfig() {
   const enabled = process.env.SCRYBE_HYBRID !== "false";
   const rrfK = parseInt(process.env.SCRYBE_RRF_K ?? "60", 10);
@@ -123,13 +137,14 @@ function buildHybridConfig() {
 }
 
 const embedding = buildEmbeddingConfig();
+const textEmbedding = buildTextEmbeddingConfig();
 const rerank = buildRerankConfig();
 const hybrid = buildHybridConfig();
 
 export const config = {
   dataDir: getDataDir(),
 
-  // Embedding provider — any OpenAI-compatible endpoint
+  // Code embedding provider — any OpenAI-compatible endpoint (EMBEDDING_* vars)
   embeddingApiKey:
     process.env.EMBEDDING_API_KEY ??
     process.env.OPENAI_API_KEY ??
@@ -140,6 +155,13 @@ export const config = {
   embeddingConfigError: embedding.configError,
   embedBatchSize: parseInt(process.env.EMBED_BATCH_SIZE ?? "100", 10),
   embedBatchDelayMs: parseInt(process.env.EMBED_BATCH_DELAY_MS ?? "0", 10),
+
+  // Text embedding provider — for knowledge sources (SCRYBE_TEXT_EMBEDDING_* vars)
+  // Falls back to code embedding config if not set separately.
+  textEmbeddingApiKey: textEmbedding.apiKey,
+  textEmbeddingBaseUrl: textEmbedding.baseUrl,
+  textEmbeddingModel: textEmbedding.model,
+  textEmbeddingDimensions: textEmbedding.dimensions,
 
   // Chunker
   chunkSize: parseInt(process.env.SCRYBE_CHUNK_SIZE ?? "60", 10),
