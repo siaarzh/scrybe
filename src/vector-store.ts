@@ -99,6 +99,7 @@ export async function search(
     .toArray();
 
   return rows.map((row) => ({
+    chunk_id: String(row.chunk_id),
     // LanceDB default is L2 distance. For unit-normalized embeddings:
     // cosine_similarity = 1 - (L2_dist^2 / 2)
     score: 1 - (Number(row._distance ?? 0) ** 2) / 2,
@@ -110,6 +111,38 @@ export async function search(
     symbol_name: String(row.symbol_name),
     content: String(row.content),
   }));
+}
+
+export async function ftsSearch(
+  query: string,
+  projectId: string,
+  topK: number
+): Promise<SearchResult[]> {
+  const table = await getTable();
+  const rows = await (table.search(query, "fts", "content") as lancedb.Query)
+    .where(`project_id = '${escapeSql(projectId)}'`)
+    .limit(topK)
+    .toArray();
+  return rows.map((row) => ({
+    chunk_id: String(row.chunk_id),
+    score: 0, // rank implied by array order; RRF assigns final score
+    project_id: String(row.project_id),
+    file_path: String(row.file_path),
+    start_line: Number(row.start_line),
+    end_line: Number(row.end_line),
+    language: String(row.language),
+    symbol_name: String(row.symbol_name),
+    content: String(row.content),
+  }));
+}
+
+export async function createFtsIndex(): Promise<void> {
+  const table = await getTable();
+  if ((await table.countRows()) === 0) return;
+  await table.createIndex("content", {
+    config: lancedb.Index.fts({ stem: false, lowercase: true }),
+    replace: true,
+  });
 }
 
 export async function deleteProject(projectId: string): Promise<void> {

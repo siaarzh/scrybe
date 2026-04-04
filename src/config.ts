@@ -116,8 +116,15 @@ function buildRerankConfig() {
   return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
 }
 
+function buildHybridConfig() {
+  const enabled = process.env.SCRYBE_HYBRID !== "false";
+  const rrfK = parseInt(process.env.SCRYBE_RRF_K ?? "60", 10);
+  return { hybridEnabled: enabled, rrfK };
+}
+
 const embedding = buildEmbeddingConfig();
 const rerank = buildRerankConfig();
+const hybrid = buildHybridConfig();
 
 export const config = {
   dataDir: getDataDir(),
@@ -140,4 +147,7 @@ export const config = {
 
   // Reranker (optional post-retrieval step)
   ...rerank,
+
+  // Hybrid search (BM25 + vector, on by default)
+  ...hybrid,
 } as const;

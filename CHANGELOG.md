@@ -7,11 +7,26 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- Hybrid search: BM25 full-text search (LanceDB FTS) runs in parallel with vector search, merged via Reciprocal Rank Fusion (RRF) — improves recall for exact identifier and keyword queries, and prevents markdown docs from outranking code files
+- `SCRYBE_HYBRID` (default `true`) — set to `false` to revert to vector-only search
+- `SCRYBE_RRF_K` (default `60`) — RRF rank-sensitivity constant
+- FTS index automatically rebuilt at the end of every index job (full and incremental)
+- Graceful fallback to vector-only if FTS index not yet built (first run before indexing)
+- `chunk_id` added to `SearchResult` — now surfaced in MCP `search_code` responses
+
+### Changed
+
+- `searchCode()` pipeline: vector + FTS (parallel) → RRF merge → optional rerank
+- Both arms over-fetch when reranking is enabled so the reranker sees the full fused candidate pool
+
 ---
 
 ## [0.3.0] — 2026-04-04
 
 ### Added
+
 - Reranking support via `SCRYBE_RERANK=true` — post-retrieval re-scoring improves result relevance
 - `src/reranker.ts`: Voyage-compatible reranker client (`POST /rerank`, native fetch)
 - `src/search.ts`: unified `searchCode()` pipeline — embed → vector search → optional rerank
@@ -21,6 +36,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 - `.env.example` documented with all reranking env vars
 
 ### Changed
+
 - MCP `search_code` and CLI `search` both now go through `searchCode()` — reranking is transparent to callers
 
 ---
@@ -28,6 +44,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 ## [0.2.0] — 2026-04-03
 
 ### Added
+
 - Voyage AI (`voyage-code-3`, 1024d) embedding support — code-optimized, now the active default
 - Multi-provider config: OpenAI, Voyage, Mistral, and any OpenAI-compatible self-hosted endpoint
 - `src/providers.ts`: known providers table — auto-resolves model + dimensions from `EMBEDDING_BASE_URL` hostname
@@ -38,6 +55,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 - Rich MCP structured error types: `rate_limit`, `auth`, `dimensions_mismatch`, `unknown_provider`, `embedding_config_mismatch`
 
 ### Changed
+
 - Env vars renamed from `SCRYBE_EMBEDDING_*` to `EMBEDDING_*` (brand-agnostic, OpenAI fallback supported)
 
 ---
@@ -45,6 +63,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 ## [0.1.0] — 2026-04-01
 
 ### Added
+
 - Full rewrite from Python/Qdrant/FastAPI to Node.js/TypeScript/LanceDB
 - LanceDB embedded vector store (no Docker required)
 - MCP server with 7 tools: `search_code`, `reindex_project`, `reindex_status`, `cancel_reindex`, `list_projects`, `add_project`, `update_project`

@@ -2,7 +2,7 @@ import { getProject } from "./registry.js";
 import { loadHashes, saveHashes, deleteHashes, hashFile } from "./hashes.js";
 import { walkRepoFiles, chunkRepo } from "./chunker.js";
 import { embedBatched } from "./embedder.js";
-import { upsert, deleteProject, deleteFileChunks, resetTable } from "./vector-store.js";
+import { upsert, deleteProject, deleteFileChunks, resetTable, createFtsIndex } from "./vector-store.js";
 import { writeMeta } from "./embedding-meta.js";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk } from "./types.js";
@@ -89,6 +89,15 @@ export async function indexProject(
   // Persist hashes and (on full reindex) record the embedding config used
   saveHashes(projectId, currentFiles);
   if (mode === "full") writeMeta();
+
+  // Rebuild FTS index so hybrid search has up-to-date BM25 candidates
+  if (config.hybridEnabled) {
+    try {
+      await createFtsIndex();
+    } catch (err) {
+      console.warn("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only):", err);
+    }
+  }
 
   return {
     status: "ok",

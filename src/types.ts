@@ -17,6 +17,7 @@ export interface CodeChunk {
 }
 
 export interface SearchResult {
+  chunk_id: string;
   score: number;
   project_id: string;
   file_path: string;
