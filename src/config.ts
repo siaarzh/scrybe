@@ -2,6 +2,7 @@ import { homedir } from "os";
 import { join, dirname } from "path";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import { resolveProvider } from "./providers.js";
 
 // Load .env (dev convenience; does NOT override existing env vars)
@@ -140,6 +141,18 @@ const embedding = buildEmbeddingConfig();
 const textEmbedding = buildTextEmbeddingConfig();
 const rerank = buildRerankConfig();
 const hybrid = buildHybridConfig();
+
+function readPackageVersion(): string {
+  try {
+    const req = createRequire(import.meta.url);
+    const pkg = req("../package.json") as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+export const VERSION = readPackageVersion();
 
 export const config = {
   dataDir: getDataDir(),

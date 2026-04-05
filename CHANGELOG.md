@@ -5,6 +5,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `last_indexed` field on `Project` — stamped with an ISO timestamp after each successful index run; visible in `list-projects` CLI output and `list_projects` MCP tool
+- MCP server version now read from `package.json` at runtime (was hardcoded `0.2.0`)
+- `remove_project` MCP tool — unregister a project without dropping to the CLI
+- `.tsx` files now parsed with the TSX tree-sitter grammar (was incorrectly using the TypeScript grammar)
+- `reindex_status` response includes `last_indexed` timestamp when job status is `"done"`
+
+---
+
 ## [0.5.0] — 2026-04-05
 
 ### Added

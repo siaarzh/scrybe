@@ -12,7 +12,7 @@ const createIgnore = ignore as unknown as () => IgnoreManager;
 const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   ".py": "python",
   ".ts": "typescript",
-  ".tsx": "typescript",
+  ".tsx": "tsx",
   ".js": "javascript",
   ".jsx": "javascript",
   ".vue": "vue",

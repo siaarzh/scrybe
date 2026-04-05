@@ -4,7 +4,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { listProjects, getProject, addProject, updateProject } from "./registry.js";
+import { listProjects, getProject, addProject, updateProject, removeProject } from "./registry.js";
+import { VERSION } from "./config.js";
 import { checkMeta } from "./embedding-meta.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { submitJob, getJobStatus, cancelJob } from "./jobs.js";
@@ -28,6 +29,17 @@ const TOOLS = [
         description: { type: "string", description: "Human-readable description" },
       },
       required: ["project_id", "root_path"],
+    },
+  },
+  {
+    name: "remove_project",
+    description: "Unregister a project (removes it from the index registry; does not delete vector data)",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string", description: "Project ID to remove" },
+      },
+      required: ["project_id"],
     },
   },
   {
@@ -145,7 +157,7 @@ function jsonResult(data: unknown) {
 
 export async function runMcpServer(): Promise<void> {
   const server = new Server(
-    { name: "scrybe", version: "0.2.0" },
+    { name: "scrybe", version: VERSION },
     { capabilities: { tools: {} } }
   );
 
@@ -169,6 +181,11 @@ export async function runMcpServer(): Promise<void> {
           };
           addProject(project);
           return jsonResult({ ok: true, project });
+        }
+
+        case "remove_project": {
+          removeProject(String(a.project_id));
+          return jsonResult({ ok: true, project_id: String(a.project_id) });
         }
 
         case "update_project": {
@@ -236,6 +253,10 @@ export async function runMcpServer(): Promise<void> {
           const status = getJobStatus(jobId);
           if (!status) {
             return jsonResult({ error: `Job '${jobId}' not found (jobs are lost on server restart)` });
+          }
+          if (status.status === "done") {
+            const project = getProject(status.project_id);
+            return jsonResult({ ...status, last_indexed: project?.last_indexed ?? null });
           }
           return jsonResult(status);
         }

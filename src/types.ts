@@ -10,6 +10,7 @@ export interface Project {
   languages: string[];
   description: string;
   source_config?: SourceConfig;
+  last_indexed?: string; // ISO timestamp, set after each successful index run
 }
 
 export interface CodeChunk {

@@ -1,4 +1,4 @@
-import { getProject } from "./registry.js";
+import { getProject, updateProject } from "./registry.js";
 import { loadHashes, saveHashes, deleteHashes } from "./hashes.js";
 import { getPlugin } from "./plugins/index.js";
 import { embedBatched } from "./embedder.js";
@@ -127,6 +127,7 @@ export async function indexProject(
   // Persist hashes and (on full reindex) record embedding config used
   saveHashes(projectId, currentSources);
   if (mode === "full") writeMeta();
+  updateProject(projectId, { last_indexed: new Date().toISOString() });
 
   // Rebuild FTS index
   if (config.hybridEnabled) {

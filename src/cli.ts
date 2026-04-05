@@ -111,7 +111,8 @@ export async function runCli(): Promise<void> {
         return;
       }
       for (const p of projects) {
-        console.log(`  ${p.id}\t${p.root_path}\t[${p.languages.join(",")}]`);
+        const indexed = p.last_indexed ? ` (indexed: ${p.last_indexed})` : " (never indexed)";
+        console.log(`  ${p.id}\t${p.root_path}\t[${p.languages.join(",")}]${indexed}`);
         if (p.description) console.log(`    ${p.description}`);
       }
     });
