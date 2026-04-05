@@ -1,5 +1,4 @@
 import { config } from "./config.js";
-import type { SearchResult } from "./types.js";
 
 interface RerankResponseItem {
   index: number;
@@ -10,11 +9,11 @@ interface RerankResponse {
   data: RerankResponseItem[];
 }
 
-export async function rerank(
+export async function rerank<T extends { content: string; score: number }>(
   query: string,
-  candidates: SearchResult[],
+  candidates: T[],
   topK: number
-): Promise<SearchResult[]> {
+): Promise<T[]> {
   const body = {
     model: config.rerankModel,
     query,

@@ -1,8 +1,10 @@
 import { CodePlugin } from "./code.js";
+import { GitLabIssuesPlugin } from "./gitlab-issues.js";
 import type { SourcePlugin } from "./base.js";
 
 const registry: Record<string, SourcePlugin> = {
   code: new CodePlugin(),
+  ticket: new GitLabIssuesPlugin(),
 };
 
 export function getPlugin(type: string): SourcePlugin {

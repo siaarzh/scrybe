@@ -6,7 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { listProjects, getProject, addProject, updateProject } from "./registry.js";
 import { checkMeta } from "./embedding-meta.js";
-import { searchCode } from "./search.js";
+import { searchCode, searchKnowledge } from "./search.js";
 import { submitJob, getJobStatus, cancelJob } from "./jobs.js";
 import type { IndexMode } from "./types.js";
 
@@ -47,6 +47,19 @@ const TOOLS = [
   {
     name: "search_code",
     description: "Semantically search code in a project using natural language",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        query: { type: "string" },
+        top_k: { type: "number", default: 10 },
+      },
+      required: ["project_id", "query"],
+    },
+  },
+  {
+    name: "search_knowledge",
+    description: "Semantically search GitLab issues, webpages, or other knowledge sources indexed in a project",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -187,6 +200,17 @@ export async function runMcpServer(): Promise<void> {
             return jsonResult({ error: metaError, error_type: "embedding_config_mismatch" });
           }
           const results = await searchCode(query, projectId, topK);
+          return jsonResult(results);
+        }
+
+        case "search_knowledge": {
+          const projectId = String(a.project_id);
+          const query = String(a.query);
+          const topK = typeof a.top_k === "number" ? a.top_k : 10;
+          if (!getProject(projectId)) {
+            return jsonResult({ error: `Project '${projectId}' not found` });
+          }
+          const results = await searchKnowledge(query, projectId, topK);
           return jsonResult(results);
         }
 

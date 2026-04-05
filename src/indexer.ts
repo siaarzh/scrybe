@@ -8,6 +8,7 @@ import {
   deleteFileChunks,
   resetTable,
   createFtsIndex,
+  createKnowledgeFtsIndex,
   upsertKnowledge,
   deleteKnowledgeProject,
   deleteKnowledgeSource,
@@ -127,10 +128,14 @@ export async function indexProject(
   saveHashes(projectId, currentSources);
   if (mode === "full") writeMeta();
 
-  // Rebuild FTS index (code only for now; knowledge FTS added when first knowledge project lands)
-  if (isCode && config.hybridEnabled) {
+  // Rebuild FTS index
+  if (config.hybridEnabled) {
     try {
-      await createFtsIndex();
+      if (isCode) {
+        await createFtsIndex();
+      } else {
+        await createKnowledgeFtsIndex();
+      }
     } catch (err) {
       console.warn("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only):", err);
     }
