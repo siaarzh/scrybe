@@ -227,6 +227,24 @@ Code files are chunked using Tree-sitter AST parsing, which aligns chunk boundar
 
 Each code chunk includes a `symbol_name` field (the enclosing function or class name) surfaced in search results.
 
+## Indexing time
+
+Full indexing time depends on project size, average file length, and your embedding provider's rate limits. Rough estimates measured with **Voyage AI `voyage-code-3`** (free tier, standard rate limits):
+
+| Project size | Example | Files | Chunks | Estimated time |
+| --- | --- | --- | --- | --- |
+| Small | scripts, single package | < 500 | < 3k | < 5 min |
+| Medium | typical frontend | ~1,700 | ~10k | ~15 min |
+| Large | full backend | ~6,000 | ~25k | ~75 min |
+
+**Throughput** is roughly **~600 chunks/min** on Voyage AI's free tier. Paid tiers or providers with higher rate limits will index significantly faster.
+
+**Language affects chunk count** — languages with larger files (e.g. generated code, `.json`, migrations) produce more chunks per file and take longer per file scanned.
+
+**Incremental reindex** (after the initial full index) only processes changed files, so day-to-day re-syncing is fast regardless of project size.
+
+If you hit rate limits during indexing, tune `EMBED_BATCH_SIZE` and `EMBED_BATCH_DELAY_MS` in your `.env`.
+
 ## Known limitations
 
 - **HTML / CSS / SCSS** use sliding-window chunking. Tree-sitter grammars exist for them but these languages have no function/class declarations, so chunk boundaries are arbitrary rather than semantic. Particularly noticeable for large single-page static sites.
