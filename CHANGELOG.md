@@ -5,7 +5,32 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [Unreleased]
+## [0.5.0] — 2026-04-05
+
+### Added
+
+- **Knowledge indexing**: Scrybe can now index non-code sources (GitLab issues, and future: webpages, Telegram) alongside code
+- `search_knowledge` MCP tool — semantic search over knowledge sources (issues, docs, messages); separate from `search_code`
+- `search-knowledge` CLI command
+- Plugin architecture: `src/plugins/` — each source type is a self-contained plugin (`SourcePlugin` interface); static registry in `src/plugins/index.ts`
+- `src/plugins/gitlab-issues.ts` — indexes GitLab issues + comments; paginated, cursor-based incremental updates; rate-limit safe (50 ms between issues)
+- `src/cursors.ts` — persists `updated_after` cursor per project in `DATA_DIR/cursors/`
+- `add-project --type ticket` CLI — registers a GitLab issues project (`--gitlab-url`, `--gitlab-project-id`, `--gitlab-token`)
+- `update-project --gitlab-token` CLI — token rotation without re-registering
+- `SCRYBE_TEXT_EMBEDDING_BASE_URL / _MODEL / _API_KEY / _DIMENSIONS` env vars — separate embedding profile for knowledge sources (default falls back to code embedding config)
+- Tree-sitter AST chunking for 11 languages: TypeScript, TSX, JavaScript, JSX, C#, Vue, Python, Go, Ruby, Rust, Java — chunks now align with function/class/method boundaries instead of arbitrary line windows
+- `symbol_name` field in code chunks populated with actual function/class name (was always `""` before)
+- Sliding-window fallback for unsupported languages and parse failures — no regression on existing indexed repos
+- **Two LanceDB tables**: `code_chunks` (existing, unchanged) and `knowledge_chunks` (new) — separate schemas, no migration of existing data required
+- Two named embedding profiles (`code` / `text`) with independent provider config
+
+### Changed
+
+- Code indexing path migrated to plugin architecture (`src/plugins/code.ts`); external behavior unchanged
+
+---
+
+## [0.4.0] — 2026-04-04
 
 ### Added
 
@@ -76,7 +101,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.3.0...HEAD
+[0.5.0]: https://github.com/siaarzh/scrybe/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/siaarzh/scrybe/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/siaarzh/scrybe/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/siaarzh/scrybe/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/siaarzh/scrybe/releases/tag/v0.1.0
