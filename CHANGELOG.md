@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.5.1] — 2026-04-05
+
 ### Added
 
 - `last_indexed` field on `Project` — stamped with an ISO timestamp after each successful index run; visible in `list-projects` CLI output and `list_projects` MCP tool
@@ -113,6 +117,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/siaarzh/scrybe/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/siaarzh/scrybe/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/siaarzh/scrybe/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/siaarzh/scrybe/compare/v0.2.0...v0.3.0
