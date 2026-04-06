@@ -20,7 +20,7 @@ const KNOWN_PROVIDERS: Record<string, ProviderDefaults> = {
   "api.voyageai.com": {
     name: "Voyage AI",
     model: "voyage-code-3",
-    textModel: "voyage-3",
+    textModel: "voyage-4",
     dimensions: 1024,
   },
   "api.mistral.ai": {
