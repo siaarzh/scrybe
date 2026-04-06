@@ -113,21 +113,37 @@ function buildRerankConfig() {
     };
   }
 
-  console.error("[scrybe] SCRYBE_RERANK=true but could not resolve a reranker (set SCRYBE_RERANK_BASE_URL + SCRYBE_RERANK_MODEL, or use Voyage as embedding provider). Reranking disabled.");
+  console.error(
+    "[scrybe] SCRYBE_RERANK=true is set but your embedding provider does not support auto-configured reranking " +
+    "(only Voyage AI is supported). Reranking is DISABLED. " +
+    "Either remove SCRYBE_RERANK=true, switch to Voyage AI, or set SCRYBE_RERANK_BASE_URL + SCRYBE_RERANK_MODEL explicitly."
+  );
   return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
 }
 
 function buildTextEmbeddingConfig() {
-  const baseUrl = process.env.SCRYBE_TEXT_EMBEDDING_BASE_URL ?? undefined;
-  const model = process.env.SCRYBE_TEXT_EMBEDDING_MODEL ?? "text-embedding-3-small";
+  const baseUrl =
+    process.env.SCRYBE_TEXT_EMBEDDING_BASE_URL ??
+    process.env.EMBEDDING_BASE_URL ??        // inherit from code embedding provider
+    undefined;
+
+  const provider = resolveProvider(baseUrl);
+
+  const model =
+    process.env.SCRYBE_TEXT_EMBEDDING_MODEL ??
+    provider?.textModel ??                   // provider's text model default
+    "text-embedding-3-small";               // final fallback (OpenAI)
+
   const dimensions = process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS
     ? parseInt(process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS, 10)
-    : 1536;
+    : (provider?.dimensions ?? 1536);        // provider dimensions
+
   const apiKey =
     process.env.SCRYBE_TEXT_EMBEDDING_API_KEY ??
     process.env.EMBEDDING_API_KEY ??
     process.env.OPENAI_API_KEY ??
     "";
+
   return { baseUrl, model, dimensions, apiKey };
 }
 

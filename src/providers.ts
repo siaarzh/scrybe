@@ -1,6 +1,7 @@
 export interface ProviderDefaults {
   name: string;
-  model: string;
+  model: string;       // code embedding model
+  textModel: string;   // text/knowledge embedding model
   dimensions: number;
 }
 
@@ -13,16 +14,19 @@ const KNOWN_PROVIDERS: Record<string, ProviderDefaults> = {
   "api.openai.com": {
     name: "OpenAI",
     model: "text-embedding-3-small",
+    textModel: "text-embedding-3-small",
     dimensions: 1536,
   },
   "api.voyageai.com": {
     name: "Voyage AI",
     model: "voyage-code-3",
+    textModel: "voyage-3",
     dimensions: 1024,
   },
   "api.mistral.ai": {
     name: "Mistral",
     model: "mistral-embed",
+    textModel: "mistral-embed",
     dimensions: 1024,
   },
 };

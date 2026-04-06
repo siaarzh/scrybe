@@ -9,6 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.5.2] — 2026-04-06
+
+### Fixed
+
+- `search_knowledge` auth error when using a minimal config (`EMBEDDING_API_KEY` + `EMBEDDING_BASE_URL` + `SCRYBE_RERANK=true`) — text embedding config now inherits `EMBEDDING_BASE_URL` and resolves the correct provider model/dimensions instead of defaulting to OpenAI
+- Added `textModel` field to provider defaults (`voyage-3` for Voyage AI) so knowledge search uses the right model automatically
+- Improved rerank warning message when `SCRYBE_RERANK=true` is set but the provider doesn't support auto-configured reranking
+
+---
+
 ## [0.5.1] — 2026-04-05
 
 ### Added
