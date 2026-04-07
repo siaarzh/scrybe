@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.5.4] — 2026-04-07
+
+### Fixed
+
+- Full reindex of ticket sources (GitLab issues) now correctly clears the cursor before scanning, so all issues are fetched instead of returning 0 results
+
+---
+
 ## [0.5.3] — 2026-04-06
 
 ### Fixed
