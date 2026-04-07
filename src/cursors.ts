@@ -1,5 +1,5 @@
 import { join } from "path";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "fs";
 import { config } from "./config.js";
 
 const CURSORS_DIR = join(config.dataDir, "cursors");
@@ -22,4 +22,9 @@ export function loadCursor(projectId: string): string | null {
 export function saveCursor(projectId: string, value: string): void {
   mkdirSync(CURSORS_DIR, { recursive: true });
   writeFileSync(cursorPath(projectId), JSON.stringify({ updated_after: value }), "utf8");
+}
+
+export function deleteCursor(projectId: string): void {
+  const p = cursorPath(projectId);
+  if (existsSync(p)) rmSync(p);
 }

@@ -1,5 +1,6 @@
 import { getProject, updateProject } from "./registry.js";
 import { loadHashes, saveHashes, deleteHashes } from "./hashes.js";
+import { deleteCursor } from "./cursors.js";
 import { getPlugin } from "./plugins/index.js";
 import { embedBatched } from "./embedder.js";
 import {
@@ -47,6 +48,7 @@ export async function indexProject(
   checkAbort(signal);
 
   const oldHashes = mode === "full" ? {} : loadHashes(projectId);
+  if (mode === "full") deleteCursor(projectId);
   const currentSources = await plugin.scanSources(project);
 
   let filesScanned = 0;
