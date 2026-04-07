@@ -36,6 +36,40 @@ export function writeMeta(): void {
   writeFileSync(META_PATH, JSON.stringify(meta, null, 2));
 }
 
+/** Returns null if code embedding config matches stored, or an error string if it has changed. */
+export function checkCodeMeta(): string | null {
+  const meta = readMeta();
+  if (!meta) return null;
+  const codeChanged =
+    meta.code.model !== config.embeddingModel ||
+    meta.code.dimensions !== config.embeddingDimensions;
+  if (!codeChanged) return null;
+  return (
+    `Code embedding configuration has changed since the last index ` +
+    `(stored: ${meta.code.model} / ${meta.code.dimensions}d, ` +
+    `current: ${config.embeddingModel} / ${config.embeddingDimensions}d). ` +
+    `All indexed code data is incompatible with the new model. ` +
+    `To recover: delete the LanceDB folder at ${config.dataDir}/lancedb, then reindex every project.`
+  );
+}
+
+/** Returns null if text embedding config matches stored, or an error string if it has changed. */
+export function checkTextMeta(): string | null {
+  const meta = readMeta();
+  if (!meta || !meta.text) return null;
+  const textChanged =
+    meta.text.model !== config.textEmbeddingModel ||
+    meta.text.dimensions !== config.textEmbeddingDimensions;
+  if (!textChanged) return null;
+  return (
+    `Text embedding configuration has changed since the last index ` +
+    `(stored: ${meta.text.model} / ${meta.text.dimensions}d, ` +
+    `current: ${config.textEmbeddingModel} / ${config.textEmbeddingDimensions}d). ` +
+    `All indexed knowledge data is incompatible with the new model. ` +
+    `To recover: delete the LanceDB folder at ${config.dataDir}/lancedb, then reindex every project.`
+  );
+}
+
 /**
  * Returns null if stored embedding configs match current ones (or no meta exists yet).
  * Returns a human-readable error string if configs changed and existing indexed data is incompatible.
@@ -54,8 +88,7 @@ export function checkMeta(): string | null {
       `(stored: ${meta.code.model} / ${meta.code.dimensions}d, ` +
       `current: ${config.embeddingModel} / ${config.embeddingDimensions}d). ` +
       `All indexed code data is incompatible with the new model. ` +
-      `Run reindex_project with mode="full" for every registered code project to rebuild the index, ` +
-      `then search and incremental reindex will work again.`
+      `To recover: delete the LanceDB folder at ${config.dataDir}/lancedb, then reindex every project.`
     );
   }
 
@@ -70,7 +103,7 @@ export function checkMeta(): string | null {
         `(stored: ${meta.text.model} / ${meta.text.dimensions}d, ` +
         `current: ${config.textEmbeddingModel} / ${config.textEmbeddingDimensions}d). ` +
         `All indexed knowledge data is incompatible with the new model. ` +
-        `Run reindex_project with mode="full" for every knowledge project to rebuild the index.`
+        `To recover: delete the LanceDB folder at ${config.dataDir}/lancedb, then reindex every project.`
       );
     }
   }

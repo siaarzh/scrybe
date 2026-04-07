@@ -141,6 +141,9 @@ function classifyError(err: unknown): { error: string; error_type?: string } {
   if (/EMBEDDING_DIMENSIONS=\d+/.test(message)) {
     return { error: message, error_type: "dimensions_mismatch" };
   }
+  if (message.startsWith("EMBEDDING_MISMATCH:")) {
+    return { error: message.replace(/^EMBEDDING_MISMATCH:\s*/, ""), error_type: "embedding_config_mismatch" };
+  }
   if (/Unknown embedding provider|EMBEDDING_MODEL is not set/.test(message)) {
     return { error: message, error_type: "unknown_provider" };
   }

@@ -47,3 +47,6 @@ Thumbs.db
 *.prompt-history
 *.llm-cache
 *.llm-log
+
+# Other
+TODO.md

@@ -7,6 +7,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- Full reindex (`mode=full`) now deletes only the target project's data instead of resetting the entire table — previously wiped all other projects' indexed data
+- Embedding config mismatch is now detected before a full reindex begins, surfaced as `embedding_config_mismatch` MCP error type, preventing silent data corruption
+- Error messages for embedding config mismatch now include the correct recovery path (delete LanceDB folder)
+
 ---
 
 ## [0.5.4] — 2026-04-07

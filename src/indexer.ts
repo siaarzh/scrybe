@@ -7,15 +7,13 @@ import {
   upsert,
   deleteProject,
   deleteFileChunks,
-  resetTable,
   createFtsIndex,
   createKnowledgeFtsIndex,
   upsertKnowledge,
   deleteKnowledgeProject,
   deleteKnowledgeSource,
-  resetKnowledgeTable,
 } from "./vector-store.js";
-import { writeMeta } from "./embedding-meta.js";
+import { writeMeta, checkCodeMeta, checkTextMeta } from "./embedding-meta.js";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
 
@@ -65,12 +63,16 @@ export async function indexProject(
     Object.keys(currentSources).filter((p) => oldHashes[p] !== currentSources[p])
   );
 
-  // Full mode: drop and recreate the table, rebuild everything
+  // Full mode: delete this project's data and rebuild from scratch
   if (mode === "full") {
+    const metaError = isCode ? checkCodeMeta() : checkTextMeta();
+    if (metaError) {
+      throw new Error(`EMBEDDING_MISMATCH: ${metaError}`);
+    }
     if (isCode) {
-      await resetTable();
+      await deleteProject(projectId);
     } else {
-      await resetKnowledgeTable();
+      await deleteKnowledgeProject(projectId);
     }
     deleteHashes(projectId);
     for (const p of Object.keys(currentSources)) toReindex.add(p);
