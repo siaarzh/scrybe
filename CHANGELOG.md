@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.5.5] — 2026-04-07
+
 ### Fixed
 
 - Full reindex (`mode=full`) now deletes only the target project's data instead of resetting the entire table — previously wiped all other projects' indexed data
