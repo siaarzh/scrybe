@@ -10,8 +10,8 @@ Claude Code (any project)
 src/mcp-server.ts
     ↕
 LanceDB (embedded, in-process)
-    ├── code_chunks     ← indexed code files (search_code)
-    └── knowledge_chunks ← indexed knowledge sources (search_knowledge)
+    ├── code_{hash}     ← per-source code tables (search_code)
+    └── knowledge_{hash} ← per-source knowledge tables (search_knowledge)
 ```
 
 No Docker. LanceDB runs in-process. All data lives in the OS user data directory:
@@ -130,62 +130,72 @@ Knowledge sources use natural language text rather than code, so a different emb
 
 ### GitLab issues
 
-Index all issues and comments from a GitLab project:
+Add a GitLab issues source to any project:
 
 ```bash
-node dist/index.js add-project \
-  --id myrepo-issues \
+node dist/index.js add-source \
+  --project-id myrepo \
+  --source-id gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
   --gitlab-token glpat-...
+
+node dist/index.js index --project-id myrepo --source-id gitlab-issues --full
 ```
 
 Indexing is cursor-based and incremental — only issues updated since the last run are fetched. Rate-limit safe (50 ms between issues).
 
-To rotate a token without re-registering:
+To rotate a token, remove and re-add the source:
 
 ```bash
-node dist/index.js update-project --id myrepo-issues --gitlab-token glpat-...
+node dist/index.js remove-source --project-id myrepo --source-id gitlab-issues
+node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
+  --type ticket --gitlab-url https://gitlab.example.com \
+  --gitlab-project-id 42 --gitlab-token glpat-new-token
 ```
 
 ## CLI
 
-```bash
-# Register a code project
-node dist/index.js add-project --id myrepo --root /path/to/repo --languages ts,vue --desc "My frontend"
+Projects are containers; sources are the actual indexable units (a code repo, GitLab issues, etc.).
 
-# Register a GitLab issues project
-node dist/index.js add-project --id myrepo-issues --type ticket \
+```bash
+# Create a project
+node dist/index.js add-project --id myrepo --desc "My frontend"
+
+# Add a code source
+node dist/index.js add-source --project-id myrepo --source-id code \
+  --type code --root /path/to/repo --languages ts,vue
+
+# Add a GitLab issues source
+node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
+  --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
   --gitlab-token glpat-...
 
-# Update a registered project
-node dist/index.js update-project --id myrepo --languages ts,vue,css
-node dist/index.js update-project --id myrepo-issues --gitlab-token glpat-...
-
-# List registered projects
-node dist/index.js list-projects
-
-# Index a project (full rebuild)
+# Index all sources in a project (full rebuild)
 node dist/index.js index --project-id myrepo --full
 
-# Index incrementally (only changed files / updated issues)
-node dist/index.js index --project-id myrepo --incremental
+# Index a specific source incrementally
+node dist/index.js index --project-id myrepo --source-id code --incremental
+
+# Search code / knowledge
+node dist/index.js search --project-id myrepo "authentication login flow"
+node dist/index.js search-knowledge --project-id myrepo "password reset broken"
+
+# List projects and their sources
+node dist/index.js list-projects
 
 # Show project info
 node dist/index.js status --project-id myrepo
 
-# Search code
-node dist/index.js search --project-id myrepo "authentication login flow"
-
-# Search knowledge sources
-node dist/index.js search-knowledge --project-id myrepo-issues "password reset broken"
-
-# Remove a project from the registry
+# Remove a source or a whole project
+node dist/index.js remove-source --project-id myrepo --source-id gitlab-issues
 node dist/index.js remove-project --id myrepo
 ```
+
+See [docs/cli-reference.md](docs/cli-reference.md) for the full command reference.
 
 ## MCP server (Claude Code integration)
 
@@ -208,14 +218,31 @@ Replace `/absolute/path/to/scrybe` with the absolute path to your clone. `OPENAI
 
 | Tool | Description |
 | --- | --- |
-| `list_projects` | List all registered projects |
-| `add_project` | Register a new project (code or ticket source) |
-| `update_project` | Update an existing project's path, languages, description, or token |
-| `search_code` | Semantic search over indexed code files |
-| `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs, messages) |
-| `reindex_project` | Trigger background reindex (`full` or `incremental`) |
+| `list_projects` | List all registered projects and their sources |
+| `add_project` | Register a new project container |
+| `update_project` | Update a project's description |
+| `remove_project` | Remove a project and all its source tables |
+| `add_source` | Add a source to a project (code repo, GitLab issues, etc.) |
+| `remove_source` | Remove a source and drop its vector table |
+| `search_code` | Semantic search over indexed code |
+| `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs) |
+| `reindex_project` | Trigger background reindex of all sources (`full` or `incremental`) |
+| `reindex_source` | Trigger background reindex of a single source |
 | `reindex_status` | Poll a background reindex job |
 | `cancel_reindex` | Cancel a running reindex job |
+
+See [docs/mcp-reference.md](docs/mcp-reference.md) for full parameter documentation.
+
+## Documentation
+
+Detailed reference docs live in [`docs/`](docs/):
+
+| Doc | Contents |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Full setup walkthrough, first project, MCP config |
+| [CLI reference](docs/cli-reference.md) | All commands and flags |
+| [MCP reference](docs/mcp-reference.md) | All tools, parameters, return values, error types |
+| [Configuration](docs/configuration.md) | All env vars by category |
 
 ## Code chunking
 
