@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.6.1] — 2026-04-09
+
+### Fixed
+
+- Full reindex now correctly clears old vectors before re-embedding: delete functions in `vector-store.ts` were silently no-oping when the LanceDB table wasn't in the in-process cache (always the case in a fresh CLI run), causing `table.add()` to pile up duplicates instead of replacing data
+
+---
+
 ## [0.6.0] — 2026-04-09
 
 ### Added

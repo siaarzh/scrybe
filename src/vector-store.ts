@@ -82,6 +82,17 @@ function escapeSql(value: string): string {
   return value.replace(/'/g, "''");
 }
 
+async function openExistingTable(tableName: string): Promise<lancedb.Table | null> {
+  const cached = _tableCache.get(tableName);
+  if (cached) return cached;
+  const db = await getDb();
+  const names = await db.tableNames();
+  if (!names.includes(tableName)) return null;
+  const table = await db.openTable(tableName);
+  _tableCache.set(tableName, table);
+  return table;
+}
+
 // ─── Code table operations ────────────────────────────────────────────────────
 
 export async function upsert(
@@ -169,7 +180,7 @@ export async function createFtsIndex(tableName: string): Promise<void> {
 }
 
 export async function deleteProject(projectId: string, tableName: string): Promise<void> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return;
   await table.delete(`project_id = '${escapeSql(projectId)}'`);
 }
@@ -179,7 +190,7 @@ export async function deleteFileChunks(
   filePath: string,
   tableName: string
 ): Promise<void> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return;
   await table.delete(
     `project_id = '${escapeSql(projectId)}' AND file_path = '${escapeSql(filePath)}'`
@@ -274,7 +285,7 @@ export async function createKnowledgeFtsIndex(tableName: string): Promise<void> 
 }
 
 export async function deleteKnowledgeProject(projectId: string, tableName: string): Promise<void> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return;
   await table.delete(`project_id = '${escapeSql(projectId)}'`);
 }
@@ -284,7 +295,7 @@ export async function deleteKnowledgeSource(
   sourcePath: string,
   tableName: string
 ): Promise<void> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return;
   await table.delete(
     `project_id = '${escapeSql(projectId)}' AND source_path = '${escapeSql(sourcePath)}'`
