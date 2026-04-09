@@ -6,6 +6,8 @@ import {
   removeProject,
   getProject,
   addSource,
+  updateSource,
+  getSource,
   removeSource,
   isSearchable,
 } from "./registry.js";
@@ -174,6 +176,81 @@ export async function runCli(): Promise<void> {
 
         addSource(opts.projectId, source);
         console.log(`Added source '${opts.sourceId}' (type: ${opts.type}) to project '${opts.projectId}'`);
+      }
+    );
+
+  program
+    .command("update-source")
+    .description("Update an existing source config (e.g. refresh a token, change root path)")
+    .requiredOption("--project-id <id>", "Project ID")
+    .requiredOption("--source-id <id>", "Source ID")
+    // ticket source options
+    .option("--gitlab-token <token>", "New GitLab personal access token")
+    .option("--gitlab-url <url>", "GitLab instance base URL")
+    .option("--gitlab-project-id <id>", "GitLab project ID or path")
+    // code source options
+    .option("--root <path>", "Absolute path to repo root")
+    .option("--languages <langs>", "Comma-separated language hints")
+    // optional embedding override
+    .option("--embedding-base-url <url>", "Override embedding base URL")
+    .option("--embedding-model <model>", "Override embedding model")
+    .option("--embedding-dimensions <n>", "Override embedding dimensions")
+    .option("--embedding-api-key-env <var>", "Env var NAME holding API key")
+    .action(
+      (opts: {
+        projectId: string;
+        sourceId: string;
+        gitlabToken?: string;
+        gitlabUrl?: string;
+        gitlabProjectId?: string;
+        root?: string;
+        languages?: string;
+        embeddingBaseUrl?: string;
+        embeddingModel?: string;
+        embeddingDimensions?: string;
+        embeddingApiKeyEnv?: string;
+      }) => {
+        const existing = getSource(opts.projectId, opts.sourceId);
+        if (!existing) {
+          console.error(`Source '${opts.sourceId}' not found in project '${opts.projectId}'`);
+          process.exit(1);
+        }
+
+        const fields: Partial<Source> = {};
+
+        // Patch source_config fields
+        const scPatch: Record<string, unknown> = {};
+        if (existing.source_config.type === "ticket") {
+          if (opts.gitlabToken) scPatch["token"] = opts.gitlabToken;
+          if (opts.gitlabUrl) scPatch["base_url"] = opts.gitlabUrl;
+          if (opts.gitlabProjectId) scPatch["project_id"] = opts.gitlabProjectId;
+        } else if (existing.source_config.type === "code") {
+          if (opts.root) scPatch["root_path"] = opts.root;
+          if (opts.languages) scPatch["languages"] = opts.languages.split(",").map((l) => l.trim());
+        }
+        if (Object.keys(scPatch).length > 0) {
+          fields.source_config = { ...existing.source_config, ...scPatch } as Source["source_config"];
+        }
+
+        // Patch embedding override
+        if (opts.embeddingBaseUrl || opts.embeddingModel || opts.embeddingDimensions || opts.embeddingApiKeyEnv) {
+          fields.embedding = {
+            base_url: opts.embeddingBaseUrl ?? existing.embedding?.base_url ?? "",
+            model: opts.embeddingModel ?? existing.embedding?.model ?? "",
+            dimensions: opts.embeddingDimensions
+              ? parseInt(opts.embeddingDimensions, 10)
+              : existing.embedding?.dimensions ?? 1536,
+            api_key_env: opts.embeddingApiKeyEnv ?? existing.embedding?.api_key_env ?? "EMBEDDING_API_KEY",
+          };
+        }
+
+        if (Object.keys(fields).length === 0) {
+          console.log("Nothing to update — specify at least one option to change.");
+          return;
+        }
+
+        updateSource(opts.projectId, opts.sourceId, fields);
+        console.log(`Updated source '${opts.sourceId}' in project '${opts.projectId}'`);
       }
     );
 

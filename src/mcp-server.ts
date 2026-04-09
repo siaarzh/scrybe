@@ -11,6 +11,8 @@ import {
   updateProject,
   removeProject,
   addSource,
+  updateSource,
+  getSource,
   removeSource,
   isSearchable,
   resolveEmbeddingConfig,
@@ -115,6 +117,32 @@ const TOOLS = [
         },
       },
       required: ["project_id", "source_id", "source_type"],
+    },
+  },
+  {
+    name: "update_source",
+    description:
+      "Update an existing source's config — e.g. refresh a GitLab token, change root path, or update language hints. " +
+      "Only the fields you provide are changed.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: { type: "string" },
+        // ticket source fields
+        gitlab_token: { type: "string", description: "New GitLab personal access token" },
+        gitlab_url: { type: "string", description: "GitLab instance base URL" },
+        gitlab_project_id: { type: "string", description: "GitLab project ID or path" },
+        // code source fields
+        root_path: { type: "string", description: "Absolute path to repo root" },
+        languages: { type: "array", items: { type: "string" }, description: "Language hints" },
+        // optional embedding override
+        embedding_base_url: { type: "string" },
+        embedding_model: { type: "string" },
+        embedding_dimensions: { type: "number" },
+        embedding_api_key_env: { type: "string", description: "Env var NAME holding the API key" },
+      },
+      required: ["project_id", "source_id"],
     },
   },
   {
@@ -399,6 +427,40 @@ export async function runMcpServer(): Promise<void> {
           };
           addSource(projectId, source);
           return jsonResult({ ok: true, project_id: projectId, source_id: sourceId });
+        }
+
+        case "update_source": {
+          const projectId = String(a.project_id);
+          const sourceId = String(a.source_id);
+          const existing = getSource(projectId, sourceId);
+          if (!existing) {
+            return jsonResult({ error: `Source '${sourceId}' not found in project '${projectId}'` });
+          }
+
+          const fields: Partial<Source> = {};
+
+          const scPatch: Record<string, unknown> = {};
+          if (existing.source_config.type === "ticket") {
+            if (a.gitlab_token) scPatch["token"] = String(a.gitlab_token);
+            if (a.gitlab_url) scPatch["base_url"] = String(a.gitlab_url);
+            if (a.gitlab_project_id) scPatch["project_id"] = String(a.gitlab_project_id);
+          } else if (existing.source_config.type === "code") {
+            if (a.root_path) scPatch["root_path"] = String(a.root_path);
+            if (Array.isArray(a.languages)) scPatch["languages"] = a.languages as string[];
+          }
+          if (Object.keys(scPatch).length > 0) {
+            fields.source_config = { ...existing.source_config, ...scPatch } as Source["source_config"];
+          }
+
+          const embedding = buildEmbeddingOverride(a);
+          if (embedding) fields.embedding = embedding;
+
+          if (Object.keys(fields).length === 0) {
+            return jsonResult({ ok: true, project_id: projectId, source_id: sourceId, updated: false, message: "Nothing to update" });
+          }
+
+          const updated = updateSource(projectId, sourceId, fields);
+          return jsonResult({ ok: true, project_id: projectId, source_id: sourceId, updated: true, source: updated });
         }
 
         case "remove_source": {

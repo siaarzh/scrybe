@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.7.0] — 2026-04-09
+
+### Added
+
+- `update-source` CLI command — patch an existing source's config without remove/re-add (e.g. `--gitlab-token` to rotate a token, `--root` / `--languages` for code sources, embedding overrides)
+- `update_source` MCP tool — same capability for MCP clients; returns the updated source object
+
+---
+
 ## [0.6.3] — 2026-04-09
 
 ### Changed
@@ -196,7 +205,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/siaarzh/scrybe/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/siaarzh/scrybe/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/siaarzh/scrybe/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/siaarzh/scrybe/compare/v0.6.0...v0.6.1
