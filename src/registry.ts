@@ -205,7 +205,7 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       base_url: config.textEmbeddingBaseUrl ?? config.embeddingBaseUrl ?? "",
       model: config.textEmbeddingModel,
       dimensions: config.textEmbeddingDimensions,
-      api_key_env: "SCRYBE_TEXT_EMBEDDING_API_KEY",
+      api_key_env: process.env.SCRYBE_TEXT_EMBEDDING_API_KEY ? "SCRYBE_TEXT_EMBEDDING_API_KEY" : "EMBEDDING_API_KEY",
     };
   }
 }

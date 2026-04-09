@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.6.2] — 2026-04-09
+
+### Fixed
+
+- Knowledge source indexing no longer requires `SCRYBE_TEXT_EMBEDDING_API_KEY` when `EMBEDDING_API_KEY` is already set — `api_key_env` now falls back to `EMBEDDING_API_KEY` automatically
+
+---
+
 ## [0.6.1] — 2026-04-09
 
 ### Fixed
