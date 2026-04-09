@@ -55,4 +55,4 @@ Internal refactors (renaming internal functions, reformatting code) do not need 
 
 ## Current version
 
-`v0.5.1` — see [CHANGELOG.md](CHANGELOG.md).
+`v0.6.3` — see [CHANGELOG.md](CHANGELOG.md).

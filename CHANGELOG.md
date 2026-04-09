@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.6.3] — 2026-04-09
+
+### Changed
+
+- README rewritten to reflect multi-source architecture (v0.6.0+): updated How it works diagram, CLI section, Knowledge sources section, and MCP tools table
+- Added `docs/` reference folder: `getting-started.md`, `cli-reference.md`, `mcp-reference.md`, `configuration.md`
+
+---
+
 ## [0.6.2] — 2026-04-09
 
 ### Fixed
@@ -187,7 +196,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/siaarzh/scrybe/compare/v0.6.2...v0.6.3
+[0.6.2]: https://github.com/siaarzh/scrybe/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/siaarzh/scrybe/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/siaarzh/scrybe/compare/v0.5.5...v0.6.0
+[0.5.5]: https://github.com/siaarzh/scrybe/compare/v0.5.4...v0.5.5
+[0.5.4]: https://github.com/siaarzh/scrybe/compare/v0.5.3...v0.5.4
+[0.5.3]: https://github.com/siaarzh/scrybe/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/siaarzh/scrybe/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/siaarzh/scrybe/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/siaarzh/scrybe/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/siaarzh/scrybe/compare/v0.3.0...v0.4.0

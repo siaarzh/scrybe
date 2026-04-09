@@ -1,6 +1,6 @@
 {
   "name": "scrybe",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Self-hosted semantic code search with MCP",
   "type": "module",
   "bin": {
