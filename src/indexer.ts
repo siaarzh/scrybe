@@ -1,4 +1,4 @@
-import { getProject, updateProject } from "./registry.js";
+import { getProject, getSource, updateSource, assignTableName, resolveEmbeddingConfig } from "./registry.js";
 import { loadHashes, saveHashes, deleteHashes } from "./hashes.js";
 import { deleteCursor } from "./cursors.js";
 import { getPlugin } from "./plugins/index.js";
@@ -13,7 +13,6 @@ import {
   deleteKnowledgeProject,
   deleteKnowledgeSource,
 } from "./vector-store.js";
-import { writeMeta, checkCodeMeta, checkTextMeta } from "./embedding-meta.js";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
 
@@ -29,28 +28,37 @@ function checkAbort(signal?: AbortSignal): void {
   }
 }
 
-export async function indexProject(
+export async function indexSource(
   projectId: string,
+  sourceId: string,
   mode: IndexMode,
   options: IndexOptions = {}
 ): Promise<IndexResult> {
   const { onScanProgress, onEmbedProgress, signal } = options;
+
   const project = getProject(projectId);
   if (!project) throw new Error(`Project '${projectId}' not found`);
 
-  const sourceType = project.source_config?.type ?? "code";
-  const plugin = getPlugin(sourceType);
+  let source = getSource(projectId, sourceId);
+  if (!source) throw new Error(`Source '${sourceId}' not found in project '${projectId}'`);
+
+  // Assign table name on first index (immutable after)
+  source = assignTableName(projectId, source);
+  const tableName = source.table_name!;
+
+  const plugin = getPlugin(source.source_config.type);
   const isCode = plugin.embeddingProfile === "code";
+  const embConfig = resolveEmbeddingConfig(source);
 
   // --- Phase 1: Scan and diff ---
   checkAbort(signal);
 
-  const oldHashes = mode === "full" ? {} : loadHashes(projectId);
-  if (mode === "full") deleteCursor(projectId);
-  const currentSources = await plugin.scanSources(project);
+  const oldHashes = mode === "full" ? {} : loadHashes(projectId, sourceId);
+  if (mode === "full") deleteCursor(projectId, sourceId);
+  const currentSources = await plugin.scanSources(project, source);
 
   let filesScanned = 0;
-  for (const key of Object.keys(currentSources)) {
+  for (const _key of Object.keys(currentSources)) {
     checkAbort(signal);
     filesScanned++;
     onScanProgress?.(filesScanned);
@@ -63,27 +71,23 @@ export async function indexProject(
     Object.keys(currentSources).filter((p) => oldHashes[p] !== currentSources[p])
   );
 
-  // Full mode: delete this project's data and rebuild from scratch
+  // Full mode: delete this source's data and rebuild from scratch
   if (mode === "full") {
-    const metaError = isCode ? checkCodeMeta() : checkTextMeta();
-    if (metaError) {
-      throw new Error(`EMBEDDING_MISMATCH: ${metaError}`);
-    }
     if (isCode) {
-      await deleteProject(projectId);
+      await deleteProject(projectId, tableName);
     } else {
-      await deleteKnowledgeProject(projectId);
+      await deleteKnowledgeProject(projectId, tableName);
     }
-    deleteHashes(projectId);
+    deleteHashes(projectId, sourceId);
     for (const p of Object.keys(currentSources)) toReindex.add(p);
   } else {
     // Incremental: delete stale chunks
     for (const p of [...toRemove, ...toReindex]) {
       checkAbort(signal);
       if (isCode) {
-        await deleteFileChunks(projectId, p);
+        await deleteFileChunks(projectId, p, tableName);
       } else {
-        await deleteKnowledgeSource(projectId, p);
+        await deleteKnowledgeSource(projectId, p, tableName);
       }
     }
   }
@@ -91,6 +95,7 @@ export async function indexProject(
   // --- Phase 2: Chunk + embed changed sources ---
   let chunksIndexed = 0;
   const batchSize = config.embedBatchSize;
+  const batchDelayMs = config.embedBatchDelayMs;
 
   let codeBatch: CodeChunk[] = [];
   let knowledgeBatch: KnowledgeChunk[] = [];
@@ -98,8 +103,8 @@ export async function indexProject(
   async function flushCode(): Promise<void> {
     if (codeBatch.length === 0) return;
     const texts = codeBatch.map((c) => c.content);
-    const vectors = await embedBatched(texts, "code");
-    await upsert(codeBatch, vectors);
+    const vectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs);
+    await upsert(codeBatch, vectors, tableName, embConfig.dimensions);
     chunksIndexed += codeBatch.length;
     onEmbedProgress?.(chunksIndexed);
     codeBatch = [];
@@ -108,14 +113,14 @@ export async function indexProject(
   async function flushKnowledge(): Promise<void> {
     if (knowledgeBatch.length === 0) return;
     const texts = knowledgeBatch.map((c) => c.content);
-    const vectors = await embedBatched(texts, "text");
-    await upsertKnowledge(knowledgeBatch, vectors);
+    const vectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs);
+    await upsertKnowledge(knowledgeBatch, vectors, tableName, embConfig.dimensions);
     chunksIndexed += knowledgeBatch.length;
     onEmbedProgress?.(chunksIndexed);
     knowledgeBatch = [];
   }
 
-  for await (const chunk of plugin.fetchChunks(project, toReindex)) {
+  for await (const chunk of plugin.fetchChunks(project, source, toReindex)) {
     checkAbort(signal);
     if (isCode) {
       codeBatch.push(chunk as CodeChunk);
@@ -128,18 +133,17 @@ export async function indexProject(
   await flushCode();
   await flushKnowledge();
 
-  // Persist hashes and (on full reindex) record embedding config used
-  saveHashes(projectId, currentSources);
-  if (mode === "full") writeMeta();
-  updateProject(projectId, { last_indexed: new Date().toISOString() });
+  // Persist hashes and update last_indexed
+  saveHashes(projectId, sourceId, currentSources);
+  updateSource(projectId, sourceId, { last_indexed: new Date().toISOString() });
 
   // Rebuild FTS index
   if (config.hybridEnabled) {
     try {
       if (isCode) {
-        await createFtsIndex();
+        await createFtsIndex(tableName);
       } else {
-        await createKnowledgeFtsIndex();
+        await createKnowledgeFtsIndex(tableName);
       }
     } catch (err) {
       console.warn("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only):", err);
@@ -149,6 +153,7 @@ export async function indexProject(
   return {
     status: "ok",
     project_id: projectId,
+    source_id: sourceId,
     chunks_indexed: chunksIndexed,
     files_scanned: filesScanned,
     files_reindexed: toReindex.size,
@@ -156,5 +161,21 @@ export async function indexProject(
   };
 }
 
-// Keep legacy re-export for any external callers
-export { deleteProject, deleteKnowledgeProject };
+/**
+ * Reindex all sources in a project sequentially.
+ */
+export async function indexProject(
+  projectId: string,
+  mode: IndexMode,
+  options: IndexOptions = {}
+): Promise<IndexResult[]> {
+  const project = getProject(projectId);
+  if (!project) throw new Error(`Project '${projectId}' not found`);
+
+  const results: IndexResult[] = [];
+  for (const source of project.sources) {
+    const result = await indexSource(projectId, source.source_id, mode, options);
+    results.push(result);
+  }
+  return results;
+}

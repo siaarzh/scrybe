@@ -1,7 +1,5 @@
 import OpenAI from "openai";
-import { config } from "./config.js";
-
-export type EmbeddingProfile = "code" | "text";
+import type { EmbeddingConfig } from "./types.js";
 
 // Character limit proxy for token truncation (~4 chars/token, 8000 tokens)
 const MAX_CHARS = 32_000;
@@ -10,50 +8,36 @@ function truncate(text: string): string {
   return text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
 }
 
-// Per-profile OpenAI client singletons
-const _clients: Partial<Record<EmbeddingProfile, OpenAI>> = {};
+// Client cache keyed by "{base_url}:{api_key_env}" to avoid recreating on every call
+const _clients = new Map<string, OpenAI>();
 
-function getClient(profile: EmbeddingProfile = "code"): OpenAI {
-  if (_clients[profile]) return _clients[profile]!;
+function getClient(embConfig: EmbeddingConfig): OpenAI {
+  const cacheKey = `${embConfig.base_url ?? ""}:${embConfig.api_key_env}`;
+  const cached = _clients.get(cacheKey);
+  if (cached) return cached;
 
-  if (profile === "code") {
-    if (config.embeddingConfigError) throw new Error(config.embeddingConfigError);
-    if (!config.embeddingApiKey) {
-      throw new Error("No embedding API key found. Set EMBEDDING_API_KEY or OPENAI_API_KEY.");
-    }
-    const opts: ConstructorParameters<typeof OpenAI>[0] = { apiKey: config.embeddingApiKey };
-    if (config.embeddingBaseUrl) opts.baseURL = config.embeddingBaseUrl;
-    _clients.code = new OpenAI(opts);
-    return _clients.code;
-  }
-
-  // text profile
-  if (!config.textEmbeddingApiKey) {
+  const apiKey =
+    process.env[embConfig.api_key_env] ??
+    process.env["OPENAI_API_KEY"] ??
+    "";
+  if (!apiKey) {
     throw new Error(
-      "No text embedding API key found. Set SCRYBE_TEXT_EMBEDDING_API_KEY, EMBEDDING_API_KEY, or OPENAI_API_KEY."
+      `No API key found. Set ${embConfig.api_key_env} (or OPENAI_API_KEY) to use model "${embConfig.model}".`
     );
   }
-  const opts: ConstructorParameters<typeof OpenAI>[0] = { apiKey: config.textEmbeddingApiKey };
-  if (config.textEmbeddingBaseUrl) opts.baseURL = config.textEmbeddingBaseUrl;
-  _clients.text = new OpenAI(opts);
-  return _clients.text;
+
+  const opts: ConstructorParameters<typeof OpenAI>[0] = { apiKey };
+  if (embConfig.base_url) opts.baseURL = embConfig.base_url;
+  const client = new OpenAI(opts);
+  _clients.set(cacheKey, client);
+  return client;
 }
 
-function getModel(profile: EmbeddingProfile): string {
-  return profile === "code" ? config.embeddingModel : config.textEmbeddingModel;
-}
-
-function getDimensions(profile: EmbeddingProfile): number {
-  return profile === "code" ? config.embeddingDimensions : config.textEmbeddingDimensions;
-}
-
-async function embedTextsOnce(texts: string[], profile: EmbeddingProfile): Promise<number[][]> {
-  const client = getClient(profile);
-  const model = getModel(profile);
-  const expectedDims = getDimensions(profile);
+async function embedTextsOnce(texts: string[], embConfig: EmbeddingConfig): Promise<number[][]> {
+  const client = getClient(embConfig);
 
   const response = await client.embeddings.create({
-    model,
+    model: embConfig.model,
     input: texts.map(truncate),
   });
   const sorted = response.data
@@ -62,24 +46,23 @@ async function embedTextsOnce(texts: string[], profile: EmbeddingProfile): Promi
 
   // Validate dimensions on first call
   const actual = sorted[0]?.length;
-  if (actual && actual !== expectedDims) {
-    const envVar = profile === "code" ? "EMBEDDING_DIMENSIONS" : "SCRYBE_TEXT_EMBEDDING_DIMENSIONS";
+  if (actual && actual !== embConfig.dimensions) {
     throw new Error(
-      `Embedding model "${model}" returned ${actual}d vectors ` +
-      `but ${envVar} is set to ${expectedDims}. ` +
-      `Update ${envVar}=${actual} in your config.`
+      `Embedding model "${embConfig.model}" returned ${actual}d vectors ` +
+      `but config expects ${embConfig.dimensions}d. ` +
+      `Update the source's embedding dimensions config to ${actual}.`
     );
   }
 
   return sorted;
 }
 
-export async function embedTexts(texts: string[], profile: EmbeddingProfile = "code"): Promise<number[][]> {
+async function embedTexts(texts: string[], embConfig: EmbeddingConfig): Promise<number[][]> {
   if (texts.length === 0) return [];
   let delay = 5_000;
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      return await embedTextsOnce(texts, profile);
+      return await embedTextsOnce(texts, embConfig);
     } catch (err: unknown) {
       const status =
         (err as { status?: number })?.status ??
@@ -96,22 +79,25 @@ export async function embedTexts(texts: string[], profile: EmbeddingProfile = "c
   throw new Error("embedTexts: exceeded retry limit");
 }
 
-export async function embedBatched(texts: string[], profile: EmbeddingProfile = "code"): Promise<number[][]> {
-  const batchSize = config.embedBatchSize;
-  const batchDelay = config.embedBatchDelayMs;
+export async function embedBatched(
+  texts: string[],
+  embConfig: EmbeddingConfig,
+  batchSize: number,
+  batchDelayMs: number
+): Promise<number[][]> {
   const results: number[][] = [];
   for (let i = 0; i < texts.length; i += batchSize) {
-    if (i > 0 && batchDelay > 0) {
-      await new Promise((r) => setTimeout(r, batchDelay));
+    if (i > 0 && batchDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, batchDelayMs));
     }
     const batch = texts.slice(i, i + batchSize);
-    const embeddings = await embedTexts(batch, profile);
+    const embeddings = await embedTexts(batch, embConfig);
     results.push(...embeddings);
   }
   return results;
 }
 
-export async function embedQuery(query: string, profile: EmbeddingProfile = "code"): Promise<number[]> {
-  const [embedding] = await embedTexts([query], profile);
+export async function embedQuery(query: string, embConfig: EmbeddingConfig): Promise<number[]> {
+  const [embedding] = await embedTexts([query], embConfig);
   return embedding;
 }

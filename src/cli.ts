@@ -5,10 +5,14 @@ import {
   updateProject,
   removeProject,
   getProject,
+  addSource,
+  removeSource,
+  isSearchable,
 } from "./registry.js";
 import { searchCode, searchKnowledge } from "./search.js";
-import { indexProject } from "./indexer.js";
+import { indexProject, indexSource } from "./indexer.js";
 import { config } from "./config.js";
+import type { Source, SourceConfig } from "./types.js";
 
 export async function runCli(): Promise<void> {
   const program = new Command();
@@ -17,93 +21,42 @@ export async function runCli(): Promise<void> {
     .description("Self-hosted semantic code search")
     .version("0.2.0");
 
+  // ─── Project commands ──────────────────────────────────────────────────────
+
   program
     .command("add-project")
-    .description("Register a project for indexing")
+    .description("Register a project container (add sources with add-source)")
     .requiredOption("--id <id>", "Project identifier")
-    .option("--root <path>", "Absolute path to repo root (required for type=code)")
-    .option("--languages <langs>", "Comma-separated language hints", "")
     .option("--desc <text>", "Description", "")
-    .option("--type <type>", "Source type: code | ticket", "code")
-    .option("--gitlab-url <url>", "GitLab instance base URL (required for type=ticket)")
-    .option("--gitlab-project-id <id>", "GitLab project ID or path (required for type=ticket)")
-    .option("--gitlab-token <token>", "GitLab personal access token (required for type=ticket)")
-    .action((opts: {
-      id: string; root?: string; languages: string; desc: string;
-      type: string; gitlabUrl?: string; gitlabProjectId?: string; gitlabToken?: string;
-    }) => {
-      if (opts.type === "ticket") {
-        if (!opts.gitlabUrl || !opts.gitlabProjectId || !opts.gitlabToken) {
-          console.error("--gitlab-url, --gitlab-project-id, and --gitlab-token are required for --type ticket");
-          process.exit(1);
-        }
-        addProject({
-          id: opts.id,
-          root_path: opts.root ?? "",
-          languages: [],
-          description: opts.desc,
-          source_config: {
-            type: "ticket",
-            provider: "gitlab",
-            base_url: opts.gitlabUrl,
-            project_id: opts.gitlabProjectId,
-            token: opts.gitlabToken,
-          },
-        });
-      } else {
-        if (!opts.root) {
-          console.error("--root is required for --type code");
-          process.exit(1);
-        }
-        addProject({
-          id: opts.id,
-          root_path: opts.root,
-          languages: opts.languages ? opts.languages.split(",").map((l) => l.trim()) : [],
-          description: opts.desc,
-        });
-      }
-      console.log(`Added project '${opts.id}' (type: ${opts.type})`);
+    .action((opts: { id: string; desc: string }) => {
+      addProject({ id: opts.id, description: opts.desc });
+      console.log(`Added project '${opts.id}'`);
     });
 
   program
     .command("update-project")
-    .description("Update a project's metadata")
+    .description("Update a project's description")
     .requiredOption("--id <id>", "Project identifier")
-    .option("--root <path>", "New root path")
-    .option("--languages <langs>", "Comma-separated languages")
     .option("--desc <text>", "New description")
-    .option("--gitlab-token <token>", "New GitLab personal access token (for ticket projects)")
-    .action((opts: { id: string; root?: string; languages?: string; desc?: string; gitlabToken?: string }) => {
-      const fields: Parameters<typeof updateProject>[1] = {
-        ...(opts.root && { root_path: opts.root }),
-        ...(opts.languages && { languages: opts.languages.split(",").map((l) => l.trim()) }),
+    .action((opts: { id: string; desc?: string }) => {
+      const updated = updateProject(opts.id, {
         ...(opts.desc !== undefined && { description: opts.desc }),
-      };
-      if (opts.gitlabToken) {
-        const existing = getProject(opts.id);
-        if (!existing) { console.error(`Project '${opts.id}' not found`); process.exit(1); }
-        if (existing.source_config?.type !== "ticket") {
-          console.error(`Project '${opts.id}' is not a ticket project`);
-          process.exit(1);
-        }
-        fields.source_config = { ...existing.source_config, token: opts.gitlabToken };
-      }
-      const updated = updateProject(opts.id, fields);
+      });
       console.log(`Updated project '${opts.id}':`, updated);
     });
 
   program
     .command("remove-project")
-    .description("Unregister a project")
+    .description("Unregister a project and drop all its source tables")
     .requiredOption("--id <id>", "Project identifier")
-    .action((opts: { id: string }) => {
-      removeProject(opts.id);
+    .action(async (opts: { id: string }) => {
+      await removeProject(opts.id);
       console.log(`Removed project '${opts.id}'`);
     });
 
   program
     .command("list-projects")
-    .description("List all registered projects")
+    .description("List all registered projects and their sources")
     .action(() => {
       const projects = listProjects();
       if (projects.length === 0) {
@@ -111,9 +64,16 @@ export async function runCli(): Promise<void> {
         return;
       }
       for (const p of projects) {
-        const indexed = p.last_indexed ? ` (indexed: ${p.last_indexed})` : " (never indexed)";
-        console.log(`  ${p.id}\t${p.root_path}\t[${p.languages.join(",")}]${indexed}`);
-        if (p.description) console.log(`    ${p.description}`);
+        console.log(`\n${p.id} — ${p.description || "(no description)"}`);
+        if (p.sources.length === 0) {
+          console.log("  (no sources)");
+        }
+        for (const s of p.sources) {
+          const { ok, reason } = isSearchable(s);
+          const indexed = s.last_indexed ? `indexed: ${s.last_indexed}` : "never indexed";
+          const searchable = ok ? "searchable" : `not searchable: ${reason}`;
+          console.log(`  [${s.source_id}] type=${s.source_config.type}  ${indexed}  ${searchable}`);
+        }
       }
     });
 
@@ -131,33 +91,155 @@ export async function runCli(): Promise<void> {
       console.log(`Data dir: ${config.dataDir}`);
     });
 
+  // ─── Source commands ───────────────────────────────────────────────────────
+
+  program
+    .command("add-source")
+    .description("Add an indexable source to a project")
+    .requiredOption("--project-id <id>", "Project ID")
+    .requiredOption("--source-id <id>", "Source ID (e.g. code, gitlab-issues)")
+    .requiredOption("--type <type>", "Source type: code | ticket")
+    // code source options
+    .option("--root <path>", "Absolute path to repo root (required for type=code)")
+    .option("--languages <langs>", "Comma-separated language hints (for type=code)", "")
+    // ticket source options
+    .option("--gitlab-url <url>", "GitLab instance base URL (required for type=ticket)")
+    .option("--gitlab-project-id <id>", "GitLab project ID or path (required for type=ticket)")
+    .option("--gitlab-token <token>", "GitLab personal access token (required for type=ticket)")
+    // optional embedding override
+    .option("--embedding-base-url <url>", "Override embedding base URL")
+    .option("--embedding-model <model>", "Override embedding model")
+    .option("--embedding-dimensions <n>", "Override embedding dimensions")
+    .option("--embedding-api-key-env <var>", "Env var NAME holding API key")
+    .action(
+      (opts: {
+        projectId: string;
+        sourceId: string;
+        type: string;
+        root?: string;
+        languages: string;
+        gitlabUrl?: string;
+        gitlabProjectId?: string;
+        gitlabToken?: string;
+        embeddingBaseUrl?: string;
+        embeddingModel?: string;
+        embeddingDimensions?: string;
+        embeddingApiKeyEnv?: string;
+      }) => {
+        let sourceConfig: SourceConfig;
+        if (opts.type === "ticket") {
+          if (!opts.gitlabUrl || !opts.gitlabProjectId || !opts.gitlabToken) {
+            console.error(
+              "--gitlab-url, --gitlab-project-id, and --gitlab-token are required for --type ticket"
+            );
+            process.exit(1);
+          }
+          sourceConfig = {
+            type: "ticket",
+            provider: "gitlab",
+            base_url: opts.gitlabUrl,
+            project_id: opts.gitlabProjectId,
+            token: opts.gitlabToken,
+          };
+        } else {
+          if (!opts.root) {
+            console.error("--root is required for --type code");
+            process.exit(1);
+          }
+          sourceConfig = {
+            type: "code",
+            root_path: opts.root,
+            languages: opts.languages ? opts.languages.split(",").map((l) => l.trim()) : [],
+          };
+        }
+
+        const source: Omit<Source, "table_name" | "last_indexed"> = {
+          source_id: opts.sourceId,
+          source_config: sourceConfig,
+        };
+
+        if (
+          opts.embeddingBaseUrl ||
+          opts.embeddingModel ||
+          opts.embeddingDimensions ||
+          opts.embeddingApiKeyEnv
+        ) {
+          source.embedding = {
+            base_url: opts.embeddingBaseUrl ?? "",
+            model: opts.embeddingModel ?? "",
+            dimensions: opts.embeddingDimensions ? parseInt(opts.embeddingDimensions, 10) : 1536,
+            api_key_env: opts.embeddingApiKeyEnv ?? "EMBEDDING_API_KEY",
+          };
+        }
+
+        addSource(opts.projectId, source);
+        console.log(`Added source '${opts.sourceId}' (type: ${opts.type}) to project '${opts.projectId}'`);
+      }
+    );
+
+  program
+    .command("remove-source")
+    .description("Remove a source from a project and drop its vector table")
+    .requiredOption("--project-id <id>")
+    .requiredOption("--source-id <id>")
+    .action(async (opts: { projectId: string; sourceId: string }) => {
+      await removeSource(opts.projectId, opts.sourceId);
+      console.log(`Removed source '${opts.sourceId}' from project '${opts.projectId}'`);
+    });
+
+  // ─── Indexing commands ─────────────────────────────────────────────────────
+
   program
     .command("index")
-    .description("Index or reindex a project")
+    .description("Index or reindex a project (all sources) or a specific source")
     .requiredOption("--project-id <id>")
+    .option("--source-id <id>", "Index only this source (omit to reindex all sources)")
     .option("--full", "Full reindex (default)", false)
     .option("--incremental", "Incremental reindex", false)
-    .action(async (opts: { projectId: string; full: boolean; incremental: boolean }) => {
-      const mode = opts.incremental ? "incremental" : "full";
-      console.log(`Indexing '${opts.projectId}' (${mode})...`);
-      const result = await indexProject(opts.projectId, mode, {
-        onScanProgress(n) {
-          process.stdout.write(`\r  Scanning... ${n} files`);
-        },
-        onEmbedProgress(n) {
-          process.stdout.write(`\r  Embedding... ${n} chunks`);
-        },
-      });
-      console.log(
-        `\nDone: ${result.chunks_indexed} chunks indexed, ` +
-          `${result.files_reindexed} files reindexed, ` +
-          `${result.files_removed} files removed`
-      );
-    });
+    .action(
+      async (opts: { projectId: string; sourceId?: string; full: boolean; incremental: boolean }) => {
+        const mode = opts.incremental ? "incremental" : "full";
+        const target = opts.sourceId
+          ? `'${opts.projectId}/${opts.sourceId}'`
+          : `'${opts.projectId}' (all sources)`;
+        console.log(`Indexing ${target} (${mode})...`);
+
+        if (opts.sourceId) {
+          const result = await indexSource(opts.projectId, opts.sourceId, mode, {
+            onScanProgress(n) { process.stdout.write(`\r  Scanning... ${n} files`); },
+            onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
+          });
+          console.log(
+            `\nDone: ${result.chunks_indexed} chunks indexed, ` +
+            `${result.files_reindexed} files reindexed, ` +
+            `${result.files_removed} files removed`
+          );
+        } else {
+          const results = await indexProject(opts.projectId, mode, {
+            onScanProgress(n) { process.stdout.write(`\r  Scanning... ${n} files`); },
+            onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
+          });
+          const totals = results.reduce(
+            (acc, r) => ({
+              chunks: acc.chunks + r.chunks_indexed,
+              reindexed: acc.reindexed + r.files_reindexed,
+              removed: acc.removed + r.files_removed,
+            }),
+            { chunks: 0, reindexed: 0, removed: 0 }
+          );
+          console.log(
+            `\nDone (${results.length} source(s)): ${totals.chunks} chunks indexed, ` +
+            `${totals.reindexed} files reindexed, ${totals.removed} files removed`
+          );
+        }
+      }
+    );
+
+  // ─── Search commands ───────────────────────────────────────────────────────
 
   program
     .command("search")
-    .description("Semantic search across a code project")
+    .description("Semantic search across code sources in a project")
     .requiredOption("--project-id <id>")
     .option("--top-k <n>", "Number of results", "10")
     .argument("<query>", "Search query")
@@ -166,26 +248,44 @@ export async function runCli(): Promise<void> {
       const results = await searchCode(query, opts.projectId, topK);
       for (const r of results) {
         const sym = r.symbol_name ? ` · ${r.symbol_name}` : "";
-        console.log(`\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})${sym}`);
+        console.log(
+          `\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})${sym}`
+        );
         console.log(r.content.slice(0, 300));
       }
     });
 
   program
     .command("search-knowledge")
-    .description("Semantic search across a knowledge project (issues, webpages, etc.)")
+    .description("Semantic search across knowledge sources (issues, webpages, etc.)")
     .requiredOption("--project-id <id>")
+    .option("--source-id <id>", "Limit to a specific source")
+    .option("--source-type <type>", "Filter by source_type (e.g. ticket)")
     .option("--top-k <n>", "Number of results", "10")
     .argument("<query>", "Search query")
-    .action(async (query: string, opts: { projectId: string; topK: string }) => {
-      const topK = parseInt(opts.topK, 10);
-      const results = await searchKnowledge(query, opts.projectId, topK);
-      for (const r of results) {
-        console.log(`\n[${r.score.toFixed(3)}] ${r.source_url || r.source_path} (${r.source_type})`);
-        if (r.author) console.log(`  Author: ${r.author}  ${r.timestamp}`);
-        console.log(r.content.slice(0, 300));
+    .action(
+      async (
+        query: string,
+        opts: { projectId: string; sourceId?: string; sourceType?: string; topK: string }
+      ) => {
+        const topK = parseInt(opts.topK, 10);
+        const sourceTypes = opts.sourceType ? [opts.sourceType] : undefined;
+        const results = await searchKnowledge(
+          query,
+          opts.projectId,
+          topK,
+          opts.sourceId,
+          sourceTypes
+        );
+        for (const r of results) {
+          console.log(
+            `\n[${r.score.toFixed(3)}] ${r.source_url || r.source_path} (${r.source_type})`
+          );
+          if (r.author) console.log(`  Author: ${r.author}  ${r.timestamp}`);
+          console.log(r.content.slice(0, 300));
+        }
       }
-    });
+    );
 
   await program.parseAsync(process.argv);
 }

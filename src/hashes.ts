@@ -5,12 +5,12 @@ import { config } from "./config.js";
 
 const HASHES_DIR = join(config.dataDir, "hashes");
 
-function hashesPath(projectId: string): string {
-  return join(HASHES_DIR, `${projectId}.json`);
+function hashesPath(projectId: string, sourceId: string): string {
+  return join(HASHES_DIR, `${projectId}__${sourceId}.json`);
 }
 
-export function loadHashes(projectId: string): Record<string, string> {
-  const p = hashesPath(projectId);
+export function loadHashes(projectId: string, sourceId: string): Record<string, string> {
+  const p = hashesPath(projectId, sourceId);
   if (!existsSync(p)) return {};
   try {
     return JSON.parse(readFileSync(p, "utf8")) as Record<string, string>;
@@ -21,14 +21,15 @@ export function loadHashes(projectId: string): Record<string, string> {
 
 export function saveHashes(
   projectId: string,
+  sourceId: string,
   hashes: Record<string, string>
 ): void {
   mkdirSync(HASHES_DIR, { recursive: true });
-  writeFileSync(hashesPath(projectId), JSON.stringify(hashes, null, 2), "utf8");
+  writeFileSync(hashesPath(projectId, sourceId), JSON.stringify(hashes, null, 2), "utf8");
 }
 
-export function deleteHashes(projectId: string): void {
-  const p = hashesPath(projectId);
+export function deleteHashes(projectId: string, sourceId: string): void {
+  const p = hashesPath(projectId, sourceId);
   if (existsSync(p)) unlinkSync(p);
 }
 

@@ -1,16 +1,29 @@
+export interface EmbeddingConfig {
+  base_url: string;
+  model: string;
+  dimensions: number;
+  api_key_env: string; // env var NAME (never the key itself), e.g. "EMBEDDING_API_KEY"
+}
+
 export type SourceConfig =
-  | { type: "code" }
+  | { type: "code"; root_path: string; languages: string[] }
   | { type: "ticket"; provider: string; base_url: string; project_id: string; token: string }
   | { type: "webpage"; sitemap_url: string; base_url?: string }
-  | { type: "message"; provider: string; params: Record<string, string> };
+  | { type: "message"; provider: string; params: Record<string, string> }
+  | { type: string; [key: string]: unknown };
+
+export interface Source {
+  source_id: string; // user-defined, e.g. "code", "gitlab-issues"
+  source_config: SourceConfig;
+  embedding?: EmbeddingConfig; // absent = falls back to global env vars
+  table_name?: string; // assigned at first index, immutable after
+  last_indexed?: string;
+}
 
 export interface Project {
   id: string;
-  root_path: string;
-  languages: string[];
   description: string;
-  source_config?: SourceConfig;
-  last_indexed?: string; // ISO timestamp, set after each successful index run
+  sources: Source[];
 }
 
 export interface CodeChunk {
@@ -39,6 +52,7 @@ export interface SearchResult {
 export interface KnowledgeChunk {
   chunk_id: string;
   project_id: string;
+  source_id: string;
   source_path: string;   // e.g. "tickets/123", "https://docs.example.com/page"
   source_url: string;    // deep link back to the original
   source_type: string;   // "ticket" | "webpage" | "message"
@@ -50,6 +64,7 @@ export interface KnowledgeChunk {
 export interface KnowledgeSearchResult {
   score: number;
   project_id: string;
+  source_id: string;
   source_path: string;
   source_url: string;
   source_type: string;   // "ticket" | "webpage" | "message"
@@ -63,6 +78,7 @@ export type IndexMode = "full" | "incremental";
 export interface IndexResult {
   status: "ok";
   project_id: string;
+  source_id: string;
   chunks_indexed: number;
   files_scanned: number;
   files_reindexed: number;
@@ -72,6 +88,7 @@ export interface IndexResult {
 export interface JobState {
   job_id: string;
   project_id: string;
+  source_id?: string;
   mode: IndexMode;
   status: "running" | "done" | "cancelled" | "failed";
   phase: "scanning" | "embedding" | "done";

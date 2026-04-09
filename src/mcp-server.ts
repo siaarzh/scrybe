@@ -4,61 +4,136 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { listProjects, getProject, addProject, updateProject, removeProject } from "./registry.js";
+import {
+  listProjects,
+  getProject,
+  addProject,
+  updateProject,
+  removeProject,
+  addSource,
+  removeSource,
+  isSearchable,
+  resolveEmbeddingConfig,
+} from "./registry.js";
+import { getPlugin } from "./plugins/index.js";
 import { VERSION } from "./config.js";
-import { checkMeta } from "./embedding-meta.js";
 import { searchCode, searchKnowledge } from "./search.js";
-import { submitJob, getJobStatus, cancelJob } from "./jobs.js";
-import type { IndexMode } from "./types.js";
+import { submitJob, submitSourceJob, getJobStatus, cancelJob } from "./jobs.js";
+import type { IndexMode, Source, SourceConfig, EmbeddingConfig } from "./types.js";
 
 const TOOLS = [
   {
     name: "list_projects",
-    description: "List all registered projects",
+    description:
+      "List all registered projects and their sources. Use this first to see what's indexed and searchable before calling search_code or search_knowledge.",
     inputSchema: { type: "object" as const, properties: {} },
   },
   {
     name: "add_project",
-    description: "Register a new project for indexing",
+    description: "Register a new project container. Add sources to it with add_source.",
     inputSchema: {
       type: "object" as const,
       properties: {
         project_id: { type: "string", description: "Unique project identifier" },
-        root_path: { type: "string", description: "Absolute path to repo root" },
-        languages: { type: "array", items: { type: "string" }, description: "Language hints (informational)" },
         description: { type: "string", description: "Human-readable description" },
       },
-      required: ["project_id", "root_path"],
+      required: ["project_id"],
     },
   },
   {
     name: "remove_project",
-    description: "Unregister a project (removes it from the index registry; does not delete vector data)",
+    description:
+      "Unregister a project and drop all its source tables (vector data deleted).",
     inputSchema: {
       type: "object" as const,
       properties: {
-        project_id: { type: "string", description: "Project ID to remove" },
+        project_id: { type: "string" },
       },
       required: ["project_id"],
     },
   },
   {
     name: "update_project",
-    description: "Update an existing project's metadata",
+    description: "Update a project's description.",
     inputSchema: {
       type: "object" as const,
       properties: {
         project_id: { type: "string" },
-        root_path: { type: "string" },
-        languages: { type: "array", items: { type: "string" } },
         description: { type: "string" },
       },
       required: ["project_id"],
     },
   },
   {
+    name: "add_source",
+    description:
+      "Add an indexable source to a project (code repo, GitLab issues, etc.). " +
+      "Then call reindex_source to index it.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: {
+          type: "string",
+          description: 'User-defined label, e.g. "code", "gitlab-issues"',
+        },
+        source_type: {
+          type: "string",
+          enum: ["code", "ticket"],
+          description: "Source type: code | ticket",
+        },
+        // code source fields
+        root_path: {
+          type: "string",
+          description: "Absolute path to repo root (required for type=code)",
+        },
+        languages: {
+          type: "array",
+          items: { type: "string" },
+          description: "Language hints for code source",
+        },
+        // ticket source fields
+        gitlab_url: {
+          type: "string",
+          description: "GitLab instance base URL (required for type=ticket)",
+        },
+        gitlab_project_id: {
+          type: "string",
+          description: "GitLab project ID or path (required for type=ticket)",
+        },
+        gitlab_token: {
+          type: "string",
+          description: "GitLab personal access token (required for type=ticket)",
+        },
+        // optional embedding override
+        embedding_base_url: { type: "string" },
+        embedding_model: { type: "string" },
+        embedding_dimensions: { type: "number" },
+        embedding_api_key_env: {
+          type: "string",
+          description: "Env var NAME holding the API key (never the key itself)",
+        },
+      },
+      required: ["project_id", "source_id", "source_type"],
+    },
+  },
+  {
+    name: "remove_source",
+    description: "Remove a source from a project and drop its vector table.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: { type: "string" },
+      },
+      required: ["project_id", "source_id"],
+    },
+  },
+  {
     name: "search_code",
-    description: "Semantically search code in a project using natural language",
+    description:
+      "Semantically search code in a project using natural language. " +
+      "Use list_projects first to confirm the project has an indexed code source.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -71,27 +146,62 @@ const TOOLS = [
   },
   {
     name: "search_knowledge",
-    description: "Semantically search GitLab issues, webpages, or other knowledge sources indexed in a project",
+    description:
+      "Semantically search GitLab issues, webpages, or other knowledge sources indexed in a project. " +
+      "Use list_projects first to confirm the project has indexed knowledge sources. " +
+      "Optionally filter by source_id (specific source) or source_types (e.g. [\"ticket\"]).",
     inputSchema: {
       type: "object" as const,
       properties: {
         project_id: { type: "string" },
         query: { type: "string" },
         top_k: { type: "number", default: 10 },
+        source_id: {
+          type: "string",
+          description: "Limit search to a specific source (optional)",
+        },
+        source_types: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Filter by source_type values, e.g. ["ticket"] (optional)',
+        },
       },
       required: ["project_id", "query"],
     },
   },
   {
     name: "reindex_project",
-    description: "Trigger background reindexing of a project. Returns a job_id to poll with reindex_status.",
+    description:
+      "Trigger background reindexing of all sources in a project. Returns a job_id to poll with reindex_status.",
     inputSchema: {
       type: "object" as const,
       properties: {
         project_id: { type: "string" },
-        mode: { type: "string", enum: ["full", "incremental"], default: "incremental" },
+        mode: {
+          type: "string",
+          enum: ["full", "incremental"],
+          default: "incremental",
+        },
       },
       required: ["project_id"],
+    },
+  },
+  {
+    name: "reindex_source",
+    description:
+      "Trigger background reindexing of a single source. Returns a job_id to poll with reindex_status.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: { type: "string" },
+        mode: {
+          type: "string",
+          enum: ["full", "incremental"],
+          default: "incremental",
+        },
+      },
+      required: ["project_id", "source_id"],
     },
   },
   {
@@ -141,8 +251,17 @@ function classifyError(err: unknown): { error: string; error_type?: string } {
   if (/EMBEDDING_DIMENSIONS=\d+/.test(message)) {
     return { error: message, error_type: "dimensions_mismatch" };
   }
-  if (message.startsWith("EMBEDDING_MISMATCH:")) {
-    return { error: message.replace(/^EMBEDDING_MISMATCH:\s*/, ""), error_type: "embedding_config_mismatch" };
+  if (message.startsWith("NO_CODE_SOURCES")) {
+    return {
+      error: message.replace(/^NO_CODE_SOURCES:\s*/, ""),
+      error_type: "no_code_sources",
+    };
+  }
+  if (message.startsWith("NO_KNOWLEDGE_SOURCES")) {
+    return {
+      error: message.replace(/^NO_KNOWLEDGE_SOURCES:\s*/, ""),
+      error_type: "no_knowledge_sources",
+    };
   }
   if (/Unknown embedding provider|EMBEDDING_MODEL is not set/.test(message)) {
     return { error: message, error_type: "unknown_provider" };
@@ -156,6 +275,78 @@ function textResult(text: string) {
 
 function jsonResult(data: unknown) {
   return textResult(JSON.stringify(data, null, 2));
+}
+
+function buildListProjectsOutput() {
+  return listProjects().map((project) => ({
+    id: project.id,
+    description: project.description,
+    sources: project.sources.map((source) => {
+      let sourceType: string;
+      try {
+        sourceType = source.source_config.type;
+      } catch {
+        sourceType = "unknown";
+      }
+      let profile: string;
+      try {
+        profile = getPlugin(source.source_config.type).embeddingProfile;
+      } catch {
+        profile = "unknown";
+      }
+      const { ok, reason } = isSearchable(source);
+      return {
+        source_id: source.source_id,
+        source_type: sourceType,
+        embedding_profile: profile,
+        last_indexed: source.last_indexed ?? null,
+        searchable: ok,
+        searchable_reason: ok ? undefined : reason,
+      };
+    }),
+  }));
+}
+
+function buildSourceConfig(a: Record<string, unknown>): SourceConfig {
+  const sourceType = String(a.source_type);
+  if (sourceType === "code") {
+    return {
+      type: "code",
+      root_path: String(a.root_path ?? ""),
+      languages: Array.isArray(a.languages)
+        ? (a.languages as string[])
+        : typeof a.languages === "string"
+        ? a.languages.split(",").map((l: string) => l.trim())
+        : [],
+    };
+  }
+  if (sourceType === "ticket") {
+    return {
+      type: "ticket",
+      provider: "gitlab",
+      base_url: String(a.gitlab_url ?? ""),
+      project_id: String(a.gitlab_project_id ?? ""),
+      token: String(a.gitlab_token ?? ""),
+    };
+  }
+  return { type: sourceType };
+}
+
+function buildEmbeddingOverride(a: Record<string, unknown>): EmbeddingConfig | undefined {
+  if (
+    a.embedding_base_url ||
+    a.embedding_model ||
+    a.embedding_dimensions ||
+    a.embedding_api_key_env
+  ) {
+    return {
+      base_url: String(a.embedding_base_url ?? ""),
+      model: String(a.embedding_model ?? ""),
+      dimensions: typeof a.embedding_dimensions === "number" ? a.embedding_dimensions : 1536,
+      api_key_env: String(a.embedding_api_key_env ?? "EMBEDDING_API_KEY"),
+    };
+  }
+  return undefined;
 }
 
 export async function runMcpServer(): Promise<void> {
@@ -173,39 +364,50 @@ export async function runMcpServer(): Promise<void> {
     try {
       switch (name) {
         case "list_projects":
-          return jsonResult(listProjects());
+          return jsonResult(buildListProjectsOutput());
 
         case "add_project": {
-          const project = {
+          addProject({
             id: String(a.project_id),
-            root_path: String(a.root_path),
-            languages: Array.isArray(a.languages) ? (a.languages as string[]) : typeof a.languages === "string" ? (() => { try { return JSON.parse(a.languages as string); } catch { return [a.languages as string]; } })() : [],
             description: a.description ? String(a.description) : "",
-          };
-          addProject(project);
-          return jsonResult({ ok: true, project });
+          });
+          return jsonResult({ ok: true, project_id: String(a.project_id) });
         }
 
         case "remove_project": {
-          removeProject(String(a.project_id));
+          await removeProject(String(a.project_id));
           return jsonResult({ ok: true, project_id: String(a.project_id) });
         }
 
         case "update_project": {
-          let languages: string[] | undefined;
-          if (a.languages !== undefined) {
-            if (typeof a.languages === "string") {
-              try { languages = JSON.parse(a.languages); } catch { languages = [a.languages]; }
-            } else {
-              languages = a.languages as string[];
-            }
-          }
           const updated = updateProject(String(a.project_id), {
-            ...(a.root_path !== undefined && { root_path: String(a.root_path) }),
-            ...(languages !== undefined && { languages }),
             ...(a.description !== undefined && { description: String(a.description) }),
           });
           return jsonResult(updated);
+        }
+
+        case "add_source": {
+          const projectId = String(a.project_id);
+          const sourceId = String(a.source_id);
+          const sourceConfig = buildSourceConfig(a);
+          const embedding = buildEmbeddingOverride(a);
+
+          const source: Omit<Source, "table_name" | "last_indexed"> = {
+            source_id: sourceId,
+            source_config: sourceConfig,
+            ...(embedding && { embedding }),
+          };
+          addSource(projectId, source);
+          return jsonResult({ ok: true, project_id: projectId, source_id: sourceId });
+        }
+
+        case "remove_source": {
+          await removeSource(String(a.project_id), String(a.source_id));
+          return jsonResult({
+            ok: true,
+            project_id: String(a.project_id),
+            source_id: String(a.source_id),
+          });
         }
 
         case "search_code": {
@@ -215,10 +417,6 @@ export async function runMcpServer(): Promise<void> {
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          const metaError = checkMeta();
-          if (metaError) {
-            return jsonResult({ error: metaError, error_type: "embedding_config_mismatch" });
-          }
           const results = await searchCode(query, projectId, topK);
           return jsonResult(results);
         }
@@ -227,39 +425,60 @@ export async function runMcpServer(): Promise<void> {
           const projectId = String(a.project_id);
           const query = String(a.query);
           const topK = typeof a.top_k === "number" ? a.top_k : 10;
+          const sourceId = a.source_id ? String(a.source_id) : undefined;
+          const sourceTypes = Array.isArray(a.source_types)
+            ? (a.source_types as string[])
+            : undefined;
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          const results = await searchKnowledge(query, projectId, topK);
+          const results = await searchKnowledge(query, projectId, topK, sourceId, sourceTypes);
           return jsonResult(results);
         }
 
         case "reindex_project": {
           const projectId = String(a.project_id);
-          const mode: IndexMode =
-            a.mode === "full" ? "full" : "incremental";
+          const mode: IndexMode = a.mode === "full" ? "full" : "incremental";
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          if (mode === "incremental") {
-            const metaError = checkMeta();
-            if (metaError) {
-              return jsonResult({ error: metaError, error_type: "embedding_config_mismatch" });
-            }
-          }
           const jobId = submitJob(projectId, mode);
           return jsonResult({ job_id: jobId, status: "started", project_id: projectId, mode });
+        }
+
+        case "reindex_source": {
+          const projectId = String(a.project_id);
+          const sourceId = String(a.source_id);
+          const mode: IndexMode = a.mode === "full" ? "full" : "incremental";
+          if (!getProject(projectId)) {
+            return jsonResult({ error: `Project '${projectId}' not found` });
+          }
+          const jobId = submitSourceJob(projectId, sourceId, mode);
+          return jsonResult({
+            job_id: jobId,
+            status: "started",
+            project_id: projectId,
+            source_id: sourceId,
+            mode,
+          });
         }
 
         case "reindex_status": {
           const jobId = String(a.job_id);
           const status = getJobStatus(jobId);
           if (!status) {
-            return jsonResult({ error: `Job '${jobId}' not found (jobs are lost on server restart)` });
+            return jsonResult({
+              error: `Job '${jobId}' not found (jobs are lost on server restart)`,
+            });
           }
           if (status.status === "done") {
-            const project = getProject(status.project_id);
-            return jsonResult({ ...status, last_indexed: project?.last_indexed ?? null });
+            const project = status.source_id
+              ? null
+              : getProject(status.project_id);
+            return jsonResult({
+              ...status,
+              last_indexed: project?.sources.map((s) => s.last_indexed) ?? null,
+            });
           }
           return jsonResult(status);
         }

@@ -5,7 +5,7 @@ import { basename } from "path";
 import { walkRepoFiles, chunkLines, getLanguage } from "../chunker.js";
 import { hashFile } from "../hashes.js";
 import { config } from "../config.js";
-import type { CodeChunk, Project } from "../types.js";
+import type { CodeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { SourcePlugin, AnyChunk } from "./base.js";
 
 // ─── Tree-sitter types (duck-typed; loaded lazily via CJS require) ───────────
@@ -350,18 +350,20 @@ export class CodePlugin implements SourcePlugin {
   readonly type = "code";
   readonly embeddingProfile = "code" as const;
 
-  async scanSources(project: Project): Promise<Record<string, string>> {
+  async scanSources(project: Project, source: Source): Promise<Record<string, string>> {
+    const cfg = source.source_config as Extract<SourceConfig, { type: "code" }>;
     const result: Record<string, string> = {};
-    for (const { relPath, absPath } of walkRepoFiles(project.root_path)) {
+    for (const { relPath, absPath } of walkRepoFiles(cfg.root_path)) {
       result[relPath] = await hashFile(absPath);
     }
     return result;
   }
 
-  async *fetchChunks(project: Project, changed: Set<string>): AsyncGenerator<AnyChunk> {
+  async *fetchChunks(project: Project, source: Source, changed: Set<string>): AsyncGenerator<AnyChunk> {
     tryInitTreeSitter();
+    const cfg = source.source_config as Extract<SourceConfig, { type: "code" }>;
 
-    for (const { relPath, absPath } of walkRepoFiles(project.root_path)) {
+    for (const { relPath, absPath } of walkRepoFiles(cfg.root_path)) {
       if (!changed.has(relPath)) continue;
 
       let source: string;

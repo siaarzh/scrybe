@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { chunkLines } from "../chunker.js";
 import { loadCursor, saveCursor } from "../cursors.js";
-import type { KnowledgeChunk, Project, SourceConfig } from "../types.js";
+import type { KnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { AnyChunk, SourcePlugin } from "./base.js";
 
 interface GitLabIssue {
@@ -20,11 +20,13 @@ interface GitLabNote {
   system: boolean;
 }
 
-function ticketConfig(project: Project): Extract<SourceConfig, { type: "ticket" }> {
-  if (project.source_config?.type !== "ticket") {
-    throw new Error(`Project "${project.id}" is not a ticket source`);
+type TicketConfig = Extract<SourceConfig, { type: "ticket" }>;
+
+function ticketConfig(source: Source): TicketConfig {
+  if (source.source_config.type !== "ticket") {
+    throw new Error(`Source "${source.source_id}" is not a ticket source`);
   }
-  return project.source_config;
+  return source.source_config as TicketConfig;
 }
 
 async function gitlabFetch<T>(url: string, token: string, projectId: string): Promise<T> {
@@ -34,7 +36,7 @@ async function gitlabFetch<T>(url: string, token: string, projectId: string): Pr
   if (res.status === 401 || res.status === 403) {
     throw new Error(
       `GitLab token for project "${projectId}" is expired or invalid (HTTP ${res.status}). ` +
-      `Update it with: scrybe update-project --id ${projectId} --gitlab-token <new-token>`
+      `Update it with: scrybe update-source --project-id ${projectId} --source-id <source-id> --gitlab-token <new-token>`
     );
   }
   if (!res.ok) {
@@ -65,9 +67,9 @@ export class GitLabIssuesPlugin implements SourcePlugin {
   readonly type = "ticket";
   readonly embeddingProfile = "text" as const;
 
-  async scanSources(project: Project): Promise<Record<string, string>> {
-    const cfg = ticketConfig(project);
-    const cursor = loadCursor(project.id);
+  async scanSources(project: Project, source: Source): Promise<Record<string, string>> {
+    const cfg = ticketConfig(source);
+    const cursor = loadCursor(project.id, source.source_id);
     const encodedId = encodeURIComponent(cfg.project_id);
     let url = `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all`;
     if (cursor) url += `&updated_after=${encodeURIComponent(cursor)}`;
@@ -80,8 +82,8 @@ export class GitLabIssuesPlugin implements SourcePlugin {
     return map;
   }
 
-  async *fetchChunks(project: Project, changed: Set<string>): AsyncGenerator<AnyChunk> {
-    const cfg = ticketConfig(project);
+  async *fetchChunks(project: Project, source: Source, changed: Set<string>): AsyncGenerator<AnyChunk> {
+    const cfg = ticketConfig(source);
     const encodedId = encodeURIComponent(cfg.project_id);
 
     for (const key of changed) {
@@ -110,12 +112,13 @@ export class GitLabIssuesPlugin implements SourcePlugin {
       for (let i = 0; i < chunks.length; i++) {
         const chunkSuffix = chunks.length > 1 ? `-${i}` : "";
         const chunkId = createHash("sha256")
-          .update(`${project.id}:${key}${chunkSuffix}`)
+          .update(`${project.id}:${source.source_id}:${key}${chunkSuffix}`)
           .digest("hex");
 
         yield {
           chunk_id: chunkId,
           project_id: project.id,
+          source_id: source.source_id,
           source_path: key,
           source_url: issue.web_url,
           source_type: "ticket",
@@ -130,6 +133,6 @@ export class GitLabIssuesPlugin implements SourcePlugin {
     }
 
     // Advance cursor to now so next incremental run only fetches updated issues
-    saveCursor(project.id, new Date().toISOString());
+    saveCursor(project.id, source.source_id, new Date().toISOString());
   }
 }

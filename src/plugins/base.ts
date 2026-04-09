@@ -1,4 +1,4 @@
-import type { CodeChunk, KnowledgeChunk, Project } from "../types.js";
+import type { CodeChunk, KnowledgeChunk, Project, Source } from "../types.js";
 
 export type AnyChunk = CodeChunk | KnowledgeChunk;
 
@@ -11,10 +11,10 @@ export interface SourcePlugin {
    * Returns a path/key → content-hash map for all indexable sources.
    * Used during the incremental diff phase to decide what changed.
    */
-  scanSources(project: Project): Promise<Record<string, string>>;
+  scanSources(project: Project, source: Source): Promise<Record<string, string>>;
   /**
    * Yields chunks for the given set of changed source keys.
    * Each key matches one returned by scanSources().
    */
-  fetchChunks(project: Project, changed: Set<string>): AsyncGenerator<AnyChunk>;
+  fetchChunks(project: Project, source: Source, changed: Set<string>): AsyncGenerator<AnyChunk>;
 }

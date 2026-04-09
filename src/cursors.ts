@@ -4,12 +4,12 @@ import { config } from "./config.js";
 
 const CURSORS_DIR = join(config.dataDir, "cursors");
 
-function cursorPath(projectId: string): string {
-  return join(CURSORS_DIR, `${projectId}.json`);
+function cursorPath(projectId: string, sourceId: string): string {
+  return join(CURSORS_DIR, `${projectId}__${sourceId}.json`);
 }
 
-export function loadCursor(projectId: string): string | null {
-  const p = cursorPath(projectId);
+export function loadCursor(projectId: string, sourceId: string): string | null {
+  const p = cursorPath(projectId, sourceId);
   if (!existsSync(p)) return null;
   try {
     const data = JSON.parse(readFileSync(p, "utf8")) as { updated_after?: string };
@@ -19,12 +19,12 @@ export function loadCursor(projectId: string): string | null {
   }
 }
 
-export function saveCursor(projectId: string, value: string): void {
+export function saveCursor(projectId: string, sourceId: string, value: string): void {
   mkdirSync(CURSORS_DIR, { recursive: true });
-  writeFileSync(cursorPath(projectId), JSON.stringify({ updated_after: value }), "utf8");
+  writeFileSync(cursorPath(projectId, sourceId), JSON.stringify({ updated_after: value }), "utf8");
 }
 
-export function deleteCursor(projectId: string): void {
-  const p = cursorPath(projectId);
+export function deleteCursor(projectId: string, sourceId: string): void {
+  const p = cursorPath(projectId, sourceId);
   if (existsSync(p)) rmSync(p);
 }
