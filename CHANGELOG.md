@@ -9,6 +9,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.6.0] — 2026-04-09
+
+### Added
+
+- **Multi-source project model**: projects are now logical containers with `sources[]`; each source gets its own isolated LanceDB table so a full reindex of one source never touches another project's data
+- Per-source LanceDB table naming: `{prefix}_{sha256(project:source:model:dims).slice(0,12)}` — immutable once assigned
+- Auto-migration: flat-model `projects.json` files are migrated on first load (source `id: "primary"`)
+- New MCP tools: `add_source`, `remove_source`, `reindex_source`
+- `search_knowledge` gains `source_id` and `source_types` filter params
+- `list_projects` now shows per-source searchability and `last_indexed`
+
+### Changed
+
+- Hashes and cursors re-keyed to `{project_id}__{source_id}`
+- `embedding-meta.ts` removed — superseded by per-source table naming (no more global mismatch detection needed)
+
+---
+
 ## [0.5.5] — 2026-04-07
 
 ### Fixed
