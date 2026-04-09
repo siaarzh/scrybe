@@ -84,6 +84,41 @@ Add an indexable source to a project. Call `reindex_source` after to index it.
 
 ---
 
+### `update_source`
+
+Update an existing source's config. Only the fields you provide are changed — everything else stays as-is.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `source_id` | string | ✓ | Source identifier |
+
+**For `source_type: "ticket"` sources:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `gitlab_token` | string | Rotate the GitLab personal access token |
+| `gitlab_url` | string | Change the GitLab instance base URL |
+| `gitlab_project_id` | string | Change the GitLab project ID or path |
+
+**For `source_type: "code"` sources:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `root_path` | string | Change the absolute path to repo root |
+| `languages` | string[] | Change language hints |
+
+**Embedding overrides (optional, any type):**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `embedding_base_url` | string | Override embedding API base URL |
+| `embedding_model` | string | Override embedding model |
+| `embedding_dimensions` | number | Override embedding dimensions |
+| `embedding_api_key_env` | string | Name of env var holding the API key (never the key itself) |
+
+---
+
 ### `remove_source`
 
 Remove a source from a project and drop its vector table.

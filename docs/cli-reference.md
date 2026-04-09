@@ -111,6 +111,47 @@ node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
 
 ---
 
+### `update-source`
+
+Update an existing source's config. Only the flags you provide are changed — everything else stays as-is.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project identifier |
+| `--source-id <id>` | ✓ | Source identifier |
+
+**For `--type ticket` sources:**
+
+| Flag | Description |
+|------|-------------|
+| `--gitlab-token <token>` | Rotate the GitLab personal access token |
+| `--gitlab-url <url>` | Change the GitLab instance base URL |
+| `--gitlab-project-id <id>` | Change the GitLab project ID or path |
+
+**For `--type code` sources:**
+
+| Flag | Description |
+|------|-------------|
+| `--root <path>` | Change the absolute path to repo root |
+| `--languages <langs>` | Change comma-separated language hints |
+
+**Embedding overrides (optional, any type):**
+
+| Flag | Description |
+|------|-------------|
+| `--embedding-base-url <url>` | Override embedding API base URL for this source |
+| `--embedding-model <model>` | Override embedding model |
+| `--embedding-dimensions <n>` | Override embedding dimensions |
+| `--embedding-api-key-env <var>` | Name of the env var holding the API key (not the key itself) |
+
+```bash
+# Rotate a GitLab token
+node dist/index.js update-source --project-id myrepo --source-id gitlab-issues \
+  --gitlab-token glpat-newtoken
+```
+
+---
+
 ### `remove-source`
 
 Remove a source from a project and drop its vector table.
