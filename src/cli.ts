@@ -269,12 +269,61 @@ export async function runCli(): Promise<void> {
   program
     .command("index")
     .description("Index or reindex a project (all sources) or a specific source")
-    .requiredOption("--project-id <id>")
+    .option("--project-id <id>", "Project ID (omit when using --all)")
     .option("--source-id <id>", "Index only this source (omit to reindex all sources)")
+    .option("--all", "Incrementally reindex all registered projects", false)
     .option("--full", "Full reindex (default)", false)
     .option("--incremental", "Incremental reindex", false)
     .action(
-      async (opts: { projectId: string; sourceId?: string; full: boolean; incremental: boolean }) => {
+      async (opts: { projectId?: string; sourceId?: string; all: boolean; full: boolean; incremental: boolean }) => {
+        if (opts.all) {
+          if (opts.projectId) {
+            console.warn("Warning: --project-id is ignored when --all is specified");
+          }
+          if (opts.sourceId) {
+            console.warn("Warning: --source-id is ignored when --all is specified");
+          }
+          const projects = listProjects();
+          if (projects.length === 0) {
+            console.log("No projects registered.");
+            return;
+          }
+          console.log(`Incrementally reindexing all ${projects.length} project(s)...`);
+          let failed = 0;
+          for (const p of projects) {
+            console.log(`\n── ${p.id} (${p.sources.length} source(s))`);
+            try {
+              const results = await indexProject(p.id, "incremental", {
+                onScanProgress(n) { process.stdout.write(`\r  Scanning... ${n} files`); },
+                onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
+              });
+              const totals = results.reduce(
+                (acc, r) => ({
+                  chunks: acc.chunks + r.chunks_indexed,
+                  reindexed: acc.reindexed + r.files_reindexed,
+                  removed: acc.removed + r.files_removed,
+                }),
+                { chunks: 0, reindexed: 0, removed: 0 }
+              );
+              console.log(
+                `\n  Done (${results.length} source(s)): ${totals.chunks} chunks indexed, ` +
+                `${totals.reindexed} files reindexed, ${totals.removed} files removed`
+              );
+            } catch (err) {
+              console.error(`\n  Failed: ${err instanceof Error ? err.message : String(err)}`);
+              failed++;
+            }
+          }
+          console.log(`\nAll projects processed. ${failed > 0 ? `${failed} failed.` : "All succeeded."}`);
+          if (failed > 0) process.exit(1);
+          return;
+        }
+
+        if (!opts.projectId) {
+          console.error("--project-id is required (or use --all to reindex everything)");
+          process.exit(1);
+        }
+
         const mode = opts.incremental ? "incremental" : "full";
         const target = opts.sourceId
           ? `'${opts.projectId}/${opts.sourceId}'`

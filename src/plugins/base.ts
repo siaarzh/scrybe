@@ -11,7 +11,7 @@ export interface SourcePlugin {
    * Returns a path/key → content-hash map for all indexable sources.
    * Used during the incremental diff phase to decide what changed.
    */
-  scanSources(project: Project, source: Source): Promise<Record<string, string>>;
+  scanSources(project: Project, source: Source, cursor?: string | null): Promise<Record<string, string>>;
   /**
    * Yields chunks for the given set of changed source keys.
    * Each key matches one returned by scanSources().

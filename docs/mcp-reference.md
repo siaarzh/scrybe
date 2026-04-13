@@ -164,6 +164,16 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 
 ## Reindex tools
 
+### `reindex_all`
+
+Incrementally reindex all registered projects in the background. Returns a `job_id` to poll with `reindex_status`. Check `current_project` in the status to see which project is currently being indexed.
+
+No parameters.
+
+**Returns:** `{ job_id, status: "started", project_count, mode: "incremental" }`
+
+---
+
 ### `reindex_project`
 
 Trigger background reindexing of all sources in a project. Returns a `job_id` to poll.
@@ -195,9 +205,11 @@ Get the status of a background reindex job.
 |-----------|------|----------|-------------|
 | `job_id` | string | ✓ | Job ID returned by `reindex_project` or `reindex_source` |
 
-**Returns:** `{ job_id, status, phase, files_scanned, chunks_indexed, error?, error_type? }`
+**Returns:** `{ job_id, status, phase, files_scanned, chunks_indexed, current_project?, error?, error_type? }`
 
-`status` values: `"running"`, `"done"`, `"error"`, `"cancelled"`
+For `reindex_all` jobs, the response also includes a `projects` array with per-project `last_indexed` times when done.
+
+`status` values: `"running"`, `"done"`, `"failed"`, `"cancelled"`
 
 ---
 

@@ -20,7 +20,7 @@ import {
 import { getPlugin } from "./plugins/index.js";
 import { VERSION } from "./config.js";
 import { searchCode, searchKnowledge } from "./search.js";
-import { submitJob, submitSourceJob, getJobStatus, cancelJob } from "./jobs.js";
+import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob } from "./jobs.js";
 import type { IndexMode, Source, SourceConfig, EmbeddingConfig } from "./types.js";
 
 const TOOLS = [
@@ -195,6 +195,16 @@ const TOOLS = [
         },
       },
       required: ["project_id", "query"],
+    },
+  },
+  {
+    name: "reindex_all",
+    description:
+      "Incrementally reindex all registered projects (all sources) in the background. Returns a job_id to poll with reindex_status. Check current_project in the status to see which project is currently being indexed.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
     },
   },
   {
@@ -498,6 +508,12 @@ export async function runMcpServer(): Promise<void> {
           return jsonResult(results);
         }
 
+        case "reindex_all": {
+          const jobId = submitAllJob();
+          const projectCount = listProjects().length;
+          return jsonResult({ job_id: jobId, status: "started", project_count: projectCount, mode: "incremental" });
+        }
+
         case "reindex_project": {
           const projectId = String(a.project_id);
           const mode: IndexMode = a.mode === "full" ? "full" : "incremental";
@@ -534,6 +550,13 @@ export async function runMcpServer(): Promise<void> {
             });
           }
           if (status.status === "done") {
+            if (status.project_id === "*") {
+              const projects = listProjects().map((p) => ({
+                project_id: p.id,
+                sources: p.sources.map((s) => ({ source_id: s.source_id, last_indexed: s.last_indexed })),
+              }));
+              return jsonResult({ ...status, projects });
+            }
             const project = status.source_id
               ? null
               : getProject(status.project_id);

@@ -167,17 +167,21 @@ Remove a source from a project and drop its vector table.
 
 ### `index`
 
-Index or reindex a project (all sources) or a single source.
+Index or reindex a project (all sources), a single source, or all registered projects.
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--project-id <id>` | ✓ | Project to index |
+| `--project-id <id>` | | Project to index (required unless `--all`) |
 | `--source-id <id>` | | Index only this source; omit to index all sources |
+| `--all` | | Incrementally reindex all registered projects |
 | `--full` | | Full reindex — clears existing data and rebuilds from scratch (default) |
 | `--incremental` | | Only process changed files / updated issues since last run |
 
 ```bash
-# Full reindex of all sources
+# Incremental reindex of all registered projects
+node dist/index.js index --all
+
+# Full reindex of all sources in a project
 node dist/index.js index --project-id myrepo --full
 
 # Incremental reindex of one source

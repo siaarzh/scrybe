@@ -1,6 +1,6 @@
 import { getProject, getSource, updateSource, assignTableName, resolveEmbeddingConfig } from "./registry.js";
 import { loadHashes, deleteHashes, saveHash, removeHash } from "./hashes.js";
-import { deleteCursor } from "./cursors.js";
+import { loadCursor, saveCursor, deleteCursor } from "./cursors.js";
 import { getPlugin } from "./plugins/index.js";
 import type { AnyChunk } from "./plugins/base.js";
 import { embedBatched } from "./embedder.js";
@@ -56,20 +56,27 @@ export async function indexSource(
 
   const oldHashes = mode === "full" ? {} : loadHashes(projectId, sourceId);
   if (mode === "full") deleteCursor(projectId, sourceId);
-  const currentSources = await plugin.scanSources(project, source);
+  const cursor = mode === "full" ? null : loadCursor(projectId, sourceId);
+  const currentSources = await plugin.scanSources(project, source, cursor);
+
+  // When using a cursor, currentSources is a partial set (only recently changed).
+  // Merge with oldHashes so the diff only picks up actual changes.
+  const merged = cursor ? { ...oldHashes, ...currentSources } : currentSources;
 
   let filesScanned = 0;
-  for (const _key of Object.keys(currentSources)) {
+  for (const _key of Object.keys(merged)) {
     checkAbort(signal);
     filesScanned++;
     onScanProgress?.(filesScanned);
   }
 
-  const toRemove = new Set(
-    Object.keys(oldHashes).filter((p) => !(p in currentSources))
-  );
+  // With a cursor we can't detect deletions (they won't appear in the partial fetch).
+  // Stale vectors are cleaned up on full reindex.
+  const toRemove = cursor
+    ? new Set<string>()
+    : new Set(Object.keys(oldHashes).filter((p) => !(p in currentSources)));
   const toReindex = new Set(
-    Object.keys(currentSources).filter((p) => oldHashes[p] !== currentSources[p])
+    Object.keys(merged).filter((p) => oldHashes[p] !== merged[p])
   );
 
   // Full mode: delete this source's data and rebuild from scratch
@@ -135,7 +142,7 @@ export async function indexSource(
       }
 
       // Checkpoint immediately after this key is stored
-      saveHash(projectId, sourceId, key, currentSources[key]);
+      saveHash(projectId, sourceId, key, merged[key]);
     }
 
     chunksIndexed += allChunks.length;
@@ -170,7 +177,9 @@ export async function indexSource(
   await flushBatch();
 
   // Update last_indexed timestamp (hashes already persisted per-key above)
-  updateSource(projectId, sourceId, { last_indexed: new Date().toISOString() });
+  const now = new Date().toISOString();
+  updateSource(projectId, sourceId, { last_indexed: now });
+  saveCursor(projectId, sourceId, now);
 
   // Rebuild FTS index
   if (config.hybridEnabled) {

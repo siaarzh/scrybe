@@ -9,6 +9,31 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.9.0] — 2026-04-14
+
+### Added
+
+- `index --all` CLI flag — incrementally reindexes all registered projects in one command; continues on per-project error, reports failures at the end
+- `reindex_all` MCP tool — background job equivalent of `--all`; poll with `reindex_status`, exposes `current_project` field while running
+- `SCRYBE_SCAN_CONCURRENCY` env var — controls file hash concurrency in scan phase (default: 32)
+
+### Changed
+
+- `index --project-id` is now optional when `--all` is specified
+- `reindex_status` returns aggregate `projects` array (per-source `last_indexed`) for `reindex_all` jobs
+
+### Performance
+
+- Code scan phase: file hashing parallelized (32 concurrent streams via `Promise.allSettled`) — ~2x speedup on large repos
+- GitLab issues scan: cursor-based `updated_after` filter — only fetches issues changed since last run instead of all issues every time; **15x total reindex speedup** on warm runs (e.g. 62s → 4s for 6 projects)
+
+### Fixed
+
+- `reindex_all` MCP job continues processing remaining projects when one project fails (previously exited on first error)
+- CLI warns when `--all` is combined with `--project-id` or `--source-id` (ignored flags)
+
+---
+
 ## [0.8.0] — 2026-04-13
 
 ### Fixed

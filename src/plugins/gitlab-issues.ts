@@ -66,10 +66,16 @@ export class GitLabIssuesPlugin implements SourcePlugin {
   readonly type = "ticket";
   readonly embeddingProfile = "text" as const;
 
-  async scanSources(project: Project, source: Source): Promise<Record<string, string>> {
+  async scanSources(project: Project, source: Source, cursor?: string | null): Promise<Record<string, string>> {
     const cfg = ticketConfig(source);
     const encodedId = encodeURIComponent(cfg.project_id);
-    const url = `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all`;
+    // 60s safety margin to handle clock skew between client and GitLab server
+    const since = cursor
+      ? new Date(Date.parse(cursor) - 60_000).toISOString()
+      : null;
+    const url = since
+      ? `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all&updated_after=${encodeURIComponent(since)}`
+      : `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all`;
 
     const issues = await fetchAllPages<GitLabIssue>(url, cfg.token, project.id);
     const map: Record<string, string> = {};

@@ -97,4 +97,6 @@ export interface JobState {
   started_at: number;
   finished_at: number | null;
   error: string | null;
+  /** Set on reindex_all jobs — name of the project currently being indexed */
+  current_project?: string;
 }

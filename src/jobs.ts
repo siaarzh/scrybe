@@ -1,12 +1,9 @@
 import { randomBytes } from "crypto";
 import { indexProject, indexSource } from "./indexer.js";
+import { listProjects } from "./registry.js";
 import type { IndexMode, JobState } from "./types.js";
 
 const _jobs = new Map<string, JobState & { controller: AbortController }>();
-
-function newJobId(): string {
-  return randomBytes(4).toString("hex");
-}
 
 function makeState(
   projectId: string,
@@ -120,7 +117,72 @@ export function submitSourceJob(projectId: string, sourceId: string, mode: Index
   return jobId;
 }
 
-export function getJobStatus(jobId: string): Omit<JobState, never> | null {
+/** Submit a background job to incrementally reindex all registered projects. */
+export function submitAllJob(): string {
+  const state = makeState("*", "incremental");
+  const jobId = state.job_id;
+  _jobs.set(jobId, state);
+
+  (async () => {
+    const projects = listProjects();
+    let totalChunks = 0;
+    let totalFiles = 0;
+    const failed: { project: string; error: string }[] = [];
+
+    for (const p of projects) {
+      const job = _jobs.get(jobId);
+      if (!job || job.status !== "running") break;
+
+      job.current_project = p.id;
+      job.phase = "scanning";
+
+      try {
+        const results = await indexProject(p.id, "incremental", {
+          signal: state.controller.signal,
+          onScanProgress(filesScanned) {
+            const j = _jobs.get(jobId);
+            if (j) { j.files_scanned = totalFiles + filesScanned; j.phase = "scanning"; }
+          },
+          onEmbedProgress(chunksIndexed) {
+            const j = _jobs.get(jobId);
+            if (j) { j.chunks_indexed = totalChunks + chunksIndexed; j.phase = "embedding"; }
+          },
+        });
+        totalChunks += results.reduce((sum, r) => sum + r.chunks_indexed, 0);
+        totalFiles += results.reduce((sum, r) => sum + r.files_scanned, 0);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Cancel = abort everything, don't continue
+        if (msg === "INDEX_CANCELLED") {
+          const j = _jobs.get(jobId);
+          if (j) handleError(j, err);
+          return;
+        }
+        failed.push({ project: p.id, error: msg });
+      }
+    }
+
+    const job = _jobs.get(jobId);
+    if (job && job.status === "running") {
+      job.status = "done";
+      job.phase = "done";
+      job.chunks_indexed = totalChunks;
+      job.files_scanned = totalFiles;
+      job.current_project = undefined;
+      job.finished_at = Date.now();
+      if (failed.length > 0) {
+        job.error = `${failed.length} project(s) failed: ${failed.map(f => `${f.project}: ${f.error}`).join("; ")}`;
+      }
+    }
+  })().catch((err: unknown) => {
+    const job = _jobs.get(jobId);
+    if (job) handleError(job, err);
+  });
+
+  return jobId;
+}
+
+export function getJobStatus(jobId: string): JobState | null {
   const job = _jobs.get(jobId);
   if (!job) return null;
   const { controller: _c, ...state } = job;

@@ -350,12 +350,27 @@ export class CodePlugin implements SourcePlugin {
   readonly type = "code";
   readonly embeddingProfile = "code" as const;
 
-  async scanSources(project: Project, source: Source): Promise<Record<string, string>> {
+  async scanSources(project: Project, source: Source, _cursor?: string | null): Promise<Record<string, string>> {
     const cfg = source.source_config as Extract<SourceConfig, { type: "code" }>;
+    const BATCH_SIZE = parseInt(process.env.SCRYBE_SCAN_CONCURRENCY ?? "32", 10);
+    const files = [...walkRepoFiles(cfg.root_path)];
     const result: Record<string, string> = {};
-    for (const { relPath, absPath } of walkRepoFiles(cfg.root_path)) {
-      result[relPath] = await hashFile(absPath);
+
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+      const batch = files.slice(i, i + BATCH_SIZE);
+      const settled = await Promise.allSettled(
+        batch.map(async ({ relPath, absPath }) => {
+          const hash = await hashFile(absPath);
+          return { relPath, hash };
+        })
+      );
+      for (const entry of settled) {
+        if (entry.status === "fulfilled") {
+          result[entry.value.relPath] = entry.value.hash;
+        }
+      }
     }
+
     return result;
   }
 
