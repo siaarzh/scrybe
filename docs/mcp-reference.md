@@ -71,7 +71,7 @@ Add an indexable source to a project. Call `reindex_source` after to index it.
 |-----------|------|----------|-------------|
 | `gitlab_url` | string | ✓ | GitLab instance base URL |
 | `gitlab_project_id` | string | ✓ | GitLab project ID or path |
-| `gitlab_token` | string | ✓ | GitLab personal access token |
+| `gitlab_token` | string | ✓ | GitLab personal access token (validated against the API before saving) |
 
 **Embedding overrides (optional, any type):**
 

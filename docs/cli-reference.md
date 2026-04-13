@@ -85,7 +85,7 @@ Add an indexable source to a project.
 |------|----------|-------------|
 | `--gitlab-url <url>` | ✓ | GitLab instance base URL |
 | `--gitlab-project-id <id>` | ✓ | GitLab project ID or path |
-| `--gitlab-token <token>` | ✓ | GitLab personal access token |
+| `--gitlab-token <token>` | ✓ | GitLab personal access token (validated against the API before saving) |
 
 **Embedding overrides (optional, any type):**
 

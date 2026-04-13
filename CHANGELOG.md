@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.10.0] — 2026-04-14
+
 ### Added
 
 - GitLab token validation on source add — `add-source` (CLI) and `add_source` (MCP) now verify the token against the GitLab API before persisting; invalid/expired tokens surface immediately instead of at reindex time
