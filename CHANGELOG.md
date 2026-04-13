@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.11.0] — 2026-04-14
+
+### Added
+
+- `.scrybeignore` file support — place in repo root to exclude additional files from indexing (gitignore syntax). Negation patterns (`!path`) can override `.gitignore` exclusions and hardcoded skip lists (`SKIP_DIRS`, `SKIP_FILENAMES`, etc.) to force-include any file.
+
+---
+
 ## [0.10.0] — 2026-04-14
 
 ### Added

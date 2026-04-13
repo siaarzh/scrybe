@@ -119,16 +119,33 @@ export function getLanguage(filename: string): string | null {
   return EXTENSION_TO_LANGUAGE[ext] ?? null;
 }
 
-function loadGitignore(rootPath: string): IgnoreManager | null {
+function loadIgnoreRules(rootPath: string): { ig: IgnoreManager | null; forcePatterns: string[] } {
+  const ig = createIgnore();
+  let hasRules = false;
+  const forcePatterns: string[] = [];
+
+  // .gitignore first (base rules)
   const gitignorePath = join(rootPath, ".gitignore");
-  if (!existsSync(gitignorePath)) return null;
-  try {
-    const ig = createIgnore();
-    ig.add(readFileSync(gitignorePath, "utf8"));
-    return ig;
-  } catch {
-    return null;
+  if (existsSync(gitignorePath)) {
+    try { ig.add(readFileSync(gitignorePath, "utf8")); hasRules = true; } catch {}
   }
+
+  // .scrybeignore on top — can add excludes or negate .gitignore rules via !pattern
+  const scrybeignorePath = join(rootPath, ".scrybeignore");
+  if (existsSync(scrybeignorePath)) {
+    try {
+      const content = readFileSync(scrybeignorePath, "utf8");
+      ig.add(content);
+      hasRules = true;
+      // Collect negation patterns (stripped of !) — used to override hardcoded SKIP_DIRS etc.
+      for (const line of content.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("!") && trimmed.length > 1) forcePatterns.push(trimmed.slice(1));
+      }
+    } catch {}
+  }
+
+  return { ig: hasRules ? ig : null, forcePatterns };
 }
 
 export function chunkLines(
@@ -158,7 +175,25 @@ export function chunkLines(
 export function* walkRepoFiles(
   rootPath: string
 ): Generator<{ relPath: string; absPath: string }> {
-  const ig = loadGitignore(rootPath);
+  const { ig, forcePatterns } = loadIgnoreRules(rootPath);
+
+  // Build force-include checker from negation patterns — overrides hardcoded skips
+  let forceInclude: IgnoreManager | null = null;
+  if (forcePatterns.length > 0) {
+    forceInclude = createIgnore();
+    forceInclude.add(forcePatterns.join("\n"));
+  }
+
+  // Returns true if relPath matches a !pattern in .scrybeignore
+  function isForceIncluded(relPath: string): boolean {
+    return forceInclude?.ignores(relPath) === true;
+  }
+
+  // Returns true if any force-include pattern targets something inside this dir
+  function dirMightContainForceIncludes(dirRelPath: string): boolean {
+    const prefix = dirRelPath + "/";
+    return forcePatterns.some(p => p === dirRelPath || p === prefix || p.startsWith(prefix));
+  }
 
   function* walk(dir: string): Generator<{ relPath: string; absPath: string }> {
     try {
@@ -168,11 +203,12 @@ export function* walkRepoFiles(
         const relPath = relative(rootPath, absPath).replace(/\\/g, "/");
 
         if (entry.isDirectory()) {
-          if (shouldSkipDir(name)) continue;
+          if (shouldSkipDir(name) && !dirMightContainForceIncludes(relPath)) continue;
           yield* walk(absPath);
         } else if (entry.isFile()) {
-          if (SKIP_FILENAMES.has(name)) continue;
-          if (getLanguage(name) === null) continue;
+          const forceIn = isForceIncluded(relPath);
+          if (!forceIn && SKIP_FILENAMES.has(name)) continue;
+          if (!forceIn && getLanguage(name) === null) continue;
           if (ig?.ignores(relPath)) continue;
           yield { relPath, absPath };
         }
