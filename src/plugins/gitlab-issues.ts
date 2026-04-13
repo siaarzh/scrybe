@@ -62,6 +62,13 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export async function validateGitlabToken(cfg: SourceConfig): Promise<void> {
+  if (cfg.type !== "ticket") return;
+  const c = cfg as TicketConfig;
+  const encodedId = encodeURIComponent(c.project_id);
+  await gitlabFetch(`${c.base_url}/api/v4/projects/${encodedId}`, c.token, c.project_id);
+}
+
 export class GitLabIssuesPlugin implements SourcePlugin {
   readonly type = "ticket";
   readonly embeddingProfile = "text" as const;

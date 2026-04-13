@@ -72,7 +72,11 @@ async function embedTexts(texts: string[], embConfig: EmbeddingConfig): Promise<
         delay *= 2;
         continue;
       }
-      throw err;
+      const body =
+        (err as { error?: { message?: string } })?.error?.message ??
+        (err instanceof Error ? err.message : String(err)) ??
+        "(no body)";
+      throw new Error(`Embedding API error (HTTP ${status || "unknown"}): ${body}`, { cause: err });
     }
   }
   /* istanbul ignore next */

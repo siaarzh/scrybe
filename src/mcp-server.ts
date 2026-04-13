@@ -18,6 +18,7 @@ import {
   resolveEmbeddingConfig,
 } from "./registry.js";
 import { getPlugin } from "./plugins/index.js";
+import { validateGitlabToken } from "./plugins/gitlab-issues.js";
 import { VERSION } from "./config.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob } from "./jobs.js";
@@ -429,6 +430,8 @@ export async function runMcpServer(): Promise<void> {
           const sourceId = String(a.source_id);
           const sourceConfig = buildSourceConfig(a);
           const embedding = buildEmbeddingOverride(a);
+
+          await validateGitlabToken(sourceConfig);
 
           const source: Omit<Source, "table_name" | "last_indexed"> = {
             source_id: sourceId,

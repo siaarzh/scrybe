@@ -7,6 +7,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- GitLab token validation on source add — `add-source` (CLI) and `add_source` (MCP) now verify the token against the GitLab API before persisting; invalid/expired tokens surface immediately instead of at reindex time
+- Default skip patterns: `vendor/` directory, auto-generated C# files (`.g.cs`, `.designer.cs`, `.Designer.cs`, `.generated.cs`)
+
+### Fixed
+
+- Embedding API errors now include the raw error message from the provider (e.g. Voyage, OpenAI) instead of re-throwing with no body; errors also carry the original cause via `{ cause }`
+
 ---
 
 ## [0.9.0] — 2026-04-14

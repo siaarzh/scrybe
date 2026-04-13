@@ -64,6 +64,7 @@ const SKIP_DIRS = new Set([
   "artifacts",
   "~ExternalLibraries",
   "Dommel",
+  "vendor",
   "android",
   "ios",
   "electron",
@@ -111,6 +112,8 @@ function shouldSkipDir(name: string): boolean {
 export function getLanguage(filename: string): string | null {
   const name = basename(filename);
   if (name.endsWith(".min.js") || name.endsWith(".min.css")) return null;
+  // Auto-generated C# files
+  if (name.endsWith(".g.cs") || name.endsWith(".designer.cs") || name.endsWith(".Designer.cs") || name.endsWith(".generated.cs")) return null;
   const ext = extname(name).toLowerCase();
   if (SKIP_EXTENSIONS.has(ext)) return null;
   return EXTENSION_TO_LANGUAGE[ext] ?? null;

@@ -13,6 +13,7 @@ import {
 } from "./registry.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { indexProject, indexSource } from "./indexer.js";
+import { validateGitlabToken } from "./plugins/gitlab-issues.js";
 import { config } from "./config.js";
 import type { Source, SourceConfig } from "./types.js";
 
@@ -114,7 +115,7 @@ export async function runCli(): Promise<void> {
     .option("--embedding-dimensions <n>", "Override embedding dimensions")
     .option("--embedding-api-key-env <var>", "Env var NAME holding API key")
     .action(
-      (opts: {
+      async (opts: {
         projectId: string;
         sourceId: string;
         type: string;
@@ -143,6 +144,12 @@ export async function runCli(): Promise<void> {
             project_id: opts.gitlabProjectId,
             token: opts.gitlabToken,
           };
+          try {
+            await validateGitlabToken(sourceConfig);
+          } catch (err) {
+            console.error(`GitLab token validation failed: ${err instanceof Error ? err.message : err}`);
+            process.exit(1);
+          }
         } else {
           if (!opts.root) {
             console.error("--root is required for --type code");
