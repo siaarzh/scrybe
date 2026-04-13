@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.11.1] — 2026-04-14
+
+### Changed
+
+- `docs/configuration.md` — added `SCRYBE_SCAN_CONCURRENCY` env var (missing since v0.9.0) and full `.scrybeignore` reference section
+- `docs/getting-started.md` — added optional `.scrybeignore` setup step
+
+---
+
 ## [0.11.0] — 2026-04-14
 
 ### Added

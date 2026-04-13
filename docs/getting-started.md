@@ -46,7 +46,21 @@ node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
   --gitlab-token glpat-...
 ```
 
-## 4. Index
+## 4. (Optional) Add a `.scrybeignore`
+
+Place a `.scrybeignore` in the repo root to fine-tune what gets indexed. Uses gitignore syntax. Negation patterns (`!path`) can override both `.gitignore` and Scrybe's built-in skip lists.
+
+```gitignore
+# Exclude large test fixtures
+tests/fixtures/
+
+# Force-include a gitignored build artifact
+!dist/api-types.d.ts
+```
+
+See [configuration.md](configuration.md#scrybeignore) for full details.
+
+## 5. Index
 
 ```bash
 # Full index (required first time)
@@ -58,7 +72,7 @@ node dist/index.js index --project-id myrepo --source-id code --full
 
 After the initial full index, use `--incremental` for day-to-day resyncs — it only processes changed files/issues.
 
-## 5. Search
+## 6. Search
 
 ```bash
 # Search code
@@ -68,7 +82,7 @@ node dist/index.js search --project-id myrepo "authentication login flow"
 node dist/index.js search-knowledge --project-id myrepo "password reset broken"
 ```
 
-## 6. Connect to Claude Code (MCP)
+## 7. Connect to Claude Code (MCP)
 
 Add to `~/.claude.json` under `mcpServers`:
 

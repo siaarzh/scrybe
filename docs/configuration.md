@@ -38,6 +38,36 @@ Used for `ticket` and other knowledge sources. Falls back to the code embedding 
 
 ---
 
+## Indexing behaviour
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_SCAN_CONCURRENCY` | `32` | Parallel file hash workers during the scan phase. Increase on fast SSDs, decrease if hitting file-handle limits. |
+
+### `.scrybeignore`
+
+Place a `.scrybeignore` file in a repo's root directory to control which files are indexed. Uses the same syntax as `.gitignore`.
+
+**Behaviour:**
+- Patterns are additive excludes on top of `.gitignore` — exclude files that git tracks but you don't want indexed
+- Negation patterns (`!path`) override both `.gitignore` and Scrybe's hardcoded skip lists (`node_modules/`, `dist/`, lock files, etc.)
+- If no `.scrybeignore` exists, behaviour is unchanged
+
+**Example `.scrybeignore`:**
+```gitignore
+# Don't index test fixtures
+tests/fixtures/
+*.generated.ts
+
+# But DO index this gitignored build output
+!dist/api-types.d.ts
+
+# Index a specific package from node_modules (yes, really)
+!node_modules/my-local-pkg/
+```
+
+---
+
 ## Hybrid search
 
 | Variable | Default | Description |
