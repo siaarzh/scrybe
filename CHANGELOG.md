@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.8.0] — 2026-04-13
+
 ### Fixed
 
 - GitLab issues plugin: incremental reindex no longer purges all previously-indexed issues. `scanSources` now always fetches the full issue list; the cursor-based `updated_after` filter was redundant (the hash diff already handles "what changed") and caused every incremental run to delete everything not updated since the last index.
@@ -211,6 +215,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 ---
 
 [Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.7.0...HEAD
+[0.8.0]: https://github.com/siaarzh/scrybe/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/siaarzh/scrybe/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/siaarzh/scrybe/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/siaarzh/scrybe/compare/v0.6.1...v0.6.2
