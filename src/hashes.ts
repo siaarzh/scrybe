@@ -33,6 +33,18 @@ export function deleteHashes(projectId: string, sourceId: string): void {
   if (existsSync(p)) unlinkSync(p);
 }
 
+export function saveHash(projectId: string, sourceId: string, key: string, value: string): void {
+  const hashes = loadHashes(projectId, sourceId);
+  hashes[key] = value;
+  saveHashes(projectId, sourceId, hashes);
+}
+
+export function removeHash(projectId: string, sourceId: string, key: string): void {
+  const hashes = loadHashes(projectId, sourceId);
+  delete hashes[key];
+  saveHashes(projectId, sourceId, hashes);
+}
+
 export function hashFile(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash("sha256");

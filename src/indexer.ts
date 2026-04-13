@@ -1,7 +1,8 @@
 import { getProject, getSource, updateSource, assignTableName, resolveEmbeddingConfig } from "./registry.js";
-import { loadHashes, saveHashes, deleteHashes } from "./hashes.js";
+import { loadHashes, deleteHashes, saveHash, removeHash } from "./hashes.js";
 import { deleteCursor } from "./cursors.js";
 import { getPlugin } from "./plugins/index.js";
+import type { AnyChunk } from "./plugins/base.js";
 import { embedBatched } from "./embedder.js";
 import {
   upsert,
@@ -81,8 +82,18 @@ export async function indexSource(
     deleteHashes(projectId, sourceId);
     for (const p of Object.keys(currentSources)) toReindex.add(p);
   } else {
-    // Incremental: delete stale chunks
-    for (const p of [...toRemove, ...toReindex]) {
+    // Incremental: delete stale chunks and checkpoint each removal immediately
+    for (const p of toRemove) {
+      checkAbort(signal);
+      if (isCode) {
+        await deleteFileChunks(projectId, p, tableName);
+      } else {
+        await deleteKnowledgeSource(projectId, p, tableName);
+      }
+      removeHash(projectId, sourceId, p);
+    }
+    // Pre-delete chunks that will be re-embedded (hash update happens after embed)
+    for (const p of toReindex) {
       checkAbort(signal);
       if (isCode) {
         await deleteFileChunks(projectId, p, tableName);
@@ -92,49 +103,73 @@ export async function indexSource(
     }
   }
 
-  // --- Phase 2: Chunk + embed changed sources ---
+  // --- Phase 2: Chunk + embed changed sources, checkpoint per key ---
+  // Chunks are accumulated across keys up to embedBatchSize for efficient embedding,
+  // but checkpointed per key after their slice is stored.
   let chunksIndexed = 0;
   const batchSize = config.embedBatchSize;
   const batchDelayMs = config.embedBatchDelayMs;
 
-  let codeBatch: CodeChunk[] = [];
-  let knowledgeBatch: KnowledgeChunk[] = [];
+  // Cross-key accumulator: list of (key, chunks[]) pairs in order
+  const keyBatches: Array<{ key: string; chunks: AnyChunk[] }> = [];
+  let totalPending = 0;
 
-  async function flushCode(): Promise<void> {
-    if (codeBatch.length === 0) return;
-    const texts = codeBatch.map((c) => c.content);
+  async function flushBatch(): Promise<void> {
+    if (keyBatches.length === 0) return;
+
+    // Embed all pending chunks in one call
+    const allChunks = keyBatches.flatMap((kb) => kb.chunks);
+    const texts = allChunks.map((c) => c.content);
     const vectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs);
-    await upsert(codeBatch, vectors, tableName, embConfig.dimensions);
-    chunksIndexed += codeBatch.length;
+
+    // Store and checkpoint each key's slice
+    let offset = 0;
+    for (const { key, chunks } of keyBatches) {
+      const keyVectors = vectors.slice(offset, offset + chunks.length);
+      offset += chunks.length;
+
+      if (isCode) {
+        await upsert(chunks as CodeChunk[], keyVectors, tableName, embConfig.dimensions);
+      } else {
+        await upsertKnowledge(chunks as KnowledgeChunk[], keyVectors, tableName, embConfig.dimensions);
+      }
+
+      // Checkpoint immediately after this key is stored
+      saveHash(projectId, sourceId, key, currentSources[key]);
+    }
+
+    chunksIndexed += allChunks.length;
     onEmbedProgress?.(chunksIndexed);
-    codeBatch = [];
+
+    keyBatches.length = 0;
+    totalPending = 0;
   }
 
-  async function flushKnowledge(): Promise<void> {
-    if (knowledgeBatch.length === 0) return;
-    const texts = knowledgeBatch.map((c) => c.content);
-    const vectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs);
-    await upsertKnowledge(knowledgeBatch, vectors, tableName, embConfig.dimensions);
-    chunksIndexed += knowledgeBatch.length;
-    onEmbedProgress?.(chunksIndexed);
-    knowledgeBatch = [];
-  }
+  let currentKey: string | null = null;
 
   for await (const chunk of plugin.fetchChunks(project, source, toReindex)) {
     checkAbort(signal);
-    if (isCode) {
-      codeBatch.push(chunk as CodeChunk);
-      if (codeBatch.length >= batchSize) await flushCode();
-    } else {
-      knowledgeBatch.push(chunk as KnowledgeChunk);
-      if (knowledgeBatch.length >= batchSize) await flushKnowledge();
+    const key = isCode
+      ? (chunk as CodeChunk).file_path
+      : (chunk as KnowledgeChunk).source_path;
+
+    // Start a new key entry when the key changes
+    if (key !== currentKey) {
+      keyBatches.push({ key, chunks: [] });
+      currentKey = key;
+    }
+    keyBatches[keyBatches.length - 1].chunks.push(chunk);
+    totalPending++;
+
+    // Flush when we've accumulated a full batch
+    if (totalPending >= batchSize) {
+      await flushBatch();
+      currentKey = null;
     }
   }
-  await flushCode();
-  await flushKnowledge();
+  await flushBatch();
 
-  // Persist hashes and update last_indexed
-  saveHashes(projectId, sourceId, currentSources);
+  // Update last_indexed timestamp (hashes already persisted per-key above)
   updateSource(projectId, sourceId, { last_indexed: new Date().toISOString() });
 
   // Rebuild FTS index

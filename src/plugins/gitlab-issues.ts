@@ -1,6 +1,5 @@
 import { createHash } from "crypto";
 import { chunkLines } from "../chunker.js";
-import { loadCursor, saveCursor } from "../cursors.js";
 import type { KnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { AnyChunk, SourcePlugin } from "./base.js";
 
@@ -69,10 +68,8 @@ export class GitLabIssuesPlugin implements SourcePlugin {
 
   async scanSources(project: Project, source: Source): Promise<Record<string, string>> {
     const cfg = ticketConfig(source);
-    const cursor = loadCursor(project.id, source.source_id);
     const encodedId = encodeURIComponent(cfg.project_id);
-    let url = `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all`;
-    if (cursor) url += `&updated_after=${encodeURIComponent(cursor)}`;
+    const url = `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all`;
 
     const issues = await fetchAllPages<GitLabIssue>(url, cfg.token, project.id);
     const map: Record<string, string> = {};
@@ -131,8 +128,5 @@ export class GitLabIssuesPlugin implements SourcePlugin {
       // Rate-limit safety: ~50ms between issues (GitLab: 10 req/s)
       await delay(50);
     }
-
-    // Advance cursor to now so next incremental run only fetches updated issues
-    saveCursor(project.id, source.source_id, new Date().toISOString());
   }
 }

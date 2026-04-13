@@ -7,6 +7,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- GitLab issues plugin: incremental reindex no longer purges all previously-indexed issues. `scanSources` now always fetches the full issue list; the cursor-based `updated_after` filter was redundant (the hash diff already handles "what changed") and caused every incremental run to delete everything not updated since the last index.
+- Indexer: per-key checkpointing — each source key (file or ticket) has its hash saved immediately after it is embedded and stored. Interrupted reindex runs now resume from the last checkpoint instead of restarting from scratch. Also adds delete-before-insert per key to prevent duplicate LanceDB rows from prior interrupted runs.
+
 ---
 
 ## [0.7.0] — 2026-04-09
