@@ -17,6 +17,7 @@ interface GitLabNote {
   body: string;
   author: { username: string };
   system: boolean;
+  created_at: string;
 }
 
 type TicketConfig = Extract<SourceConfig, { type: "ticket" }>;
@@ -107,36 +108,59 @@ export class GitLabIssuesPlugin implements SourcePlugin {
           fetchAllPages<GitLabNote>(notesUrl, cfg.token, project.id),
         ]);
 
-        // Build content: title + description + non-system comments
-        const parts: string[] = [
-          `# ${issue.title}`,
-          issue.description?.trim() || "",
-        ];
+        const emit = function* (
+          baseId: string,
+          content: string,
+          author: string,
+          timestamp: string,
+          sourceType: string,
+          sourceUrl: string,
+        ): Generator<KnowledgeChunk> {
+          const lines = content.split("\n").map((l) => l + "\n");
+          const chunks = chunkLines(lines);
+          for (let i = 0; i < chunks.length; i++) {
+            const chunkSuffix = chunks.length > 1 ? `-${i}` : "";
+            const chunkId = createHash("sha256")
+              .update(`${project.id}:${source.source_id}:${key}:${baseId}${chunkSuffix}`)
+              .digest("hex");
+            yield {
+              chunk_id: chunkId,
+              project_id: project.id,
+              source_id: source.source_id,
+              source_path: key,
+              source_url: sourceUrl,
+              source_type: sourceType,
+              author,
+              timestamp,
+              content: chunks[i].content,
+            } satisfies KnowledgeChunk;
+          }
+        };
+
+        // Issue body chunk(s)
+        const issueBody = `# ${issue.title}\n\n${issue.description?.trim() || ""}`.trim();
+        yield* emit(
+          "issue",
+          issueBody,
+          issue.author.username,
+          issue.updated_at,
+          "ticket",
+          issue.web_url,
+        );
+
+        // One chunk family per non-system, non-empty comment
         for (const note of notes) {
           if (note.system) continue;
-          parts.push(`---\n**${note.author.username}:** ${note.body.trim()}`);
-        }
-        const fullText = parts.filter(Boolean).join("\n\n");
-        const lines = fullText.split("\n").map((l) => l + "\n");
-        const chunks = chunkLines(lines);
-
-        for (let i = 0; i < chunks.length; i++) {
-          const chunkSuffix = chunks.length > 1 ? `-${i}` : "";
-          const chunkId = createHash("sha256")
-            .update(`${project.id}:${source.source_id}:${key}${chunkSuffix}`)
-            .digest("hex");
-
-          yield {
-            chunk_id: chunkId,
-            project_id: project.id,
-            source_id: source.source_id,
-            source_path: key,
-            source_url: issue.web_url,
-            source_type: "ticket",
-            author: issue.author.username,
-            timestamp: issue.updated_at,
-            content: chunks[i].content,
-          } satisfies KnowledgeChunk;
+          const body = note.body.trim();
+          if (!body) continue;
+          yield* emit(
+            `note-${note.id}`,
+            body,
+            note.author.username,
+            note.created_at || issue.updated_at,
+            "ticket_comment",
+            `${issue.web_url}#note_${note.id}`,
+          );
         }
 
         // Rate-limit safety: ~50ms between issues (GitLab: 10 req/s)

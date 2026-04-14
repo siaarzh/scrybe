@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.13.0] — 2026-04-15
+
+### Added
+
+- **`source_type: "ticket_comment"`** — one knowledge chunk per GitLab issue comment with its own author, timestamp (`note.created_at`), and deep-link URL (`{issue_url}#note_{id}`). `search_knowledge` can now filter with `source_types: ["ticket_comment"]` for comments only or `["ticket"]` for issue bodies only.
+- **`search-knowledge --source-types`** CLI flag — comma-separated filter by source type, e.g. `--source-types ticket_comment`. Replaces the previous singular `--source-type` flag.
+
+### Changed
+
+- `gitlab-issues` plugin emits separate chunks for issue body (`source_type: "ticket"`) and each non-system comment (`source_type: "ticket_comment"`). Previously all comments were concatenated into the issue's chunk and lost per-comment authorship, timestamps, and deep links. **Recommended:** full reindex of any project with a ticket source to benefit (`scrybe index --project-id <id> --source-ids gitlab-issues --full`).
+
+---
+
 ## [0.12.1] — 2026-04-15
 
 ### Fixed
@@ -310,7 +323,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/siaarzh/scrybe/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/siaarzh/scrybe/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/siaarzh/scrybe/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/siaarzh/scrybe/compare/v0.11.0...v0.11.1

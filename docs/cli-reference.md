@@ -235,11 +235,12 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 |------|----------|-------------|
 | `--project-id <id>` | ✓ | Project to search |
 | `--source-id <id>` | | Limit to a specific source |
-| `--source-type <type>` | | Filter by source type, e.g. `ticket` |
+| `--source-types <types>` | | Comma-separated source type filter. Known values: `ticket` (issue bodies), `ticket_comment` (individual comments) |
 | `--top-k <n>` | | Number of results (default: 10) |
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash
 scrybe search-knowledge --project-id myrepo "password reset broken"
-scrybe search-knowledge --project-id myrepo --source-type ticket "login error"
+scrybe search-knowledge --project-id myrepo --source-types ticket "login error"
+scrybe search-knowledge --project-id myrepo --source-types ticket_comment "architectural decision"
 ```

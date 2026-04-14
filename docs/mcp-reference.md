@@ -156,9 +156,11 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 | `query` | string | ✓ | Natural language search query |
 | `top_k` | number | | Number of results (default: 10) |
 | `source_id` | string | | Limit to a specific source |
-| `source_types` | string[] | | Filter by source type, e.g. `["ticket"]` |
+| `source_types` | string[] | | Filter by source type. Known values: `"ticket"` (GitLab issue body), `"ticket_comment"` (individual issue comment). Example: `["ticket"]` returns only issue bodies; `["ticket_comment"]` returns only comments; omit to return both. |
 
 **Returns:** array of `{ source_url, source_path, source_type, author, timestamp, content, score }`
+
+For `source_type: "ticket_comment"`, `author` is the commenter's username, `timestamp` is the comment's `created_at`, and `source_url` includes a `#note_{id}` anchor linking to the specific comment.
 
 ---
 

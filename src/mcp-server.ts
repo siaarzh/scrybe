@@ -178,7 +178,9 @@ const TOOLS = [
     description:
       "Semantically search GitLab issues, webpages, or other knowledge sources indexed in a project. " +
       "Use list_projects first to confirm the project has indexed knowledge sources. " +
-      "Optionally filter by source_id (specific source) or source_types (e.g. [\"ticket\"]).",
+      "Optionally filter by source_id (specific source) or source_types. " +
+      "Known source_types: \"ticket\" = GitLab issue bodies; \"ticket_comment\" = individual issue comments (each with its own author, timestamp, and #note_NNN deep-link). " +
+      "Omit source_types to search both. Use [\"ticket_comment\"] to find architectural decisions made in comments, or [\"ticket\"] to find/deduplicate issue bodies.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -192,7 +194,7 @@ const TOOLS = [
         source_types: {
           type: "array",
           items: { type: "string" },
-          description: 'Filter by source_type values, e.g. ["ticket"] (optional)',
+          description: 'Filter by source_type. Known values: "ticket" (issue bodies), "ticket_comment" (individual comments). Omit to return both.',
         },
       },
       required: ["project_id", "query"],

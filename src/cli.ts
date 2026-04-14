@@ -419,20 +419,20 @@ export async function runCli(): Promise<void> {
     .description("Semantic search across knowledge sources (issues, webpages, etc.)")
     .requiredOption("--project-id <id>")
     .option("--source-id <id>", "Limit to a specific source")
-    .option("--source-type <type>", "Filter by source_type (e.g. ticket)")
+    .option("--source-types <types>", "Comma-separated source_type filter (e.g. ticket,ticket_comment)")
     .option("--top-k <n>", "Number of results", "10")
     .argument("<query>", "Search query")
     .action(
       async (
         query: string,
-        opts: { projectId: string; sourceId?: string; sourceType?: string; topK: string }
+        opts: { projectId: string; sourceId?: string; sourceTypes?: string; topK: string }
       ) => {
         if (config.embeddingConfigError) {
           console.error(`[scrybe] ${config.embeddingConfigError}`);
           process.exit(1);
         }
         const topK = parseInt(opts.topK, 10);
-        const sourceTypes = opts.sourceType ? [opts.sourceType] : undefined;
+        const sourceTypes = opts.sourceTypes ? opts.sourceTypes.split(",").map((s) => s.trim()) : undefined;
         const results = await searchKnowledge(
           query,
           opts.projectId,
