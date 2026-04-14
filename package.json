@@ -1,14 +1,25 @@
 {
   "name": "scrybe",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "description": "Self-hosted semantic code search with MCP",
+  "author": "Serzhan Akhmetov",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/siaarzh/scrybe.git"
+  },
+  "homepage": "https://github.com/siaarzh/scrybe#readme",
+  "bugs": {
+    "url": "https://github.com/siaarzh/scrybe/issues"
+  },
+  "keywords": ["code-search", "semantic-search", "mcp", "rag", "lancedb", "embeddings", "ast", "tree-sitter", "claude"],
   "type": "module",
   "bin": {
     "scrybe": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
-    "prepare": "npm run build"
+    "prepublishOnly": "npm run build"
   },
   "files": [
     "dist/"

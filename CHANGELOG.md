@@ -9,6 +9,35 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.12.0] — 2026-04-14
+
+### Added
+
+- **Per-source job model** — reindex jobs now contain an ordered `tasks[]` array, one per source. Each task tracks `status` (`pending | running | done | failed | cancelled`), `phase`, `files_scanned`, `chunks_indexed`, `started_at`, `finished_at`, and `error` independently. `reindex_status` returns the full plan so callers know what was requested, what's in progress, and what's done.
+- **`list_jobs` MCP tool** — list all background reindex jobs without a `job_id`, like `docker ps`. Accepts optional `status` filter (`running`, `done`, `failed`, `cancelled`).
+- **`scrybe jobs` CLI command** — same as `list_jobs` for the terminal. `--running` flag to show only active jobs.
+- **Source-level cancellation** — `cancel_reindex` now accepts an optional `source_id` to cancel a single pending/running task without aborting the whole job.
+- **Concurrent reindex guard** — submitting a second reindex for the same project while one is running now returns `error_type: "already_running"` with the existing `job_id` instead of launching a competing job.
+- **`--source-ids` CLI flag** — replaces `--source-id`; accepts a comma-separated list (e.g. `--source-ids primary,gitlab-issues`) to reindex multiple specific sources in one command.
+- **`package.json` publish metadata** — added `author`, `license`, `repository`, `homepage`, `bugs`, `keywords`. Changed `prepare` → `prepublishOnly`.
+- **`LICENSE`** — MIT license file added.
+
+### Changed
+
+- `reindex_project` MCP tool: added `source_ids` array parameter. Required when `mode: "full"` — passing `full` without `source_ids` now returns `error_type: "invalid_request"`. Omit for incremental reindex of all sources.
+- `cancel_reindex` MCP tool: added optional `source_id` parameter.
+- CLI `index` command: `--full` now requires `--source-ids` (prevents accidental destructive reindex). Default mode is now correctly `incremental` (was incorrectly defaulting to `full` when no flag was given).
+- README restructured: AST chunking and knowledge sources sections moved above the fold. All `node dist/index.js` examples replaced with `scrybe` / `npx scrybe`.
+- `docs/cli-reference.md`, `docs/getting-started.md` updated to use `scrybe` command.
+
+### Fixed
+
+- Atomic `projects.json` writes — registry now writes to `.tmp` then renames, preventing corruption on crash. Windows `EEXIST` rename handled correctly.
+- Chunker infinite loop guard — `SCRYBE_CHUNK_OVERLAP >= SCRYBE_CHUNK_SIZE` now throws at startup instead of hanging.
+- GitLab 404 skip-and-continue — deleted issues no longer abort the entire ticket scan; each 404 is logged and skipped.
+
+---
+
 ## [0.11.1] — 2026-04-14
 
 ### Changed
@@ -269,7 +298,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/siaarzh/scrybe/compare/v0.11.1...v0.12.0
+[0.11.1]: https://github.com/siaarzh/scrybe/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/siaarzh/scrybe/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/siaarzh/scrybe/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/siaarzh/scrybe/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/siaarzh/scrybe/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/siaarzh/scrybe/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/siaarzh/scrybe/compare/v0.6.2...v0.6.3

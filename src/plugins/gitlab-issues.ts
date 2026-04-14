@@ -101,45 +101,53 @@ export class GitLabIssuesPlugin implements SourcePlugin {
       const issueUrl = `${cfg.base_url}/api/v4/projects/${encodedId}/issues/${iid}`;
       const notesUrl = `${cfg.base_url}/api/v4/projects/${encodedId}/issues/${iid}/notes`;
 
-      const [issue, notes] = await Promise.all([
-        gitlabFetch<GitLabIssue>(issueUrl, cfg.token, project.id),
-        fetchAllPages<GitLabNote>(notesUrl, cfg.token, project.id),
-      ]);
+      try {
+        const [issue, notes] = await Promise.all([
+          gitlabFetch<GitLabIssue>(issueUrl, cfg.token, project.id),
+          fetchAllPages<GitLabNote>(notesUrl, cfg.token, project.id),
+        ]);
 
-      // Build content: title + description + non-system comments
-      const parts: string[] = [
-        `# ${issue.title}`,
-        issue.description?.trim() || "",
-      ];
-      for (const note of notes) {
-        if (note.system) continue;
-        parts.push(`---\n**${note.author.username}:** ${note.body.trim()}`);
+        // Build content: title + description + non-system comments
+        const parts: string[] = [
+          `# ${issue.title}`,
+          issue.description?.trim() || "",
+        ];
+        for (const note of notes) {
+          if (note.system) continue;
+          parts.push(`---\n**${note.author.username}:** ${note.body.trim()}`);
+        }
+        const fullText = parts.filter(Boolean).join("\n\n");
+        const lines = fullText.split("\n").map((l) => l + "\n");
+        const chunks = chunkLines(lines);
+
+        for (let i = 0; i < chunks.length; i++) {
+          const chunkSuffix = chunks.length > 1 ? `-${i}` : "";
+          const chunkId = createHash("sha256")
+            .update(`${project.id}:${source.source_id}:${key}${chunkSuffix}`)
+            .digest("hex");
+
+          yield {
+            chunk_id: chunkId,
+            project_id: project.id,
+            source_id: source.source_id,
+            source_path: key,
+            source_url: issue.web_url,
+            source_type: "ticket",
+            author: issue.author.username,
+            timestamp: issue.updated_at,
+            content: chunks[i].content,
+          } satisfies KnowledgeChunk;
+        }
+
+        // Rate-limit safety: ~50ms between issues (GitLab: 10 req/s)
+        await delay(50);
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("404")) {
+          console.warn(`[scrybe] Issue '${key}' not found (404) — skipping`);
+          continue;
+        }
+        throw err;
       }
-      const fullText = parts.filter(Boolean).join("\n\n");
-      const lines = fullText.split("\n").map((l) => l + "\n");
-      const chunks = chunkLines(lines);
-
-      for (let i = 0; i < chunks.length; i++) {
-        const chunkSuffix = chunks.length > 1 ? `-${i}` : "";
-        const chunkId = createHash("sha256")
-          .update(`${project.id}:${source.source_id}:${key}${chunkSuffix}`)
-          .digest("hex");
-
-        yield {
-          chunk_id: chunkId,
-          project_id: project.id,
-          source_id: source.source_id,
-          source_path: key,
-          source_url: issue.web_url,
-          source_type: "ticket",
-          author: issue.author.username,
-          timestamp: issue.updated_at,
-          content: chunks[i].content,
-        } satisfies KnowledgeChunk;
-      }
-
-      // Rate-limit safety: ~50ms between issues (GitLab: 10 req/s)
-      await delay(50);
     }
   }
 }

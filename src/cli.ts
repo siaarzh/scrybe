@@ -275,20 +275,20 @@ export async function runCli(): Promise<void> {
 
   program
     .command("index")
-    .description("Index or reindex a project (all sources) or a specific source")
+    .description("Index or reindex a project (all sources) or specific sources")
     .option("--project-id <id>", "Project ID (omit when using --all)")
-    .option("--source-id <id>", "Index only this source (omit to reindex all sources)")
+    .option("--source-ids <ids>", "Comma-separated source IDs (e.g. primary,gitlab-issues)")
     .option("--all", "Incrementally reindex all registered projects", false)
-    .option("--full", "Full reindex (default)", false)
-    .option("--incremental", "Incremental reindex", false)
+    .option("--full", "Full reindex (clears and rebuilds from scratch)", false)
+    .option("--incremental", "Incremental reindex (default)", false)
     .action(
-      async (opts: { projectId?: string; sourceId?: string; all: boolean; full: boolean; incremental: boolean }) => {
+      async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean }) => {
         if (opts.all) {
           if (opts.projectId) {
             console.warn("Warning: --project-id is ignored when --all is specified");
           }
-          if (opts.sourceId) {
-            console.warn("Warning: --source-id is ignored when --all is specified");
+          if (opts.sourceIds) {
+            console.warn("Warning: --source-ids is ignored when --all is specified");
           }
           const projects = listProjects();
           if (projects.length === 0) {
@@ -331,23 +331,41 @@ export async function runCli(): Promise<void> {
           process.exit(1);
         }
 
-        const mode = opts.incremental ? "incremental" : "full";
-        const target = opts.sourceId
-          ? `'${opts.projectId}/${opts.sourceId}'`
-          : `'${opts.projectId}' (all sources)`;
-        console.log(`Indexing ${target} (${mode})...`);
+        const mode = opts.full ? "full" : "incremental";
+        const sourceIds = opts.sourceIds?.split(",").map((s: string) => s.trim()).filter(Boolean);
 
-        if (opts.sourceId) {
-          const result = await indexSource(opts.projectId, opts.sourceId, mode, {
-            onScanProgress(n) { process.stdout.write(`\r  Scanning... ${n} files`); },
-            onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
-          });
-          console.log(
-            `\nDone: ${result.chunks_indexed} chunks indexed, ` +
-            `${result.files_reindexed} files reindexed, ` +
-            `${result.files_removed} files removed`
-          );
+        if (opts.full && !sourceIds?.length) {
+          console.error("Error: --full requires --source-ids (e.g. --source-ids primary,gitlab-issues)");
+          process.exit(1);
+        }
+
+        if (sourceIds?.length) {
+          // Index specific sources
+          const target = sourceIds.map((sid) => `${opts.projectId}/${sid}`).join(", ");
+          console.log(`Indexing ${target} (${mode})...`);
+          let totalChunks = 0;
+          let totalReindexed = 0;
+          let totalRemoved = 0;
+          for (const sid of sourceIds) {
+            const result = await indexSource(opts.projectId!, sid, mode, {
+              onScanProgress(n) { process.stdout.write(`\r  [${sid}] Scanning... ${n} files`); },
+              onEmbedProgress(n) { process.stdout.write(`\r  [${sid}] Embedding... ${n} chunks`); },
+            });
+            console.log(
+              `\n  [${sid}] Done: ${result.chunks_indexed} chunks indexed, ` +
+              `${result.files_reindexed} files reindexed, ${result.files_removed} files removed`
+            );
+            totalChunks += result.chunks_indexed;
+            totalReindexed += result.files_reindexed;
+            totalRemoved += result.files_removed;
+          }
+          if (sourceIds.length > 1) {
+            console.log(`\nTotal: ${totalChunks} chunks indexed, ${totalReindexed} files reindexed, ${totalRemoved} files removed`);
+          }
         } else {
+          // Incremental reindex of all sources
+          const target = `'${opts.projectId}' (all sources)`;
+          console.log(`Indexing ${target} (${mode})...`);
           const results = await indexProject(opts.projectId, mode, {
             onScanProgress(n) { process.stdout.write(`\r  Scanning... ${n} files`); },
             onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
@@ -419,6 +437,27 @@ export async function runCli(): Promise<void> {
         }
       }
     );
+
+  program
+    .command("jobs")
+    .description("List background reindex jobs (in-memory, current process only)")
+    .option("--running", "Show only running jobs", false)
+    .action(async (opts: { running: boolean }) => {
+      const { listJobs } = await import("./jobs.js");
+      const filter = opts.running ? "running" : undefined;
+      const jobs = listJobs(filter);
+      if (jobs.length === 0) {
+        console.log("No jobs found.");
+        return;
+      }
+      for (const job of jobs) {
+        const elapsed = job.finished_at
+          ? `${((job.finished_at - job.started_at) / 1000).toFixed(1)}s`
+          : `${((Date.now() - job.started_at) / 1000).toFixed(1)}s (running)`;
+        const taskSummary = job.tasks.map((t: any) => `${t.source_id}:${t.status}`).join(", ");
+        console.log(`[${job.job_id}] ${job.project_id} | ${job.status} | ${elapsed} | ${taskSummary || job.current_project || ""}`);
+      }
+    });
 
   await program.parseAsync(process.argv);
 }

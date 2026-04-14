@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
 import { createHash } from "crypto";
 import { config } from "./config.js";
@@ -66,7 +66,18 @@ function load(): Project[] {
 
 function save(projects: Project[]): void {
   mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
-  writeFileSync(REGISTRY_PATH, JSON.stringify(projects, null, 2), "utf8");
+  const tmpPath = REGISTRY_PATH + ".tmp";
+  writeFileSync(tmpPath, JSON.stringify(projects, null, 2), "utf8");
+  try {
+    renameSync(tmpPath, REGISTRY_PATH);
+  } catch (err: any) {
+    if (err.code === "EEXIST") {
+      unlinkSync(REGISTRY_PATH);
+      renameSync(tmpPath, REGISTRY_PATH);
+    } else {
+      throw err;
+    }
+  }
 }
 
 // ─── Project CRUD ─────────────────────────────────────────────────────────────

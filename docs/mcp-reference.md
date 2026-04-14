@@ -176,11 +176,12 @@ No parameters.
 
 ### `reindex_project`
 
-Trigger background reindexing of all sources in a project. Returns a `job_id` to poll.
+Trigger background reindexing of sources in a project. Returns a `job_id` to poll.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `project_id` | string | ✓ | Project to reindex |
+| `source_ids` | string[] | | Sources to reindex. Required when `mode` is `"full"`. Omit to reindex all sources (incremental only) |
 | `mode` | string | | `"full"` or `"incremental"` (default: `"incremental"`) |
 
 ---
@@ -201,25 +202,44 @@ Trigger background reindexing of a single source. Returns a `job_id` to poll.
 
 Get the status of a background reindex job.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | ✓ | Job ID returned by `reindex_project` or `reindex_source` |
+| Parameter   | Type   | Required | Description                          |
+|-------------|--------|----------|--------------------------------------|
+| `job_id`    | string | ✓        | Job ID returned by a reindex tool    |
 
-**Returns:** `{ job_id, status, phase, files_scanned, chunks_indexed, current_project?, error?, error_type? }`
+**Returns:** `{ job_id, status, tasks[], current_project?, error? }`
 
-For `reindex_all` jobs, the response also includes a `projects` array with per-project `last_indexed` times when done.
+Each entry in `tasks` has: `{ source_id, mode, status, phase, files_scanned, chunks_indexed, started_at, finished_at, error }`
 
 `status` values: `"running"`, `"done"`, `"failed"`, `"cancelled"`
+
+Task `status` values: `"pending"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`
+
+---
+
+### `list_jobs`
+
+List all background reindex jobs (like `docker ps`). Does not require a `job_id`.
+
+| Parameter | Type   | Required | Description                     |
+|-----------|--------|----------|---------------------------------|
+| `status`  | string |          | Filter by job status (optional) |
+
+Accepted `status` values: `"running"`, `"done"`, `"failed"`, `"cancelled"`. Omit to return all jobs.
+
+**Returns:** `{ jobs[], count }`
 
 ---
 
 ### `cancel_reindex`
 
-Cancel a running reindex job.
+Cancel a running reindex job, optionally targeting a single source task.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `job_id` | string | ✓ | Job ID to cancel |
+| Parameter   | Type   | Required | Description                      |
+|-------------|--------|----------|----------------------------------|
+| `job_id`    | string | ✓        | Job ID to cancel                 |
+| `source_id` | string |          | Source task to cancel (optional) |
+
+If `source_id` is omitted, all remaining tasks in the job are cancelled.
 
 ---
 

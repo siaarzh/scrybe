@@ -202,3 +202,10 @@ export const config = {
   // Hybrid search (BM25 + vector, on by default)
   ...hybrid,
 } as const;
+
+if (config.chunkOverlap >= config.chunkSize) {
+  throw new Error(
+    `Invalid chunking config: SCRYBE_CHUNK_OVERLAP (${config.chunkOverlap}) must be ` +
+    `less than SCRYBE_CHUNK_SIZE (${config.chunkSize}). Defaults: size=60, overlap=10.`
+  );
+}

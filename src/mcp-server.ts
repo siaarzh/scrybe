@@ -21,7 +21,7 @@ import { getPlugin } from "./plugins/index.js";
 import { validateGitlabToken } from "./plugins/gitlab-issues.js";
 import { VERSION } from "./config.js";
 import { searchCode, searchKnowledge } from "./search.js";
-import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob } from "./jobs.js";
+import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob, listJobs } from "./jobs.js";
 import type { IndexMode, Source, SourceConfig, EmbeddingConfig } from "./types.js";
 
 const TOOLS = [
@@ -221,6 +221,11 @@ const TOOLS = [
           enum: ["full", "incremental"],
           default: "incremental",
         },
+        source_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Sources to reindex. Required when mode is 'full'.",
+        },
       },
       required: ["project_id"],
     },
@@ -261,8 +266,23 @@ const TOOLS = [
       type: "object" as const,
       properties: {
         job_id: { type: "string" },
+        source_id: { type: "string", description: "Cancel only this source (omit to cancel entire job)" },
       },
       required: ["job_id"],
+    },
+  },
+  {
+    name: "list_jobs",
+    description: "List background reindex jobs. Like 'docker ps' — shows all jobs or filter by status.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        status: {
+          type: "string",
+          enum: ["running", "done", "failed", "cancelled"],
+          description: "Filter by status (omit for all jobs)",
+        },
+      },
     },
   },
 ];
@@ -520,11 +540,18 @@ export async function runMcpServer(): Promise<void> {
         case "reindex_project": {
           const projectId = String(a.project_id);
           const mode: IndexMode = a.mode === "full" ? "full" : "incremental";
+          const sourceIds: string[] | undefined = Array.isArray(a.source_ids) ? a.source_ids : undefined;
+          if (mode === "full" && !sourceIds?.length) {
+            return jsonResult({ error: "source_ids is required for mode: full", error_type: "invalid_request" });
+          }
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          const jobId = submitJob(projectId, mode);
-          return jsonResult({ job_id: jobId, status: "started", project_id: projectId, mode });
+          const jobResult = submitJob(projectId, mode, sourceIds);
+          if (typeof jobResult === "object" && "error" in jobResult) {
+            return jsonResult({ error: "A reindex job is already running for this project", error_type: "already_running", job_id: jobResult.job_id });
+          }
+          return jsonResult({ job_id: jobResult, status: "started", project_id: projectId, mode });
         }
 
         case "reindex_source": {
@@ -534,9 +561,12 @@ export async function runMcpServer(): Promise<void> {
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          const jobId = submitSourceJob(projectId, sourceId, mode);
+          const sourceJobResult = submitSourceJob(projectId, sourceId, mode);
+          if (typeof sourceJobResult === "object" && "error" in sourceJobResult) {
+            return jsonResult({ error: "A reindex job is already running for this project", error_type: "already_running", job_id: sourceJobResult.job_id });
+          }
           return jsonResult({
-            job_id: jobId,
+            job_id: sourceJobResult,
             status: "started",
             project_id: projectId,
             source_id: sourceId,
@@ -552,29 +582,27 @@ export async function runMcpServer(): Promise<void> {
               error: `Job '${jobId}' not found (jobs are lost on server restart)`,
             });
           }
-          if (status.status === "done") {
-            if (status.project_id === "*") {
-              const projects = listProjects().map((p) => ({
-                project_id: p.id,
-                sources: p.sources.map((s) => ({ source_id: s.source_id, last_indexed: s.last_indexed })),
-              }));
-              return jsonResult({ ...status, projects });
-            }
-            const project = status.source_id
-              ? null
-              : getProject(status.project_id);
-            return jsonResult({
-              ...status,
-              last_indexed: project?.sources.map((s) => s.last_indexed) ?? null,
-            });
+          if (status.status === "done" && status.project_id === "*") {
+            const projects = listProjects().map((p) => ({
+              project_id: p.id,
+              sources: p.sources.map((s) => ({ source_id: s.source_id, last_indexed: s.last_indexed })),
+            }));
+            return jsonResult({ ...status, projects });
           }
           return jsonResult(status);
         }
 
         case "cancel_reindex": {
           const jobId = String(a.job_id);
-          const cancelled = cancelJob(jobId);
+          const sourceId = a.source_id ? String(a.source_id) : undefined;
+          const cancelled = cancelJob(jobId, sourceId);
           return jsonResult({ job_id: jobId, cancelled });
+        }
+
+        case "list_jobs": {
+          const statusFilter = a.status ? String(a.status) : undefined;
+          const jobs = listJobs(statusFilter);
+          return jsonResult({ jobs, count: jobs.length });
         }
 
         default:

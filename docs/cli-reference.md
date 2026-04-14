@@ -1,6 +1,6 @@
 # CLI Reference
 
-All commands run via `node dist/index.js <command> [options]`.
+All commands run via `scrybe <command> [options]`.
 
 ---
 
@@ -16,7 +16,7 @@ Register a new project container. Sources are added separately with `add-source`
 | `--desc <text>` | | Human-readable description |
 
 ```bash
-node dist/index.js add-project --id myrepo --desc "My frontend"
+scrybe add-project --id myrepo --desc "My frontend"
 ```
 
 ---
@@ -98,11 +98,11 @@ Add an indexable source to a project.
 
 ```bash
 # Code source
-node dist/index.js add-source --project-id myrepo --source-id code \
+scrybe add-source --project-id myrepo --source-id code \
   --type code --root /path/to/repo --languages ts,vue
 
 # GitLab issues source
-node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
+scrybe add-source --project-id myrepo --source-id gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
@@ -146,7 +146,7 @@ Update an existing source's config. Only the flags you provide are changed — e
 
 ```bash
 # Rotate a GitLab token
-node dist/index.js update-source --project-id myrepo --source-id gitlab-issues \
+scrybe update-source --project-id myrepo --source-id gitlab-issues \
   --gitlab-token glpat-newtoken
 ```
 
@@ -167,25 +167,44 @@ Remove a source from a project and drop its vector table.
 
 ### `index`
 
-Index or reindex a project (all sources), a single source, or all registered projects.
+Index or reindex a project (all sources), specific sources, or all registered projects.
 
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--project-id <id>` | | Project to index (required unless `--all`) |
-| `--source-id <id>` | | Index only this source; omit to index all sources |
+| `--source-ids <ids>` | | Comma-separated source IDs to index, e.g. `primary,gitlab-issues`. Required when using `--full` |
 | `--all` | | Incrementally reindex all registered projects |
-| `--full` | | Full reindex — clears existing data and rebuilds from scratch (default) |
-| `--incremental` | | Only process changed files / updated issues since last run |
+| `--full` | | Full reindex — clears and rebuilds from scratch. Requires `--source-ids` |
+| `--incremental` | | Only process changed files / updated issues since last run (default) |
 
 ```bash
 # Incremental reindex of all registered projects
-node dist/index.js index --all
+scrybe index --all
 
-# Full reindex of all sources in a project
-node dist/index.js index --project-id myrepo --full
+# Incremental reindex of all sources in a project (default mode)
+scrybe index --project-id myrepo
+
+# Full reindex of specific sources
+scrybe index --project-id myrepo --source-ids primary --full
+scrybe index --project-id myrepo --source-ids primary,gitlab-issues --full
 
 # Incremental reindex of one source
-node dist/index.js index --project-id myrepo --source-id gitlab-issues --incremental
+scrybe index --project-id myrepo --source-ids gitlab-issues
+```
+
+---
+
+### `jobs`
+
+List background reindex jobs from the current process.
+
+| Flag        | Required | Description                       |
+|-------------|----------|-----------------------------------|
+| `--running` |          | Show only currently running jobs  |
+
+```bash
+scrybe jobs
+scrybe jobs --running
 ```
 
 ---
@@ -203,7 +222,7 @@ Semantic search over indexed code sources.
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash
-node dist/index.js search --project-id myrepo "authentication login flow"
+scrybe search --project-id myrepo "authentication login flow"
 ```
 
 ---
@@ -221,6 +240,6 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash
-node dist/index.js search-knowledge --project-id myrepo "password reset broken"
-node dist/index.js search-knowledge --project-id myrepo --source-type ticket "login error"
+scrybe search-knowledge --project-id myrepo "password reset broken"
+scrybe search-knowledge --project-id myrepo --source-type ticket "login error"
 ```

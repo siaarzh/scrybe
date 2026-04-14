@@ -32,14 +32,14 @@ Projects are containers. Add sources to them separately.
 
 ```bash
 # Create the project
-node dist/index.js add-project --id myrepo --desc "My frontend"
+scrybe add-project --id myrepo --desc "My frontend"
 
 # Add a code source
-node dist/index.js add-source --project-id myrepo --source-id code \
+scrybe add-source --project-id myrepo --source-id code \
   --type code --root /absolute/path/to/repo --languages ts,vue
 
 # Optionally add a GitLab issues source
-node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
+scrybe add-source --project-id myrepo --source-id gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
@@ -64,10 +64,10 @@ See [configuration.md](configuration.md#scrybeignore) for full details.
 
 ```bash
 # Full index (required first time)
-node dist/index.js index --project-id myrepo --full
+scrybe index --project-id myrepo --full
 
 # Or index a single source
-node dist/index.js index --project-id myrepo --source-id code --full
+scrybe index --project-id myrepo --source-id code --full
 ```
 
 After the initial full index, use `--incremental` for day-to-day resyncs — it only processes changed files/issues.
@@ -76,10 +76,10 @@ After the initial full index, use `--incremental` for day-to-day resyncs — it 
 
 ```bash
 # Search code
-node dist/index.js search --project-id myrepo "authentication login flow"
+scrybe search --project-id myrepo "authentication login flow"
 
 # Search knowledge (issues, etc.)
-node dist/index.js search-knowledge --project-id myrepo "password reset broken"
+scrybe search-knowledge --project-id myrepo "password reset broken"
 ```
 
 ## 7. Connect to Claude Code (MCP)
@@ -104,10 +104,10 @@ After adding, restart Claude Code. The `mcp__scrybe__*` tools become available i
 
 ```bash
 # After pulling new code
-node dist/index.js index --project-id myrepo --source-id code --incremental
+scrybe index --project-id myrepo --source-id code --incremental
 
 # After new issues/comments in GitLab
-node dist/index.js index --project-id myrepo --source-id gitlab-issues --incremental
+scrybe index --project-id myrepo --source-id gitlab-issues --incremental
 ```
 
 Or trigger it from Claude Code:

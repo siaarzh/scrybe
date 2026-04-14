@@ -50,9 +50,3 @@ Every user-visible change gets an entry under `[Unreleased]` as it lands:
 - **Deprecated** — features scheduled for removal
 
 Internal refactors (renaming internal functions, reformatting code) do not need entries unless they affect the public CLI/MCP interface or `.env` config.
-
----
-
-## Current version
-
-`v0.6.3` — see [CHANGELOG.md](CHANGELOG.md).

@@ -20,6 +20,58 @@ No Docker. LanceDB runs in-process. All data lives in the OS user data directory
 - **Linux:** `~/.local/share/scrybe/`
 - **Mac:** `~/Library/Application Support/scrybe/`
 
+## Code chunking
+
+Code files are chunked using Tree-sitter AST parsing, which aligns chunk boundaries with actual function, class, and method definitions. This significantly improves retrieval precision compared to arbitrary sliding-window splits.
+
+**Supported languages (AST chunking):** TypeScript, TSX, JavaScript, JSX, C#, Vue, Python, Go, Ruby, Rust, Java
+
+**Fallback:** unsupported languages and parse failures fall back to sliding-window chunking — no regression on existing indexed repos.
+
+Each code chunk includes a `symbol_name` field (the enclosing function or class name) surfaced in search results.
+
+## Knowledge sources
+
+Scrybe can index non-code sources (GitLab issues, and future: webpages, Telegram) into a separate `knowledge_chunks` table and expose them via `search_knowledge`.
+
+### Separate text embedding profile
+
+Knowledge sources use natural language text rather than code, so a different embedding model is often better (e.g. `voyage-3` for multilingual issue text vs. `voyage-code-3` for code). Configure via:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SCRYBE_TEXT_EMBEDDING_BASE_URL` | — | Falls back to `EMBEDDING_BASE_URL`. |
+| `SCRYBE_TEXT_EMBEDDING_MODEL` | — | Falls back to `EMBEDDING_MODEL`. |
+| `SCRYBE_TEXT_EMBEDDING_API_KEY` | — | Falls back to `EMBEDDING_API_KEY`. |
+| `SCRYBE_TEXT_EMBEDDING_DIMENSIONS` | — | Falls back to `EMBEDDING_DIMENSIONS`. |
+
+### GitLab issues
+
+Add a GitLab issues source to any project:
+
+```bash
+scrybe add-source \
+  --project-id myrepo \
+  --source-id gitlab-issues \
+  --type ticket \
+  --gitlab-url https://gitlab.example.com \
+  --gitlab-project-id 42 \
+  --gitlab-token glpat-...
+
+scrybe index --project-id myrepo --source-id gitlab-issues --full
+```
+
+Indexing is cursor-based and incremental — only issues updated since the last run are fetched. Rate-limit safe (50 ms between issues).
+
+To rotate a token, remove and re-add the source:
+
+```bash
+scrybe remove-source --project-id myrepo --source-id gitlab-issues
+scrybe add-source --project-id myrepo --source-id gitlab-issues \
+  --type ticket --gitlab-url https://gitlab.example.com \
+  --gitlab-project-id 42 --gitlab-token glpat-new-token
+```
+
 ## Requirements
 
 - Node.js 20+
@@ -113,86 +165,44 @@ Optional post-retrieval re-scoring that improves result relevance. Requires a re
 
 When using Voyage AI, just set `SCRYBE_RERANK=true` — the endpoint and model are auto-detected from `EMBEDDING_BASE_URL`.
 
-## Knowledge sources
-
-Scrybe can index non-code sources (GitLab issues, and future: webpages, Telegram) into a separate `knowledge_chunks` table and expose them via `search_knowledge`.
-
-### Separate text embedding profile
-
-Knowledge sources use natural language text rather than code, so a different embedding model is often better (e.g. `voyage-3` for multilingual issue text vs. `voyage-code-3` for code). Configure via:
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SCRYBE_TEXT_EMBEDDING_BASE_URL` | — | Falls back to `EMBEDDING_BASE_URL`. |
-| `SCRYBE_TEXT_EMBEDDING_MODEL` | — | Falls back to `EMBEDDING_MODEL`. |
-| `SCRYBE_TEXT_EMBEDDING_API_KEY` | — | Falls back to `EMBEDDING_API_KEY`. |
-| `SCRYBE_TEXT_EMBEDDING_DIMENSIONS` | — | Falls back to `EMBEDDING_DIMENSIONS`. |
-
-### GitLab issues
-
-Add a GitLab issues source to any project:
-
-```bash
-node dist/index.js add-source \
-  --project-id myrepo \
-  --source-id gitlab-issues \
-  --type ticket \
-  --gitlab-url https://gitlab.example.com \
-  --gitlab-project-id 42 \
-  --gitlab-token glpat-...
-
-node dist/index.js index --project-id myrepo --source-id gitlab-issues --full
-```
-
-Indexing is cursor-based and incremental — only issues updated since the last run are fetched. Rate-limit safe (50 ms between issues).
-
-To rotate a token, remove and re-add the source:
-
-```bash
-node dist/index.js remove-source --project-id myrepo --source-id gitlab-issues
-node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
-  --type ticket --gitlab-url https://gitlab.example.com \
-  --gitlab-project-id 42 --gitlab-token glpat-new-token
-```
-
 ## CLI
 
 Projects are containers; sources are the actual indexable units (a code repo, GitLab issues, etc.).
 
 ```bash
 # Create a project
-node dist/index.js add-project --id myrepo --desc "My frontend"
+scrybe add-project --id myrepo --desc "My frontend"
 
 # Add a code source
-node dist/index.js add-source --project-id myrepo --source-id code \
+scrybe add-source --project-id myrepo --source-id code \
   --type code --root /path/to/repo --languages ts,vue
 
 # Add a GitLab issues source
-node dist/index.js add-source --project-id myrepo --source-id gitlab-issues \
+scrybe add-source --project-id myrepo --source-id gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
   --gitlab-token glpat-...
 
 # Index all sources in a project (full rebuild)
-node dist/index.js index --project-id myrepo --full
+scrybe index --project-id myrepo --full
 
 # Index a specific source incrementally
-node dist/index.js index --project-id myrepo --source-id code --incremental
+scrybe index --project-id myrepo --source-id code --incremental
 
 # Search code / knowledge
-node dist/index.js search --project-id myrepo "authentication login flow"
-node dist/index.js search-knowledge --project-id myrepo "password reset broken"
+scrybe search --project-id myrepo "authentication login flow"
+scrybe search-knowledge --project-id myrepo "password reset broken"
 
 # List projects and their sources
-node dist/index.js list-projects
+scrybe list-projects
 
 # Show project info
-node dist/index.js status --project-id myrepo
+scrybe status --project-id myrepo
 
 # Remove a source or a whole project
-node dist/index.js remove-source --project-id myrepo --source-id gitlab-issues
-node dist/index.js remove-project --id myrepo
+scrybe remove-source --project-id myrepo --source-id gitlab-issues
+scrybe remove-project --id myrepo
 ```
 
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command reference.
@@ -243,16 +253,6 @@ Detailed reference docs live in [`docs/`](docs/):
 | [CLI reference](docs/cli-reference.md) | All commands and flags |
 | [MCP reference](docs/mcp-reference.md) | All tools, parameters, return values, error types |
 | [Configuration](docs/configuration.md) | All env vars by category |
-
-## Code chunking
-
-Code files are chunked using Tree-sitter AST parsing, which aligns chunk boundaries with actual function, class, and method definitions. This significantly improves retrieval precision compared to arbitrary sliding-window splits.
-
-**Supported languages (AST chunking):** TypeScript, TSX, JavaScript, JSX, C#, Vue, Python, Go, Ruby, Rust, Java
-
-**Fallback:** unsupported languages and parse failures fall back to sliding-window chunking — no regression on existing indexed repos.
-
-Each code chunk includes a `symbol_name` field (the enclosing function or class name) surfaced in search results.
 
 ## Indexing time
 

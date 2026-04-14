@@ -85,15 +85,26 @@ export interface IndexResult {
   files_removed: number;
 }
 
+export interface SourceTask {
+  source_id: string;
+  mode: IndexMode;
+  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  phase: "scanning" | "embedding" | "done" | null;
+  files_scanned: number;
+  chunks_indexed: number;
+  started_at: number | null;
+  finished_at: number | null;
+  error: string | null;
+}
+
 export interface JobState {
   job_id: string;
   project_id: string;
+  /** Set on single-source reindex jobs */
   source_id?: string;
   mode: IndexMode;
   status: "running" | "done" | "cancelled" | "failed";
-  phase: "scanning" | "embedding" | "done";
-  files_scanned: number;
-  chunks_indexed: number;
+  tasks: SourceTask[];
   started_at: number;
   finished_at: number | null;
   error: string | null;
