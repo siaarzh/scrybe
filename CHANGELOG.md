@@ -9,6 +9,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.12.1] — 2026-04-15
+
+### Fixed
+
+- **`scrybe --version`** was returning `0.2.0` (hardcoded). Now reads the actual version from `package.json`.
+- **`gitlab_token` leak** — `update_source` MCP response was echoing the full source config including the GitLab token. Token is now redacted to `"[redacted]"` in the response.
+- **`embeddingConfigError` surfaced** — unknown embedding provider / missing `EMBEDDING_MODEL` was silently ignored. Now raises a clear error at the start of any operation that needs embeddings (`search_code`, `search_knowledge`, `reindex_project`, `reindex_source`, `reindex_all` via MCP; `index`, `search`, `search-knowledge` via CLI). Non-embedding operations (`list_projects`, etc.) are unaffected.
+- **SIGTERM/SIGINT graceful shutdown** — Ctrl+C or `kill` now aborts all running index jobs cleanly before exiting, preventing orphaned background tasks.
+- **`error_type` on unmapped MCP errors** — the catch-all error path now sets `error_type: "file_system"` (ENOENT/EACCES/etc.), `"data_corruption"` (malformed JSON/manifest), or `"internal"` (everything else). Previously returned no `error_type`, making programmatic error routing impossible.
+
+---
+
 ## [0.12.0] — 2026-04-14
 
 ### Added
@@ -298,7 +310,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/siaarzh/scrybe/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/siaarzh/scrybe/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/siaarzh/scrybe/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/siaarzh/scrybe/compare/v0.10.0...v0.11.0

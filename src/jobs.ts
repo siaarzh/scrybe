@@ -329,6 +329,18 @@ export function cancelJob(jobId: string, sourceId?: string): boolean {
   return true;
 }
 
+/** Abort all currently running jobs. Used by SIGTERM/SIGINT handlers. */
+export function cancelAllJobs(): void {
+  for (const job of _jobs.values()) {
+    if (job.status === "running") {
+      job.controller.abort();
+      for (const tc of job.taskControllers.values()) {
+        tc.abort();
+      }
+    }
+  }
+}
+
 /** List all jobs, optionally filtered by status. Sorted by started_at descending. */
 export function listJobs(statusFilter?: string): JobState[] {
   const all: JobState[] = [];

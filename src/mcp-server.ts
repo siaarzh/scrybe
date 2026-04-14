@@ -19,7 +19,7 @@ import {
 } from "./registry.js";
 import { getPlugin } from "./plugins/index.js";
 import { validateGitlabToken } from "./plugins/gitlab-issues.js";
-import { VERSION } from "./config.js";
+import { VERSION, config } from "./config.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob, listJobs } from "./jobs.js";
 import type { IndexMode, Source, SourceConfig, EmbeddingConfig } from "./types.js";
@@ -325,7 +325,13 @@ function classifyError(err: unknown): { error: string; error_type?: string } {
   if (/Unknown embedding provider|EMBEDDING_MODEL is not set/.test(message)) {
     return { error: message, error_type: "unknown_provider" };
   }
-  return { error: message };
+  if (/ENOENT|EACCES|EPERM|EISDIR|ENOTDIR/.test(message)) {
+    return { error: message, error_type: "file_system" };
+  }
+  if (/corrupt|malformed|unexpected token|invalid.*manifest/i.test(message)) {
+    return { error: message, error_type: "data_corruption" };
+  }
+  return { error: message, error_type: "internal" };
 }
 
 function textResult(text: string) {
@@ -334,6 +340,14 @@ function textResult(text: string) {
 
 function jsonResult(data: unknown) {
   return textResult(JSON.stringify(data, null, 2));
+}
+
+/** Returns an error result if embedding is not configured, null if OK. */
+function requireEmbedding(): ReturnType<typeof jsonResult> | null {
+  if (config.embeddingConfigError) {
+    return jsonResult({ error: config.embeddingConfigError, error_type: "unknown_provider" });
+  }
+  return null;
 }
 
 function buildListProjectsOutput() {
@@ -493,7 +507,11 @@ export async function runMcpServer(): Promise<void> {
           }
 
           const updated = updateSource(projectId, sourceId, fields);
-          return jsonResult({ ok: true, project_id: projectId, source_id: sourceId, updated: true, source: updated });
+          const sanitizedConfig = { ...updated.source_config };
+          if ("token" in sanitizedConfig) {
+            (sanitizedConfig as Record<string, unknown>)["token"] = "[redacted]";
+          }
+          return jsonResult({ ok: true, project_id: projectId, source_id: sourceId, updated: true, source: { ...updated, source_config: sanitizedConfig } });
         }
 
         case "remove_source": {
@@ -506,6 +524,8 @@ export async function runMcpServer(): Promise<void> {
         }
 
         case "search_code": {
+          const embErr = requireEmbedding();
+          if (embErr) return embErr;
           const projectId = String(a.project_id);
           const query = String(a.query);
           const topK = typeof a.top_k === "number" ? a.top_k : 10;
@@ -517,6 +537,8 @@ export async function runMcpServer(): Promise<void> {
         }
 
         case "search_knowledge": {
+          const embErr = requireEmbedding();
+          if (embErr) return embErr;
           const projectId = String(a.project_id);
           const query = String(a.query);
           const topK = typeof a.top_k === "number" ? a.top_k : 10;
@@ -532,12 +554,16 @@ export async function runMcpServer(): Promise<void> {
         }
 
         case "reindex_all": {
+          const embErr = requireEmbedding();
+          if (embErr) return embErr;
           const jobId = submitAllJob();
           const projectCount = listProjects().length;
           return jsonResult({ job_id: jobId, status: "started", project_count: projectCount, mode: "incremental" });
         }
 
         case "reindex_project": {
+          const embErr = requireEmbedding();
+          if (embErr) return embErr;
           const projectId = String(a.project_id);
           const mode: IndexMode = a.mode === "full" ? "full" : "incremental";
           const sourceIds: string[] | undefined = Array.isArray(a.source_ids) ? a.source_ids : undefined;
@@ -555,6 +581,8 @@ export async function runMcpServer(): Promise<void> {
         }
 
         case "reindex_source": {
+          const embErr = requireEmbedding();
+          if (embErr) return embErr;
           const projectId = String(a.project_id);
           const sourceId = String(a.source_id);
           const mode: IndexMode = a.mode === "full" ? "full" : "incremental";

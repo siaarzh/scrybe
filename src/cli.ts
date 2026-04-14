@@ -14,7 +14,7 @@ import {
 import { searchCode, searchKnowledge } from "./search.js";
 import { indexProject, indexSource } from "./indexer.js";
 import { validateGitlabToken } from "./plugins/gitlab-issues.js";
-import { config } from "./config.js";
+import { config, VERSION } from "./config.js";
 import type { Source, SourceConfig } from "./types.js";
 
 export async function runCli(): Promise<void> {
@@ -22,7 +22,7 @@ export async function runCli(): Promise<void> {
   program
     .name("scrybe")
     .description("Self-hosted semantic code search")
-    .version("0.2.0");
+    .version(VERSION);
 
   // ─── Project commands ──────────────────────────────────────────────────────
 
@@ -283,6 +283,10 @@ export async function runCli(): Promise<void> {
     .option("--incremental", "Incremental reindex (default)", false)
     .action(
       async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean }) => {
+        if (config.embeddingConfigError) {
+          console.error(`[scrybe] ${config.embeddingConfigError}`);
+          process.exit(1);
+        }
         if (opts.all) {
           if (opts.projectId) {
             console.warn("Warning: --project-id is ignored when --all is specified");
@@ -395,6 +399,10 @@ export async function runCli(): Promise<void> {
     .option("--top-k <n>", "Number of results", "10")
     .argument("<query>", "Search query")
     .action(async (query: string, opts: { projectId: string; topK: string }) => {
+      if (config.embeddingConfigError) {
+        console.error(`[scrybe] ${config.embeddingConfigError}`);
+        process.exit(1);
+      }
       const topK = parseInt(opts.topK, 10);
       const results = await searchCode(query, opts.projectId, topK);
       for (const r of results) {
@@ -419,6 +427,10 @@ export async function runCli(): Promise<void> {
         query: string,
         opts: { projectId: string; sourceId?: string; sourceType?: string; topK: string }
       ) => {
+        if (config.embeddingConfigError) {
+          console.error(`[scrybe] ${config.embeddingConfigError}`);
+          process.exit(1);
+        }
         const topK = parseInt(opts.topK, 10);
         const sourceTypes = opts.sourceType ? [opts.sourceType] : undefined;
         const results = await searchKnowledge(
