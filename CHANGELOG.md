@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.15.0] — 2026-04-22
+
 ### Added
 
 - **Daemon shell (Phase 1)** — `scrybe daemon start|stop|status|restart` CLI commands. The daemon writes a pidfile (`<DATA_DIR>/daemon.pid`) with `{pid, port, startedAt, version, dataDir, execPath}`, registers SIGTERM/SIGINT handlers for graceful shutdown, and keeps the event loop alive. `daemon start` exits 1 if a daemon is already running. `daemon stop` is Windows-safe: removes the pidfile itself if the process's signal handler didn't (Windows `TerminateProcess` skips Node.js signal handlers).
@@ -18,6 +22,9 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 - **Daemon fetch poller + pinned-branch reindex (Phase 6)** — daemon now periodically runs `git fetch origin --prune` for each project and queues an incremental reindex whenever a pinned branch advances (SHA delta detection before/after fetch). Backfill on startup: any pinned branch not yet present in branch-tags.db is queued immediately. Concurrent-fetch cap of 2; exponential back-off on error. New env vars: `SCRYBE_DAEMON_FETCH_ACTIVE_MS` (default 5 min), `SCRYBE_DAEMON_FETCH_IDLE_MS` (default 30 min), `SCRYBE_DAEMON_NO_FETCH=1` to disable. Indexing a non-HEAD branch (remote-tracking ref) now reads file content from git objects via `scanRef` rather than the working tree.
 - **Daemon git ref watcher (Phase 5)** — daemon now also subscribes on each project's `.git/` directory (resolves worktree symlinks and gitdir files). Watches `HEAD`, `refs/heads/**`, `refs/remotes/**`, `packed-refs`, `FETCH_HEAD`. On any change, debounces 300 ms then checks current branch via `resolveBranchForPath()`. Branch-switch detected → `branchChanged=true` in SSE event; new commit detected → same incremental reindex. `/status` now returns live `currentBranch`, `watcherHealthy`, and `gitWatcherHealthy` per project from cached watcher state. New env var: `SCRYBE_DAEMON_GIT_DEBOUNCE_MS`.
 - **Daemon FS watcher + idle state (Phase 4)** — daemon now subscribes to each registered project's code source root via `@parcel/watcher`. File-system changes are debounced (1500 ms HOT / 7500 ms COLD) and coalesced into a single incremental reindex job per project. HOT/COLD idle state machine transitions the daemon between active and low-activity modes (60 s hot window, 5× debounce multiplier in cold state). `.gitignore` and `.scrybeignore` rules are respected via post-filter. `watcher.event` and `watcher.unhealthy` SSE events emitted on change and on subscription failure (with 10-retry exponential back-off). New env vars: `SCRYBE_DAEMON_FS_DEBOUNCE_MS`, `SCRYBE_DAEMON_HOT_MS`, `SCRYBE_DAEMON_COLD_MULTIPLIER`.
+- **Daemon documentation + test helpers (Phase 10)** — new `docs/daemon.md` covering architecture, HTTP API reference (Contracts 14–19), pinned branches, git hooks, autostart on all three platforms, and troubleshooting. `tests/helpers/daemon.ts` exports `startTempDaemon` / `waitForIdle` / `waitForEvent` (Contract 17) for integration tests that need a live daemon. `docs/cli-reference.md` extended with `daemon`, `hook`, and `pin` command sections. `README.md` gains a "Running as a background service" quickstart.
+- **Daemon acceptance tests (Phase 11)** — `tests/daemon-acceptance.test.ts` covers: FS watcher unhealthy detection (unit, mocked queue), git watcher skip on non-git directory, and HTTP `/status` reflecting `watcherHealthy` state (integration, real daemon child process with pre-seeded `projects.json`). 108 tests total, all passing.
+- **Pinned-branch MCP tools** (`list_pinned_branches`, `pin_branches`, `unpin_branches`) documented in `docs/mcp-reference.md`.
 
 ---
 
@@ -384,7 +391,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/siaarzh/scrybe/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/siaarzh/scrybe/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/siaarzh/scrybe/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/siaarzh/scrybe/compare/v0.13.0...v0.13.1

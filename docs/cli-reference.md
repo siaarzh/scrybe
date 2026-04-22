@@ -278,3 +278,179 @@ scrybe search-knowledge --project-id myrepo "password reset broken"
 scrybe search-knowledge --project-id myrepo --source-types ticket "login error"
 scrybe search-knowledge --project-id myrepo --source-types ticket_comment "architectural decision"
 ```
+
+---
+
+## Daemon commands
+
+### `daemon start`
+
+Start the background daemon. Writes a pidfile at `<DATA_DIR>/daemon.pid`. Exits 1 if a daemon is already running.
+
+```bash
+scrybe daemon start
+```
+
+---
+
+### `daemon stop`
+
+Graceful shutdown: calls `POST /shutdown`, waits up to 5 s for the pidfile to be removed.
+
+```bash
+scrybe daemon stop
+```
+
+---
+
+### `daemon status`
+
+Print the daemon's current status as JSON. Add `--watch` for a live Ink terminal dashboard (polls `/status` every 2 s and streams SSE events).
+
+| Flag | Description |
+|------|-------------|
+| `--watch` | Live terminal dashboard (requires daemon running) |
+
+```bash
+scrybe daemon status
+scrybe daemon status --watch
+```
+
+---
+
+### `daemon restart`
+
+Stop then start the daemon.
+
+```bash
+scrybe daemon restart
+```
+
+---
+
+### `daemon install`
+
+Install the daemon as a per-user autostart entry (no admin / sudo required). Platform-specific:
+
+- **Windows** — logon Scheduled Task via `schtasks`, fallback to `HKCU\...\Run`
+- **macOS** — `~/Library/LaunchAgents/com.scrybe.daemon.plist` + `launchctl load`
+- **Linux** — `~/.config/systemd/user/scrybe.service` + `systemctl --user enable --now`
+
+```bash
+scrybe daemon install
+scrybe daemon uninstall
+```
+
+---
+
+### `daemon kick`
+
+Trigger an immediate incremental reindex for a project by posting to the daemon's `/kick` endpoint. Used by git hooks.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | | Project to kick (default: all projects) |
+| `--source-id <id>` | | Limit to a specific source |
+| `--branch <name>` | | Branch to reindex (default: current HEAD) |
+| `--mode <mode>` | | `full` or `incremental` (default: `incremental`) |
+
+```bash
+scrybe daemon kick --project-id myrepo
+```
+
+---
+
+## Hook commands
+
+### `hook install`
+
+Append a marker-delimited scrybe block to `.git/hooks/post-commit`, `post-checkout`, `post-merge`, and `post-rewrite`. Safe to run on repos with existing hook content — only the scrybe block is added. Idempotent.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project to install hooks for |
+
+```bash
+scrybe hook install --project-id myrepo
+```
+
+---
+
+### `hook uninstall`
+
+Remove the scrybe marker block from all git hooks in the project. Non-scrybe hook content is preserved.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project to remove hooks from |
+
+```bash
+scrybe hook uninstall --project-id myrepo
+```
+
+---
+
+## Pinned-branch commands
+
+Pinned branches are code branches the daemon keeps indexed in the background (via periodic `git fetch` + incremental reindex). Only `code` sources support pinning.
+
+### `pin list`
+
+Print the pinned branches for a project source.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project identifier |
+| `--source-id <id>` | | Source identifier (default: `primary`) |
+
+```bash
+scrybe pin list --project-id cmx-ionic
+```
+
+---
+
+### `pin add`
+
+Add one or more branch names to the pinned list. Merges with the existing list (deduped). Emits a warning for unknown remote refs or when the total count exceeds 20. If the daemon is running, newly-pinned branches are backfilled immediately.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project identifier |
+| `--source-id <id>` | | Source identifier (default: `primary`) |
+| `<branch...>` | ✓ | Branch names (positional) |
+
+```bash
+scrybe pin add --project-id cmx-ionic main dev dev-2 dev-3 beta
+```
+
+---
+
+### `pin remove`
+
+Remove specific branch names from the pinned list. Orphaned chunks remain until `scrybe gc` is run.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project identifier |
+| `--source-id <id>` | | Source identifier (default: `primary`) |
+| `<branch...>` | ✓ | Branch names to remove (positional) |
+
+```bash
+scrybe pin remove --project-id cmx-ionic dev-3
+```
+
+---
+
+### `pin clear`
+
+Remove all pinned branches for a source. Asks for confirmation unless `--yes` is passed.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project identifier |
+| `--source-id <id>` | | Source identifier (default: `primary`) |
+| `--yes` | | Skip confirmation prompt |
+
+```bash
+scrybe pin clear --project-id cmx-ionic --yes
+```

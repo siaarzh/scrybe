@@ -207,6 +207,32 @@ scrybe remove-project --id myrepo
 
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command reference.
 
+## Running as a background service
+
+Scrybe can run as a persistent daemon that keeps every project's index fresh automatically — no manual `scrybe index` required after the first full index.
+
+```bash
+# Start the daemon (indexes registered projects in background)
+scrybe daemon start
+
+# Watch live status in the terminal
+scrybe daemon status --watch
+
+# Install as a per-user autostart (Windows / macOS / Linux — no admin needed)
+scrybe daemon install
+
+# Opt-in git hooks: git commit/checkout/merge → instant reindex via /kick
+scrybe hook install --project-id myrepo
+
+# Pin branches for background indexing beyond current HEAD
+scrybe pin add --project-id cmx-ionic main dev dev-2 dev-3 beta
+scrybe pin list --project-id cmx-ionic
+```
+
+The daemon exposes a local HTTP API on `127.0.0.1:58451` (ephemeral fallback if busy). Port is persisted in `<DATA_DIR>/daemon.pid` so all clients — CLI, MCP server, VS Code extension — discover it automatically.
+
+See [docs/daemon.md](docs/daemon.md) for the full architecture, HTTP API reference, pinned-branch details, and troubleshooting guide.
+
 ## MCP server (Claude Code integration)
 
 Add to `~/.claude.json` under `mcpServers`:
@@ -253,6 +279,7 @@ Detailed reference docs live in [`docs/`](docs/):
 | [CLI reference](docs/cli-reference.md) | All commands and flags |
 | [MCP reference](docs/mcp-reference.md) | All tools, parameters, return values, error types |
 | [Configuration](docs/configuration.md) | All env vars by category |
+| [Daemon](docs/daemon.md) | Background daemon, HTTP API, pinned branches, autostart |
 
 ## Indexing time
 

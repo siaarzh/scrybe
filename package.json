@@ -1,6 +1,6 @@
 {
   "name": "scrybe",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",
   "license": "MIT",

@@ -263,6 +263,43 @@ Non-code sources (tickets) always show `["*"]` — they are branch-agnostic.
 
 ---
 
+### `list_pinned_branches`
+
+List the pinned branches for a project's code sources.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `source_id` | string | | Limit to a specific source (omit for all sources) |
+
+**Returns:** array of `{ source_id, pinned_branches: string[] }`
+
+---
+
+### `pin_branches`
+
+Add one or more branch names to a code source's pinned list. Deduped; warns when total exceeds 20. If the daemon is running, newly-pinned branches are backfilled immediately.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `source_id` | string | ✓ | Code source to pin branches on |
+| `branches` | string[] | ✓ | Branch names to add |
+
+---
+
+### `unpin_branches`
+
+Remove one or more branch names from a code source's pinned list.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `source_id` | string | ✓ | Code source to unpin branches from |
+| `branches` | string[] | ✓ | Branch names to remove |
+
+---
+
 ## Error types
 
 When a tool call fails, the response includes an `error_type` field for programmatic handling:
