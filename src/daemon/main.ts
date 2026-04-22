@@ -6,6 +6,7 @@ import { writePidfile, removePidfile } from "./pidfile.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
 import { initQueue, enqueue, stopQueue } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
+import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { onStateChange } from "./idle-state.js";
 import { listProjects } from "../registry.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
@@ -18,6 +19,7 @@ async function shutdown(signal: string): Promise<void> {
   process.stderr.write(`[scrybe daemon] ${signal} — shutting down\n`);
   await stopHttpServer();
   await stopWatcher();
+  await stopGitWatcher();
   stopQueue();
   cancelAllJobs();
   closeBranchTagsDB();
@@ -72,20 +74,22 @@ export async function runDaemon(): Promise<void> {
   // Wire queue → SSE ring buffer (must happen after startHttpServer exports pushEvent)
   initQueue({ pushEvent });
 
-  // Wire FS watcher → SSE + queue
+  // Wire FS + git watchers → SSE + queue
   initWatcher({ pushEvent });
+  initGitWatcher({ pushEvent });
 
   // Mirror idle-state HOT/COLD transitions to HTTP /status
   onStateChange((s) => setDaemonState(s));
 
-  // Start per-project FS watchers (code sources only)
+  // Start per-project FS + git watchers (code sources only)
   const projects = listProjects();
   for (const project of projects) {
     for (const source of project.sources) {
       if (source.source_config.type === "code") {
         const rootPath = (source.source_config as { type: "code"; root_path: string }).root_path;
         await watchProject(project.id, rootPath);
-        break; // one code source per project for now; Phase 5 extends to multi-source
+        await watchGitProject(project.id, rootPath);
+        break; // one code source per project for now
       }
     }
   }

@@ -11,6 +11,8 @@ import {
   InvalidSourceTypeError, ProjectNotFoundError, SourceNotFoundError,
 } from "../pinned-branches.js";
 import { getQueueStats } from "./queue.js";
+import { getWatcherHealth } from "./watcher.js";
+import { getGitWatcherHealth, getCachedBranch } from "./git-watcher.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -214,15 +216,17 @@ function buildStatus(): DaemonStatus {
       if (codeSource && codeSource.source_config.type === "code") {
         rootPath = (codeSource.source_config as { type: "code"; root_path: string }).root_path;
       }
+      const fsHealth = getWatcherHealth();
+      const gitHealth = getGitWatcherHealth();
       return {
         projectId: p.id,
         rootPath,
-        currentBranch: null,      // Phase 5: git-watcher
-        watcherHealthy: false,    // Phase 4: FS watcher
-        gitWatcherHealthy: false, // Phase 5: git-watcher
+        currentBranch: getCachedBranch(p.id),
+        watcherHealthy: fsHealth.get(p.id) ?? false,
+        gitWatcherHealthy: gitHealth.get(p.id) ?? false,
         lastIndexedAt: codeSource?.last_indexed ?? null,
-        lastBranch: null,         // Phase 5: git-watcher
-        queueDepth: 0,            // Phase 3: queue
+        lastBranch: getCachedBranch(p.id),
+        queueDepth: 0,
       };
     }),
     queue: getQueueStats(),
