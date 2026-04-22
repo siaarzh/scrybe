@@ -18,6 +18,7 @@ export interface Source {
   embedding?: EmbeddingConfig; // absent = falls back to global env vars
   table_name?: string; // assigned at first index, immutable after
   last_indexed?: string;
+  pinned_branches?: string[]; // code sources only; daemon indexes these in background
 }
 
 export interface Project {

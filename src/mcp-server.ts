@@ -24,6 +24,7 @@ import { checkAndMigrate } from "./schema-version.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob, listJobs } from "./jobs.js";
 import { getBranchesForSource } from "./branch-tags.js";
+import { listPinned, addPinned, removePinned, InvalidSourceTypeError, SourceNotFoundError, ProjectNotFoundError } from "./pinned-branches.js";
 import type { IndexMode, Source, SourceConfig, EmbeddingConfig } from "./types.js";
 
 const TOOLS = [
@@ -317,6 +318,52 @@ const TOOLS = [
           description: "Filter by status (omit for all jobs)",
         },
       },
+    },
+  },
+  {
+    name: "list_pinned_branches",
+    description:
+      "List branches pinned for background daemon indexing on a project's code source(s). " +
+      "Pinned branches are kept current by the daemon without requiring a manual `scrybe index --branch` call.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: { type: "string", description: "Specific source (omit to list all code sources)" },
+      },
+      required: ["project_id"],
+    },
+  },
+  {
+    name: "pin_branches",
+    description:
+      "Add (or replace) pinned branches on a code source. " +
+      "mode='add' (default) merges with the existing list; mode='set' replaces it. " +
+      "Returns warnings if pinned count exceeds 20.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: { type: "string", description: "Source identifier (default: primary)" },
+        branches: { type: "array", items: { type: "string" }, description: "Branch names to pin" },
+        mode: { type: "string", enum: ["add", "set"], description: "add (default) or set (replace)" },
+      },
+      required: ["project_id", "branches"],
+    },
+  },
+  {
+    name: "unpin_branches",
+    description:
+      "Remove branches from the pinned list. Silently no-ops on branches not currently pinned. " +
+      "Does NOT delete indexed data — run scrybe gc to remove orphan chunks.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: { type: "string", description: "Source identifier (default: primary)" },
+        branches: { type: "array", items: { type: "string" }, description: "Branch names to unpin" },
+      },
+      required: ["project_id", "branches"],
     },
   },
 ];
@@ -690,6 +737,51 @@ export async function runMcpServer(): Promise<void> {
           const statusFilter = a.status ? String(a.status) : undefined;
           const jobs = listJobs(statusFilter);
           return jsonResult({ jobs, count: jobs.length });
+        }
+
+        case "list_pinned_branches": {
+          const projectId = String(a.project_id);
+          const project = getProject(projectId);
+          if (!project) return jsonResult({ error: `Project '${projectId}' not found`, error_type: "project_not_found" });
+          const filterSourceId = a.source_id ? String(a.source_id) : undefined;
+          const sources = filterSourceId
+            ? project.sources.filter((s) => s.source_id === filterSourceId && s.source_config.type === "code")
+            : project.sources.filter((s) => s.source_config.type === "code");
+          return jsonResult(sources.map((s) => ({
+            source_id: s.source_id,
+            branches: listPinned(projectId, s.source_id),
+          })));
+        }
+
+        case "pin_branches": {
+          const projectId = String(a.project_id);
+          const sourceId = a.source_id ? String(a.source_id) : "primary";
+          const branches = Array.isArray(a.branches) ? (a.branches as string[]) : [];
+          const mode = a.mode === "set" ? "set" : "add";
+          try {
+            const result = addPinned(projectId, sourceId, branches, mode);
+            return jsonResult(result);
+          } catch (err) {
+            if (err instanceof InvalidSourceTypeError) return jsonResult({ error: err.message, error_type: err.code });
+            if (err instanceof SourceNotFoundError) return jsonResult({ error: err.message, error_type: err.code });
+            if (err instanceof ProjectNotFoundError) return jsonResult({ error: err.message, error_type: err.code });
+            throw err;
+          }
+        }
+
+        case "unpin_branches": {
+          const projectId = String(a.project_id);
+          const sourceId = a.source_id ? String(a.source_id) : "primary";
+          const branches = Array.isArray(a.branches) ? (a.branches as string[]) : [];
+          try {
+            const result = removePinned(projectId, sourceId, branches);
+            return jsonResult(result);
+          } catch (err) {
+            if (err instanceof InvalidSourceTypeError) return jsonResult({ error: err.message, error_type: err.code });
+            if (err instanceof SourceNotFoundError) return jsonResult({ error: err.message, error_type: err.code });
+            if (err instanceof ProjectNotFoundError) return jsonResult({ error: err.message, error_type: err.code });
+            throw err;
+          }
         }
 
         default:

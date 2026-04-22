@@ -7,6 +7,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Daemon shell (Phase 1)** — `scrybe daemon start|stop|status|restart` CLI commands. The daemon writes a pidfile (`<DATA_DIR>/daemon.pid`) with `{pid, port, startedAt, version, dataDir, execPath}`, registers SIGTERM/SIGINT handlers for graceful shutdown, and keeps the event loop alive. `daemon start` exits 1 if a daemon is already running. `daemon stop` is Windows-safe: removes the pidfile itself if the process's signal handler didn't (Windows `TerminateProcess` skips Node.js signal handlers).
+- **Pinned branches** — `scrybe pin list|add|remove|clear` CLI commands and `list_pinned_branches`, `pin_branches`, `unpin_branches` MCP tools. Per-source allowlist of branch names the daemon will index in background (Phase 2+). Code sources only; warns at >20 entries. Stored in `projects.json` as `pinned_branches` on each source.
+- **Daemon HTTP API (Phase 2)** — daemon now binds an HTTP server on `127.0.0.1:58451` (ephemeral fallback if port busy). Port is written to the pidfile so clients discover it automatically. Endpoints: `GET /health`, `GET /status`, `GET /events` (SSE), `POST /kick`, `POST /pause`, `POST /resume`, `POST /shutdown`, `GET /projects`, and full `GET|POST|DELETE /projects/:id/sources/:sid/pinned-branches` CRUD. `DaemonClient` TS class (Contract 15) exported for use by VS Code extension (M-D3).
+- **Daemon job queue (Phase 3)** — `POST /kick` now dispatches jobs through a concurrency-limited queue (`max(1, cpu/2)` active jobs; per-project serialization). Job lifecycle events (`job.started`, `job.completed`, `job.failed`, `job.cancelled`) are emitted to SSE clients and written to a durable JSONL log (`<DATA_DIR>/daemon-log.jsonl`) with automatic 10 MB rotation.
+
 ---
 
 ## [0.14.1] — 2026-04-22

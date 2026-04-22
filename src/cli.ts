@@ -548,5 +548,177 @@ export async function runCli(): Promise<void> {
       }
     });
 
+  // ─── Daemon commands ──────────────────────────────────────────────────────
+
+  const daemon = program
+    .command("daemon")
+    .description("Manage the background scrybe daemon");
+
+  daemon
+    .command("start")
+    .description("Start the background daemon (runs in foreground; use OS task scheduler for autostart)")
+    .action(async () => {
+      const { isDaemonRunning } = await import("./daemon/pidfile.js");
+      const { running } = await isDaemonRunning();
+      if (running) {
+        console.error("[scrybe] Daemon is already running. Use 'scrybe daemon status' to check.");
+        process.exit(1);
+      }
+      const { runDaemon } = await import("./daemon/main.js");
+      await runDaemon();
+    });
+
+  daemon
+    .command("stop")
+    .description("Gracefully stop the running daemon")
+    .action(async () => {
+      const { isDaemonRunning, getPidfilePath } = await import("./daemon/pidfile.js");
+      const { existsSync } = await import("fs");
+      const { running, data } = await isDaemonRunning();
+      if (!running || !data) {
+        console.log("Daemon is not running.");
+        return;
+      }
+      process.kill(data.pid, "SIGTERM");
+      // Wait up to 5 s for pidfile removal (signal handler does this on Unix)
+      const pidfilePath = getPidfilePath();
+      for (let i = 0; i < 50; i++) {
+        await new Promise((r) => setTimeout(r, 100));
+        if (!existsSync(pidfilePath)) break;
+      }
+      // Windows: TerminateProcess skips signal handlers — remove pidfile ourselves
+      if (existsSync(pidfilePath)) {
+        const { unlinkSync } = await import("fs");
+        try { unlinkSync(pidfilePath); } catch { /* ignore */ }
+      }
+      console.log("Daemon stopped.");
+    });
+
+  daemon
+    .command("status")
+    .description("Show daemon status")
+    .action(async () => {
+      const { isDaemonRunning } = await import("./daemon/pidfile.js");
+      const { running, data } = await isDaemonRunning();
+      if (!running) {
+        console.log("Daemon is not running.");
+        return;
+      }
+      const uptimeSec = Math.floor((Date.now() - new Date(data!.startedAt).getTime()) / 1000);
+      console.log(JSON.stringify({ ...data, uptimeSec }, null, 2));
+    });
+
+  daemon
+    .command("restart")
+    .description("Stop and restart the daemon")
+    .action(async () => {
+      const { isDaemonRunning, getPidfilePath } = await import("./daemon/pidfile.js");
+      const { existsSync } = await import("fs");
+      const { running, data } = await isDaemonRunning();
+      if (running && data) {
+        process.kill(data.pid, "SIGTERM");
+        const pidfilePath = getPidfilePath();
+        for (let i = 0; i < 50; i++) {
+          await new Promise((r) => setTimeout(r, 100));
+          if (!existsSync(pidfilePath)) break;
+        }
+        if (existsSync(pidfilePath)) {
+          const { unlinkSync } = await import("fs");
+          try { unlinkSync(pidfilePath); } catch { /* ignore */ }
+        }
+      }
+      const { runDaemon } = await import("./daemon/main.js");
+      await runDaemon();
+    });
+
+  // ─── Pin commands ──────────────────────────────────────────────────────────
+
+  const pin = program
+    .command("pin")
+    .description("Manage pinned branches for background daemon indexing");
+
+  pin
+    .command("list")
+    .description("List pinned branches for a source")
+    .requiredOption("--project-id <id>", "Project identifier")
+    .option("--source-id <id>", "Source identifier", "primary")
+    .action(async (opts: { projectId: string; sourceId: string }) => {
+      const { listPinned } = await import("./pinned-branches.js");
+      try {
+        const branches = listPinned(opts.projectId, opts.sourceId);
+        console.log(JSON.stringify({ branches }, null, 2));
+      } catch (err: any) {
+        console.error(err.message);
+        process.exit(1);
+      }
+    });
+
+  pin
+    .command("add")
+    .description("Add branches to the pinned list")
+    .requiredOption("--project-id <id>", "Project identifier")
+    .option("--source-id <id>", "Source identifier", "primary")
+    .argument("<branches...>", "Branch names to pin")
+    .action(async (branches: string[], opts: { projectId: string; sourceId: string }) => {
+      const { addPinned } = await import("./pinned-branches.js");
+      try {
+        const result = await addPinned(opts.projectId, opts.sourceId, branches, "add");
+        console.log(JSON.stringify(result, null, 2));
+        for (const w of result.warnings) console.warn(`warning: ${w}`);
+      } catch (err: any) {
+        console.error(err.message);
+        process.exit(1);
+      }
+    });
+
+  pin
+    .command("remove")
+    .description("Remove branches from the pinned list")
+    .requiredOption("--project-id <id>", "Project identifier")
+    .option("--source-id <id>", "Source identifier", "primary")
+    .argument("<branches...>", "Branch names to unpin")
+    .action(async (branches: string[], opts: { projectId: string; sourceId: string }) => {
+      const { removePinned } = await import("./pinned-branches.js");
+      try {
+        const result = removePinned(opts.projectId, opts.sourceId, branches);
+        console.log(JSON.stringify(result, null, 2));
+      } catch (err: any) {
+        console.error(err.message);
+        process.exit(1);
+      }
+    });
+
+  pin
+    .command("clear")
+    .description("Remove all pinned branches from a source")
+    .requiredOption("--project-id <id>", "Project identifier")
+    .option("--source-id <id>", "Source identifier", "primary")
+    .option("--yes", "Skip confirmation prompt", false)
+    .action(async (opts: { projectId: string; sourceId: string; yes: boolean }) => {
+      const { clearPinned } = await import("./pinned-branches.js");
+      if (!opts.yes) {
+        // Simple confirmation via stdin (non-interactive environments use --yes)
+        process.stdout.write(
+          `Clear all pinned branches for ${opts.projectId}/${opts.sourceId}? [y/N] `
+        );
+        const confirmed = await new Promise<boolean>((resolve) => {
+          process.stdin.once("data", (data) => {
+            resolve(data.toString().trim().toLowerCase() === "y");
+          });
+        });
+        if (!confirmed) {
+          console.log("Aborted.");
+          return;
+        }
+      }
+      try {
+        const result = clearPinned(opts.projectId, opts.sourceId);
+        console.log(JSON.stringify(result, null, 2));
+      } catch (err: any) {
+        console.error(err.message);
+        process.exit(1);
+      }
+    });
+
   await program.parseAsync(process.argv);
 }
