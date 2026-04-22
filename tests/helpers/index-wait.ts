@@ -8,8 +8,9 @@ import type { IndexResult } from "../../src/types.js";
 export async function runIndex(
   projectId: string,
   sourceId: string,
-  mode: "full" | "incremental"
+  mode: "full" | "incremental",
+  branch?: string
 ): Promise<IndexResult> {
   const { indexSource } = await import("../../src/indexer.js");
-  return indexSource(projectId, sourceId, mode);
+  return indexSource(projectId, sourceId, mode, branch ? { branch } : {});
 }

@@ -6,6 +6,7 @@ import type { IndexMode, JobState, SourceTask } from "./types.js";
 type StoredJob = JobState & {
   controller: AbortController;
   taskControllers: Map<string, AbortController>;
+  branch?: string;
 };
 
 const _jobs = new Map<string, StoredJob>();
@@ -91,6 +92,7 @@ async function runTasks(jobId: string): Promise<void> {
     try {
       const result = await indexSource(job.project_id, task.source_id, task.mode, {
         signal: taskController.signal,
+        branch: job.branch,
         onScanProgress(n) {
           task.files_scanned = n;
           task.phase = "scanning";
@@ -132,7 +134,8 @@ async function runTasks(jobId: string): Promise<void> {
 export function submitJob(
   projectId: string,
   mode: IndexMode,
-  sourceIds?: string[]
+  sourceIds?: string[],
+  branch?: string
 ): string | { error: "already_running"; job_id: string } {
   if (mode === "full" && !sourceIds?.length) {
     throw new Error("full reindex requires explicit source_ids");
@@ -172,6 +175,7 @@ export function submitJob(
     error: null,
     controller,
     taskControllers,
+    ...(branch && { branch }),
   };
 
   _jobs.set(job.job_id, job);
@@ -193,7 +197,8 @@ export function submitJob(
 export function submitSourceJob(
   projectId: string,
   sourceId: string,
-  mode: IndexMode
+  mode: IndexMode,
+  branch?: string
 ): string | { error: "already_running"; job_id: string } {
   const existingJobId = findRunningJobForProject(projectId);
   if (existingJobId) {
@@ -216,6 +221,7 @@ export function submitSourceJob(
     error: null,
     controller,
     taskControllers,
+    ...(branch && { branch }),
   };
 
   _jobs.set(job.job_id, job);

@@ -10,9 +10,15 @@ import {
   ftsSearchKnowledge,
 } from "./vector-store.js";
 import { rerank } from "./reranker.js";
+import { resolveBranch } from "./branches.js";
+import { getChunkIdsForBranch } from "./branch-tags.js";
 import type { SearchResult, KnowledgeSearchResult, Source } from "./types.js";
 
 const MAX_RERANK_CANDIDATES = 500;
+
+// Chunk_ids above this size are handled by JS post-filter instead of SQL IN clause.
+// LanceDB's IN predicate has practical limits; 5000 is conservative.
+const BRANCH_FILTER_INLINE_LIMIT = 5000;
 
 function mergeRrfKnowledge(lists: KnowledgeSearchResult[][], k: number): KnowledgeSearchResult[] {
   const scores = new Map<string, number>();
@@ -59,15 +65,31 @@ function getKnowledgeSources(sources: Source[]): Source[] {
   });
 }
 
+export interface SearchCodeOptions {
+  /** Max results to return (default: 10). */
+  limit?: number;
+  /** Branch to filter by. Defaults to current HEAD per source. Pass "*" to skip filter. */
+  branch?: string;
+  /** Restrict to specific source IDs within the project. */
+  sources?: string[];
+}
+
 export async function searchCode(
   query: string,
   projectId: string,
-  topK: number
+  opts?: SearchCodeOptions
 ): Promise<SearchResult[]> {
   const project = getProject(projectId);
   if (!project) throw new Error(`Project '${projectId}' not found`);
 
-  const codeSources = getCodeSources(project.sources);
+  const topK = opts?.limit ?? 10;
+  // SCRYBE_SKIP_MIGRATION=1 → read-only compat mode, no branch filter (old chunks lack tags)
+  const skipBranchFilter = process.env.SCRYBE_SKIP_MIGRATION === "1";
+
+  let codeSources = getCodeSources(project.sources);
+  if (opts?.sources && opts.sources.length > 0) {
+    codeSources = codeSources.filter((s) => opts.sources!.includes(s.source_id));
+  }
   if (codeSources.length === 0) {
     throw new Error("NO_CODE_SOURCES: Project has no indexed code sources");
   }
@@ -83,23 +105,51 @@ export async function searchCode(
       .map(async (source) => {
         const embConfig = resolveEmbeddingConfig(source);
         const tableName = source.table_name!;
-        const queryVec = await embedQuery(query, embConfig);
 
-        if (!config.hybridEnabled) {
-          return search(queryVec, projectId, fetchCount, tableName, embConfig.dimensions);
+        // Resolve branch for this source
+        const sourceBranch = opts?.branch ?? resolveBranch(projectId, source.source_id);
+        const applyFilter = !skipBranchFilter && sourceBranch !== "*";
+
+        let inlineIds: string[] | undefined;
+        let postFilterIds: Set<string> | undefined;
+
+        if (applyFilter) {
+          const ids = getChunkIdsForBranch(projectId, source.source_id, sourceBranch);
+          if (ids.size === 0) {
+            // No chunks indexed for this branch on this source
+            return [] as SearchResult[];
+          }
+          if (ids.size <= BRANCH_FILTER_INLINE_LIMIT) {
+            inlineIds = [...ids];
+          } else {
+            postFilterIds = ids;
+          }
         }
 
-        const [vectorResults, ftsResults] = await Promise.all([
-          search(queryVec, projectId, fetchCount, tableName, embConfig.dimensions),
-          ftsSearch(query, projectId, fetchCount, tableName).catch((err: unknown) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            if (/index|fts/i.test(msg)) return [] as SearchResult[];
-            throw err;
-          }),
-        ]);
+        const queryVec = await embedQuery(query, embConfig);
 
-        if (ftsResults.length === 0) return vectorResults;
-        return mergeRrf([vectorResults, ftsResults], config.rrfK);
+        let results: SearchResult[];
+        if (!config.hybridEnabled) {
+          results = await search(queryVec, projectId, fetchCount, tableName, embConfig.dimensions, inlineIds);
+        } else {
+          const [vectorResults, ftsResults] = await Promise.all([
+            search(queryVec, projectId, fetchCount, tableName, embConfig.dimensions, inlineIds),
+            ftsSearch(query, projectId, fetchCount, tableName, inlineIds).catch((err: unknown) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              if (/index|fts/i.test(msg)) return [] as SearchResult[];
+              throw err;
+            }),
+          ]);
+
+          results = ftsResults.length === 0 ? vectorResults : mergeRrf([vectorResults, ftsResults], config.rrfK);
+        }
+
+        // Post-filter for large branch sets (> BRANCH_FILTER_INLINE_LIMIT chunk_ids)
+        if (postFilterIds) {
+          results = results.filter((r) => postFilterIds!.has(r.chunk_id));
+        }
+
+        return results;
       })
   );
 

@@ -35,6 +35,14 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // Close SQLite branch-tags handle before module reset nukes it
+  try {
+    const { closeBranchTagsDB } = await import("../src/branch-tags.js");
+    closeBranchTagsDB();
+  } catch {
+    // module not yet loaded in this test — no-op
+  }
+
   // Brief pause to let LanceDB release file handles (especially on Windows)
   await new Promise((r) => setTimeout(r, 100));
   if (testDir) {

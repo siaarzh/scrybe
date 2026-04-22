@@ -122,12 +122,18 @@ export async function search(
   projectId: string,
   topK: number,
   tableName: string,
-  dimensions: number
+  dimensions: number,
+  chunkIdIn?: string[]
 ): Promise<SearchResult[]> {
   const table = await getProjectTable(tableName, dimensions, "code");
+  let where = `project_id = '${escapeSql(projectId)}'`;
+  if (chunkIdIn && chunkIdIn.length > 0) {
+    const ids = chunkIdIn.map((id) => `'${escapeSql(id)}'`).join(", ");
+    where += ` AND chunk_id IN (${ids})`;
+  }
   const rows = await table
     .search(Float32Array.from(queryVector))
-    .where(`project_id = '${escapeSql(projectId)}'`)
+    .where(where)
     .limit(topK)
     .toArray();
 
@@ -148,12 +154,18 @@ export async function ftsSearch(
   query: string,
   projectId: string,
   topK: number,
-  tableName: string
+  tableName: string,
+  chunkIdIn?: string[]
 ): Promise<SearchResult[]> {
   const table = _tableCache.get(tableName);
   if (!table) return [];
+  let where = `project_id = '${escapeSql(projectId)}'`;
+  if (chunkIdIn && chunkIdIn.length > 0) {
+    const ids = chunkIdIn.map((id) => `'${escapeSql(id)}'`).join(", ");
+    where += ` AND chunk_id IN (${ids})`;
+  }
   const rows = await (table.search(query, "fts", "content") as lancedb.Query)
-    .where(`project_id = '${escapeSql(projectId)}'`)
+    .where(where)
     .limit(topK)
     .toArray();
   return rows.map((row) => ({
@@ -303,6 +315,33 @@ export async function deleteKnowledgeSource(
 }
 
 // ─── Table lifecycle ──────────────────────────────────────────────────────────
+
+/**
+ * Returns all chunk_ids for a project in a table.
+ * Used by `scrybe gc` to find orphan chunks.
+ */
+export async function listChunkIds(projectId: string, tableName: string): Promise<string[]> {
+  const table = await openExistingTable(tableName);
+  if (!table) return [];
+  const rows = await table
+    .query()
+    .select(["chunk_id"])
+    .where(`project_id = '${escapeSql(projectId)}'`)
+    .toArray();
+  return rows.map((r) => String(r.chunk_id));
+}
+
+/**
+ * Deletes specific chunks by chunk_id from a table.
+ * Used by `scrybe gc` to remove orphan chunks.
+ */
+export async function deleteChunks(chunkIds: string[], tableName: string): Promise<void> {
+  if (chunkIds.length === 0) return;
+  const table = await openExistingTable(tableName);
+  if (!table) return;
+  const ids = chunkIds.map((id) => `'${escapeSql(id)}'`).join(", ");
+  await table.delete(`chunk_id IN (${ids})`);
+}
 
 /** Drop a named table entirely (used by removeSource / removeProject). */
 export async function dropTable(tableName: string): Promise<void> {

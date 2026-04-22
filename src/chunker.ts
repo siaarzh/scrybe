@@ -221,8 +221,20 @@ export function* walkRepoFiles(
   yield* walk(rootPath);
 }
 
+export function makeChunkId(
+  projectId: string,
+  sourceId: string,
+  language: string,
+  content: string
+): string {
+  return createHash("sha256")
+    .update(projectId + "\0" + sourceId + "\0" + language + "\0" + content)
+    .digest("hex");
+}
+
 export function* chunkRepo(
   projectId: string,
+  sourceId: string,
   rootPath: string,
   onlyFiles?: Set<string>
 ): Generator<CodeChunk> {
@@ -240,12 +252,8 @@ export function* chunkRepo(
     const lines = text.split(/^/m);
 
     for (const { start, end, content } of chunkLines(lines)) {
-      const chunkId = createHash("sha256")
-        .update(`${projectId}:${relPath}:${start}:${end}`)
-        .digest("hex");
-
       yield {
-        chunk_id: chunkId,
+        chunk_id: makeChunkId(projectId, sourceId, language, content),
         project_id: projectId,
         file_path: relPath,
         content,

@@ -9,6 +9,29 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.14.0] — 2026-04-22
+
+### Added
+
+- **Branch-aware indexing** — code sources maintain separate chunk sets per branch. `scrybe index --branch <name>` indexes a specific git ref; defaults to current HEAD. Enables side-by-side indexing of `main` + feature branches.
+- **Branch-aware search** — `scrybe search --branch <name>` and `search_code(branch?)` filter results to chunks tagged for that branch. Defaults to current HEAD.
+- **`scrybe gc` command** — removes orphaned LanceDB chunks (chunks no longer referenced by any branch tag). Run after deleting long-lived branches. Supports `--dry-run` and `--project-id`.
+- **`list_branches` MCP tool** — returns the list of indexed branches per source for a project. Useful before calling `search_code` with an explicit `branch`.
+- **`branch` param on `reindex_project` / `reindex_source` MCP tools** — optional; indexes the specified git ref instead of current HEAD.
+- **`branches_indexed` in `scrybe status`** — shows which branches have been indexed per source.
+- **SQLite branch-tag side-store** (`branch-tags.db`) — maps `(project, source, branch, file_path)` → `chunk_id`. Enables cross-branch chunk sharing and GC.
+- **Per-branch hash files** — `hashes/<project>__<source>__<branch-slug>.json`; branches track their own incremental state independently.
+- **Rename detection** — renaming a file on the same branch no longer triggers re-embedding; content-addressed IDs + preserved LanceDB rows enable the fast path.
+
+### Changed (BREAKING)
+
+- **Content-addressed chunk IDs** — `chunk_id` is now `sha256(projectId + NUL + sourceId + NUL + language + NUL + content)` instead of a hash of file path + line numbers. Identical content in the same project/source always produces the same ID regardless of where it lives in the file system (enables rename detection and branch dedup). **Full reindex required on upgrade** — existing chunk IDs are incompatible with the new formula.
+- Scrybe now requires **Node.js ≥ 22.5.0** (up from ≥ 20) — uses the built-in `node:sqlite` module for the branch-tag side-store (no `better-sqlite3` native dependency needed).
+
+See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
+
+---
+
 ## [0.13.1] — 2026-04-22
 
 ### Added
@@ -335,7 +358,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/siaarzh/scrybe/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/siaarzh/scrybe/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/siaarzh/scrybe/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/siaarzh/scrybe/compare/v0.12.0...v0.12.1

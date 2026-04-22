@@ -1,5 +1,4 @@
-import { createHash } from "crypto";
-import { chunkLines } from "../chunker.js";
+import { chunkLines, makeChunkId } from "../chunker.js";
 import type { KnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { AnyChunk, SourcePlugin } from "./base.js";
 
@@ -109,7 +108,6 @@ export class GitLabIssuesPlugin implements SourcePlugin {
         ]);
 
         const emit = function* (
-          baseId: string,
           content: string,
           author: string,
           timestamp: string,
@@ -118,13 +116,9 @@ export class GitLabIssuesPlugin implements SourcePlugin {
         ): Generator<KnowledgeChunk> {
           const lines = content.split("\n").map((l) => l + "\n");
           const chunks = chunkLines(lines);
-          for (let i = 0; i < chunks.length; i++) {
-            const chunkSuffix = chunks.length > 1 ? `-${i}` : "";
-            const chunkId = createHash("sha256")
-              .update(`${project.id}:${source.source_id}:${key}:${baseId}${chunkSuffix}`)
-              .digest("hex");
+          for (const chunk of chunks) {
             yield {
-              chunk_id: chunkId,
+              chunk_id: makeChunkId(project.id, source.source_id, "", chunk.content),
               project_id: project.id,
               source_id: source.source_id,
               source_path: key,
@@ -132,7 +126,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
               source_type: sourceType,
               author,
               timestamp,
-              content: chunks[i].content,
+              content: chunk.content,
             } satisfies KnowledgeChunk;
           }
         };
@@ -140,7 +134,6 @@ export class GitLabIssuesPlugin implements SourcePlugin {
         // Issue body chunk(s)
         const issueBody = `# ${issue.title}\n\n${issue.description?.trim() || ""}`.trim();
         yield* emit(
-          "issue",
           issueBody,
           issue.author.username,
           issue.updated_at,
@@ -154,7 +147,6 @@ export class GitLabIssuesPlugin implements SourcePlugin {
           const body = note.body.trim();
           if (!body) continue;
           yield* emit(
-            `note-${note.id}`,
             body,
             note.author.username,
             note.created_at || issue.updated_at,

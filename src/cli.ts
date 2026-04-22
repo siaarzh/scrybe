@@ -13,11 +13,15 @@ import {
 } from "./registry.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { indexProject, indexSource } from "./indexer.js";
+import { getBranchesForSource, getAllChunkIdsForSource } from "./branch-tags.js";
+import { listChunkIds, deleteChunks } from "./vector-store.js";
 import { validateGitlabToken } from "./plugins/gitlab-issues.js";
 import { config, VERSION } from "./config.js";
+import { checkAndMigrate } from "./schema-version.js";
 import type { Source, SourceConfig } from "./types.js";
 
 export async function runCli(): Promise<void> {
+  checkAndMigrate();
   const program = new Command();
   program
     .name("scrybe")
@@ -90,7 +94,14 @@ export async function runCli(): Promise<void> {
         console.error(`Project '${opts.projectId}' not found`);
         process.exit(1);
       }
-      console.log(JSON.stringify(p, null, 2));
+      const info = {
+        ...p,
+        sources: p.sources.map((s) => ({
+          ...s,
+          branches_indexed: getBranchesForSource(opts.projectId, s.source_id),
+        })),
+      };
+      console.log(JSON.stringify(info, null, 2));
       console.log(`Data dir: ${config.dataDir}`);
     });
 
@@ -281,8 +292,9 @@ export async function runCli(): Promise<void> {
     .option("--all", "Incrementally reindex all registered projects", false)
     .option("--full", "Full reindex (clears and rebuilds from scratch)", false)
     .option("--incremental", "Incremental reindex (default)", false)
+    .option("--branch <name>", "Branch name to index (default: current HEAD for code sources)")
     .action(
-      async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean }) => {
+      async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean; branch?: string }) => {
         if (config.embeddingConfigError) {
           console.error(`[scrybe] ${config.embeddingConfigError}`);
           process.exit(1);
@@ -354,6 +366,7 @@ export async function runCli(): Promise<void> {
             const result = await indexSource(opts.projectId!, sid, mode, {
               onScanProgress(n) { process.stdout.write(`\r  [${sid}] Scanning... ${n} files`); },
               onEmbedProgress(n) { process.stdout.write(`\r  [${sid}] Embedding... ${n} chunks`); },
+              ...(opts.branch && { branch: opts.branch }),
             });
             console.log(
               `\n  [${sid}] Done: ${result.chunks_indexed} chunks indexed, ` +
@@ -373,6 +386,7 @@ export async function runCli(): Promise<void> {
           const results = await indexProject(opts.projectId, mode, {
             onScanProgress(n) { process.stdout.write(`\r  Scanning... ${n} files`); },
             onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
+            ...(opts.branch && { branch: opts.branch }),
           });
           const totals = results.reduce(
             (acc, r) => ({
@@ -397,14 +411,18 @@ export async function runCli(): Promise<void> {
     .description("Semantic search across code sources in a project")
     .requiredOption("--project-id <id>")
     .option("--top-k <n>", "Number of results", "10")
+    .option("--branch <name>", "Branch to search (default: current HEAD)")
     .argument("<query>", "Search query")
-    .action(async (query: string, opts: { projectId: string; topK: string }) => {
+    .action(async (query: string, opts: { projectId: string; topK: string; branch?: string }) => {
       if (config.embeddingConfigError) {
         console.error(`[scrybe] ${config.embeddingConfigError}`);
         process.exit(1);
       }
       const topK = parseInt(opts.topK, 10);
-      const results = await searchCode(query, opts.projectId, topK);
+      const results = await searchCode(query, opts.projectId, {
+        limit: topK,
+        ...(opts.branch && { branch: opts.branch }),
+      });
       for (const r of results) {
         const sym = r.symbol_name ? ` · ${r.symbol_name}` : "";
         console.log(
@@ -468,6 +486,59 @@ export async function runCli(): Promise<void> {
           : `${((Date.now() - job.started_at) / 1000).toFixed(1)}s (running)`;
         const taskSummary = job.tasks.map((t: any) => `${t.source_id}:${t.status}`).join(", ");
         console.log(`[${job.job_id}] ${job.project_id} | ${job.status} | ${elapsed} | ${taskSummary || job.current_project || ""}`);
+      }
+    });
+
+  program
+    .command("gc")
+    .description("Remove orphan chunks not referenced by any indexed branch")
+    .option("--project-id <id>", "Limit GC to a specific project (default: all projects)")
+    .option("--dry-run", "Report orphans without deleting", false)
+    .action(async (opts: { projectId?: string; dryRun: boolean }) => {
+      let projects;
+      if (opts.projectId) {
+        const p = getProject(opts.projectId);
+        if (!p) {
+          console.error(`Project '${opts.projectId}' not found`);
+          process.exit(1);
+        }
+        projects = [p];
+      } else {
+        projects = listProjects();
+      }
+
+      if (projects.length === 0) {
+        console.log("No projects registered.");
+        return;
+      }
+
+      let totalOrphans = 0;
+      let totalDeleted = 0;
+
+      for (const project of projects) {
+        for (const source of project.sources) {
+          if (!source.table_name) continue;
+          const lanceIds = await listChunkIds(project.id, source.table_name);
+          const taggedIds = getAllChunkIdsForSource(project.id, source.source_id);
+          const orphans = lanceIds.filter((id) => !taggedIds.has(id));
+          if (orphans.length === 0) continue;
+          totalOrphans += orphans.length;
+          console.log(`  ${project.id}/${source.source_id}: ${orphans.length} orphan chunk(s)`);
+          if (!opts.dryRun) {
+            await deleteChunks(orphans, source.table_name);
+            totalDeleted += orphans.length;
+          }
+        }
+      }
+
+      if (totalOrphans === 0) {
+        console.log("No orphan chunks found.");
+        return;
+      }
+      if (opts.dryRun) {
+        console.log(`\nDry run: ${totalOrphans} orphan chunk(s) found (not deleted).`);
+      } else {
+        console.log(`\nGC complete: ${totalDeleted} orphan chunk(s) deleted.`);
       }
     });
 

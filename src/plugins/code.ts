@@ -1,8 +1,8 @@
 import { createRequire } from "module";
-import { createHash } from "crypto";
+import { execSync } from "child_process";
 import { readFileSync } from "fs";
 import { basename } from "path";
-import { walkRepoFiles, chunkLines, getLanguage } from "../chunker.js";
+import { walkRepoFiles, chunkLines, getLanguage, makeChunkId } from "../chunker.js";
 import { hashFile } from "../hashes.js";
 import { config } from "../config.js";
 import type { CodeChunk, Project, Source, SourceConfig } from "../types.js";
@@ -253,6 +253,7 @@ function walkDeclarations(
 
 function astChunks(
   projectId: string,
+  sourceId: string,
   relPath: string,
   source: string,
   langKey: LanguageKey,
@@ -276,15 +277,12 @@ function astChunks(
   for (const decl of decls) {
     const declLines = decl.endLine - decl.startLine + 1;
     if (declLines <= config.chunkSize) {
-      // Fits in one chunk
-      const id = createHash("sha256")
-        .update(`${projectId}:${relPath}:${decl.startLine + 1}:${decl.endLine + 1}`)
-        .digest("hex");
+      const content = decl.content.trim();
       chunks.push({
-        chunk_id: id,
+        chunk_id: makeChunkId(projectId, sourceId, langKey, content),
         project_id: projectId,
         file_path: relPath,
-        content: decl.content.trim(),
+        content,
         start_line: decl.startLine + 1,
         end_line: decl.endLine + 1,
         language: langKey,
@@ -295,11 +293,8 @@ function astChunks(
       const declLineSlice = lines.slice(decl.startLine, decl.endLine + 1);
       let first = true;
       for (const window of chunkLines(declLineSlice, decl.startLine)) {
-        const id = createHash("sha256")
-          .update(`${projectId}:${relPath}:${window.start}:${window.end}`)
-          .digest("hex");
         chunks.push({
-          chunk_id: id,
+          chunk_id: makeChunkId(projectId, sourceId, langKey, window.content),
           project_id: projectId,
           file_path: relPath,
           content: window.content,
@@ -320,6 +315,7 @@ function astChunks(
 
 function slidingWindowChunks(
   projectId: string,
+  sourceId: string,
   relPath: string,
   source: string,
   language: string
@@ -327,11 +323,8 @@ function slidingWindowChunks(
   const lines = source.split(/^/m);
   const chunks: CodeChunk[] = [];
   for (const { start, end, content } of chunkLines(lines)) {
-    const id = createHash("sha256")
-      .update(`${projectId}:${relPath}:${start}:${end}`)
-      .digest("hex");
     chunks.push({
-      chunk_id: id,
+      chunk_id: makeChunkId(projectId, sourceId, language, content),
       project_id: projectId,
       file_path: relPath,
       content,
@@ -342,6 +335,88 @@ function slidingWindowChunks(
     });
   }
   return chunks;
+}
+
+// ─── Branch-aware scanner (Contract 11) ──────────────────────────────────────
+
+export interface ScanEntry {
+  relPath: string;
+  content: string;
+  size: number;
+  mode: number;  // git object mode; 120000=symlink, 160000=submodule (skipped in impl)
+}
+
+/**
+ * Yields file entries for a repo path, either from the working tree or a git ref.
+ *
+ * - `branch === undefined`: walks the working tree via walkRepoFiles (same as normal index)
+ * - `branch` set: runs `git ls-tree` to enumerate the ref, reads content via `git show`
+ *
+ * Contract 11 export — consumed by M-D2 daemon for branch-switch and remote-push workflows.
+ */
+export async function* scanRef(
+  repoPath: string,
+  branch?: string
+): AsyncGenerator<ScanEntry> {
+  if (!branch) {
+    for (const { relPath, absPath } of walkRepoFiles(repoPath)) {
+      let content: string;
+      try {
+        content = readFileSync(absPath, "utf8");
+      } catch {
+        continue;
+      }
+      yield { relPath, content, size: Buffer.byteLength(content, "utf8"), mode: 0o100644 };
+    }
+    return;
+  }
+
+  // git ls-tree path — enumerate files from git ref
+  let lsOutput: string;
+  try {
+    lsOutput = execSync(`git ls-tree --full-tree -r -z "${branch}"`, {
+      cwd: repoPath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 50 * 1024 * 1024,
+    });
+  } catch {
+    return;
+  }
+
+  const MAX_FILE_BYTES = parseInt(process.env["SCRYBE_MAX_FILE_BYTES"] ?? "0", 10) || 1 * 1024 * 1024;
+
+  for (const entry of lsOutput.split("\0").filter(Boolean)) {
+    // format: "<mode> <type> <hash>\t<path>"
+    const tabIdx = entry.indexOf("\t");
+    if (tabIdx === -1) continue;
+    const meta = entry.slice(0, tabIdx);
+    const relPath = entry.slice(tabIdx + 1);
+    const mode = parseInt(meta.split(" ")[0], 8);
+
+    // Skip symlinks (120000) and submodules (160000)
+    if (mode === 0o120000 || mode === 0o160000) continue;
+
+    // Skip files with no known language (mirrors walkRepoFiles filtering)
+    if (!getLanguage(basename(relPath))) continue;
+
+    let content: string;
+    try {
+      content = execSync(`git show "${branch}:${relPath}"`, {
+        cwd: repoPath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: MAX_FILE_BYTES,
+      });
+    } catch {
+      continue;
+    }
+
+    const size = Buffer.byteLength(content, "utf8");
+    if (size > MAX_FILE_BYTES) continue;
+
+    yield { relPath, content, size, mode };
+  }
 }
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
@@ -377,25 +452,27 @@ export class CodePlugin implements SourcePlugin {
   async *fetchChunks(project: Project, source: Source, changed: Set<string>): AsyncGenerator<AnyChunk> {
     tryInitTreeSitter();
     const cfg = source.source_config as Extract<SourceConfig, { type: "code" }>;
+    const sourceId = source.source_id;
 
     for (const { relPath, absPath } of walkRepoFiles(cfg.root_path)) {
       if (!changed.has(relPath)) continue;
 
-      let source: string;
+      let fileSource: string;
       try {
-        source = readFileSync(absPath, "utf8");
+        fileSource = readFileSync(absPath, "utf8");
       } catch {
         continue;
       }
 
       const lang = getLanguage(basename(absPath)) ?? "";
-      const chunks = this._chunkFile(project.id, relPath, source, lang);
+      const chunks = this._chunkFile(project.id, sourceId, relPath, fileSource, lang);
       yield* chunks;
     }
   }
 
   private _chunkFile(
     projectId: string,
+    sourceId: string,
     relPath: string,
     source: string,
     language: string
@@ -406,22 +483,22 @@ export class CodePlugin implements SourcePlugin {
       if (extracted) {
         const parser = getParser("typescript");
         if (parser) {
-          const chunks = astChunks(projectId, relPath, extracted.code, "typescript", extracted.lineOffset, parser);
+          const chunks = astChunks(projectId, sourceId, relPath, extracted.code, "typescript", extracted.lineOffset, parser);
           if (chunks.length > 0) return chunks;
         }
       }
-      return slidingWindowChunks(projectId, relPath, source, language);
+      return slidingWindowChunks(projectId, sourceId, relPath, source, language);
     }
 
     const langKey = LANGUAGE_TO_KEY[language];
     if (langKey) {
       const parser = getParser(language);
       if (parser) {
-        const chunks = astChunks(projectId, relPath, source, langKey, 0, parser);
+        const chunks = astChunks(projectId, sourceId, relPath, source, langKey, 0, parser);
         if (chunks.length > 0) return chunks;
       }
     }
 
-    return slidingWindowChunks(projectId, relPath, source, language);
+    return slidingWindowChunks(projectId, sourceId, relPath, source, language);
   }
 }

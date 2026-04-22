@@ -7,6 +7,8 @@ import type { SearchResult } from "../../src/types.js";
 
 export interface SearchOptions {
   topK?: number;
+  branch?: string;
+  sources?: string[];
 }
 
 export async function search(
@@ -15,5 +17,9 @@ export async function search(
   opts: SearchOptions = {}
 ): Promise<SearchResult[]> {
   const { searchCode } = await import("../../src/search.js");
-  return searchCode(query, projectId, opts.topK ?? 10);
+  return searchCode(query, projectId, {
+    limit: opts.topK ?? 10,
+    branch: opts.branch,
+    sources: opts.sources,
+  });
 }

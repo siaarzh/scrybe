@@ -52,7 +52,7 @@ No flags.
 
 ### `status`
 
-Print full project JSON (sources, table names, last indexed timestamps) and the data directory path.
+Print full project JSON (sources, table names, last indexed timestamps, `branches_indexed` per source) and the data directory path.
 
 | Flag | Required | Description |
 |------|----------|-------------|
@@ -176,6 +176,7 @@ Index or reindex a project (all sources), specific sources, or all registered pr
 | `--all` | | Incrementally reindex all registered projects |
 | `--full` | | Full reindex — clears and rebuilds from scratch. Requires `--source-ids` |
 | `--incremental` | | Only process changed files / updated issues since last run (default) |
+| `--branch <name>` | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources |
 
 ```bash
 # Incremental reindex of all registered projects
@@ -190,6 +191,9 @@ scrybe index --project-id myrepo --source-ids primary,gitlab-issues --full
 
 # Incremental reindex of one source
 scrybe index --project-id myrepo --source-ids gitlab-issues
+
+# Index a specific git branch
+scrybe index --project-id myrepo --source-ids primary --branch feat/my-feature
 ```
 
 ---
@@ -209,6 +213,32 @@ scrybe jobs --running
 
 ---
 
+### `gc`
+
+Remove orphaned chunks from the vector store. Orphans accumulate when branches are deleted or full reindexes are skipped — they waste disk space and slightly skew search scores.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | | Limit GC to a specific project (default: all projects) |
+| `--dry-run` | | Report orphans without deleting |
+
+A chunk is orphaned when no `branch_tags` row references it (it was never re-tagged after its branch was dropped).
+
+```bash
+# Dry run — see what would be deleted
+scrybe gc --dry-run
+
+# Remove orphans in a single project
+scrybe gc --project-id myrepo
+
+# Remove orphans across all projects
+scrybe gc
+```
+
+Run after deleting a long-lived branch or after migrating from v0.13.x.
+
+---
+
 ## Search commands
 
 ### `search`
@@ -219,10 +249,12 @@ Semantic search over indexed code sources.
 |------|----------|-------------|
 | `--project-id <id>` | ✓ | Project to search |
 | `--top-k <n>` | | Number of results (default: 10) |
+| `--branch <name>` | | Branch to search (default: current HEAD for code sources) |
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash
 scrybe search --project-id myrepo "authentication login flow"
+scrybe search --project-id myrepo --branch feat/my-feature "new feature implementation"
 ```
 
 ---

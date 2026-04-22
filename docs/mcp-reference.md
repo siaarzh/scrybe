@@ -141,6 +141,7 @@ Semantic search over indexed code sources in a project.
 | `project_id` | string | ✓ | Project to search |
 | `query` | string | ✓ | Natural language search query |
 | `top_k` | number | | Number of results (default: 10) |
+| `branch` | string | | Branch to search (default: current HEAD of the source repo). Use `list_branches` to see indexed branches. |
 
 **Returns:** array of `{ file_path, start_line, end_line, language, symbol_name, content, score }`
 
@@ -185,6 +186,7 @@ Trigger background reindexing of sources in a project. Returns a `job_id` to pol
 | `project_id` | string | ✓ | Project to reindex |
 | `source_ids` | string[] | | Sources to reindex. Required when `mode` is `"full"`. Omit to reindex all sources (incremental only) |
 | `mode` | string | | `"full"` or `"incremental"` (default: `"incremental"`) |
+| `branch` | string | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources. |
 
 ---
 
@@ -197,6 +199,7 @@ Trigger background reindexing of a single source. Returns a `job_id` to poll.
 | `project_id` | string | ✓ | Project identifier |
 | `source_id` | string | ✓ | Source to reindex |
 | `mode` | string | | `"full"` or `"incremental"` (default: `"incremental"`) |
+| `branch` | string | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources. |
 
 ---
 
@@ -242,6 +245,21 @@ Cancel a running reindex job, optionally targeting a single source task.
 | `source_id` | string |          | Source task to cancel (optional) |
 
 If `source_id` is omitted, all remaining tasks in the job are cancelled.
+
+---
+
+### `list_branches`
+
+List branches that have been indexed for a project's sources. Useful before calling `search_code` or `reindex_source` with an explicit `branch` parameter.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `source_id` | string | | Limit to a specific source (omit for all sources) |
+
+**Returns:** array of `{ source_id, branches: string[] }`
+
+Non-code sources (tickets) always show `["*"]` — they are branch-agnostic.
 
 ---
 

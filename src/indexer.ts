@@ -1,5 +1,10 @@
 import { getProject, getSource, updateSource, assignTableName, resolveEmbeddingConfig } from "./registry.js";
-import { loadHashes, deleteHashes, saveHash, removeHash } from "./hashes.js";
+import {
+  loadBranchHashes,
+  deleteBranchHashes,
+  saveBranchHash,
+  removeBranchHash,
+} from "./hashes.js";
 import { loadCursor, saveCursor, deleteCursor } from "./cursors.js";
 import { getPlugin } from "./plugins/index.js";
 import type { AnyChunk } from "./plugins/base.js";
@@ -7,20 +12,29 @@ import { embedBatched } from "./embedder.js";
 import {
   upsert,
   deleteProject,
-  deleteFileChunks,
   createFtsIndex,
   createKnowledgeFtsIndex,
   upsertKnowledge,
   deleteKnowledgeProject,
-  deleteKnowledgeSource,
 } from "./vector-store.js";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
+import { resolveBranch } from "./branches.js";
+import {
+  addTags,
+  getAllChunkIdsForSource,
+  getChunkIdsForFile,
+  removeTagsForBranch,
+  removeTagsForFile,
+  type BranchTag,
+} from "./branch-tags.js";
 
 export interface IndexOptions {
   onScanProgress?: (filesScanned: number) => void;
   onEmbedProgress?: (chunksIndexed: number) => void;
   signal?: AbortSignal;
+  /** Branch to index. Defaults to current HEAD for code sources; "*" for non-code. */
+  branch?: string;
 }
 
 function checkAbort(signal?: AbortSignal): void {
@@ -51,10 +65,16 @@ export async function indexSource(
   const isCode = plugin.embeddingProfile === "code";
   const embConfig = resolveEmbeddingConfig(source);
 
+  // Non-code sources (tickets, webpages) always use "*" as branch sentinel.
+  // Code sources respect the explicit option or auto-resolve from HEAD.
+  const branch = isCode
+    ? (options.branch ?? resolveBranch(projectId, sourceId))
+    : "*";
+
   // --- Phase 1: Scan and diff ---
   checkAbort(signal);
 
-  const oldHashes = mode === "full" ? {} : loadHashes(projectId, sourceId);
+  const oldHashes = mode === "full" ? {} : loadBranchHashes(projectId, sourceId, branch);
   if (mode === "full") deleteCursor(projectId, sourceId);
   const cursor = mode === "full" ? null : loadCursor(projectId, sourceId);
   const currentSources = await plugin.scanSources(project, source, cursor);
@@ -79,6 +99,11 @@ export async function indexSource(
     Object.keys(merged).filter((p) => oldHashes[p] !== merged[p])
   );
 
+  // Snapshot chunk_ids from removed files BEFORE tags are deleted — they still exist in
+  // LanceDB. This enables rename-detection: renamed.ts has the same content-addressed
+  // chunk_ids as the old alpha.ts, so we skip re-embedding even after removing alpha.ts tags.
+  const preservedFromRemovals = new Set<string>();
+
   // Full mode: delete this source's data and rebuild from scratch
   if (mode === "full") {
     if (isCode) {
@@ -86,33 +111,34 @@ export async function indexSource(
     } else {
       await deleteKnowledgeProject(projectId, tableName);
     }
-    deleteHashes(projectId, sourceId);
+    deleteBranchHashes(projectId, sourceId, branch);
+    removeTagsForBranch(projectId, sourceId, branch);
     for (const p of Object.keys(currentSources)) toReindex.add(p);
   } else {
-    // Incremental: delete stale chunks and checkpoint each removal immediately
+    // Incremental: remove tags for deleted and changed files.
+    // We do NOT delete from LanceDB here — orphan chunks are cleaned up by `scrybe gc`.
+    // This prevents cross-branch corruption when branches share content-addressed chunk IDs.
     for (const p of toRemove) {
       checkAbort(signal);
-      if (isCode) {
-        await deleteFileChunks(projectId, p, tableName);
-      } else {
-        await deleteKnowledgeSource(projectId, p, tableName);
+      for (const id of getChunkIdsForFile(projectId, sourceId, branch, p)) {
+        preservedFromRemovals.add(id);
       }
-      removeHash(projectId, sourceId, p);
+      removeTagsForFile(projectId, sourceId, branch, p);
+      removeBranchHash(projectId, sourceId, branch, p);
     }
-    // Pre-delete chunks that will be re-embedded (hash update happens after embed)
     for (const p of toReindex) {
       checkAbort(signal);
-      if (isCode) {
-        await deleteFileChunks(projectId, p, tableName);
-      } else {
-        await deleteKnowledgeSource(projectId, p, tableName);
-      }
+      removeTagsForFile(projectId, sourceId, branch, p);
     }
   }
 
+  // Build the skip-embed set AFTER removing stale tags.
+  // Any chunk_id still in branch_tags has a valid LanceDB row — safe to skip embedding.
+  const alreadyEmbedded = getAllChunkIdsForSource(projectId, sourceId);
+  // Also include chunk_ids from files just removed from this branch — still in LanceDB.
+  for (const id of preservedFromRemovals) alreadyEmbedded.add(id);
+
   // --- Phase 2: Chunk + embed changed sources, checkpoint per key ---
-  // Chunks are accumulated across keys up to embedBatchSize for efficient embedding,
-  // but checkpointed per key after their slice is stored.
   let chunksIndexed = 0;
   const batchSize = config.embedBatchSize;
   const batchDelayMs = config.embedBatchDelayMs;
@@ -124,25 +150,55 @@ export async function indexSource(
   async function flushBatch(): Promise<void> {
     if (keyBatches.length === 0) return;
 
-    // Embed all pending chunks in one call
     const allChunks = keyBatches.flatMap((kb) => kb.chunks);
-    const texts = allChunks.map((c) => c.content);
-    const vectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs);
+
+    // Split into chunks that need embedding vs those already in LanceDB
+    const toEmbed = allChunks.filter((c) => !alreadyEmbedded.has(c.chunk_id));
+
+    // Embed only new chunks
+    let embedVectors: number[][] = [];
+    if (toEmbed.length > 0) {
+      const texts = toEmbed.map((c) => c.content);
+      embedVectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs);
+    }
+
+    // Build chunk_id → vector lookup for newly embedded chunks
+    const vectorMap = new Map<string, number[]>(
+      toEmbed.map((c, i) => [c.chunk_id, embedVectors[i]])
+    );
+
+    // Mark new chunk_ids as known for subsequent flushes in this run
+    for (const c of toEmbed) alreadyEmbedded.add(c.chunk_id);
 
     // Store and checkpoint each key's slice
-    let offset = 0;
     for (const { key, chunks } of keyBatches) {
-      const keyVectors = vectors.slice(offset, offset + chunks.length);
-      offset += chunks.length;
-
-      if (isCode) {
-        await upsert(chunks as CodeChunk[], keyVectors, tableName, embConfig.dimensions);
-      } else {
-        await upsertKnowledge(chunks as KnowledgeChunk[], keyVectors, tableName, embConfig.dimensions);
+      // Upsert only the newly embedded chunks for this key
+      const newKeyChunks = chunks.filter((c) => vectorMap.has(c.chunk_id));
+      if (newKeyChunks.length > 0) {
+        const keyVectors = newKeyChunks.map((c) => vectorMap.get(c.chunk_id)!);
+        if (isCode) {
+          await upsert(newKeyChunks as CodeChunk[], keyVectors, tableName, embConfig.dimensions);
+        } else {
+          await upsertKnowledge(newKeyChunks as KnowledgeChunk[], keyVectors, tableName, embConfig.dimensions);
+        }
       }
 
-      // Checkpoint immediately after this key is stored
-      saveHash(projectId, sourceId, key, merged[key]);
+      // Add branch tags for ALL chunks in this key (new + already-embedded)
+      const tags: BranchTag[] = chunks.map((c) => ({
+        projectId,
+        sourceId,
+        branch,
+        filePath: isCode
+          ? (c as CodeChunk).file_path
+          : (c as KnowledgeChunk).source_path,
+        chunkId: c.chunk_id,
+        startLine: isCode ? (c as CodeChunk).start_line : 0,
+        endLine: isCode ? (c as CodeChunk).end_line : 0,
+      }));
+      addTags(tags);
+
+      // Checkpoint immediately after this key is processed
+      saveBranchHash(projectId, sourceId, branch, key, merged[key]);
     }
 
     chunksIndexed += allChunks.length;

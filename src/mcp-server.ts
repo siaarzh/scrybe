@@ -20,8 +20,10 @@ import {
 import { getPlugin } from "./plugins/index.js";
 import { validateGitlabToken } from "./plugins/gitlab-issues.js";
 import { VERSION, config } from "./config.js";
+import { checkAndMigrate } from "./schema-version.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob, listJobs } from "./jobs.js";
+import { getBranchesForSource } from "./branch-tags.js";
 import type { IndexMode, Source, SourceConfig, EmbeddingConfig } from "./types.js";
 
 const TOOLS = [
@@ -169,6 +171,10 @@ const TOOLS = [
         project_id: { type: "string" },
         query: { type: "string" },
         top_k: { type: "number", default: 10 },
+        branch: {
+          type: "string",
+          description: "Branch to search (default: current HEAD for code sources)",
+        },
       },
       required: ["project_id", "query"],
     },
@@ -228,6 +234,10 @@ const TOOLS = [
           items: { type: "string" },
           description: "Sources to reindex. Required when mode is 'full'.",
         },
+        branch: {
+          type: "string",
+          description: "Branch to index for code sources (default: current HEAD)",
+        },
       },
       required: ["project_id"],
     },
@@ -246,8 +256,30 @@ const TOOLS = [
           enum: ["full", "incremental"],
           default: "incremental",
         },
+        branch: {
+          type: "string",
+          description: "Branch to index for code sources (default: current HEAD)",
+        },
       },
       required: ["project_id", "source_id"],
+    },
+  },
+  {
+    name: "list_branches",
+    description:
+      "List branches that have been indexed for a project's sources. " +
+      "Each code source maintains separate indexed chunks per branch. " +
+      "Non-code sources (tickets) always use the branch sentinel '*'.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        project_id: { type: "string" },
+        source_id: {
+          type: "string",
+          description: "Limit to a specific source (omit for all sources)",
+        },
+      },
+      required: ["project_id"],
     },
   },
   {
@@ -425,6 +457,7 @@ function buildEmbeddingOverride(a: Record<string, unknown>): EmbeddingConfig | u
 }
 
 export async function runMcpServer(): Promise<void> {
+  checkAndMigrate();
   const server = new Server(
     { name: "scrybe", version: VERSION },
     { capabilities: { tools: {} } }
@@ -531,10 +564,11 @@ export async function runMcpServer(): Promise<void> {
           const projectId = String(a.project_id);
           const query = String(a.query);
           const topK = typeof a.top_k === "number" ? a.top_k : 10;
+          const branch = a.branch ? String(a.branch) : undefined;
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          const results = await searchCode(query, projectId, topK);
+          const results = await searchCode(query, projectId, { limit: topK, ...(branch && { branch }) });
           return jsonResult(results);
         }
 
@@ -569,13 +603,14 @@ export async function runMcpServer(): Promise<void> {
           const projectId = String(a.project_id);
           const mode: IndexMode = a.mode === "full" ? "full" : "incremental";
           const sourceIds: string[] | undefined = Array.isArray(a.source_ids) ? a.source_ids : undefined;
+          const branch = a.branch ? String(a.branch) : undefined;
           if (mode === "full" && !sourceIds?.length) {
             return jsonResult({ error: "source_ids is required for mode: full", error_type: "invalid_request" });
           }
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          const jobResult = submitJob(projectId, mode, sourceIds);
+          const jobResult = submitJob(projectId, mode, sourceIds, branch);
           if (typeof jobResult === "object" && "error" in jobResult) {
             return jsonResult({ error: "A reindex job is already running for this project", error_type: "already_running", job_id: jobResult.job_id });
           }
@@ -588,10 +623,11 @@ export async function runMcpServer(): Promise<void> {
           const projectId = String(a.project_id);
           const sourceId = String(a.source_id);
           const mode: IndexMode = a.mode === "full" ? "full" : "incremental";
+          const branch = a.branch ? String(a.branch) : undefined;
           if (!getProject(projectId)) {
             return jsonResult({ error: `Project '${projectId}' not found` });
           }
-          const sourceJobResult = submitSourceJob(projectId, sourceId, mode);
+          const sourceJobResult = submitSourceJob(projectId, sourceId, mode, branch);
           if (typeof sourceJobResult === "object" && "error" in sourceJobResult) {
             return jsonResult({ error: "A reindex job is already running for this project", error_type: "already_running", job_id: sourceJobResult.job_id });
           }
@@ -602,6 +638,23 @@ export async function runMcpServer(): Promise<void> {
             source_id: sourceId,
             mode,
           });
+        }
+
+        case "list_branches": {
+          const projectId = String(a.project_id);
+          const project = getProject(projectId);
+          if (!project) {
+            return jsonResult({ error: `Project '${projectId}' not found` });
+          }
+          const filterSourceId = a.source_id ? String(a.source_id) : undefined;
+          const sources = filterSourceId
+            ? project.sources.filter((s) => s.source_id === filterSourceId)
+            : project.sources;
+          const result = sources.map((s) => ({
+            source_id: s.source_id,
+            branches: getBranchesForSource(projectId, s.source_id),
+          }));
+          return jsonResult(result);
         }
 
         case "reindex_status": {
