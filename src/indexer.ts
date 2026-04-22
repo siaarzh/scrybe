@@ -183,19 +183,21 @@ export async function indexSource(
         }
       }
 
-      // Add branch tags for ALL chunks in this key (new + already-embedded)
-      const tags: BranchTag[] = chunks.map((c) => ({
-        projectId,
-        sourceId,
-        branch,
-        filePath: isCode
-          ? (c as CodeChunk).file_path
-          : (c as KnowledgeChunk).source_path,
-        chunkId: c.chunk_id,
-        startLine: isCode ? (c as CodeChunk).start_line : 0,
-        endLine: isCode ? (c as CodeChunk).end_line : 0,
-      }));
-      addTags(tags);
+      // Add branch tags for code chunks only. Non-code sources (tickets, etc.) are
+      // branch-agnostic and don't participate in branch-aware search or local GC.
+      // Upstream deletion handling belongs to a future `scrybe reconcile` command.
+      if (isCode) {
+        const tags: BranchTag[] = chunks.map((c) => ({
+          projectId,
+          sourceId,
+          branch,
+          filePath: (c as CodeChunk).file_path,
+          chunkId: c.chunk_id,
+          startLine: (c as CodeChunk).start_line,
+          endLine: (c as CodeChunk).end_line,
+        }));
+        addTags(tags);
+      }
 
       // Checkpoint immediately after this key is processed
       saveBranchHash(projectId, sourceId, branch, key, merged[key]);

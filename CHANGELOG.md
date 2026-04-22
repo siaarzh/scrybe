@@ -9,6 +9,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.14.1] — 2026-04-22
+
+### Changed
+
+- **`branch_tags` is now code-source-only.** Non-code sources (GitLab issues, future webpage/message sources) no longer participate in the branch-tag side-store. Fixes an architectural conflation in v0.14.0 where branch-filtering (a code-source concept) and GC tracking (a universal concept) were coupled into one table via a `"*"` sentinel. Existing v0.13.x ticket chunks remain valid with no reindex required — only code sources need the v0.14.0 migration reindex.
+- **`scrybe gc` now skips non-code sources.** An "orphan" for tickets/webpages/messages is an upstream deletion that can't be detected from local state alone; that's a different operation (future `scrybe reconcile` command — tracked in backlog). Running `gc` was previously dangerous for un-migrated ticket sources because their chunks would appear as orphans and be deleted wholesale.
+- **`list_branches` (MCP) and `status --project-id <id>` (CLI) now return `["*"]` explicitly for non-code sources** instead of reading from `branch_tags` (which will be empty for them after v0.14.1).
+
+### Fixed
+
+- Users upgrading from v0.13.x no longer have to refetch all GitLab issues just to satisfy the v0.14.0 migration. Saves ~2 hours of API calls on a multi-project install.
+
+---
+
 ## [0.14.0] — 2026-04-22
 
 ### Added
@@ -358,7 +372,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/siaarzh/scrybe/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/siaarzh/scrybe/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/siaarzh/scrybe/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/siaarzh/scrybe/compare/v0.12.1...v0.13.0

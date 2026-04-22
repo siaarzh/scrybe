@@ -217,6 +217,8 @@ scrybe jobs --running
 
 Remove orphaned chunks from the vector store. Orphans accumulate when branches are deleted or full reindexes are skipped — they waste disk space and slightly skew search scores.
 
+**Only operates on code sources** (since v0.14.1). Non-code sources (GitLab issues, etc.) are branch-agnostic and don't participate in `branch_tags` — a "stale" ticket chunk means its upstream issue was deleted, which can't be detected without an API fetch. That's a future `scrybe reconcile` command.
+
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--project-id <id>` | | Limit GC to a specific project (default: all projects) |

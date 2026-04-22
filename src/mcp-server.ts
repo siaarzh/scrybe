@@ -652,7 +652,11 @@ export async function runMcpServer(): Promise<void> {
             : project.sources;
           const result = sources.map((s) => ({
             source_id: s.source_id,
-            branches: getBranchesForSource(projectId, s.source_id),
+            // Non-code sources are branch-agnostic; always report "*" for them
+            // since they don't participate in branch_tags after v0.14.1.
+            branches: s.source_config.type === "code"
+              ? getBranchesForSource(projectId, s.source_id)
+              : ["*"],
           }));
           return jsonResult(result);
         }

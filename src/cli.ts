@@ -98,7 +98,9 @@ export async function runCli(): Promise<void> {
         ...p,
         sources: p.sources.map((s) => ({
           ...s,
-          branches_indexed: getBranchesForSource(opts.projectId, s.source_id),
+          branches_indexed: s.source_config.type === "code"
+            ? getBranchesForSource(opts.projectId, s.source_id)
+            : ["*"],
         })),
       };
       console.log(JSON.stringify(info, null, 2));
@@ -518,6 +520,10 @@ export async function runCli(): Promise<void> {
       for (const project of projects) {
         for (const source of project.sources) {
           if (!source.table_name) continue;
+          // GC only applies to code sources. Non-code sources (tickets, etc.) don't
+          // participate in branch_tags and their "orphans" are upstream deletions
+          // that require an API fetch to detect — future `scrybe reconcile` command.
+          if (source.source_config.type !== "code") continue;
           const lanceIds = await listChunkIds(project.id, source.table_name);
           const taggedIds = getAllChunkIdsForSource(project.id, source.source_id);
           const orphans = lanceIds.filter((id) => !taggedIds.has(id));

@@ -49,18 +49,23 @@ git pull
 npm install
 npm run build
 
-# 3. Reindex all projects (triggers migration automatically)
-scrybe index --all
-# or per-project:
+# 3. Reindex code sources (triggers migration automatically)
+# Only the `code` sources need reindexing — tickets and other non-code
+# sources are branch-agnostic and their existing chunks remain valid.
 scrybe index --project-id myrepo --source-ids primary --full
+# ...repeat per project for their code sources.
 ```
+
+**Non-code sources (GitLab issues, webpages, etc.) do NOT need reindexing.** From v0.14.1 onward they don't participate in `branch_tags` at all — they're branch-agnostic and their existing chunks continue to work as-is.
 
 After reindexing, run GC to remove any orphans left over from the old path-addressed format:
 
 ```bash
-scrybe gc --dry-run   # see what would be deleted
+scrybe gc --dry-run   # see what would be deleted (code sources only)
 scrybe gc             # delete orphans
 ```
+
+`scrybe gc` only operates on code sources. Non-code sources are skipped because their notion of "orphan" (an upstream resource was deleted) can't be detected from local state alone. A future `scrybe reconcile` command will cover that case.
 
 ---
 
