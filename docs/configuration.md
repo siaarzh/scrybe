@@ -40,9 +40,10 @@ Used for `ticket` and other knowledge sources. Falls back to the code embedding 
 
 ## Indexing behaviour
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SCRYBE_SCAN_CONCURRENCY` | `32` | Parallel file hash workers during the scan phase. Increase on fast SSDs, decrease if hitting file-handle limits. |
+| Variable                       | Default | Description                                                                                                                                                          |
+|--------------------------------|---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `SCRYBE_SCAN_CONCURRENCY`      | `32`    | Parallel file hash workers during the scan phase. Increase on fast SSDs, decrease if hitting file-handle limits.                                                     |
+| `SCRYBE_EMBED_RETRY_DELAY_MS`  | `5000`  | Initial retry delay (ms) when the embedding API returns a 429. Doubles on each subsequent attempt (up to 5 total). Set to a lower value in test environments.        |
 
 ### `.scrybeignore`
 

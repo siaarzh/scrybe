@@ -276,3 +276,7 @@ If you hit rate limits during indexing, tune `EMBED_BATCH_SIZE` and `EMBED_BATCH
 
 - **HTML / CSS / SCSS** use sliding-window chunking. Tree-sitter grammars exist for them but these languages have no function/class declarations, so chunk boundaries are arbitrary rather than semantic. Particularly noticeable for large single-page static sites.
 - **Kotlin, PHP, Swift** fall back to sliding-window. Tree-sitter grammar packages exist but aren't wired up yet (easy to add when needed).
+
+## Contributing
+
+See [docs/contributing.md](docs/contributing.md) for how to run tests locally and add new tests.

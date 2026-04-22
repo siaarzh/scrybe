@@ -9,6 +9,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.13.1] — 2026-04-22
+
+### Added
+
+- **Test infrastructure** — `npm test` runs the full pipeline offline using a local WASM embedder sidecar (`@xenova/transformers`, `Xenova/all-MiniLM-L6-v2`, 384-dim). No API keys or network required. Covers: registry → chunker → embedder HTTP → LanceDB upsert → FTS → hybrid search → result shape. Includes smoke test, dimension-mismatch detection test, and retry/backoff test.
+- **`SCRYBE_EMBED_RETRY_DELAY_MS` env var** — overrides the initial 5 s retry delay in the embedder. Primarily for tests; useful in production environments that want faster or slower backoff.
+- **`resetEmbedderClientCache()` export** from `src/embedder.ts` — purges the internal OpenAI client cache; used by the test harness.
+- **GitHub Actions CI** (`.github/workflows/test.yml`) — runs on ubuntu-latest, Node 20, caches the HuggingFace model between runs.
+- **`docs/contributing.md`** — documents test setup, sidecar architecture, per-test isolation rationale, cross-stub contracts, and example test patterns.
+
+---
+
 ## [0.13.0] — 2026-04-15
 
 ### Added
@@ -323,7 +335,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/siaarzh/scrybe/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/siaarzh/scrybe/compare/v0.12.1...v0.13.0
 [0.12.1]: https://github.com/siaarzh/scrybe/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/siaarzh/scrybe/compare/v0.11.1...v0.12.0

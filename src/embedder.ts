@@ -59,7 +59,7 @@ async function embedTextsOnce(texts: string[], embConfig: EmbeddingConfig): Prom
 
 async function embedTexts(texts: string[], embConfig: EmbeddingConfig): Promise<number[][]> {
   if (texts.length === 0) return [];
-  let delay = 5_000;
+  let delay = parseInt(process.env["SCRYBE_EMBED_RETRY_DELAY_MS"] ?? "5000", 10);
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       return await embedTextsOnce(texts, embConfig);
@@ -104,4 +104,8 @@ export async function embedBatched(
 export async function embedQuery(query: string, embConfig: EmbeddingConfig): Promise<number[]> {
   const [embedding] = await embedTexts([query], embConfig);
   return embedding;
+}
+
+export function resetEmbedderClientCache(): void {
+  _clients.clear();
 }

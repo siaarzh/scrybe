@@ -1,6 +1,6 @@
 {
   "name": "scrybe",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",
   "license": "MIT",
@@ -12,13 +12,25 @@
   "bugs": {
     "url": "https://github.com/siaarzh/scrybe/issues"
   },
-  "keywords": ["code-search", "semantic-search", "mcp", "rag", "lancedb", "embeddings", "ast", "tree-sitter", "claude"],
+  "keywords": [
+    "code-search",
+    "semantic-search",
+    "mcp",
+    "rag",
+    "lancedb",
+    "embeddings",
+    "ast",
+    "tree-sitter",
+    "claude"
+  ],
   "type": "module",
   "bin": {
     "scrybe": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
   "files": [
@@ -26,28 +38,31 @@
   ],
   "dependencies": {
     "@lancedb/lancedb": "^0.14.0",
-    "apache-arrow": "^17.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "openai": "^4.0.0",
+    "apache-arrow": "^17.0.0",
     "commander": "^12.0.0",
     "ignore": "^5.0.0",
-    "zod": "^3.0.0",
+    "openai": "^4.0.0",
     "tree-sitter": "^0.21.0",
-    "tree-sitter-typescript": "^0.21.0",
+    "tree-sitter-c": "^0.21.0",
+    "tree-sitter-c-sharp": "^0.21.0",
+    "tree-sitter-cpp": "^0.21.0",
+    "tree-sitter-go": "^0.21.0",
+    "tree-sitter-java": "^0.21.0",
     "tree-sitter-javascript": "^0.21.0",
     "tree-sitter-python": "^0.21.0",
-    "tree-sitter-c-sharp": "^0.21.0",
-    "tree-sitter-go": "^0.21.0",
-    "tree-sitter-rust": "^0.21.0",
-    "tree-sitter-java": "^0.21.0",
     "tree-sitter-ruby": "^0.21.0",
-    "tree-sitter-c": "^0.21.0",
-    "tree-sitter-cpp": "^0.21.0"
+    "tree-sitter-rust": "^0.21.0",
+    "tree-sitter-typescript": "^0.21.0",
+    "zod": "^3.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.0.0",
     "@types/node": "^22.0.0",
-    "tree-sitter-cli": "^0.21.0"
+    "@xenova/transformers": "^2.17.2",
+    "tree-sitter-cli": "^0.21.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.5"
   },
   "engines": {
     "node": ">=20.0.0"
