@@ -70,6 +70,35 @@ export function ensureMultiBranchFixture(name: string): void {
 }
 
 /**
+ * Clones an arbitrary local git repo into a fresh tmpdir.
+ * Useful for creating a "local" repo whose origin points to another temp clone.
+ * Returns a handle with the clone path and a cleanup function.
+ */
+export function cloneLocal(sourcePath: string): FixtureHandle {
+  const cloneDir = mkdtempSync(join(tmpdir(), "scrybe-local-"));
+  execSync(
+    `git clone --local --no-hardlinks "${sourcePath}" "${cloneDir}"`,
+    { stdio: "ignore" }
+  );
+  execSync("git config core.autocrlf false", { cwd: cloneDir, stdio: "ignore" });
+  execSync("git config user.email test@scrybe.local", { cwd: cloneDir, stdio: "ignore" });
+  execSync("git config user.name scrybe-test", { cwd: cloneDir, stdio: "ignore" });
+  execSync("git fetch --all", { cwd: cloneDir, stdio: "ignore" });
+  return {
+    path: cloneDir,
+    async cleanup() {
+      await new Promise((r) => setTimeout(r, 100));
+      try {
+        rmSync(cloneDir, { recursive: true, force: true });
+      } catch {
+        await new Promise((r) => setTimeout(r, 500));
+        try { rmSync(cloneDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    },
+  };
+}
+
+/**
  * Clones the named fixture into a fresh tmpdir.
  * Returns a handle with the clone path and a cleanup function.
  *

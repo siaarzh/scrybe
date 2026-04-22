@@ -450,7 +450,6 @@ export class CodePlugin implements SourcePlugin {
   }
 
   async *fetchChunks(project: Project, source: Source, changed: Set<string>): AsyncGenerator<AnyChunk> {
-    tryInitTreeSitter();
     const cfg = source.source_config as Extract<SourceConfig, { type: "code" }>;
     const sourceId = source.source_id;
 
@@ -465,40 +464,47 @@ export class CodePlugin implements SourcePlugin {
       }
 
       const lang = getLanguage(basename(absPath)) ?? "";
-      const chunks = this._chunkFile(project.id, sourceId, relPath, fileSource, lang);
-      yield* chunks;
+      yield* chunkFileContent(project.id, sourceId, relPath, fileSource, lang) as AnyChunk[];
     }
   }
+}
 
-  private _chunkFile(
-    projectId: string,
-    sourceId: string,
-    relPath: string,
-    source: string,
-    language: string
-  ): CodeChunk[] {
-    // Vue: extract <script> block, parse as TypeScript
-    if (language === "vue") {
-      const extracted = extractVueScript(source);
-      if (extracted) {
-        const parser = getParser("typescript");
-        if (parser) {
-          const chunks = astChunks(projectId, sourceId, relPath, extracted.code, "typescript", extracted.lineOffset, parser);
-          if (chunks.length > 0) return chunks;
-        }
-      }
-      return slidingWindowChunks(projectId, sourceId, relPath, source, language);
-    }
+// ─── Exported chunker — used by daemon for non-HEAD branch indexing ───────────
 
-    const langKey = LANGUAGE_TO_KEY[language];
-    if (langKey) {
-      const parser = getParser(language);
+/**
+ * Chunks file content into CodeChunk[].
+ * Exported so the daemon can chunk content read from git objects (via scanRef)
+ * rather than from the working tree.
+ */
+export function chunkFileContent(
+  projectId: string,
+  sourceId: string,
+  relPath: string,
+  source: string,
+  language: string
+): CodeChunk[] {
+  tryInitTreeSitter();
+  // Vue: extract <script> block, parse as TypeScript
+  if (language === "vue") {
+    const extracted = extractVueScript(source);
+    if (extracted) {
+      const parser = getParser("typescript");
       if (parser) {
-        const chunks = astChunks(projectId, sourceId, relPath, source, langKey, 0, parser);
+        const chunks = astChunks(projectId, sourceId, relPath, extracted.code, "typescript", extracted.lineOffset, parser);
         if (chunks.length > 0) return chunks;
       }
     }
-
     return slidingWindowChunks(projectId, sourceId, relPath, source, language);
   }
+
+  const langKey = LANGUAGE_TO_KEY[language];
+  if (langKey) {
+    const parser = getParser(language);
+    if (parser) {
+      const chunks = astChunks(projectId, sourceId, relPath, source, langKey, 0, parser);
+      if (chunks.length > 0) return chunks;
+    }
+  }
+
+  return slidingWindowChunks(projectId, sourceId, relPath, source, language);
 }

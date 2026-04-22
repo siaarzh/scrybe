@@ -17,9 +17,13 @@ import {
   upsertKnowledge,
   deleteKnowledgeProject,
 } from "./vector-store.js";
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { resolveBranch } from "./branches.js";
+import { resolveBranch, resolveBranchForPath } from "./branches.js";
+import { scanRef, chunkFileContent } from "./plugins/code.js";
+import { getLanguage } from "./chunker.js";
 import {
   addTags,
   getAllChunkIdsForSource,
@@ -71,17 +75,39 @@ export async function indexSource(
     ? (options.branch ?? resolveBranch(projectId, sourceId))
     : "*";
 
+  // For code sources, detect non-HEAD branch indexing: file content must come from
+  // git objects (via scanRef) rather than the working tree, which reflects HEAD only.
+  const rootPath = isCode
+    ? (source.source_config as { type: "code"; root_path: string }).root_path
+    : "";
+  const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
+  const nonHeadContentCache = new Map<string, string>();
+
   // --- Phase 1: Scan and diff ---
   checkAbort(signal);
 
   const oldHashes = mode === "full" ? {} : loadBranchHashes(projectId, sourceId, branch);
   if (mode === "full") deleteCursor(projectId, sourceId);
   const cursor = mode === "full" ? null : loadCursor(projectId, sourceId);
-  const currentSources = await plugin.scanSources(project, source, cursor);
+
+  let currentSources: Record<string, string>;
+  if (isNonHeadBranch) {
+    // Enumerate files from git objects; cache content for the chunk phase.
+    currentSources = {};
+    for await (const entry of scanRef(rootPath, branch)) {
+      const hash = createHash("sha256").update(entry.content).digest("hex");
+      currentSources[entry.relPath] = hash;
+      nonHeadContentCache.set(entry.relPath, entry.content);
+    }
+  } else {
+    currentSources = await plugin.scanSources(project, source, cursor);
+  }
 
   // When using a cursor, currentSources is a partial set (only recently changed).
   // Merge with oldHashes so the diff only picks up actual changes.
-  const merged = cursor ? { ...oldHashes, ...currentSources } : currentSources;
+  // Non-HEAD branches always enumerate all files — no cursor merging needed.
+  const effectiveCursor = isNonHeadBranch ? null : cursor;
+  const merged = effectiveCursor ? { ...oldHashes, ...currentSources } : currentSources;
 
   let filesScanned = 0;
   for (const _key of Object.keys(merged)) {
@@ -92,7 +118,7 @@ export async function indexSource(
 
   // With a cursor we can't detect deletions (they won't appear in the partial fetch).
   // Stale vectors are cleaned up on full reindex.
-  const toRemove = cursor
+  const toRemove = effectiveCursor
     ? new Set<string>()
     : new Set(Object.keys(oldHashes).filter((p) => !(p in currentSources)));
   const toReindex = new Set(
@@ -212,7 +238,11 @@ export async function indexSource(
 
   let currentKey: string | null = null;
 
-  for await (const chunk of plugin.fetchChunks(project, source, toReindex)) {
+  const chunkIter = isNonHeadBranch
+    ? fetchChunksFromRef(projectId, sourceId, toReindex, nonHeadContentCache)
+    : plugin.fetchChunks(project, source, toReindex);
+
+  for await (const chunk of chunkIter) {
     checkAbort(signal);
     const key = isCode
       ? (chunk as CodeChunk).file_path
@@ -237,7 +267,10 @@ export async function indexSource(
   // Update last_indexed timestamp (hashes already persisted per-key above)
   const now = new Date().toISOString();
   updateSource(projectId, sourceId, { last_indexed: now });
-  saveCursor(projectId, sourceId, now);
+  // Don't update the cursor for non-HEAD branches — the cursor tracks HEAD-based scan state
+  if (!isNonHeadBranch) {
+    saveCursor(projectId, sourceId, now);
+  }
 
   // Rebuild FTS index
   if (config.hybridEnabled) {
@@ -261,6 +294,20 @@ export async function indexSource(
     files_reindexed: toReindex.size,
     files_removed: toRemove.size,
   };
+}
+
+async function* fetchChunksFromRef(
+  projectId: string,
+  sourceId: string,
+  toReindex: Set<string>,
+  contentCache: Map<string, string>
+): AsyncGenerator<AnyChunk> {
+  for (const relPath of toReindex) {
+    const content = contentCache.get(relPath);
+    if (content == null) continue;
+    const lang = getLanguage(basename(relPath)) ?? "";
+    yield* chunkFileContent(projectId, sourceId, relPath, content, lang) as AnyChunk[];
+  }
 }
 
 /**

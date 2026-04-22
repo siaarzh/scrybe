@@ -596,16 +596,30 @@ export async function runCli(): Promise<void> {
 
   daemon
     .command("status")
-    .description("Show daemon status")
-    .action(async () => {
-      const { isDaemonRunning } = await import("./daemon/pidfile.js");
-      const { running, data } = await isDaemonRunning();
-      if (!running) {
+    .description("Show daemon status (--watch for live Ink dashboard)")
+    .option("--watch", "Live dashboard — polls /status every 2s and streams /events via SSE")
+    .action(async (opts: { watch?: boolean }) => {
+      if (opts.watch) {
+        // Lazy import — React/Ink only loaded when --watch is requested
+        const { renderStatusDashboard } = await import("./daemon/status-cli.js");
+        await renderStatusDashboard();
+        return;
+      }
+      const { readPidfile } = await import("./daemon/pidfile.js");
+      const pidData = readPidfile();
+      if (!pidData?.port) {
         console.log("Daemon is not running.");
         return;
       }
-      const uptimeSec = Math.floor((Date.now() - new Date(data!.startedAt).getTime()) / 1000);
-      console.log(JSON.stringify({ ...data, uptimeSec }, null, 2));
+      const { DaemonClient } = await import("./daemon/client.js");
+      const client = new DaemonClient({ port: pidData.port });
+      try {
+        const s = await client.status();
+        console.log(JSON.stringify(s, null, 2));
+      } catch (err: any) {
+        console.error(`Failed to reach daemon: ${err.message}`);
+        process.exit(1);
+      }
     });
 
   daemon
@@ -629,6 +643,91 @@ export async function runCli(): Promise<void> {
       }
       const { runDaemon } = await import("./daemon/main.js");
       await runDaemon();
+    });
+
+  daemon
+    .command("kick")
+    .description("Trigger an incremental reindex job in the running daemon")
+    .option("--project-id <id>", "Project to reindex (omit for all projects)")
+    .option("--source-id <id>", "Source to reindex (default: all sources)")
+    .option("--branch <branch>", "Branch to index (default: HEAD)")
+    .option("--mode <mode>", "Index mode: incremental | full", "incremental")
+    .action(async (opts: {
+      projectId?: string;
+      sourceId?: string;
+      branch?: string;
+      mode?: string;
+    }) => {
+      const { readPidfile } = await import("./daemon/pidfile.js");
+      const pidData = readPidfile();
+      if (!pidData || pidData.port <= 0) {
+        console.error("Daemon is not running (no pidfile or port not yet bound).");
+        process.exit(1);
+      }
+      const body: Record<string, string> = {};
+      if (opts.projectId) body["projectId"] = opts.projectId;
+      if (opts.sourceId) body["sourceId"] = opts.sourceId;
+      if (opts.branch) body["branch"] = opts.branch;
+      if (opts.mode) body["mode"] = opts.mode;
+      try {
+        const res = await fetch(`http://127.0.0.1:${pidData.port}/kick`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          console.error(`Daemon returned ${res.status}: ${text}`);
+          process.exit(1);
+        }
+        const json = await res.json() as { jobs: unknown[] };
+        console.log(JSON.stringify(json, null, 2));
+      } catch (err: any) {
+        console.error(`Failed to reach daemon: ${err.message}`);
+        process.exit(1);
+      }
+    });
+
+  // ─── Hook commands ────────────────────────────────────────────────────────
+
+  const hook = program
+    .command("hook")
+    .description("Manage git hooks that notify the daemon on commit/checkout/merge");
+
+  hook
+    .command("install")
+    .description("Install scrybe daemon kick hooks in a git repo")
+    .requiredOption("--project-id <id>", "Project identifier (passed to daemon kick)")
+    .option("--repo <path>", "Path to the git repo root (default: current directory)", process.cwd())
+    .action(async (opts: { projectId: string; repo: string }) => {
+      const { installHooks } = await import("./daemon/hooks.js");
+      const mainJsPath = process.argv[1]!;
+      const result = installHooks(opts.repo, mainJsPath, opts.projectId);
+      if (result.installed.length > 0) {
+        console.log(`Installed hooks: ${result.installed.join(", ")}`);
+      }
+      if (result.skipped.length > 0) {
+        console.log(`Already installed (skipped): ${result.skipped.join(", ")}`);
+      }
+      if (result.installed.length === 0 && result.skipped.length === 0) {
+        console.log("No hooks installed.");
+      }
+    });
+
+  hook
+    .command("uninstall")
+    .description("Remove scrybe daemon kick hooks from a git repo")
+    .option("--repo <path>", "Path to the git repo root (default: current directory)", process.cwd())
+    .action(async (opts: { repo: string }) => {
+      const { uninstallHooks } = await import("./daemon/hooks.js");
+      const result = uninstallHooks(opts.repo);
+      if (result.removed.length > 0) {
+        console.log(`Removed scrybe block from: ${result.removed.join(", ")}`);
+      }
+      if (result.notFound.length > 0) {
+        console.log(`No scrybe block found in: ${result.notFound.join(", ")}`);
+      }
     });
 
   // ─── Pin commands ──────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./ht
 import { initQueue, enqueue, stopQueue } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
+import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
 import { onStateChange } from "./idle-state.js";
 import { listProjects } from "../registry.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
@@ -20,6 +21,7 @@ async function shutdown(signal: string): Promise<void> {
   await stopHttpServer();
   await stopWatcher();
   await stopGitWatcher();
+  stopFetchPoller();
   stopQueue();
   cancelAllJobs();
   closeBranchTagsDB();
@@ -74,14 +76,15 @@ export async function runDaemon(): Promise<void> {
   // Wire queue → SSE ring buffer (must happen after startHttpServer exports pushEvent)
   initQueue({ pushEvent });
 
-  // Wire FS + git watchers → SSE + queue
+  // Wire FS + git watchers + fetch poller → SSE + queue
   initWatcher({ pushEvent });
   initGitWatcher({ pushEvent });
+  initFetchPoller({ pushEvent });
 
   // Mirror idle-state HOT/COLD transitions to HTTP /status
   onStateChange((s) => setDaemonState(s));
 
-  // Start per-project FS + git watchers (code sources only)
+  // Start per-project FS + git watchers + fetch pollers (code sources only)
   const projects = listProjects();
   for (const project of projects) {
     for (const source of project.sources) {
@@ -93,6 +96,7 @@ export async function runDaemon(): Promise<void> {
       }
     }
   }
+  startFetchPoller(projects);
 
   writePidfile({
     pid: process.pid,
