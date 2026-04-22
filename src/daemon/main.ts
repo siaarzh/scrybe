@@ -3,8 +3,10 @@ import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
-import { startHttpServer, stopHttpServer, pushEvent } from "./http-server.js";
+import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
 import { initQueue, enqueue, stopQueue } from "./queue.js";
+import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
+import { onStateChange } from "./idle-state.js";
 import { listProjects } from "../registry.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
@@ -15,6 +17,7 @@ async function shutdown(signal: string): Promise<void> {
   shutdownCalled = true;
   process.stderr.write(`[scrybe daemon] ${signal} — shutting down\n`);
   await stopHttpServer();
+  await stopWatcher();
   stopQueue();
   cancelAllJobs();
   closeBranchTagsDB();
@@ -52,7 +55,8 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
  * Phase 1: pidfile management + signal handlers.
  * Phase 2: HTTP server — port written to pidfile so clients can discover it.
  * Phase 3: Job queue with concurrency limiter + JSONL durable log.
- * Phase 4+: FS watcher, git watcher, fetch poller.
+ * Phase 4: FS watcher per project + HOT/COLD idle state machine.
+ * Phase 5+: Git ref watcher, fetch poller.
  */
 export async function runDaemon(): Promise<void> {
   checkAndMigrate();
@@ -67,6 +71,24 @@ export async function runDaemon(): Promise<void> {
 
   // Wire queue → SSE ring buffer (must happen after startHttpServer exports pushEvent)
   initQueue({ pushEvent });
+
+  // Wire FS watcher → SSE + queue
+  initWatcher({ pushEvent });
+
+  // Mirror idle-state HOT/COLD transitions to HTTP /status
+  onStateChange((s) => setDaemonState(s));
+
+  // Start per-project FS watchers (code sources only)
+  const projects = listProjects();
+  for (const project of projects) {
+    for (const source of project.sources) {
+      if (source.source_config.type === "code") {
+        const rootPath = (source.source_config as { type: "code"; root_path: string }).root_path;
+        await watchProject(project.id, rootPath);
+        break; // one code source per project for now; Phase 5 extends to multi-source
+      }
+    }
+  }
 
   writePidfile({
     pid: process.pid,
