@@ -1,5 +1,5 @@
 {
-  "name": "scrybe",
+  "name": "scrybe-cli",
   "version": "0.15.0",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",

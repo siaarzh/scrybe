@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Changed
+
+- npm package renamed from `scrybe` to `scrybe-cli` (brand and binary name `scrybe` unchanged). The `scrybe` package name on npm is owned by an unrelated documentation tool; `scrybe-cli` avoids the conflict while keeping the product identity intact.
+
 ---
 
 ## [0.15.0] — 2026-04-22
