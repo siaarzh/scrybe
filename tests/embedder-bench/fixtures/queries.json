@@ -1,0 +1,72 @@
+[
+  {
+    "id": "en-001",
+    "query": "how to validate JWT authentication token",
+    "lang": "en",
+    "cross_lingual": false,
+    "relevant_chunk_ids": ["ts-auth-001", "cs-token-001", "ts-auth-ru-001"]
+  },
+  {
+    "id": "en-002",
+    "query": "database connection pool configuration",
+    "lang": "en",
+    "cross_lingual": false,
+    "relevant_chunk_ids": ["ts-pool-001", "cs-db-001"]
+  },
+  {
+    "id": "en-003",
+    "query": "async file system watcher for code changes",
+    "lang": "en",
+    "cross_lingual": false,
+    "relevant_chunk_ids": ["ts-watcher-001", "ts-watcher-zh-001"]
+  },
+  {
+    "id": "en-004",
+    "query": "vector embedding cosine similarity search",
+    "lang": "en",
+    "cross_lingual": false,
+    "relevant_chunk_ids": ["ts-vector-001", "ts-search-ru-001"]
+  },
+  {
+    "id": "en-005",
+    "query": "error handling middleware JSON response",
+    "lang": "en",
+    "cross_lingual": false,
+    "relevant_chunk_ids": ["ts-error-001", "ts-error-ru-001"]
+  },
+  {
+    "id": "ru-001",
+    "query": "проверка JWT токена авторизации пользователя",
+    "lang": "ru",
+    "cross_lingual": true,
+    "relevant_chunk_ids": ["ts-auth-001", "ts-auth-ru-001", "cs-token-001"]
+  },
+  {
+    "id": "ru-002",
+    "query": "поиск похожих векторов в базе данных",
+    "lang": "ru",
+    "cross_lingual": true,
+    "relevant_chunk_ids": ["ts-vector-001", "ts-search-ru-001"]
+  },
+  {
+    "id": "ru-003",
+    "query": "обработка ошибок в веб-приложении",
+    "lang": "ru",
+    "cross_lingual": true,
+    "relevant_chunk_ids": ["ts-error-001", "ts-error-ru-001"]
+  },
+  {
+    "id": "zh-001",
+    "query": "数据库连接池配置",
+    "lang": "zh",
+    "cross_lingual": true,
+    "relevant_chunk_ids": ["ts-pool-001", "cs-db-001"]
+  },
+  {
+    "id": "zh-002",
+    "query": "异步文件系统监听器触发重新索引",
+    "lang": "zh",
+    "cross_lingual": true,
+    "relevant_chunk_ids": ["ts-watcher-001", "ts-watcher-zh-001"]
+  }
+]

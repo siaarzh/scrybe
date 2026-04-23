@@ -1,0 +1,152 @@
+[
+  {
+    "id": "ts-auth-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "authentication", "jwt", "token", "english-code"],
+    "content": "// Validates a JWT bearer token and returns the decoded payload.\n// Throws AuthError if the token is expired or has an invalid signature.\nexport async function validateBearerToken(token: string): Promise<TokenPayload> {\n  const [header, payload, signature] = token.split('.');\n  if (!header || !payload || !signature) {\n    throw new AuthError('Invalid token format: expected 3 segments');\n  }\n  const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));\n  if (decoded.exp < Math.floor(Date.now() / 1000)) {\n    throw new AuthError('Token has expired');\n  }\n  await verifySignature(header, payload, signature);\n  return decoded as TokenPayload;\n}"
+  },
+  {
+    "id": "ts-pool-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "database", "connection-pool", "english-code"],
+    "content": "// Creates a database connection pool with configured min/max connections.\n// Uses exponential backoff for initial connection failures.\nexport function createConnectionPool(config: PoolConfig): Pool {\n  return new Pool({\n    host: config.host,\n    port: config.port,\n    database: config.database,\n    user: config.user,\n    password: config.password,\n    min: config.minConnections ?? 2,\n    max: config.maxConnections ?? 10,\n    idleTimeoutMillis: 30000,\n    connectionTimeoutMillis: 5000,\n  });\n}"
+  },
+  {
+    "id": "ts-watcher-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "file-system", "watcher", "async", "english-code"],
+    "content": "// Starts a file system watcher on the given root directory.\n// Emits change events for modified files, debounced by 300ms.\nexport function createFsWatcher(root: string, onChange: (path: string) => void): Disposable {\n  const watcher = watch(root, { recursive: true });\n  let debounceTimer: ReturnType<typeof setTimeout> | null = null;\n  watcher.on('change', (event, filename) => {\n    if (!filename) return;\n    if (debounceTimer) clearTimeout(debounceTimer);\n    debounceTimer = setTimeout(() => onChange(join(root, String(filename))), 300);\n  });\n  return { dispose: () => watcher.close() };\n}"
+  },
+  {
+    "id": "ts-vector-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "vector-search", "cosine-similarity", "lancedb", "english-code"],
+    "content": "// Performs cosine similarity search against the LanceDB vector table.\n// Returns top-k results sorted by descending similarity score.\nexport async function vectorSearch(\n  table: Table,\n  queryVector: number[],\n  limit: number,\n  filter?: string\n): Promise<SearchResult[]> {\n  let query = table.vectorSearch(queryVector).limit(limit);\n  if (filter) query = query.where(filter);\n  const rows = await query.toArray();\n  return rows.map(row => ({\n    chunk_id: row.chunk_id as string,\n    score: row._distance as number,\n    content: row.content as string,\n    file_path: row.file_path as string,\n    start_line: row.start_line as number,\n    end_line: row.end_line as number,\n  }));\n}"
+  },
+  {
+    "id": "ts-error-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "error-handling", "middleware", "express", "english-code"],
+    "content": "// Express error handling middleware — catches all unhandled errors.\n// Formats them into a consistent JSON error response with the correct HTTP status.\nexport function errorMiddleware(\n  err: Error,\n  req: Request,\n  res: Response,\n  next: NextFunction\n): void {\n  const status = (err as HttpError).status ?? 500;\n  const message = status >= 500 ? 'Internal server error' : err.message;\n  console.error(`[error] ${req.method} ${req.path}: ${err.message}`);\n  res.status(status).json({ error: message, code: (err as HttpError).code ?? 'unknown' });\n}"
+  },
+  {
+    "id": "ts-config-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "configuration", "environment-variables", "english-code"],
+    "content": "// Loads application configuration from environment variables with validation.\n// Throws ConfigError if required fields are missing or malformed.\nexport function loadConfig(): AppConfig {\n  const port = parseInt(process.env.PORT ?? '3000', 10);\n  const databaseUrl = process.env.DATABASE_URL;\n  if (!databaseUrl) throw new ConfigError('DATABASE_URL is required');\n  const jwtSecret = process.env.JWT_SECRET;\n  if (!jwtSecret) throw new ConfigError('JWT_SECRET is required');\n  const maxConnections = parseInt(process.env.DB_MAX_CONNECTIONS ?? '10', 10);\n  return { port, databaseUrl, jwtSecret, maxConnections, nodeEnv: process.env.NODE_ENV ?? 'development' };\n}"
+  },
+  {
+    "id": "ts-batch-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "embeddings", "batch-processing", "api", "english-code"],
+    "content": "// Sends texts to the embedding API in batches, respecting rate limits.\n// Retries failed batches with exponential backoff (max 5 attempts).\nexport async function embedBatched(\n  texts: string[],\n  config: EmbeddingConfig,\n  batchSize = 100\n): Promise<number[][]> {\n  const results: number[][] = [];\n  for (let i = 0; i < texts.length; i += batchSize) {\n    const batch = texts.slice(i, i + batchSize);\n    const embeddings = await embedWithRetry(batch, config);\n    results.push(...embeddings);\n    if (i + batchSize < texts.length) {\n      await new Promise(r => setTimeout(r, config.batchDelayMs ?? 0));\n    }\n  }\n  return results;\n}"
+  },
+  {
+    "id": "ts-hash-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "hashing", "incremental-scan", "file-tracking", "english-code"],
+    "content": "// Scans a directory for changed files using SHA-256 content hashes.\n// Returns only files whose hash differs from the previously stored value.\nexport async function scanForChanges(\n  root: string,\n  storedHashes: Map<string, string>\n): Promise<ChangedFile[]> {\n  const changed: ChangedFile[] = [];\n  for await (const filePath of walkFiles(root)) {\n    const content = await fs.readFile(filePath, 'utf8');\n    const hash = createHash('sha256').update(content).digest('hex');\n    const relative = path.relative(root, filePath).replace(/\\\\/g, '/');\n    if (storedHashes.get(relative) !== hash) {\n      changed.push({ path: relative, hash, content });\n    }\n  }\n  return changed;\n}"
+  },
+  {
+    "id": "ts-job-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "job-queue", "async", "cancellation", "english-code"],
+    "content": "// In-memory background job queue with AbortController cancellation support.\n// Each job runs asynchronously and can be individually cancelled by job ID.\nexport class JobQueue {\n  private readonly jobs = new Map<string, JobState>();\n\n  async enqueue(\n    projectId: string,\n    fn: (signal: AbortSignal) => Promise<void>\n  ): Promise<string> {\n    const jobId = crypto.randomUUID();\n    const controller = new AbortController();\n    const state: JobState = { jobId, projectId, status: 'running', controller };\n    this.jobs.set(jobId, state);\n    fn(controller.signal)\n      .then(() => { state.status = 'done'; })\n      .catch(err => { state.status = 'failed'; state.error = String(err); });\n    return jobId;\n  }\n\n  cancel(jobId: string): boolean {\n    const job = this.jobs.get(jobId);\n    if (!job) return false;\n    job.controller.abort();\n    job.status = 'cancelled';\n    return true;\n  }\n}"
+  },
+  {
+    "id": "ts-mcp-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "mcp", "tool-handler", "search", "english-code"],
+    "content": "// Handles the search_code MCP tool call.\n// Returns formatted search results or a structured error on failure.\nexport async function handleSearchCode(\n  args: { project_id: string; query: string; limit?: number; branch?: string }\n): Promise<McpResult> {\n  const project = registry.getProject(args.project_id);\n  if (!project) {\n    return mcpError('project_not_found', `Project '${args.project_id}' not found in registry`);\n  }\n  const results = await searchCode(project, args.query, args.limit ?? 10, args.branch);\n  if (results.length === 0) {\n    return mcpError('no_results', `No chunks found for query in project '${args.project_id}'`);\n  }\n  return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };\n}"
+  },
+  {
+    "id": "ts-plugin-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "plugin", "registry", "source-type", "english-code"],
+    "content": "// Registry of source plugins, keyed by the source type string.\n// Plugins define how to chunk and incrementally index a particular data source.\nconst PLUGINS: Record<string, SourcePlugin> = {};\n\nexport function registerPlugin(type: string, plugin: SourcePlugin): void {\n  if (PLUGINS[type]) throw new Error(`Plugin already registered for type: ${type}`);\n  PLUGINS[type] = plugin;\n}\n\nexport function getPlugin(type: string): SourcePlugin {\n  const plugin = PLUGINS[type];\n  if (!plugin) throw new Error(`No plugin registered for source type: ${type}`);\n  return plugin;\n}\n\nexport function listPluginTypes(): string[] {\n  return Object.keys(PLUGINS);\n}"
+  },
+  {
+    "id": "ts-ast-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "ast", "tree-sitter", "code-parser", "english-code"],
+    "content": "// Walks the Tree-sitter AST to extract named top-level declarations.\n// Returns function, class, and method nodes with their source ranges.\nexport function extractDeclarations(tree: Tree, source: string): Declaration[] {\n  const declarations: Declaration[] = [];\n  const cursor = tree.walk();\n  function walk(): void {\n    const node = cursor.currentNode;\n    if (isDeclarationNode(node.type)) {\n      declarations.push({\n        type: node.type,\n        name: findNodeName(node) ?? '(anonymous)',\n        startLine: node.startPosition.row + 1,\n        endLine: node.endPosition.row + 1,\n        text: source.slice(node.startIndex, node.endIndex),\n      });\n    }\n    if (cursor.gotoFirstChild()) { walk(); cursor.gotoParent(); }\n    if (cursor.gotoNextSibling()) walk();\n  }\n  walk();\n  return declarations;\n}"
+  },
+  {
+    "id": "ts-branch-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "git", "branch", "detection", "english-code"],
+    "content": "// Resolves the current Git branch name for the given repository root.\n// Returns '*' for non-code sources that do not track branches.\nexport function resolveBranch(root: string, sourceType: string): string {\n  if (sourceType !== 'code') return '*';\n  try {\n    const branch = execSync('git rev-parse --abbrev-ref HEAD', {\n      cwd: root,\n      encoding: 'utf8',\n      stdio: ['ignore', 'pipe', 'ignore'],\n    }).trim();\n    return branch || 'HEAD';\n  } catch {\n    return 'HEAD';\n  }\n}"
+  },
+  {
+    "id": "ts-retry-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "http", "retry", "backoff", "english-code"],
+    "content": "// Executes a fetch with exponential backoff on 429 and 5xx responses.\n// Gives up after maxAttempts attempts and re-throws the final error.\nexport async function fetchWithRetry(\n  url: string,\n  options: RequestInit,\n  maxAttempts = 5\n): Promise<Response> {\n  let delay = 1000;\n  for (let attempt = 0; attempt < maxAttempts; attempt++) {\n    const res = await fetch(url, options);\n    if (res.ok) return res;\n    if ((res.status === 429 || res.status >= 500) && attempt < maxAttempts - 1) {\n      await new Promise(r => setTimeout(r, delay));\n      delay = Math.min(delay * 2, 30000);\n      continue;\n    }\n    throw new Error(`HTTP ${res.status}: ${await res.text()}`);\n  }\n  throw new Error('fetchWithRetry: exhausted all attempts');\n}"
+  },
+  {
+    "id": "ts-gitlab-001",
+    "primary_lang": "en",
+    "tags": ["typescript", "gitlab", "api", "pagination", "cursor", "english-code"],
+    "content": "// Fetches GitLab issues updated after the given cursor timestamp.\n// Uses cursor-based pagination — yields pages until no more issues are returned.\nexport async function* fetchIssuesSince(\n  baseUrl: string,\n  projectId: string,\n  token: string,\n  cursor?: string\n): AsyncGenerator<GitLabIssue[]> {\n  let updatedAfter = cursor;\n  while (true) {\n    const params = new URLSearchParams({ state: 'all', per_page: '100' });\n    if (updatedAfter) params.set('updated_after', updatedAfter);\n    const res = await fetch(`${baseUrl}/api/v4/projects/${projectId}/issues?${params}`, {\n      headers: { 'PRIVATE-TOKEN': token },\n    });\n    if (!res.ok) throw new Error(`GitLab API ${res.status}: ${await res.text()}`);\n    const issues: GitLabIssue[] = await res.json();\n    if (issues.length === 0) break;\n    yield issues;\n    updatedAfter = issues[issues.length - 1].updated_at;\n  }\n}"
+  },
+  {
+    "id": "cs-db-001",
+    "primary_lang": "en",
+    "tags": ["csharp", "database", "connection-pool", "npgsql", "english-code"],
+    "content": "// Creates a PostgreSQL connection pool with connection recycling.\n// MinPoolSize=2, MaxPoolSize=20, connection lifetime 300 seconds.\npublic class DatabaseConnectionPool\n{\n    private readonly string _connectionString;\n\n    public DatabaseConnectionPool(string connectionString)\n    {\n        _connectionString = connectionString +\n            \";Minimum Pool Size=2;Maximum Pool Size=20;Connection Lifetime=300\";\n    }\n\n    public async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken ct = default)\n    {\n        var conn = new NpgsqlConnection(_connectionString);\n        await conn.OpenAsync(ct);\n        return conn;\n    }\n}"
+  },
+  {
+    "id": "cs-cache-001",
+    "primary_lang": "en",
+    "tags": ["csharp", "cache", "redis", "invalidation", "english-code"],
+    "content": "// Invalidates distributed cache entries associated with the given tag.\n// Fetches the list of affected keys, removes them all, then removes the tag index.\npublic async Task InvalidateByTagAsync(string tag, CancellationToken ct = default)\n{\n    var keys = await _cache.GetAsync<List<string>>($\"tag:{tag}\", ct);\n    if (keys == null || keys.Count == 0) return;\n    var removeTasks = keys.Select(key => _cache.RemoveAsync(key, ct));\n    await Task.WhenAll(removeTasks);\n    await _cache.RemoveAsync($\"tag:{tag}\", ct);\n    _logger.LogInformation(\n        \"Cache invalidated for tag {Tag}: {Count} entries removed\", tag, keys.Count);\n}"
+  },
+  {
+    "id": "cs-migration-001",
+    "primary_lang": "en",
+    "tags": ["csharp", "database", "migration", "entity-framework", "english-code"],
+    "content": "// Runs pending database schema migrations in version order.\n// Each migration executes inside its own transaction; already-applied ones are skipped.\npublic async Task MigrateAsync(IDbConnection connection, CancellationToken ct = default)\n{\n    var applied = await GetAppliedMigrationsAsync(connection, ct);\n    var pending = _migrations\n        .Where(m => !applied.Contains(m.Name))\n        .OrderBy(m => m.Version);\n    foreach (var migration in pending)\n    {\n        using var tx = connection.BeginTransaction();\n        await migration.ApplyAsync(connection, ct);\n        await RecordMigrationAsync(connection, migration.Name, ct);\n        tx.Commit();\n        _logger.LogInformation(\"Applied migration: {Name}\", migration.Name);\n    }\n}"
+  },
+  {
+    "id": "cs-token-001",
+    "primary_lang": "en",
+    "tags": ["csharp", "authentication", "jwt", "token-refresh", "english-code"],
+    "content": "// Refreshes an expired access token using the stored refresh token.\n// Updates the token store on success; throws TokenExpiredException if refresh is also expired.\npublic async Task<TokenPair> RefreshAccessTokenAsync(\n    string refreshToken, CancellationToken ct = default)\n{\n    var payload = _jwtService.DecodeToken(refreshToken);\n    if (payload.ExpiresAt < DateTimeOffset.UtcNow)\n        throw new TokenExpiredException(\"Refresh token has expired. Please log in again.\");\n    var user = await _userRepository.FindByIdAsync(payload.UserId, ct);\n    var newAccess = _jwtService.GenerateAccessToken(user);\n    var newRefresh = _jwtService.GenerateRefreshToken(user);\n    await _tokenStore.ReplaceAsync(refreshToken, newRefresh, ct);\n    return new TokenPair(newAccess, newRefresh);\n}"
+  },
+  {
+    "id": "cs-search-001",
+    "primary_lang": "en",
+    "tags": ["csharp", "full-text-search", "postgresql", "query-builder", "english-code"],
+    "content": "// Builds a PostgreSQL full-text search query with weighted columns.\n// Title column has weight A (highest), body has weight B.\npublic string BuildFtsQuery(string searchTerm, string lang = \"german\")\n{\n    var sanitized = Regex.Replace(searchTerm, @\"[^\\w\\s]\", \" \").Trim();\n    var parts = sanitized.Split(' ', StringSplitOptions.RemoveEmptyEntries);\n    var tsQuery = string.Join(\" & \", parts.Select(p => $\"{p}:*\"));\n    return $\"\"\"\n        SELECT id, title, ts_rank_cd(search_vector, query) AS rank\n        FROM posts, to_tsquery('{lang}', '{tsQuery}') query\n        WHERE search_vector @@ query\n        ORDER BY rank DESC\n        LIMIT 50\n        \"\"\";\n}"
+  },
+  {
+    "id": "ts-auth-ru-001",
+    "primary_lang": "ru",
+    "tags": ["typescript", "authentication", "jwt", "russian-docstring"],
+    "content": "/**\n * Проверяет токен авторизации пользователя.\n * Возвращает данные пользователя или выбрасывает исключение при невалидном токене.\n * @param token - JWT токен из заголовка Authorization: Bearer <token>\n */\nexport async function verifyUserToken(token: string): Promise<User> {\n  const payload = await jwt.verify(token, process.env.JWT_SECRET!);\n  const user = await userRepository.findById(payload.sub);\n  if (!user || !user.isActive) {\n    throw new UnauthorizedError('User not found or inactive');\n  }\n  return user;\n}"
+  },
+  {
+    "id": "ts-search-ru-001",
+    "primary_lang": "ru",
+    "tags": ["typescript", "vector-search", "lancedb", "russian-comment"],
+    "content": "// Выполняет поиск по векторному индексу и возвращает топ-N релевантных результатов.\n// Фильтрация по project_id обязательна для изоляции данных между проектами.\nexport async function findSimilarChunks(\n  queryEmbedding: number[],\n  projectId: string,\n  limit = 10\n): Promise<CodeChunk[]> {\n  // Косинусное сходство встроено в LanceDB — никаких внешних вычислений не нужно\n  const results = await vectorTable\n    .search(queryEmbedding)\n    .where(`project_id = '${projectId}'`)\n    .limit(limit)\n    .toArray();\n  return results.map(mapRowToChunk);\n}"
+  },
+  {
+    "id": "ts-error-ru-001",
+    "primary_lang": "ru",
+    "tags": ["typescript", "error-handling", "middleware", "russian-comment"],
+    "content": "// Обработчик ошибок для Express — перехватывает все необработанные исключения.\n// Форматирует ошибку в JSON-ответ с корректным HTTP-статусом.\nexport function handleError(err: AppError, req: Request, res: Response): void {\n  // Логируем только серверные ошибки (5xx), клиентские ошибки — только в debug-режиме\n  if (err.statusCode >= 500) {\n    logger.error({ err, path: req.path }, 'Внутренняя ошибка сервера');\n  } else {\n    logger.debug({ err, path: req.path }, 'Клиентская ошибка');\n  }\n  res.status(err.statusCode).json({\n    error: err.code,\n    message: err.isPublic ? err.message : 'Произошла ошибка. Попробуйте позже.',\n  });\n}"
+  },
+  {
+    "id": "ts-watcher-zh-001",
+    "primary_lang": "zh",
+    "tags": ["typescript", "file-system", "watcher", "chinese-comment"],
+    "content": "// 监听文件系统变化，当代码文件被修改时触发重新索引。\n// 使用防抖处理频繁的文件变更事件，避免过度触发索引任务。\nexport class FileSystemWatcher {\n  private watcher: FSWatcher | null = null;\n\n  start(root: string, onChange: (path: string) => void): void {\n    // 忽略隐藏文件和 node_modules 目录\n    this.watcher = watch(root, { recursive: true });\n    const debouncedChange = debounce(onChange, 300);\n    this.watcher.on('change', (event, filename) => {\n      if (filename) debouncedChange(join(root, String(filename)));\n    });\n  }\n\n  stop(): void {\n    this.watcher?.close();\n    this.watcher = null;\n  }\n}"
+  },
+  {
+    "id": "ts-embed-zh-001",
+    "primary_lang": "zh",
+    "tags": ["typescript", "embeddings", "batch-processing", "chinese-docstring"],
+    "content": "/**\n * 将文本批量转换为向量嵌入。\n * 自动处理 API 限速，使用指数退避重试策略。\n * @param texts - 待嵌入的文本列表\n * @param batchSize - 每次 API 调用的最大文本数量，默认 100\n */\nexport async function batchEmbed(texts: string[], batchSize = 100): Promise<number[][]> {\n  const vectors: number[][] = [];\n  for (let i = 0; i < texts.length; i += batchSize) {\n    const batch = texts.slice(i, i + batchSize);\n    const response = await embeddingClient.create({ model: config.model, input: batch });\n    vectors.push(...response.data.map(d => d.embedding));\n  }\n  return vectors;\n}"
+  }
+]
