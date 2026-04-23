@@ -1,0 +1,8 @@
+{
+  "name": "scrybe",
+  "description": "Semantic code and knowledge search for multi-repo setups. Works offline by default — no API key required. Guides Claude to call search_code instead of Grep for conceptual questions, and search_knowledge for ticket/issue context.",
+  "author": {
+    "name": "Serzhan Akhmetov",
+    "url": "https://github.com/siaarzh"
+  }
+}

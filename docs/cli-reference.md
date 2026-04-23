@@ -23,6 +23,8 @@ scrybe init --skip-index
 
 Config is written to `<DATA_DIR>/.env` and picked up automatically on subsequent runs. Local embedder: writes `SCRYBE_LOCAL_EMBEDDER` + `EMBEDDING_DIMENSIONS`. External provider: writes `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_API_KEY`.
 
+MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.json`), **Cursor** (`~/.cursor/mcp.json`), **Codex** (`~/.codex/config.toml`), **Cline** and **Roo Code** (VS Code globalStorage paths).
+
 ---
 
 ### `doctor`

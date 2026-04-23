@@ -155,3 +155,120 @@ describe("applyMcpMerge", () => {
     expect(existsSync(file.path)).toBe(true);
   });
 });
+
+// ─── Codex (TOML) ────────────────────────────────────────────────────────────
+
+describe("codex — TOML detection and read", () => {
+  it("detects ~/.codex/config.toml path", async () => {
+    const { detectMcpConfigs } = await load(tmp);
+    const codex = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    expect(codex.path).toContain("config.toml");
+    expect(codex.exists).toBe(false);
+  });
+
+  it("reads scrybe entry from TOML", async () => {
+    const { readScrybeEntry, detectMcpConfigs } = await load(tmp);
+    const codexDir = join(tmp, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      join(codexDir, "config.toml"),
+      `[other]\nfoo = "bar"\n\n[mcp_servers.scrybe]\ncommand = "npx"\nargs = ["-y", "scrybe-cli", "mcp"]\n`
+    );
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    const entry = readScrybeEntry(file);
+    expect(entry).toEqual({ command: "npx", args: ["-y", "scrybe-cli", "mcp"] });
+  });
+
+  it("returns null when [mcp_servers.scrybe] absent", async () => {
+    const { readScrybeEntry, detectMcpConfigs } = await load(tmp);
+    const codexDir = join(tmp, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(join(codexDir, "config.toml"), `[other]\nfoo = "bar"\n`);
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    expect(readScrybeEntry(file)).toBeNull();
+  });
+});
+
+describe("codex — applyMcpMerge TOML", () => {
+  it("writes new [mcp_servers.scrybe] block into empty file", async () => {
+    const { applyMcpMerge, computeDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const codexDir = join(tmp, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    const tomlPath = join(codexDir, "config.toml");
+    writeFileSync(tomlPath, "");
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    await applyMcpMerge(computeDiff(file, proposed));
+    const written = readFileSync(tomlPath, "utf8");
+    expect(written).toContain("[mcp_servers.scrybe]");
+    expect(written).toContain('command = "npx"');
+    expect(written).toContain('args = ["-y", "scrybe-cli", "mcp"]');
+  });
+
+  it("preserves other TOML tables when adding scrybe", async () => {
+    const { applyMcpMerge, computeDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const codexDir = join(tmp, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    const tomlPath = join(codexDir, "config.toml");
+    writeFileSync(tomlPath, `[mcp_servers.other]\ncommand = "other"\nargs = []\n`);
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    await applyMcpMerge(computeDiff(file, proposed));
+    const written = readFileSync(tomlPath, "utf8");
+    expect(written).toContain("[mcp_servers.other]");
+    expect(written).toContain("[mcp_servers.scrybe]");
+  });
+
+  it("replaces existing [mcp_servers.scrybe] block", async () => {
+    const { applyMcpMerge, computeDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const codexDir = join(tmp, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    const tomlPath = join(codexDir, "config.toml");
+    writeFileSync(tomlPath, `[mcp_servers.scrybe]\ncommand = "old"\nargs = []\n`);
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    await applyMcpMerge(computeDiff(file, proposed));
+    const written = readFileSync(tomlPath, "utf8");
+    expect(written).toContain('command = "npx"');
+    expect(written).not.toContain('command = "old"');
+  });
+
+  it("round-trips: read entry matches what was written", async () => {
+    const { applyMcpMerge, computeDiff, detectMcpConfigs, proposeScrybeEntry, readScrybeEntry } = await load(tmp);
+    const codexDir = join(tmp, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    await applyMcpMerge(computeDiff(file, proposed));
+    const read = readScrybeEntry({ ...file, exists: true });
+    expect(read).toEqual(proposed);
+  });
+});
+
+// ─── Cline + Roo Code (JSON via vsCodeGlobalStorageDir) ──────────────────────
+
+describe("cline + roo-code detection", () => {
+  it("detects cline and roo-code config paths under vscode-gs test dir", async () => {
+    const { detectMcpConfigs } = await load(tmp);
+    const results = detectMcpConfigs(tmp);
+    const cline = results.find((r) => r.type === "cline")!;
+    const roo = results.find((r) => r.type === "roo-code")!;
+    expect(cline.path).toContain("cline_mcp_settings.json");
+    expect(cline.path).toContain("saoudrizwan.claude-dev");
+    expect(roo.path).toContain("mcp_settings.json");
+    expect(roo.path).toContain("rooveterinaryinc.roo-cline");
+    expect(cline.exists).toBe(false);
+    expect(roo.exists).toBe(false);
+  });
+
+  it("reads and writes Cline entry exactly like claude-code (same JSON shape)", async () => {
+    const { applyMcpMerge, computeDiff, detectMcpConfigs, proposeScrybeEntry, readScrybeEntry } = await load(tmp);
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "cline")!;
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    await applyMcpMerge(computeDiff(file, proposed));
+    const written = JSON.parse(readFileSync(file.path, "utf8"));
+    expect(written.mcpServers?.scrybe).toEqual(proposed);
+    const read = readScrybeEntry({ ...file, exists: true });
+    expect(read).toEqual(proposed);
+  });
+});

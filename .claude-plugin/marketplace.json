@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "scrybe",
+  "description": "Semantic code + knowledge search for multi-repo codebases. Works offline by default (no API key). Replaces Grep with semantic search for conceptual questions. Multilingual: Russian/Chinese prompts find English code.",
+  "owner": {
+    "name": "Serzhan Akhmetov",
+    "url": "https://github.com/siaarzh"
+  },
+  "plugins": [
+    {
+      "name": "scrybe",
+      "description": "search_code over Grep for conceptual queries. /scrybe to reindex.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

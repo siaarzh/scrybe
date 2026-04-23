@@ -9,6 +9,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.18.0] — 2026-04-23
+
+### Added
+
+- **Claude Code plugin** — install via `/plugin install https://github.com/siaarzh/scrybe`. Ships `.claude-plugin/` manifest and `plugins/scrybe/skills/scrybe/SKILL.md`. The skill guides Claude to call `search_code` instead of `Grep` for conceptual questions, `search_knowledge` for ticket/issue context, and defines `/scrybe` slash command to trigger incremental reindex of the current repo.
+- **Codex MCP auto-registration** — `scrybe init` now detects `~/.codex/config.toml` and writes `[mcp_servers.scrybe]` TOML block. Preserves all other TOML tables. Minimal inline TOML reader/writer — no new dependency.
+- **Cline MCP auto-registration** — `scrybe init` detects VS Code's Cline extension config (`saoudrizwan.claude-dev` globalStorage) on Windows, macOS, and Linux, and writes a scrybe entry in JSON.
+- **Roo Code MCP auto-registration** — `scrybe init` detects Roo Code extension config (`rooveterinaryinc.roo-cline` globalStorage) and writes a scrybe entry in JSON.
+- **CI-based npm publish** — `.github/workflows/publish.yml` publishes to npm automatically on any `v*` tag push. Requires `NPM_TOKEN` secret set in GitHub repo settings (use an npm Automation token — bypasses 2FA by design).
+
+### Changed
+
+- `McpClientType` union expanded from `"claude-code" | "cursor"` to include `"codex" | "cline" | "roo-code"`. Fully backward-compatible — `detectMcpConfigs()` still detects claude-code and cursor first, new clients appended.
+- `scrybe init` MCP registration step automatically includes Codex, Cline, and Roo Code when their config files are present — no wizard changes needed.
+
+---
+
 ## [0.17.1] — 2026-04-23
 
 ### Fixed
@@ -437,7 +454,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/siaarzh/scrybe/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/siaarzh/scrybe/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/siaarzh/scrybe/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/siaarzh/scrybe/compare/v0.15.0...v0.16.0

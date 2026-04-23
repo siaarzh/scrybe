@@ -3,7 +3,7 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 import { randomBytes } from "crypto";
 
-export type McpClientType = "claude-code" | "cursor";
+export type McpClientType = "claude-code" | "cursor" | "codex" | "cline" | "roo-code";
 
 export interface McpConfigFile {
   type: McpClientType;
@@ -26,30 +26,50 @@ export interface McpEntryDiff {
   diff: string;
 }
 
+// ─── Path helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Returns the VS Code User globalStorage base dir.
+ * When `home` is provided (test mode), fakes it under `home/.vscode-gs/`.
+ */
+function vsCodeGlobalStorageDir(home?: string): string {
+  if (home) return join(home, ".vscode-gs");
+  const h = homedir();
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? join(h, "AppData", "Roaming");
+    return join(appData, "Code", "User", "globalStorage");
+  }
+  if (process.platform === "darwin") {
+    return join(h, "Library", "Application Support", "Code", "User", "globalStorage");
+  }
+  return join(process.env.XDG_CONFIG_HOME ?? join(h, ".config"), "Code", "User", "globalStorage");
+}
+
+// ─── Exports ──────────────────────────────────────────────────────────────────
+
 export function detectMcpConfigs(home?: string): McpConfigFile[] {
   const h = home ?? homedir();
+  const gsDir = vsCodeGlobalStorageDir(home);
   const candidates: { type: McpClientType; path: string }[] = [
     { type: "claude-code", path: join(h, ".claude.json") },
     { type: "cursor",      path: join(h, ".cursor", "mcp.json") },
+    { type: "codex",       path: join(h, ".codex", "config.toml") },
+    {
+      type: "cline",
+      path: join(gsDir, "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json"),
+    },
+    {
+      type: "roo-code",
+      path: join(gsDir, "rooveterinaryinc.roo-cline", "settings", "mcp_settings.json"),
+    },
   ];
   return candidates.map(({ type, path }) => ({ type, path, exists: existsSync(path) }));
 }
 
 export function readScrybeEntry(file: McpConfigFile): ScrybeMcpEntry | null {
   if (!file.exists) return null;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(file.path, "utf8"));
-  } catch {
-    return null;
-  }
-  const servers = (raw as any)?.mcpServers as Record<string, unknown> | undefined;
-  if (!servers || typeof servers !== "object") return null;
-  const entry = servers["scrybe"] as any;
-  if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) return null;
-  const result: ScrybeMcpEntry = { command: entry.command, args: entry.args };
-  if (entry.env && typeof entry.env === "object") result.env = entry.env;
-  return result;
+  if (file.type === "codex") return readTomlScrybeEntry(file.path);
+  return readJsonScrybeEntry(file.path);
 }
 
 export function proposeScrybeEntry(opts: { binResolution: "npx" | "local"; localPath?: string }): ScrybeMcpEntry {
@@ -62,18 +82,26 @@ export function proposeScrybeEntry(opts: { binResolution: "npx" | "local"; local
 
 export function computeDiff(file: McpConfigFile, proposed: ScrybeMcpEntry): McpEntryDiff {
   const existing = readScrybeEntry(file);
-  const existingStr = existing ? JSON.stringify(existing, null, 2) : null;
-  const proposedStr = JSON.stringify(proposed, null, 2);
+  const isToml = file.type === "codex";
+
+  const existingStr = existing
+    ? (isToml ? serializeTomlEntry(existing) : JSON.stringify(existing, null, 2))
+    : null;
+  const proposedStr = isToml ? serializeTomlEntry(proposed) : JSON.stringify(proposed, null, 2);
 
   let action: McpEntryDiff["action"];
   let diff: string;
 
   if (!existing) {
     action = "add";
-    diff = `+ "scrybe": ${proposedStr}`;
+    diff = isToml
+      ? `+ [mcp_servers.scrybe]\n${proposedStr}`
+      : `+ "scrybe": ${proposedStr}`;
   } else if (existingStr === proposedStr) {
     action = "skip";
-    diff = `  "scrybe": ${proposedStr}  (no change)`;
+    diff = isToml
+      ? `  [mcp_servers.scrybe]\n${proposedStr}  (no change)`
+      : `  "scrybe": ${proposedStr}  (no change)`;
   } else {
     action = "replace";
     const oldLines = existingStr!.split("\n").map((l) => `- ${l}`).join("\n");
@@ -87,36 +115,123 @@ export function computeDiff(file: McpConfigFile, proposed: ScrybeMcpEntry): McpE
 export async function applyMcpMerge(diff: McpEntryDiff): Promise<void> {
   if (diff.action === "skip") return;
 
-  const { path } = diff.file;
+  const { path, type } = diff.file;
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-  // Load or create the config
+  if (type === "codex") {
+    await applyTomlMerge(path, diff.proposed);
+  } else {
+    await applyJsonMerge(path, diff.proposed);
+  }
+}
+
+// ─── JSON helpers (claude-code, cursor, cline, roo-code) ──────────────────────
+
+function readJsonScrybeEntry(path: string): ScrybeMcpEntry | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+  const servers = (raw as any)?.mcpServers as Record<string, unknown> | undefined;
+  if (!servers || typeof servers !== "object") return null;
+  const entry = servers["scrybe"] as any;
+  if (!entry || typeof entry.command !== "string" || !Array.isArray(entry.args)) return null;
+  const result: ScrybeMcpEntry = { command: entry.command, args: entry.args };
+  if (entry.env && typeof entry.env === "object") result.env = entry.env;
+  return result;
+}
+
+async function applyJsonMerge(path: string, proposed: ScrybeMcpEntry): Promise<void> {
   let raw: Record<string, unknown> = {};
   if (existsSync(path)) {
     try {
       raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     } catch {
-      // Corrupt JSON — preserve with backup
       const backupPath = `${path}.bak-${Date.now()}`;
       writeFileSync(backupPath, readFileSync(path));
       raw = {};
     }
   }
 
-  // Inject or replace scrybe entry
   if (!raw["mcpServers"] || typeof raw["mcpServers"] !== "object") {
     raw["mcpServers"] = {};
   }
-  (raw["mcpServers"] as Record<string, unknown>)["scrybe"] = diff.proposed;
+  (raw["mcpServers"] as Record<string, unknown>)["scrybe"] = proposed;
 
-  // Atomic write: tmp → rename (avoids partial-write corruption)
+  atomicWrite(path, JSON.stringify(raw, null, 2) + "\n");
+}
+
+// ─── TOML helpers (codex) ─────────────────────────────────────────────────────
+
+function readTomlScrybeEntry(path: string): ScrybeMcpEntry | null {
+  let toml: string;
+  try {
+    toml = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+
+  // Match [mcp_servers.scrybe] table block (up to next table header or end of file)
+  const match = toml.match(/\[mcp_servers\.scrybe\]([\s\S]*?)(?=\n\s*\[|$)/);
+  if (!match) return null;
+  const block = match[1];
+
+  const cmdMatch = block.match(/^\s*command\s*=\s*"([^"]*)"\s*$/m);
+  if (!cmdMatch) return null;
+  const command = cmdMatch[1];
+
+  const args: string[] = [];
+  const argsMatch = block.match(/^\s*args\s*=\s*\[([^\]]*)\]\s*$/m);
+  if (argsMatch) {
+    for (const m of argsMatch[1].matchAll(/"([^"]*)"/g)) {
+      args.push(m[1]);
+    }
+  }
+
+  return { command, args };
+}
+
+/** Serializes a ScrybeMcpEntry to the body lines of a TOML [mcp_servers.scrybe] block (no header). */
+function serializeTomlEntry(entry: ScrybeMcpEntry): string {
+  const argsToml = "[" + entry.args.map((a) => `"${a}"`).join(", ") + "]";
+  return `command = "${entry.command}"\nargs = ${argsToml}`;
+}
+
+async function applyTomlMerge(path: string, proposed: ScrybeMcpEntry): Promise<void> {
+  let existing = "";
+  if (existsSync(path)) {
+    try {
+      existing = readFileSync(path, "utf8");
+    } catch { /* start fresh */ }
+  }
+
+  const header = "[mcp_servers.scrybe]";
+  const body = serializeTomlEntry(proposed);
+  const block = `${header}\n${body}`;
+
+  // Replace existing section (up to next table or end of file)
+  const sectionRe = /\[mcp_servers\.scrybe\][\s\S]*?(?=\n\s*\[|\n*$)/;
+  let updated: string;
+  if (sectionRe.test(existing)) {
+    updated = existing.replace(sectionRe, block);
+  } else {
+    updated = existing.trimEnd() + (existing.length > 0 ? "\n\n" : "") + block + "\n";
+  }
+
+  atomicWrite(path, updated);
+}
+
+// ─── Shared ───────────────────────────────────────────────────────────────────
+
+function atomicWrite(path: string, content: string): void {
   const tmp = `${path}.tmp-${randomBytes(4).toString("hex")}`;
-  writeFileSync(tmp, JSON.stringify(raw, null, 2) + "\n", "utf8");
+  writeFileSync(tmp, content, "utf8");
   try {
     renameSync(tmp, path);
   } catch {
-    // Windows: rename fails if target exists (shouldn't, but guard)
     try { unlinkSync(path); } catch { /* ignore */ }
     renameSync(tmp, path);
   }
