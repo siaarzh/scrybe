@@ -7,6 +7,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Local offline embedder** — `src/local-embedder.ts` production module via `@xenova/transformers`. Pipeline-cached per model ID; exports `embedLocalBatched`, `embedLocalQuery`, `warmupLocalEmbedder`. No API key, no network call after first model download.
+- **`validateLocal(modelId)`** — new function in `src/onboarding/validate-provider.ts`. Loads the local pipeline and runs a test inference; returns dimensions and cold-start time. Used by wizard and doctor.
+- **Embedder benchmark harness** — `tests/embedder-bench/` (reusable script + corpus + queries). Ran 5 WASM/ONNX candidates; winner: `Xenova/multilingual-e5-small` (384d, 100% P@5, 100% cross-lingual, cold-start 7 s). Results in `tests/embedder-bench/README.md`.
+
+### Changed
+
+- **Default embedding provider is now local (offline)** — no API key or signup required on a fresh install. New installs that have no `EMBEDDING_*` environment variables or `OPENAI_API_KEY` automatically use `Xenova/multilingual-e5-small` (384d, ~120 MB download on first use). Existing users with `EMBEDDING_*` env vars set are **unaffected** — their provider is detected and used unchanged.
+- **`scrybe init` wizard defaults to local provider** — Step 1 now asks "Use an external provider?" (default: No). Choosing No validates the local embedder and writes `SCRYBE_LOCAL_EMBEDDER` + `EMBEDDING_DIMENSIONS` to `DATA_DIR/.env`. Choosing Yes enters the existing Voyage / OpenAI / Mistral / Custom flow.
+- **`scrybe doctor` handles local provider** — `provider.key_present` is `ok` (not `fail`) for local provider. `provider.auth` calls `validateLocal()` and reports cold-start time. No false positives on fresh installs.
+- **Reranking only offered for Voyage AI** — `ProviderDefaults` now carries `supports_rerank?: boolean`; only Voyage AI has it set to `true`. Wizard never surfaces a rerank prompt unless the user explicitly selected Voyage in the advanced provider path.
+- **`@xenova/transformers`** moved from `devDependencies` to `dependencies` (pinned `~2.17.2`). Installing `scrybe-cli` globally now includes the local embedder.
+- **`resolveProvider(undefined)` returns `null`** (was: OpenAI defaults). Callers now check `SCRYBE_LOCAL_EMBEDDER` / API key presence to decide the default. Existing behaviour for all configured installs is unchanged.
+- **`EmbeddingConfig`** gains optional `provider_type?: "api" | "local"`. Absent = `"api"` (fully backward-compatible with persisted configs).
+
 ---
 
 ## [0.16.0] — 2026-04-23

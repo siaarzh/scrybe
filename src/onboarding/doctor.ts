@@ -65,7 +65,7 @@ export async function runDoctor(): Promise<DoctorReport> {
   const { listProjects } = await import("../registry.js");
   const { readPidfile, isDaemonRunning } = await import("../daemon/pidfile.js");
   const { CURRENT_SCHEMA_VERSION } = await import("../schema-version.js");
-  const { validateProvider } = await import("./validate-provider.js");
+  const { validateProvider, validateLocal } = await import("./validate-provider.js");
   const { detectMcpConfigs, readScrybeEntry, proposeScrybeEntry } = await import("./mcp-config.js");
 
   const checks: CheckResult[] = [];
@@ -105,11 +105,39 @@ export async function runDoctor(): Promise<DoctorReport> {
   if (config.embeddingConfigError) {
     checks.push(fail("provider.config", SEC_PROV, "Provider config", config.embeddingConfigError,
       "Set EMBEDDING_BASE_URL, EMBEDDING_MODEL, and EMBEDDING_DIMENSIONS in your .env"));
-    // Skip remaining provider checks
     checks.push(skip("provider.key_present", SEC_PROV, "API key", "Skipped: provider config error"));
     checks.push(skip("provider.auth", SEC_PROV, "Auth", "Skipped: provider config error"));
     checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: provider config error"));
+  } else if (config.embeddingProviderType === "local") {
+    // ── Local WASM provider — no API key needed ─────────────────────────────
+    const localModelId = config.embeddingModel;
+    checks.push(ok("provider.config", SEC_PROV, "Provider config",
+      `Local (offline) / ${localModelId} / ${config.embeddingDimensions}d`,
+      { model: localModelId, dimensions: config.embeddingDimensions, provider_type: "local" }));
+    checks.push(ok("provider.key_present", SEC_PROV, "API key", "Local embedder — no API key needed"));
+
+    const localResult = await validateLocal(localModelId);
+    if (!localResult.ok) {
+      checks.push(fail("provider.auth", SEC_PROV, "Auth",
+        localResult.message ?? "Local embedder failed to load",
+        "Run `scrybe init` or set SCRYBE_LOCAL_EMBEDDER to a cached model ID"));
+      checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: local embedder not ready"));
+    } else {
+      const coldMs = localResult.coldStartMs !== undefined ? ` (cold-start ${localResult.coldStartMs}ms)` : "";
+      checks.push(ok("provider.auth", SEC_PROV, "Auth",
+        `Local embedder loaded${coldMs}`, { dimensions: localResult.dimensions, coldStartMs: localResult.coldStartMs }));
+
+      const actualDims = localResult.dimensions!;
+      if (actualDims !== config.embeddingDimensions) {
+        checks.push(fail("provider.dimensions_match", SEC_PROV, "Dimensions",
+          `Config expects ${config.embeddingDimensions}d but local model returns ${actualDims}d`,
+          `Set EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
+      } else {
+        checks.push(ok("provider.dimensions_match", SEC_PROV, "Dimensions", `${actualDims}d — matches config`));
+      }
+    }
   } else {
+    // ── API provider — existing logic ───────────────────────────────────────
     const provName = config.embeddingBaseUrl ?? "OpenAI (default)";
     checks.push(ok("provider.config", SEC_PROV, "Provider config",
       `${provName} / ${config.embeddingModel} / ${config.embeddingDimensions}d`,
@@ -150,8 +178,7 @@ export async function runDoctor(): Promise<DoctorReport> {
             `Config expects ${config.embeddingDimensions}d but provider returns ${actualDims}d`,
             `Set EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
         } else {
-          checks.push(ok("provider.dimensions_match", SEC_PROV, "Dimensions",
-            `${actualDims}d — matches config`));
+          checks.push(ok("provider.dimensions_match", SEC_PROV, "Dimensions", `${actualDims}d — matches config`));
         }
       }
     }

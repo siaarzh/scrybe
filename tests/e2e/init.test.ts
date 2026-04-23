@@ -63,6 +63,7 @@ async function runWizardMocked({
   addManual = false,
   mcpConfirm = false,
   doIndex = false,
+  useExternalProvider = false, // false = local path (new default); true = API provider path
 }: {
   providerValue?: string;
   apiKey?: string;
@@ -71,8 +72,10 @@ async function runWizardMocked({
   addManual?: boolean;
   mcpConfirm?: boolean;
   doIndex?: boolean;
+  useExternalProvider?: boolean;
 } = {}): Promise<void> {
-  // Mock @clack/prompts
+  // Mock @clack/prompts.
+  // Confirm sequence: [useExternal?, addManual?, mcpConfirm?, doIndex?]
   vi.doMock("@clack/prompts", () => ({
     intro: vi.fn(),
     outro: vi.fn(),
@@ -84,18 +87,24 @@ async function runWizardMocked({
     password: vi.fn().mockResolvedValueOnce(apiKey),
     multiselect: vi.fn().mockResolvedValueOnce(selectedRepos),
     confirm: vi.fn()
-      .mockResolvedValueOnce(addManual)   // "Add repo manually?"
-      .mockResolvedValueOnce(mcpConfirm)  // MCP confirm (may not be called)
-      .mockResolvedValueOnce(doIndex),    // "Index now?"
+      .mockResolvedValueOnce(useExternalProvider) // "Use an external provider?" Step 1
+      .mockResolvedValueOnce(addManual)            // "Add repo manually?"
+      .mockResolvedValueOnce(mcpConfirm)           // MCP confirm (may not be called)
+      .mockResolvedValueOnce(doIndex),             // "Index now?"
     text: vi.fn(),
   }));
 
-  // Mock validateProvider to succeed
+  // Mock validateProvider + validateLocal
   vi.doMock("../../src/onboarding/validate-provider.js", () => ({
     validateProvider: vi.fn().mockResolvedValue(
       validateOk
         ? { ok: true, dimensions: 1024, model: "voyage-code-3" }
         : { ok: false, errorType: "auth", message: "Invalid API key" }
+    ),
+    validateLocal: vi.fn().mockResolvedValue(
+      validateOk
+        ? { ok: true, dimensions: 384, model: "Xenova/multilingual-e5-small", coldStartMs: 200 }
+        : { ok: false, errorType: "other", message: "Model not cached" }
     ),
   }));
 
@@ -213,8 +222,17 @@ describe("wizard — registry side effects", () => {
 });
 
 describe("wizard — credentials written", () => {
-  it("writes API key to DATA_DIR/.env", async () => {
-    await runWizardMocked({ apiKey: "sk-test-xyz" });
+  it("writes SCRYBE_LOCAL_EMBEDDER to DATA_DIR/.env on local path", async () => {
+    await runWizardMocked(); // default: local path
+    const envPath = join(dataDir, ".env");
+    expect(existsSync(envPath)).toBe(true);
+    const content = readFileSync(envPath, "utf8");
+    expect(content).toContain("SCRYBE_LOCAL_EMBEDDER=");
+    expect(content).toContain("EMBEDDING_DIMENSIONS=384");
+  });
+
+  it("writes API key to DATA_DIR/.env on external provider path", async () => {
+    await runWizardMocked({ useExternalProvider: true, apiKey: "sk-test-xyz" });
     const envPath = join(dataDir, ".env");
     expect(existsSync(envPath)).toBe(true);
     const content = readFileSync(envPath, "utf8");

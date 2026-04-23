@@ -210,6 +210,7 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       model: config.embeddingModel,
       dimensions: config.embeddingDimensions,
       api_key_env: "EMBEDDING_API_KEY",
+      provider_type: config.embeddingProviderType,
     };
   } else {
     return {
@@ -217,6 +218,7 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       model: config.textEmbeddingModel,
       dimensions: config.textEmbeddingDimensions,
       api_key_env: process.env.SCRYBE_TEXT_EMBEDDING_API_KEY ? "SCRYBE_TEXT_EMBEDDING_API_KEY" : "EMBEDDING_API_KEY",
+      provider_type: config.textEmbeddingProviderType,
     };
   }
 }

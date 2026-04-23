@@ -3,7 +3,7 @@ import { join, dirname } from "path";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
-import { resolveProvider } from "./providers.js";
+import { resolveProvider, LOCAL_PROVIDER_DEFAULTS } from "./providers.js";
 
 // Load .env (dev convenience; does NOT override existing env vars)
 // Checks: cwd/.env first, then the repo root (dist/../.env) as fallback
@@ -48,10 +48,21 @@ function getDataDir(): string {
 
 function buildEmbeddingConfig() {
   const baseUrl = process.env.EMBEDDING_BASE_URL ?? undefined;
-  const provider = resolveProvider(baseUrl);
-
+  const apiKey = process.env.EMBEDDING_API_KEY ?? process.env.OPENAI_API_KEY;
+  const localModelEnv = process.env.SCRYBE_LOCAL_EMBEDDER;
   const modelEnv = process.env.EMBEDDING_MODEL;
   const dimsEnv = process.env.EMBEDDING_DIMENSIONS;
+
+  // Local provider: explicit SCRYBE_LOCAL_EMBEDDER, OR no URL and no API key (zero-config default)
+  const isLocal = !!localModelEnv || (!baseUrl && !apiKey && !modelEnv);
+  if (isLocal) {
+    const model = localModelEnv ?? modelEnv ?? LOCAL_PROVIDER_DEFAULTS.model;
+    const dimensions = dimsEnv ? parseInt(dimsEnv, 10) : LOCAL_PROVIDER_DEFAULTS.dimensions;
+    return { baseUrl: undefined, model, dimensions, configError: null, providerType: "local" as const };
+  }
+
+  // API provider — existing logic
+  const provider = resolveProvider(baseUrl);
 
   // Unknown provider with no explicit model — surface a helpful config error
   let configError: string | null = null;
@@ -71,7 +82,7 @@ function buildEmbeddingConfig() {
     ? parseInt(dimsEnv, 10)
     : (provider?.dimensions ?? 1536);
 
-  return { baseUrl, model, dimensions, configError };
+  return { baseUrl, model, dimensions, configError, providerType: "api" as const };
 }
 
 function buildRerankConfig() {
@@ -130,14 +141,21 @@ function buildTextEmbeddingConfig() {
 
   const provider = resolveProvider(baseUrl);
 
-  const model =
-    process.env.SCRYBE_TEXT_EMBEDDING_MODEL ??
-    provider?.textModel ??                   // provider's text model default
-    "text-embedding-3-small";               // final fallback (OpenAI)
+  // Inherit local provider when code embedding is also local
+  const codeIsLocal = !!(process.env.SCRYBE_LOCAL_EMBEDDER ||
+    (!process.env.EMBEDDING_BASE_URL && !process.env.EMBEDDING_API_KEY &&
+     !process.env.OPENAI_API_KEY && !process.env.EMBEDDING_MODEL));
+  const textIsLocal = codeIsLocal && !process.env.SCRYBE_TEXT_EMBEDDING_BASE_URL;
+
+  const model = textIsLocal
+    ? (process.env.SCRYBE_TEXT_EMBEDDING_MODEL ?? process.env.SCRYBE_LOCAL_EMBEDDER ?? LOCAL_PROVIDER_DEFAULTS.textModel)
+    : (process.env.SCRYBE_TEXT_EMBEDDING_MODEL ?? provider?.textModel ?? "text-embedding-3-small");
 
   const dimensions = process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS
     ? parseInt(process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS, 10)
-    : (provider?.dimensions ?? 1536);        // provider dimensions
+    : textIsLocal
+      ? LOCAL_PROVIDER_DEFAULTS.dimensions
+      : (provider?.dimensions ?? 1536);
 
   const apiKey =
     process.env.SCRYBE_TEXT_EMBEDDING_API_KEY ??
@@ -145,7 +163,7 @@ function buildTextEmbeddingConfig() {
     process.env.OPENAI_API_KEY ??
     "";
 
-  return { baseUrl, model, dimensions, apiKey };
+  return { baseUrl: textIsLocal ? undefined : baseUrl, model, dimensions, apiKey, providerType: textIsLocal ? "local" as const : "api" as const };
 }
 
 function buildHybridConfig() {
@@ -174,7 +192,8 @@ export const VERSION = readPackageVersion();
 export const config = {
   dataDir: getDataDir(),
 
-  // Code embedding provider — any OpenAI-compatible endpoint (EMBEDDING_* vars)
+  // Code embedding provider — local WASM or any OpenAI-compatible endpoint (EMBEDDING_* vars)
+  embeddingProviderType: embedding.providerType,
   embeddingApiKey:
     process.env.EMBEDDING_API_KEY ??
     process.env.OPENAI_API_KEY ??
@@ -188,6 +207,7 @@ export const config = {
 
   // Text embedding provider — for knowledge sources (SCRYBE_TEXT_EMBEDDING_* vars)
   // Falls back to code embedding config if not set separately.
+  textEmbeddingProviderType: textEmbedding.providerType,
   textEmbeddingApiKey: textEmbedding.apiKey,
   textEmbeddingBaseUrl: textEmbedding.baseUrl,
   textEmbeddingModel: textEmbedding.model,

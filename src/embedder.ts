@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { EmbeddingConfig } from "./types.js";
+import { embedLocalBatched, embedLocalQuery } from "./local-embedder.js";
 
 // Character limit proxy for token truncation (~4 chars/token, 8000 tokens)
 const MAX_CHARS = 32_000;
@@ -89,6 +90,9 @@ export async function embedBatched(
   batchSize: number,
   batchDelayMs: number
 ): Promise<number[][]> {
+  if (embConfig.provider_type === "local") {
+    return embedLocalBatched(texts, { modelId: embConfig.model, dimensions: embConfig.dimensions }, batchSize);
+  }
   const results: number[][] = [];
   for (let i = 0; i < texts.length; i += batchSize) {
     if (i > 0 && batchDelayMs > 0) {
@@ -102,6 +106,9 @@ export async function embedBatched(
 }
 
 export async function embedQuery(query: string, embConfig: EmbeddingConfig): Promise<number[]> {
+  if (embConfig.provider_type === "local") {
+    return embedLocalQuery(query, { modelId: embConfig.model, dimensions: embConfig.dimensions });
+  }
   const [embedding] = await embedTexts([query], embConfig);
   return embedding;
 }

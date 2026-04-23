@@ -1,6 +1,10 @@
 # scrybe
 
+**No API key required. Works fully offline.**
+
 Self-hosted code memory with semantic search. Index your repos and knowledge sources into a local vector database and search them by natural language — from the CLI or directly inside Claude Code via MCP.
+
+A local WASM/ONNX embedder (`Xenova/multilingual-e5-small`, ~120 MB download on first run) is the default provider. To use Voyage AI, OpenAI, or a custom endpoint instead, run `scrybe init` and choose "Use an external provider".
 
 ## How it works
 

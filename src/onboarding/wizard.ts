@@ -73,15 +73,27 @@ function writeEnvFile(dataDir: string, vars: Record<string, string>): void {
   writeFileSync(envPath, content, "utf8");
 }
 
+function isApiProviderConfigured(): boolean {
+  return !!(
+    process.env.EMBEDDING_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    process.env.EMBEDDING_BASE_URL
+  );
+}
+
+function isLocalProviderConfigured(): boolean {
+  return !!process.env.SCRYBE_LOCAL_EMBEDDER;
+}
+
 function isProviderConfigured(): boolean {
-  return !!(process.env.EMBEDDING_API_KEY || process.env.OPENAI_API_KEY);
+  return isApiProviderConfigured() || isLocalProviderConfigured();
 }
 
 export async function runWizard(opts?: WizardOptions): Promise<void> {
   const { config } = await import("../config.js");
   const { listProjects, addProject } = await import("../registry.js");
   const { addSource } = await import("../registry.js");
-  const { validateProvider } = await import("./validate-provider.js");
+  const { validateProvider, validateLocal } = await import("./validate-provider.js");
   const { discoverRepos } = await import("./repo-discovery.js");
   const { generateScrybeIgnore } = await import("./scrybeignore.js");
   const { detectMcpConfigs, proposeScrybeEntry, computeDiff, applyMcpMerge } = await import("./mcp-config.js");
@@ -90,75 +102,105 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
   p.intro("Scrybe setup wizard");
 
   // ── Step 1: Provider ───────────────────────────────────────────────────────
-  let providerPreset: ProviderPreset | null = null;
-  let validatedDims = 0;
-  const alreadyConfigured = isProviderConfigured();
+  const { LOCAL_PROVIDER_DEFAULTS } = await import("../providers.js");
+  const LOCAL_MODEL_ID = process.env.SCRYBE_LOCAL_EMBEDDER ?? LOCAL_PROVIDER_DEFAULTS.model;
 
-  if (alreadyConfigured && config.embeddingBaseUrl) {
-    p.log.info(`Provider already configured: ${config.embeddingBaseUrl} / ${config.embeddingModel}`);
+  if (isApiProviderConfigured()) {
+    p.log.info(`Step 1/5 — Provider already configured: ${config.embeddingBaseUrl ?? "OpenAI (default)"} / ${config.embeddingModel}`);
+  } else if (isLocalProviderConfigured()) {
+    p.log.info(`Step 1/5 — Local embedder already configured: ${LOCAL_MODEL_ID}`);
   } else {
-    const providerValue = await p.select({
-      message: "Step 1/5 — Choose an embedding provider",
-      options: PROVIDERS.map(({ value, label, hint }) => ({ value, label, hint })),
-      initialValue: "voyage",
+    // Default path: local embedder, no API key required.
+    // "Use an external provider" escape via one keystroke.
+    const useExternal = await p.confirm({
+      message: "Step 1/5 — Use an external embedding provider? (Voyage AI, OpenAI, Mistral)\n" +
+        "  No = local offline model (no API key, no signup — recommended for most users)",
+      initialValue: false,
     });
-    if (p.isCancel(providerValue)) { p.cancel("Setup cancelled."); return; }
+    if (p.isCancel(useExternal)) { p.cancel("Setup cancelled."); return; }
 
-    providerPreset = PROVIDERS.find((pr) => pr.value === providerValue as string)!;
+    if (!useExternal) {
+      // ── Local default path ──────────────────────────────────────────────
+      const spinner = p.spinner();
+      spinner.start(`Loading local embedder (${LOCAL_MODEL_ID}) — first run downloads ~120 MB...`);
+      const localResult = await validateLocal(LOCAL_MODEL_ID);
+      if (!localResult.ok) {
+        spinner.stop(`Local embedder validation failed: ${localResult.message}`);
+        p.cancel("Cannot initialise local embedder. Check your network connection and try again.");
+        return;
+      }
+      const validatedDimsLocal = localResult.dimensions ?? LOCAL_PROVIDER_DEFAULTS.dimensions;
+      spinner.stop(
+        `Local embedder ready — ${validatedDimsLocal}d, cold-start ${localResult.coldStartMs ?? "?"}ms`
+      );
 
-    let baseUrl = providerPreset.baseUrl;
-    let model = providerPreset.model;
-    let dimensions = providerPreset.dimensions;
-
-    if (providerPreset.value === "custom") {
-      const customUrl = await p.text({
-        message: "Base URL (OpenAI-compatible, e.g. http://localhost:11434/v1)",
-        validate: (v) => (v?.startsWith("http") ? undefined : "Must start with http:// or https://"),
+      writeEnvFile(config.dataDir, {
+        SCRYBE_LOCAL_EMBEDDER: LOCAL_MODEL_ID,
+        EMBEDDING_DIMENSIONS: String(validatedDimsLocal),
       });
-      if (p.isCancel(customUrl)) { p.cancel("Setup cancelled."); return; }
-      baseUrl = customUrl as string;
-
-      const customModel = await p.text({ message: "Model name (e.g. nomic-embed-text)" });
-      if (p.isCancel(customModel)) { p.cancel("Setup cancelled."); return; }
-      model = customModel as string;
-
-      const customDims = await p.text({
-        message: "Embedding dimensions (e.g. 768)",
-        validate: (v) => (v && /^\d+$/.test(v) ? undefined : "Must be a number"),
+      p.log.success(`Local embedder config saved to ${config.dataDir}/.env`);
+    } else {
+      // ── External provider path (existing logic) ─────────────────────────
+      const providerValue = await p.select({
+        message: "Choose an embedding provider",
+        options: PROVIDERS.map(({ value, label, hint }) => ({ value, label, hint })),
+        initialValue: "voyage",
       });
-      if (p.isCancel(customDims)) { p.cancel("Setup cancelled."); return; }
-      dimensions = parseInt(customDims as string, 10);
+      if (p.isCancel(providerValue)) { p.cancel("Setup cancelled."); return; }
+
+      const providerPreset = PROVIDERS.find((pr) => pr.value === providerValue as string)!;
+
+      let baseUrl = providerPreset.baseUrl;
+      let model = providerPreset.model;
+      let dimensions = providerPreset.dimensions;
+
+      if (providerPreset.value === "custom") {
+        const customUrl = await p.text({
+          message: "Base URL (OpenAI-compatible, e.g. http://localhost:11434/v1)",
+          validate: (v) => (v?.startsWith("http") ? undefined : "Must start with http:// or https://"),
+        });
+        if (p.isCancel(customUrl)) { p.cancel("Setup cancelled."); return; }
+        baseUrl = customUrl as string;
+
+        const customModel = await p.text({ message: "Model name (e.g. nomic-embed-text)" });
+        if (p.isCancel(customModel)) { p.cancel("Setup cancelled."); return; }
+        model = customModel as string;
+
+        const customDims = await p.text({
+          message: "Embedding dimensions (e.g. 768)",
+          validate: (v) => (v && /^\d+$/.test(v) ? undefined : "Must be a number"),
+        });
+        if (p.isCancel(customDims)) { p.cancel("Setup cancelled."); return; }
+        dimensions = parseInt(customDims as string, 10);
+      }
+
+      const keyInput = await p.password({
+        message: `API key for ${providerPreset.label}`,
+        validate: (v) => (v?.trim() ? undefined : "Key cannot be empty"),
+      });
+      if (p.isCancel(keyInput)) { p.cancel("Setup cancelled."); return; }
+      const apiKey = (keyInput as string).trim();
+
+      const spinner = p.spinner();
+      spinner.start("Validating API key...");
+      const result = await validateProvider({ baseUrl, model, apiKey });
+      if (!result.ok) {
+        spinner.stop(`Validation failed: ${result.message}`);
+        p.cancel(`Could not reach ${baseUrl}. Check your key and try again.`);
+        return;
+      }
+      const validatedDims = result.dimensions ?? dimensions;
+      spinner.stop(`API key valid — model ${result.model}, ${validatedDims}d`);
+
+      // Only Voyage supports rerank — wizard never offers rerank for other providers
+      writeEnvFile(config.dataDir, {
+        EMBEDDING_BASE_URL: baseUrl,
+        EMBEDDING_MODEL: model,
+        EMBEDDING_DIMENSIONS: String(validatedDims),
+        EMBEDDING_API_KEY: apiKey,
+      });
+      p.log.success(`Credentials saved to ${config.dataDir}/.env`);
     }
-
-    // Key input
-    const keyInput = await p.password({
-      message: `API key for ${providerPreset.label}`,
-      validate: (v) => (v?.trim() ? undefined : "Key cannot be empty"),
-    });
-    if (p.isCancel(keyInput)) { p.cancel("Setup cancelled."); return; }
-    const apiKey = (keyInput as string).trim();
-
-    // Validate
-    const spinner = p.spinner();
-    spinner.start("Validating API key...");
-    const result = await validateProvider({ baseUrl, model, apiKey });
-    if (!result.ok) {
-      spinner.stop(`Validation failed: ${result.message}`);
-      p.cancel(`Could not reach ${baseUrl}. Check your key and try again.`);
-      return;
-    }
-    validatedDims = result.dimensions ?? dimensions;
-    spinner.stop(`API key valid — model ${result.model}, ${validatedDims}d`);
-
-    // Persist to DATA_DIR/.env
-    const envVars: Record<string, string> = {
-      EMBEDDING_BASE_URL: baseUrl,
-      EMBEDDING_MODEL: model,
-      EMBEDDING_DIMENSIONS: String(validatedDims),
-      EMBEDDING_API_KEY: apiKey,
-    };
-    writeEnvFile(config.dataDir, envVars);
-    p.log.success(`Credentials saved to ${config.dataDir}/.env`);
   }
 
   // ── Step 2: Repo discovery ─────────────────────────────────────────────────

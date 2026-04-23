@@ -75,6 +75,7 @@ describe("runDoctor — provider checks", () => {
     // Mock validate-provider to return auth failure
     vi.doMock("../src/onboarding/validate-provider.js", () => ({
       validateProvider: async () => ({ ok: false, errorType: "auth", message: "Invalid API key" }),
+      validateLocal: async () => ({ ok: true, dimensions: 1024, model: "local", coldStartMs: 100 }),
     }));
     const { runDoctor } = await import("../src/onboarding/doctor.js");
     const report = await runDoctor();
@@ -86,6 +87,7 @@ describe("runDoctor — provider checks", () => {
   it("provider.dimensions_match fail when dims mismatch", async () => {
     vi.doMock("../src/onboarding/validate-provider.js", () => ({
       validateProvider: async () => ({ ok: true, dimensions: 512, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 512, model: "local", coldStartMs: 100 }),
     }));
     const { runDoctor } = await import("../src/onboarding/doctor.js");
     const report = await runDoctor();

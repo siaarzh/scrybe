@@ -11,6 +11,7 @@ export interface ValidateResult {
   errorType?: "auth" | "rate_limit" | "network" | "dns" | "dimensions_unknown" | "bad_url" | "other";
   message?: string;
   rawStatus?: number;
+  coldStartMs?: number; // local provider only
 }
 
 const TIMEOUT_MS = 30_000;
@@ -81,4 +82,34 @@ export async function validateProvider(spec: ProviderSpec): Promise<ValidateResu
     dimensions: vector.length,
     model: data?.model ?? spec.model,
   };
+}
+
+/**
+ * Validates the local WASM/ONNX embedder by loading the pipeline and running a test inference.
+ * No network call if the model is already cached. Returns dimensions and cold-start time.
+ */
+export async function validateLocal(modelId: string): Promise<ValidateResult> {
+  const t0 = Date.now();
+  try {
+    const { pipeline } = await import("@xenova/transformers");
+    const extractor = await pipeline("feature-extraction", modelId, { revision: "main" });
+    const output: any = await extractor(["ping"], { pooling: "mean", normalize: true });
+    const dims = (output[0].data as Float32Array).length;
+    const coldStartMs = Date.now() - t0;
+    return { ok: true, dimensions: dims, model: modelId, coldStartMs };
+  } catch (err: any) {
+    const msg: string = err?.message ?? String(err);
+    const isNetwork =
+      msg.includes("ENOTFOUND") ||
+      msg.includes("getaddrinfo") ||
+      msg.includes("fetch") ||
+      msg.includes("network");
+    return {
+      ok: false,
+      errorType: "other",
+      message: isNetwork
+        ? `Model not cached and no network available. Run once with internet access to download the model (~120 MB): ${msg.slice(0, 120)}`
+        : `Local embedder failed to load: ${msg.slice(0, 200)}`,
+    };
+  }
 }

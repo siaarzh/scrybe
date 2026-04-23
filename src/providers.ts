@@ -3,12 +3,13 @@ export interface ProviderDefaults {
   model: string;       // code embedding model
   textModel: string;   // text/knowledge embedding model
   dimensions: number;
+  // Whether this provider supports reranking (Voyage AI only).
+  supports_rerank?: boolean;
 }
 
 /**
  * Known OpenAI-compatible embedding providers.
  * Keyed by hostname of the base URL.
- * When EMBEDDING_BASE_URL is unset, OpenAI defaults apply.
  */
 const KNOWN_PROVIDERS: Record<string, ProviderDefaults> = {
   "api.openai.com": {
@@ -22,6 +23,7 @@ const KNOWN_PROVIDERS: Record<string, ProviderDefaults> = {
     model: "voyage-code-3",
     textModel: "voyage-4",
     dimensions: 1024,
+    supports_rerank: true,
   },
   "api.mistral.ai": {
     name: "Mistral",
@@ -31,14 +33,24 @@ const KNOWN_PROVIDERS: Record<string, ProviderDefaults> = {
   },
 };
 
+/** Defaults for the local WASM/ONNX provider (no API key, no network). */
+export const LOCAL_PROVIDER_DEFAULTS: ProviderDefaults = {
+  name: "Local (offline)",
+  // Chosen by M-D5 Phase 1 benchmark: 100% P@5 and 100% cross-lingual hit rate
+  model: "Xenova/multilingual-e5-small",
+  textModel: "Xenova/multilingual-e5-small",
+  dimensions: 384,
+  supports_rerank: false,
+};
+
 /**
  * Resolves provider defaults from a base URL.
- * - No URL → OpenAI defaults.
+ * - No URL → null (caller checks whether local or OpenAI applies).
  * - Known URL → that provider's defaults.
  * - Unknown URL → null (caller must require explicit model config).
  */
 export function resolveProvider(baseUrl: string | undefined): ProviderDefaults | null {
-  if (!baseUrl) return KNOWN_PROVIDERS["api.openai.com"];
+  if (!baseUrl) return null;
   try {
     const { hostname } = new URL(baseUrl);
     return KNOWN_PROVIDERS[hostname] ?? null;
