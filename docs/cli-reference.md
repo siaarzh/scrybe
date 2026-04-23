@@ -8,7 +8,9 @@ All commands run via `scrybe <command> [options]`.
 
 ### `init`
 
-Interactive first-run wizard. Guides through embedding provider selection, API key validation, repo discovery, `.scrybeignore` generation, MCP auto-registration (Claude Code and Cursor), and optional initial index. Re-running on an already-configured machine short-circuits completed steps.
+Interactive first-run wizard. Defaults to a **local offline embedder** (no API key or signup required). External providers (Voyage AI, OpenAI, Mistral) are accessible via "Use an external provider?" at the first prompt.
+
+Guides through: provider setup → repo discovery → `.scrybeignore` generation → MCP auto-registration (Claude Code and Cursor) → optional initial index. Re-running on an already-configured machine short-circuits completed steps.
 
 | Flag | Description |
 |------|-------------|
@@ -19,7 +21,7 @@ scrybe init
 scrybe init --skip-index
 ```
 
-Credentials are written to `<DATA_DIR>/.env` and picked up automatically on subsequent runs.
+Config is written to `<DATA_DIR>/.env` and picked up automatically on subsequent runs. Local embedder: writes `SCRYBE_LOCAL_EMBEDDER` + `EMBEDDING_DIMENSIONS`. External provider: writes `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_API_KEY`.
 
 ---
 

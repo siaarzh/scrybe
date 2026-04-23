@@ -4,20 +4,33 @@ All configuration is via environment variables. Set them in `.env` or in the MCP
 
 **Precedence (highest to lowest):**
 1. Shell environment / MCP `env` block
-2. `.env` file
+2. `<DATA_DIR>/.env` file (written by `scrybe init`)
 3. Provider defaults derived from `EMBEDDING_BASE_URL`
-4. Built-in fallbacks (`OPENAI_API_KEY`, `text-embedding-3-small` / `1536`)
+4. `OPENAI_API_KEY` fallback (triggers OpenAI defaults)
+5. **Local offline embedder** — `Xenova/multilingual-e5-small` (384d) — when none of the above are set
 
 ---
 
-## Code embedding
+## Local embedder (default)
 
-Used for all `code` sources.
+When no `EMBEDDING_*` or `OPENAI_API_KEY` env vars are set, Scrybe uses an in-process WASM/ONNX model — no API key, no network call after first download.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_LOCAL_EMBEDDER` | `Xenova/multilingual-e5-small` | HuggingFace model ID for the local embedder. Set by `scrybe init`. Override to use a different ONNX-compatible model. |
+
+The model is downloaded on first use (~120 MB) and cached in `~/.cache/huggingface/hub/`. Subsequent runs load from cache.
+
+---
+
+## Code embedding (API provider)
+
+Used for all `code` sources when an API provider is configured.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `EMBEDDING_API_KEY` | — | API key. Falls back to `OPENAI_API_KEY` if not set. |
-| `EMBEDDING_BASE_URL` | OpenAI | Base URL for the embeddings endpoint. Set to switch providers. |
+| `EMBEDDING_BASE_URL` | — | Base URL for the embeddings endpoint. Set to switch providers. |
 | `EMBEDDING_MODEL` | auto | Model name. Auto-set for known providers; required for unknown ones. |
 | `EMBEDDING_DIMENSIONS` | auto | Vector dimensions. Auto-set for known providers; required for unknown ones. |
 | `EMBED_BATCH_SIZE` | `100` | Chunks per embedding request. Reduce if hitting rate limits. |
@@ -96,13 +109,12 @@ When using Voyage AI, set only `SCRYBE_RERANK=true` — endpoint and model are a
 
 ## Known providers
 
-Model and dimensions are set automatically when `EMBEDDING_BASE_URL` matches a known provider:
-
-| Provider | `EMBEDDING_BASE_URL` | Default model | Dimensions |
-|----------|----------------------|---------------|------------|
-| OpenAI | `https://api.openai.com/v1` | `text-embedding-3-small` | 1536 |
-| Voyage AI | `https://api.voyageai.com/v1` | `voyage-code-3` (code) / `voyage-4` (text) | 1024 |
-| Mistral | `https://api.mistral.ai/v1` | `mistral-embed` | 1024 |
+| Provider | How to select | Default model | Dimensions | Reranking |
+|----------|---------------|---------------|------------|-----------|
+| **Local (offline)** | No env vars set (default) | `Xenova/multilingual-e5-small` | 384 | — |
+| OpenAI | `EMBEDDING_BASE_URL=https://api.openai.com/v1` | `text-embedding-3-small` | 1536 | — |
+| Voyage AI | `EMBEDDING_BASE_URL=https://api.voyageai.com/v1` | `voyage-code-3` (code) / `voyage-4` (text) | 1024 | `rerank-2.5` |
+| Mistral | `EMBEDDING_BASE_URL=https://api.mistral.ai/v1` | `mistral-embed` | 1024 | — |
 
 For unknown providers, set `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` explicitly.
 
