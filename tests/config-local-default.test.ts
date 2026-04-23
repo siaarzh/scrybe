@@ -7,7 +7,7 @@
  *
  * These tests do NOT test embedding inference — only config resolution logic.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { LOCAL_PROVIDER_DEFAULTS } from "../src/providers.js";
 
 // Save & restore env vars around each test
@@ -74,6 +74,52 @@ describe("resolveProvider", () => {
     const rerankProviders = Object.values(KNOWN_PROVIDERS).filter((p) => p.supports_rerank);
     expect(rerankProviders).toHaveLength(1);
     expect(rerankProviders[0]!.name).toBe("Voyage AI");
+  });
+});
+
+describe("envStr empty-string regression — all env vars set to empty string", () => {
+  // Tests use vi.resetModules() + dynamic import to get a fresh config evaluation.
+  // isolate.ts sets real sidecar values in beforeEach; we override them to ""
+  // here and restore in afterEach.
+  const REGRESSION_KEYS = [
+    "EMBEDDING_MODEL",
+    "EMBEDDING_BASE_URL",
+    "EMBEDDING_API_KEY",
+    "OPENAI_API_KEY",
+    "EMBEDDING_DIMENSIONS",
+  ] as const;
+  let saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    saved = {};
+    for (const k of REGRESSION_KEYS) saved[k] = process.env[k];
+    // Set all to empty string — this is the bug scenario
+    for (const k of REGRESSION_KEYS) process.env[k] = "";
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    for (const k of REGRESSION_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it("resolves to local provider when all embedding env vars are empty strings", async () => {
+    const { config } = await import("../src/config.js");
+    expect(config.embeddingProviderType).toBe("local");
+    expect(config.embeddingModel).toBe("Xenova/multilingual-e5-small");
+    expect(config.embeddingDimensions).toBe(384);
+  });
+
+  it("resolves to Voyage defaults when BASE_URL and API_KEY are set but EMBEDDING_MODEL is empty", async () => {
+    process.env["EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
+    process.env["EMBEDDING_API_KEY"] = "key";
+    vi.resetModules();
+    const { config } = await import("../src/config.js");
+    expect(config.embeddingProviderType).toBe("api");
+    expect(config.embeddingModel).toBe("voyage-code-3");
+    expect(config.embeddingDimensions).toBe(1024);
   });
 });
 

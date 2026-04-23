@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.17.1] — 2026-04-23
+
+### Fixed
+
+- **Empty-string env vars no longer break local provider resolution.** When `EMBEDDING_MODEL`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, or `OPENAI_API_KEY` was set to empty string (`""`) in a `.env` file or MCP `env` block, `config.ts` previously propagated the empty string to `@xenova/transformers`, which silently fell back to its own default model (`all-MiniLM-L6-v2` instead of the intended `multilingual-e5-small`). New `envStr()` helper in `config.ts` coerces `""` to `undefined` so fallback chains work correctly. Two regression tests added.
+
+---
+
 ## [0.17.0] — 2026-04-23
 
 ### Added
@@ -429,7 +437,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/siaarzh/scrybe/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/siaarzh/scrybe/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/siaarzh/scrybe/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/siaarzh/scrybe/compare/v0.14.1...v0.15.0

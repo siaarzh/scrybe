@@ -46,12 +46,19 @@ function getDataDir(): string {
   }
 }
 
+// Read a string env var, coercing empty string to undefined.
+// Callers use `||` fallback chains, so this normalises "" → undefined consistently.
+function envStr(name: string): string | undefined {
+  const v = process.env[name];
+  return v === undefined || v === "" ? undefined : v;
+}
+
 function buildEmbeddingConfig() {
-  const baseUrl = process.env.EMBEDDING_BASE_URL ?? undefined;
-  const apiKey = process.env.EMBEDDING_API_KEY ?? process.env.OPENAI_API_KEY;
-  const localModelEnv = process.env.SCRYBE_LOCAL_EMBEDDER;
-  const modelEnv = process.env.EMBEDDING_MODEL;
-  const dimsEnv = process.env.EMBEDDING_DIMENSIONS;
+  const baseUrl = envStr("EMBEDDING_BASE_URL");
+  const apiKey = envStr("EMBEDDING_API_KEY") ?? envStr("OPENAI_API_KEY");
+  const localModelEnv = envStr("SCRYBE_LOCAL_EMBEDDER");
+  const modelEnv = envStr("EMBEDDING_MODEL");
+  const dimsEnv = envStr("EMBEDDING_DIMENSIONS");
 
   // Local provider: explicit SCRYBE_LOCAL_EMBEDDER, OR no URL and no API key (zero-config default)
   const isLocal = !!localModelEnv || (!baseUrl && !apiKey && !modelEnv);
@@ -135,32 +142,33 @@ function buildRerankConfig() {
 
 function buildTextEmbeddingConfig() {
   const baseUrl =
-    process.env.SCRYBE_TEXT_EMBEDDING_BASE_URL ??
-    process.env.EMBEDDING_BASE_URL ??        // inherit from code embedding provider
+    envStr("SCRYBE_TEXT_EMBEDDING_BASE_URL") ??
+    envStr("EMBEDDING_BASE_URL") ??        // inherit from code embedding provider
     undefined;
 
   const provider = resolveProvider(baseUrl);
 
   // Inherit local provider when code embedding is also local
-  const codeIsLocal = !!(process.env.SCRYBE_LOCAL_EMBEDDER ||
-    (!process.env.EMBEDDING_BASE_URL && !process.env.EMBEDDING_API_KEY &&
-     !process.env.OPENAI_API_KEY && !process.env.EMBEDDING_MODEL));
-  const textIsLocal = codeIsLocal && !process.env.SCRYBE_TEXT_EMBEDDING_BASE_URL;
+  const codeIsLocal = !!(envStr("SCRYBE_LOCAL_EMBEDDER") ||
+    (!envStr("EMBEDDING_BASE_URL") && !envStr("EMBEDDING_API_KEY") &&
+     !envStr("OPENAI_API_KEY") && !envStr("EMBEDDING_MODEL")));
+  const textIsLocal = codeIsLocal && !envStr("SCRYBE_TEXT_EMBEDDING_BASE_URL");
 
   const model = textIsLocal
-    ? (process.env.SCRYBE_TEXT_EMBEDDING_MODEL ?? process.env.SCRYBE_LOCAL_EMBEDDER ?? LOCAL_PROVIDER_DEFAULTS.textModel)
-    : (process.env.SCRYBE_TEXT_EMBEDDING_MODEL ?? provider?.textModel ?? "text-embedding-3-small");
+    ? (envStr("SCRYBE_TEXT_EMBEDDING_MODEL") ?? envStr("SCRYBE_LOCAL_EMBEDDER") ?? LOCAL_PROVIDER_DEFAULTS.textModel)
+    : (envStr("SCRYBE_TEXT_EMBEDDING_MODEL") ?? provider?.textModel ?? "text-embedding-3-small");
 
-  const dimensions = process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS
-    ? parseInt(process.env.SCRYBE_TEXT_EMBEDDING_DIMENSIONS, 10)
+  const dimsEnv = envStr("SCRYBE_TEXT_EMBEDDING_DIMENSIONS");
+  const dimensions = dimsEnv
+    ? parseInt(dimsEnv, 10)
     : textIsLocal
       ? LOCAL_PROVIDER_DEFAULTS.dimensions
       : (provider?.dimensions ?? 1536);
 
   const apiKey =
-    process.env.SCRYBE_TEXT_EMBEDDING_API_KEY ??
-    process.env.EMBEDDING_API_KEY ??
-    process.env.OPENAI_API_KEY ??
+    envStr("SCRYBE_TEXT_EMBEDDING_API_KEY") ??
+    envStr("EMBEDDING_API_KEY") ??
+    envStr("OPENAI_API_KEY") ??
     "";
 
   return { baseUrl: textIsLocal ? undefined : baseUrl, model, dimensions, apiKey, providerType: textIsLocal ? "local" as const : "api" as const };
