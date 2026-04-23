@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.16.0] — 2026-04-23
+
 ### Added
 
 - **`scrybe init`** — interactive first-run wizard (`@clack/prompts`). Guides through provider selection, API key validation (live test embedding), repo discovery (walks `~/repos`, `~/code`, etc.), `.scrybeignore` generation, MCP auto-registration for Claude Code (`~/.claude.json`) and Cursor (`~/.cursor/mcp.json`), and optional initial index. Re-running on a configured machine short-circuits already-completed steps. Credentials written to `DATA_DIR/.env` (now included in config search path).
@@ -405,7 +409,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/siaarzh/scrybe/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/siaarzh/scrybe/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/siaarzh/scrybe/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/siaarzh/scrybe/compare/v0.13.1...v0.14.0

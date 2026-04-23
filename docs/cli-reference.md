@@ -4,6 +4,58 @@ All commands run via `scrybe <command> [options]`.
 
 ---
 
+## Setup commands
+
+### `init`
+
+Interactive first-run wizard. Guides through embedding provider selection, API key validation, repo discovery, `.scrybeignore` generation, MCP auto-registration (Claude Code and Cursor), and optional initial index. Re-running on an already-configured machine short-circuits completed steps.
+
+| Flag | Description |
+|------|-------------|
+| `--skip-index` | Complete all configuration steps but defer the initial index |
+
+```bash
+scrybe init
+scrybe init --skip-index
+```
+
+Credentials are written to `<DATA_DIR>/.env` and picked up automatically on subsequent runs.
+
+---
+
+### `doctor`
+
+One-shot diagnostics. Checks: DATA_DIR, Node version, provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, git hook presence, and MCP configuration for Claude Code and Cursor.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output a stable `DoctorReport` JSON object (schemaVersion: 1) for machine consumption |
+| `--strict` | Exit code 1 on warnings as well as failures |
+
+```bash
+scrybe doctor
+scrybe doctor --json
+scrybe doctor --strict
+```
+
+Exit codes: 0 = all ok, 1 = any failure (or any warning with `--strict`).
+
+---
+
+### Default (zero-config)
+
+When run with no subcommand in a git repository:
+
+- **No flags** — prints a hint to run `scrybe init` or `scrybe --auto`.
+- **`--auto`** — registers the current directory as a project (id = directory basename) and runs an incremental index. Requires an interactive TTY.
+
+```bash
+# In an unregistered git repo:
+scrybe --auto
+```
+
+---
+
 ## Project commands
 
 ### `add-project`
