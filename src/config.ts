@@ -13,6 +13,7 @@ import { resolveProvider } from "./providers.js";
   const candidates = [
     join(process.cwd(), ".env"),
     join(scriptDir, "..", ".env"), // dist/../.env → repo root
+    join(getDataDir(), ".env"),   // DATA_DIR/.env — written by `scrybe init`
   ];
   for (const p of candidates) {
     if (!existsSync(p)) continue;

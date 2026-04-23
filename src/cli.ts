@@ -819,5 +819,127 @@ export async function runCli(): Promise<void> {
       }
     });
 
+  // ─── Init command ─────────────────────────────────────────────────────────
+
+  program
+    .command("init")
+    .description("First-run wizard: provider setup, repo discovery, MCP auto-configuration")
+    .option("--skip-index", "Configure everything but defer the initial reindex")
+    .action(async (opts: { skipIndex?: boolean }) => {
+      const { runWizard } = await import("./onboarding/wizard.js");
+      await runWizard({ skipIndex: opts.skipIndex });
+    });
+
+  // ─── Doctor command ────────────────────────────────────────────────────────
+
+  program
+    .command("doctor")
+    .description("Diagnose scrybe configuration and data integrity")
+    .option("--json", "Output as JSON (schema v1)")
+    .option("--strict", "Exit code 1 on warnings as well as failures")
+    .action(async (opts: { json?: boolean; strict?: boolean }) => {
+      const { runDoctor } = await import("./onboarding/doctor.js");
+      const report = await runDoctor();
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        printDoctorReport(report);
+      }
+      const hasFail = report.summary.fail > 0;
+      const hasWarn = opts.strict && report.summary.warn > 0;
+      if (hasFail || hasWarn) process.exit(1);
+    });
+
+  // ─── Zero-config default action ───────────────────────────────────────────
+
+  program
+    .option("--auto", "Auto-register and index current directory as a scrybe project (must be a git repo)")
+    .hook("preAction", () => { /* no-op; --auto handled in default action */ });
+
+  program.action(async (opts: { auto?: boolean }) => {
+    const { execSync } = await import("child_process");
+    const { basename } = await import("path");
+    const cwd = process.cwd();
+
+    // Check if cwd is a git repo
+    let isGit = false;
+    try {
+      execSync("git rev-parse --git-dir", { cwd, stdio: "ignore" });
+      isGit = true;
+    } catch { /* not a git repo */ }
+
+    if (!isGit) {
+      console.error("Not a git repository. Run `scrybe init` to set up scrybe.");
+      process.exit(1);
+    }
+
+    const projects = listProjects();
+    const alreadyRegistered = projects.some((p) =>
+      p.sources.some(
+        (s) => s.source_config.type === "code" && (s.source_config as any).root_path === cwd
+      )
+    );
+
+    if (!opts.auto) {
+      if (alreadyRegistered) {
+        console.log("Repo already registered in scrybe. Try:");
+        console.log(`  scrybe index --project-id <id> --incremental`);
+        console.log(`  scrybe search --project-id <id> "your query"`);
+        console.log(`  scrybe daemon status`);
+      } else {
+        console.log("Repo not yet registered. Run:");
+        console.log(`  scrybe init          # full wizard (recommended)`);
+        console.log(`  scrybe --auto        # quick register + index current repo`);
+      }
+      return;
+    }
+
+    // --auto path: only if stdin is a TTY
+    if (!process.stdin.isTTY) {
+      console.error("--auto requires an interactive terminal. Run `scrybe init` instead.");
+      process.exit(1);
+    }
+
+    const projectId = basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    process.stdout.write(
+      `Register '${projectId}' at ${cwd} and run incremental index? [y/N] `
+    );
+    const confirmed = await new Promise<boolean>((resolve) => {
+      process.stdin.once("data", (d) => resolve(d.toString().trim().toLowerCase() === "y"));
+    });
+    if (!confirmed) { console.log("Aborted."); return; }
+
+    addProject({ id: projectId, description: "" });
+    addSource(projectId, {
+      source_id: "primary",
+      source_config: { type: "code", root_path: cwd, languages: [] },
+    });
+    console.log(`Registered '${projectId}'. Indexing...`);
+    await indexProject(projectId, "incremental");
+    console.log(`Done. Try: scrybe search --project-id ${projectId} "your query"`);
+  });
+
   await program.parseAsync(process.argv);
+}
+
+function printDoctorReport(report: import("./onboarding/doctor.js").DoctorReport): void {
+  const icons: Record<string, string> = { ok: "✓", warn: "⚠", fail: "✗", skip: "–" };
+  console.log(`\nScrybe Doctor — v${report.scrybeVersion} — ${report.generatedAt}`);
+  console.log("─".repeat(50));
+  let currentSection = "";
+  for (const c of report.checks) {
+    if (c.section !== currentSection) {
+      console.log(`\n${c.section}`);
+      currentSection = c.section;
+    }
+    const icon = icons[c.status] ?? "?";
+    console.log(`  ${icon} ${c.title}: ${c.message}`);
+    if (c.remedy && (c.status === "fail" || c.status === "warn")) {
+      console.log(`    → ${c.remedy}`);
+    }
+  }
+  const { ok, warn, fail, skip } = report.summary;
+  console.log(
+    `\nSummary: ${ok} ok, ${warn} warn, ${fail} fail${skip > 0 ? `, ${skip} skip` : ""}`
+  );
 }

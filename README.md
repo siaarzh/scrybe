@@ -79,20 +79,41 @@ scrybe add-source --project-id myrepo --source-id gitlab-issues \
 
 ## Setup
 
+### Quick start (recommended)
+
 ```bash
-# 1. Clone and enter the repo
-cd scrybe
+npx scrybe-cli init
+```
 
-# 2. Install dependencies
-npm install
+The wizard handles everything: picks an embedding provider, validates your API key, discovers repos, generates `.scrybeignore` files, and auto-registers the MCP server in `~/.claude.json` and `~/.cursor/mcp.json`. Under 90 seconds to first search hit.
 
-# 3. Build
-npm run build
+### Manual setup
 
-# 4. Configure environment
-copy .env.example .env   # Windows
-# cp .env.example .env   # Linux/Mac
-# Edit .env and set your embedding API key
+```bash
+# 1. Install globally
+npm install -g scrybe-cli
+
+# 2. Register a project
+scrybe add-project --id myrepo --desc "My project"
+scrybe add-source --project-id myrepo --source-id primary \
+  --type code --root /path/to/repo --languages ts,vue
+
+# 3. Configure credentials (one-time)
+#    Create/edit DATA_DIR/.env (printed by `scrybe doctor`)
+EMBEDDING_BASE_URL=https://api.voyageai.com/v1
+EMBEDDING_API_KEY=your-key-here
+
+# 4. Index
+scrybe index --project-id myrepo --incremental
+
+# 5. Register MCP (add to ~/.claude.json manually or use `scrybe init`)
+```
+
+### Diagnose issues
+
+```bash
+scrybe doctor          # check config, auth, indexes, MCP
+scrybe doctor --json   # machine-readable output
 ```
 
 ## Embedding providers

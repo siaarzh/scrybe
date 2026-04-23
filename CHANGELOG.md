@@ -7,9 +7,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **`scrybe init`** — interactive first-run wizard (`@clack/prompts`). Guides through provider selection, API key validation (live test embedding), repo discovery (walks `~/repos`, `~/code`, etc.), `.scrybeignore` generation, MCP auto-registration for Claude Code (`~/.claude.json`) and Cursor (`~/.cursor/mcp.json`), and optional initial index. Re-running on a configured machine short-circuits already-completed steps. Credentials written to `DATA_DIR/.env` (now included in config search path).
+- **`scrybe doctor`** — one-shot diagnostic command. Checks DATA_DIR, Node version, provider config and auth (live test embedding), dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed/chunk-count, daemon pidfile and HTTP health, git hook presence, and MCP configuration for all detected clients. Exit code 1 on failures; `--strict` also exits 1 on warnings. `--json` outputs a stable `DoctorReport` (schemaVersion: 1) for machine consumption.
+- **`scrybe --auto`** — zero-config mode. Run `scrybe --auto` in an unregistered git repo to quickly add it as a project with default settings and run incremental index. Requires TTY or exits with a hint to use `scrybe init`.
+- **`src/onboarding/` module layer** — reusable, UI-free modules forming the stable contract between the CLI wizard and future VS Code extension: `mcp-config.ts` (detect/diff/merge MCP config files atomically), `validate-provider.ts` (test-embed + error classification), `repo-discovery.ts` (home-dir walk with depth/time/dir caps), `scrybeignore.ts` (.gitignore merge + standard skip list generator), `language-sniff.ts` (extension-histogram language detection).
+- **51 new tests** — unit tests for all onboarding modules (mcp-config: 14, validate-provider: 9, scrybeignore: 5, doctor: 16) plus E2E wizard tests (7) using mocked `@clack/prompts` verifying registry writes, `.scrybeignore` generation, and credential storage.
+- **`DATA_DIR/.env` config path** — `scrybe init` writes credentials to `<DATA_DIR>/.env`. Config loader now checks this path as a fallback so credentials persist across working directories.
+
 ### Changed
 
 - npm package renamed from `scrybe` to `scrybe-cli` (brand and binary name `scrybe` unchanged). The `scrybe` package name on npm is owned by an unrelated documentation tool; `scrybe-cli` avoids the conflict while keeping the product identity intact.
+- `README.md` setup section rewritten — `npx scrybe-cli init` is now the canonical first step; manual setup preserved as secondary path.
 
 ---
 
