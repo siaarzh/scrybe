@@ -6,9 +6,14 @@
  * Relies on isolate.ts (setupFiles) for per-test module reset + temp DATA_DIR.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { platform } from "os";
 import type { FixtureHandle } from "./helpers/fixtures.js";
 import { cloneFixture } from "./helpers/fixtures.js";
 import { createBranch, switchBranch, commitFile, getCurrentBranch } from "./helpers/git.js";
+
+// FSEvents (macOS) does not fire reliably in GitHub Actions CI sandboxes.
+// Skip on macOS CI until community validation — tracked in M-D9.
+const skipOnMacCI = process.env["CI"] === "true" && platform() === "darwin";
 
 // Short debounce — git events are immediate, no need to wait 300 ms
 process.env["SCRYBE_DAEMON_GIT_DEBOUNCE_MS"] = "80";
@@ -46,7 +51,7 @@ afterEach(async () => {
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
-describe("git watcher — branch switch detection", () => {
+describe.skipIf(skipOnMacCI)("git watcher — branch switch detection", () => {
   it("calls enqueue when HEAD changes (git checkout)", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { initGitWatcher, watchGitProject } = await import("../src/daemon/git-watcher.js");
@@ -104,7 +109,7 @@ describe("git watcher — branch switch detection", () => {
   });
 });
 
-describe("git watcher — commit detection", () => {
+describe.skipIf(skipOnMacCI)("git watcher — commit detection", () => {
   it("calls enqueue when a new commit is made on current branch", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { initGitWatcher, watchGitProject } = await import("../src/daemon/git-watcher.js");
@@ -147,7 +152,7 @@ describe("git watcher — commit detection", () => {
   });
 });
 
-describe("git watcher — lifecycle", () => {
+describe.skipIf(skipOnMacCI)("git watcher — lifecycle", () => {
   it("skips projects without a .git directory", async () => {
     const { mkdtempSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");

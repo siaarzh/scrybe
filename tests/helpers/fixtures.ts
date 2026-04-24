@@ -61,12 +61,12 @@ export function ensureMultiBranchFixture(name: string): void {
   execSync("git add src/alpha.ts", { cwd: fixturePath, stdio: "ignore" });
   execSync('git commit -m "add alphaFarewell"', { cwd: fixturePath, stdio: "ignore" });
 
-  // Switch back to main (default branch)
-  execSync("git checkout main 2>/dev/null || git checkout master", {
-    cwd: fixturePath,
-    stdio: "ignore",
-    shell: true,
-  });
+  // Switch back to main (cross-platform — no shell redirect)
+  try {
+    execSync("git checkout main", { cwd: fixturePath, stdio: "ignore" });
+  } catch {
+    execSync("git checkout master", { cwd: fixturePath, stdio: "ignore" });
+  }
 }
 
 /**
