@@ -28,20 +28,11 @@ export interface DiscoveryResult {
   scannedRoots: string[];
 }
 
+// Returns parent directories of recently-opened VS Code workspaces.
+// Hardcoded candidates (~/repos, ~/code, etc.) removed — the wizard prompts the user explicitly.
 export function defaultRoots(home?: string): string[] {
   const h = home ?? homedir();
-  const candidates = [
-    join(h, "repos"),
-    join(h, "code"),
-    join(h, "projects"),
-    join(h, "workspace"),
-    join(h, "dev"),
-    join(h, "src"),
-    h, // home itself as last resort (depth capped tightly)
-  ];
-  // VS Code workspaceStorage — extract recently-opened workspace paths
-  const vscodeStorage = getVSCodeWorkspacePaths(h);
-  return [...new Set([...candidates, ...vscodeStorage])].filter(existsSync);
+  return [...new Set(getVSCodeWorkspacePaths(h))].filter(existsSync);
 }
 
 function getVSCodeWorkspacePaths(home: string): string[] {
@@ -84,10 +75,7 @@ export async function discoverRepos(opts?: DiscoveryOptions): Promise<DiscoveryR
   const maxDirs  = opts?.maxDirs  ?? 500;
   const timeoutMs = opts?.timeoutMs ?? 5_000;
 
-  const roots = [
-    ...(defaultRoots()),
-    ...(opts?.extraRoots?.map((p) => resolve(p)) ?? []),
-  ];
+  const roots = [...(opts?.extraRoots?.map((p) => resolve(p)) ?? [])];
 
   const seenPaths = new Set<string>();
   const repos: DiscoveredRepo[] = [];

@@ -64,6 +64,7 @@ async function runWizardMocked({
   mcpConfirm = false,
   doIndex = false,
   useExternalProvider = false, // false = local path (new default); true = API provider path
+  rootChoice = "__skip",       // root-selection prompt: "__auto" | "__manual" | "__skip"
 }: {
   providerValue?: string;
   apiKey?: string;
@@ -73,17 +74,23 @@ async function runWizardMocked({
   mcpConfirm?: boolean;
   doIndex?: boolean;
   useExternalProvider?: boolean;
+  rootChoice?: string;
 } = {}): Promise<void> {
   // Mock @clack/prompts.
+  // Select sequence: external → [provider, root_choice] | local → [root_choice]
   // Confirm sequence: [useExternal?, addManual?, mcpConfirm?, doIndex?]
+  const selectMock = useExternalProvider
+    ? vi.fn().mockResolvedValueOnce(providerValue).mockResolvedValueOnce(rootChoice)
+    : vi.fn().mockResolvedValueOnce(rootChoice);
+
   vi.doMock("@clack/prompts", () => ({
     intro: vi.fn(),
     outro: vi.fn(),
     cancel: vi.fn(),
     log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn(), message: vi.fn() },
     isCancel: vi.fn(() => false),
-    spinner: () => ({ start: vi.fn(), stop: vi.fn() }),
-    select: vi.fn().mockResolvedValueOnce(providerValue),
+    spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
+    select: selectMock,
     password: vi.fn().mockResolvedValueOnce(apiKey),
     multiselect: vi.fn().mockResolvedValueOnce(selectedRepos),
     confirm: vi.fn()
@@ -108,8 +115,9 @@ async function runWizardMocked({
     ),
   }));
 
-  // Mock discoverRepos to return our test repo
+  // Mock discoverRepos + defaultRoots
   vi.doMock("../../src/onboarding/repo-discovery.js", () => ({
+    defaultRoots: vi.fn().mockReturnValue([]),
     discoverRepos: vi.fn().mockResolvedValue({
       repos: [{ path: repoDir, isGitRepo: true, alreadyRegistered: false, primaryLanguage: "typescript", fileCount: 1 }],
       hitLimit: null,
@@ -131,7 +139,7 @@ async function runWizardMocked({
   }));
 
   const { runWizard } = await import("../../src/onboarding/wizard.js");
-  await runWizard({ skipIndex: !doIndex });
+  await runWizard({ registerOnly: !doIndex });
 }
 
 describe("wizard — provider skip when already configured", () => {
@@ -140,12 +148,13 @@ describe("wizard — provider skip when already configured", () => {
     process.env["EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
     process.env["EMBEDDING_MODEL"] = "voyage-code-3";
 
-    const selectMock = vi.fn();
+    // Root-choice select fires once (always); provider select must NOT fire
+    const selectMock = vi.fn().mockResolvedValueOnce("__skip");
     vi.doMock("@clack/prompts", () => ({
       intro: vi.fn(), outro: vi.fn(), cancel: vi.fn(),
       log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn(), message: vi.fn() },
       isCancel: vi.fn(() => false),
-      spinner: () => ({ start: vi.fn(), stop: vi.fn() }),
+      spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
       select: selectMock,
       password: vi.fn(),
       multiselect: vi.fn().mockResolvedValueOnce([]),
@@ -153,6 +162,7 @@ describe("wizard — provider skip when already configured", () => {
       text: vi.fn(),
     }));
     vi.doMock("../../src/onboarding/repo-discovery.js", () => ({
+      defaultRoots: vi.fn().mockReturnValue([]),
       discoverRepos: vi.fn().mockResolvedValue({ repos: [], hitLimit: null, scannedRoots: [] }),
     }));
     vi.doMock("../../src/onboarding/mcp-config.js", () => ({
@@ -163,10 +173,10 @@ describe("wizard — provider skip when already configured", () => {
     }));
 
     const { runWizard } = await import("../../src/onboarding/wizard.js");
-    await runWizard({ skipIndex: true });
+    await runWizard({ registerOnly: true });
 
-    // Provider picker select should NOT have been called
-    expect(selectMock).not.toHaveBeenCalled();
+    // select called exactly once (root-choice only) — provider picker skipped
+    expect(selectMock).toHaveBeenCalledTimes(1);
 
     delete process.env["EMBEDDING_API_KEY"];
     delete process.env["EMBEDDING_BASE_URL"];

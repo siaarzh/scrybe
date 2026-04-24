@@ -2,9 +2,11 @@ import { existsSync, writeFileSync, readFileSync, mkdirSync } from "fs";
 import { join, resolve, basename } from "path";
 import { homedir } from "os";
 import * as p from "@clack/prompts";
+import { formatProgressLine, updateThroughput } from "./progress-renderer.js";
+import type { ProgressState } from "./progress-renderer.js";
 
 export interface WizardOptions {
-  skipIndex?: boolean;
+  registerOnly?: boolean;
 }
 
 interface ProviderPreset {
@@ -106,14 +108,14 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
   const LOCAL_MODEL_ID = process.env.SCRYBE_LOCAL_EMBEDDER ?? LOCAL_PROVIDER_DEFAULTS.model;
 
   if (isApiProviderConfigured()) {
-    p.log.info(`Step 1/5 — Provider already configured: ${config.embeddingBaseUrl ?? "OpenAI (default)"} / ${config.embeddingModel}`);
+    p.log.info(`Provider — already configured: ${config.embeddingBaseUrl ?? "OpenAI (default)"} / ${config.embeddingModel}`);
   } else if (isLocalProviderConfigured()) {
-    p.log.info(`Step 1/5 — Local embedder already configured: ${LOCAL_MODEL_ID}`);
+    p.log.info(`Provider — local embedder already configured: ${LOCAL_MODEL_ID}`);
   } else {
     // Default path: local embedder, no API key required.
     // "Use an external provider" escape via one keystroke.
     const useExternal = await p.confirm({
-      message: "Step 1/5 — Use an external embedding provider? (Voyage AI, OpenAI, Mistral)\n" +
+      message: "Provider — Use an external embedding provider? (Voyage AI, OpenAI, Mistral)\n" +
         "  No = local offline model (no API key, no signup — recommended for most users)",
       initialValue: false,
     });
@@ -213,9 +215,42 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
     )
   );
 
+  // Ask the user where their repos live — VS Code recents auto-detected when available.
+  const { defaultRoots } = await import("./repo-discovery.js");
+  const vscPaths = defaultRoots();
+  const rootChoices = [
+    ...(vscPaths.length > 0
+      ? [{ value: "__auto", label: `Auto-detect (VS Code recents, ${vscPaths.length} path${vscPaths.length !== 1 ? "s" : ""})` }]
+      : []),
+    { value: "__manual", label: "Enter a directory" },
+    { value: "__skip", label: "Skip — I'll add projects manually later" },
+  ];
+  const rootChoice = await p.select({
+    message: "Choose repos — Where are your projects stored?",
+    options: rootChoices,
+    initialValue: vscPaths.length > 0 ? "__auto" : "__manual",
+  });
+  if (p.isCancel(rootChoice)) { p.cancel("Setup cancelled."); return; }
+
+  let userRoots: string[] = [];
+  if (rootChoice === "__auto") {
+    userRoots = vscPaths;
+  } else if (rootChoice === "__manual") {
+    const entered = await p.text({
+      message: "Directory containing your git repos (e.g. ~/code, C:\\Users\\me\\src)",
+      validate: (v) => {
+        if (!v) return "Path required";
+        const resolved = resolve(v);
+        return existsSync(resolved) ? undefined : "Path does not exist";
+      },
+    });
+    if (p.isCancel(entered)) { p.cancel("Setup cancelled."); return; }
+    userRoots = [resolve(entered as string)];
+  }
+
   const spinner2 = p.spinner();
   spinner2.start("Discovering git repos...");
-  const { repos, hitLimit } = await discoverRepos();
+  const { repos, hitLimit } = await discoverRepos({ extraRoots: userRoots });
   spinner2.stop(
     hitLimit
       ? `Found ${repos.length} repo(s) (scan stopped: hit ${hitLimit} limit)`
@@ -237,7 +272,7 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
 
   if (repoOptions.length > 0) {
     const selected = await p.multiselect({
-      message: "Step 2/5 — Select repos to index",
+      message: "Choose repos — Select repos to register",
       options: repoOptions,
       required: false,
     });
@@ -302,9 +337,9 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
   const mcpToApply = mcpDiffs.filter((d) => d.action !== "skip");
 
   if (mcpToApply.length === 0) {
-    p.log.info("Step 3/5 — MCP config: all clients already configured");
+    p.log.info("MCP config — all clients already configured");
   } else {
-    p.log.message(`Step 3/5 — MCP configuration (${mcpToApply.length} client(s) to update)`);
+    p.log.message(`MCP config — ${mcpToApply.length} client(s) to update`);
     for (const diff of mcpToApply) {
       const clientName = diff.file.type === "claude-code" ? "Claude Code" : "Cursor";
       p.log.info(`${clientName}: ${diff.action}\n${diff.diff}`);
@@ -320,31 +355,62 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
     }
   }
 
+  if (mcpToApply.length > 0) {
+    p.log.warn("Restart your editor to pick up the new MCP config.");
+  }
+
   // ── Step 5: Initial index ──────────────────────────────────────────────────
-  const allProjects = listProjects();
   const toIndex = registeredNow.length > 0 ? registeredNow : [];
 
-  if (toIndex.length === 0 || opts?.skipIndex) {
+  if (toIndex.length === 0 || opts?.registerOnly) {
     if (toIndex.length > 0) {
-      p.log.info("Skipping initial index (--skip-index). Run `scrybe index --project-id <id>` when ready.");
+      p.log.info("Skipping initial index (--register-only). Run `scrybe index --project-id <id>` when ready.");
     }
   } else {
     const doIndex = await p.confirm({
-      message: `Step 4/5 — Index ${toIndex.length} repo(s) now? (may take 1–5 min depending on repo size)`,
+      message: `Index — Index ${toIndex.length} repo(s) now? (may take 1–5 min depending on repo size)`,
       initialValue: true,
     });
     if (p.isCancel(doIndex)) { p.cancel("Setup cancelled."); return; }
 
     if (doIndex) {
-      for (const projectId of toIndex) {
-        const spinner3 = p.spinner();
-        spinner3.start(`Indexing '${projectId}'...`);
+      const total = toIndex.length;
+      const spinner3 = p.spinner();
+      for (let i = 0; i < total; i++) {
+        const projectId = toIndex[i]!;
+        const pstate: ProgressState = {
+          projectIdx: i + 1,
+          projectTotal: total,
+          projectId,
+          bytesEmbedded: 0,
+          bytesTotal: null,
+          chunksIndexed: 0,
+          throughputBps: null,
+        };
+        spinner3.start(formatProgressLine(pstate));
         try {
-          const results = await indexProject(projectId, "incremental");
-          const total = results.reduce((s, r) => s + r.chunks_indexed, 0);
-          spinner3.stop(`'${projectId}' — ${total} chunks indexed`);
+          await indexProject(projectId, "incremental", {
+            onProgress: (r) => {
+              if (r.phase === "embed_start") {
+                pstate.bytesTotal = r.bytesTotal ?? null;
+              }
+              if (r.phase === "embed_batch") {
+                pstate.bytesEmbedded = r.bytesEmbedded ?? pstate.bytesEmbedded;
+                pstate.chunksIndexed = r.chunksIndexed ?? pstate.chunksIndexed;
+                if (r.batchBytes && r.batchDurationMs) {
+                  pstate.throughputBps = updateThroughput(
+                    pstate.throughputBps,
+                    r.batchBytes,
+                    r.batchDurationMs
+                  );
+                }
+                spinner3.message(formatProgressLine(pstate));
+              }
+            },
+          });
+          spinner3.stop(`[${i + 1}/${total}] ${projectId} — ${pstate.chunksIndexed} chunks indexed`);
         } catch (err: any) {
-          spinner3.stop(`'${projectId}' failed: ${err?.message ?? String(err)}`);
+          spinner3.stop(`[${i + 1}/${total}] ${projectId} failed: ${err?.message ?? String(err)}`);
         }
       }
     }
@@ -354,14 +420,14 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
   const allRegistered = listProjects();
   p.outro(
     [
-      `Setup complete! ${allRegistered.length} project(s) registered.`,
+      `Setup complete — ${allRegistered.length} project${allRegistered.length === 1 ? "" : "s"} registered.`,
       "",
-      "Try it:",
-      `  scrybe search --project-id ${allRegistered[0]?.id ?? "<id>"} "your query"`,
+      "Next: restart your editor, then ask your agent:",
+      `  "How does <topic> work in ${allRegistered[0]?.id ?? "<project>"}?"`,
       "",
-      "Restart your editor to pick up the MCP config.",
+      "Scrybe fires automatically — no slash command needed.",
       "",
-      "Need help? `scrybe doctor` checks your setup.",
+      "Troubleshoot: scrybe doctor",
     ].join("\n")
   );
 }

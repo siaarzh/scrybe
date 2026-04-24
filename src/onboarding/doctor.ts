@@ -187,6 +187,13 @@ export async function runDoctor(): Promise<DoctorReport> {
   // ── 3. Data integrity ────────────────────────────────────────────────────────
   const SEC_DATA = "Data Integrity";
 
+  // Fresh install: projects registered but index never ran (schema.json absent).
+  // Suppress expected-empty warnings for these checks so `scrybe doctor` is green post-init.
+  const isFreshInstall =
+    existsSync(dataDir) &&
+    existsSync(join(dataDir, "projects.json")) &&
+    !existsSync(join(dataDir, "schema.json"));
+
   const schemaPath = join(dataDir, "schema.json");
   if (!existsSync(dataDir)) {
     checks.push(skip("data.schema_version", SEC_DATA, "Schema version", "Skipped: DATA_DIR missing"));
@@ -195,9 +202,14 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push(skip("data.branch_tags_db", SEC_DATA, "branch-tags.db", "Skipped: DATA_DIR missing"));
   } else {
     if (!existsSync(schemaPath)) {
-      checks.push(warn("data.schema_version", SEC_DATA, "Schema version",
-        "schema.json not found — first index has not run yet",
-        "Run `scrybe index --project-id <id>` after adding a project"));
+      if (isFreshInstall) {
+        checks.push(ok("data.schema_version", SEC_DATA, "Schema version",
+          "Will be created on first index (expected)"));
+      } else {
+        checks.push(warn("data.schema_version", SEC_DATA, "Schema version",
+          "schema.json not found — first index has not run yet",
+          "Run `scrybe index --project-id <id>` after adding a project"));
+      }
     } else {
       let version = 0;
       try {
@@ -232,9 +244,14 @@ export async function runDoctor(): Promise<DoctorReport> {
 
     const lancedbDir = join(dataDir, "lancedb");
     if (!existsSync(lancedbDir)) {
-      checks.push(warn("data.lancedb", SEC_DATA, "LanceDB directory",
-        "Not found — no indexes created yet",
-        "Run `scrybe index` after adding a project"));
+      if (isFreshInstall) {
+        checks.push(ok("data.lancedb", SEC_DATA, "LanceDB directory",
+          "Will be created on first index (expected)"));
+      } else {
+        checks.push(warn("data.lancedb", SEC_DATA, "LanceDB directory",
+          "Not found — no indexes created yet",
+          "Run `scrybe index` after adding a project"));
+      }
     } else {
       const tables = readdirSync(lancedbDir).filter((f) => f.endsWith(".lance") || existsSync(join(lancedbDir, f, "_latest.manifest")));
       checks.push(ok("data.lancedb", SEC_DATA, "LanceDB directory",
@@ -243,9 +260,14 @@ export async function runDoctor(): Promise<DoctorReport> {
 
     const branchTagsPath = join(dataDir, "branch-tags.db");
     if (!existsSync(branchTagsPath)) {
-      checks.push(warn("data.branch_tags_db", SEC_DATA, "branch-tags.db",
-        "Not found — will be created on next index",
-        "Run `scrybe index` after adding a code source"));
+      if (isFreshInstall) {
+        checks.push(ok("data.branch_tags_db", SEC_DATA, "branch-tags.db",
+          "Will be created on first index (expected)"));
+      } else {
+        checks.push(warn("data.branch_tags_db", SEC_DATA, "branch-tags.db",
+          "Not found — will be created on next index",
+          "Run `scrybe index` after adding a code source"));
+      }
     } else {
       checks.push(ok("data.branch_tags_db", SEC_DATA, "branch-tags.db", "Present"));
     }
@@ -274,9 +296,14 @@ export async function runDoctor(): Promise<DoctorReport> {
       const sid = source.source_id;
       const lastIndexed = source.last_indexed;
       if (!lastIndexed) {
-        checks.push(warn(`project.${project.id}.${sid}.last_indexed`,
-          SEC_PROJ, `${sid} — last indexed`, "Never indexed",
-          `Run: scrybe index --project-id ${project.id} --source-ids ${sid} --incremental`));
+        if (isFreshInstall) {
+          checks.push(ok(`project.${project.id}.${sid}.last_indexed`,
+            SEC_PROJ, `${sid} — last indexed`, "Not yet indexed (expected on fresh install)"));
+        } else {
+          checks.push(warn(`project.${project.id}.${sid}.last_indexed`,
+            SEC_PROJ, `${sid} — last indexed`, "Never indexed",
+            `Run: scrybe index --project-id ${project.id} --source-ids ${sid} --incremental`));
+        }
       } else {
         const age = Date.now() - new Date(lastIndexed).getTime();
         const ageDays = Math.floor(age / 86_400_000);

@@ -6,6 +6,18 @@ Self-hosted code memory with semantic search. Index your repos and knowledge sou
 
 A local WASM/ONNX embedder (`Xenova/multilingual-e5-small`, ~120 MB download on first run) is the default provider. To use Voyage AI, OpenAI, or a custom endpoint instead, run `scrybe init` and choose "Use an external provider".
 
+## Why scrybe?
+
+Ask your agent a natural-language question. scrybe returns the right chunks; Grep can't.
+
+**Example** — real session in this repo:
+
+> "How does incremental reindex decide which files changed?"
+
+scrybe returns `src/indexer.ts:100-159` at score 0.81 — the exact function body that computes `toRemove` and `toReindex` from the cursor + `oldHashes` diff.
+
+For contrast: `grep "incremental"` returns 34 hits across type declarations, CLI option strings, and tests. `grep "files changed"` returns 0 — the phrase doesn't appear in the code; only the *concept* does. Semantic search bridges that gap.
+
 ## How it works
 
 ```

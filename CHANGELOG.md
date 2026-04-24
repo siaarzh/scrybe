@@ -7,6 +7,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **`llms-install.md`** — non-interactive install guide for AI coding agents (Cline, Roo Code, Codex). Covers Node prerequisites, CLI-based project registration, and per-agent MCP settings file paths. Referenced by Cline marketplace submission.
+- **README "Why scrybe?" section** — concrete semantic-search-vs-Grep example using this repo's own `src/indexer.ts`.
+- **`onProgress` callback on `IndexOptions`** — `ProgressReport` events (`embed_start`, `embed_batch`, `embed_done`) expose `bytesTotal`, `bytesEmbedded`, `chunksIndexed`, `batchBytes`, and `batchDurationMs` for progress rendering.
+- **Wizard indexing progress** — `scrybe init` now shows `[N/M] project — X% · ~Ys remaining` updating per embed batch. Falls back to chunk count when byte totals are unavailable.
+- **Doctor fresh-install profile** — `scrybe doctor` reclassifies `data.schema_version`, `data.lancedb`, `data.branch_tags_db`, and `last_indexed` from `warn` to `ok` post-`scrybe init` before any index has run.
+
+### Changed
+
+- **`scrybe init` root selection** — wizard prompts "Where are your projects stored?" before discovery. VS Code auto-detect, manual directory, or skip. Hardcoded `~/repos`, `~/code`, etc. removed from `defaultRoots()`.
+- **`scrybe init` exit message** — agent-first CTA: "restart your editor, then ask your agent". `scrybe search` no longer mentioned in wizard exit.
+- **Editor-restart warning** — `p.log.warn` shown immediately after MCP config is written.
+- **Wizard step labels** — removed `/N` count suffix to avoid drift.
+- **`--skip-index` renamed to `--register-only`** (`scrybe init --register-only`). No deprecation alias.
+
 ---
 
 ## [0.18.0] — 2026-04-23

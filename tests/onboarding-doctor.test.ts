@@ -159,3 +159,59 @@ describe("runDoctor — report structure", () => {
     expect(Array.isArray(parsed.checks)).toBe(true);
   });
 });
+
+describe("runDoctor — fresh install profile", () => {
+  it("reclassifies 4 data checks as ok when projects.json exists but schema.json absent", async () => {
+    // Simulate post-init state: projects registered, no index yet
+    writeFileSync(join(tmp, "projects.json"), "[]", "utf8");
+    // schema.json intentionally absent
+
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 384, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+
+    const report = await runFresh();
+
+    const schema = report.checks.find((c) => c.id === "data.schema_version")!;
+    const lancedb = report.checks.find((c) => c.id === "data.lancedb")!;
+    const branchTags = report.checks.find((c) => c.id === "data.branch_tags_db")!;
+
+    expect(schema.status).toBe("ok");
+    expect(schema.message).toContain("expected");
+    expect(lancedb.status).toBe("ok");
+    expect(lancedb.message).toContain("expected");
+    expect(branchTags.status).toBe("ok");
+    expect(branchTags.message).toContain("expected");
+  });
+
+  it("still warns when projects.json absent (not fresh-install state)", async () => {
+    // DATA_DIR exists but no projects.json → not a fresh install
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 384, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+
+    const report = await runFresh();
+    const schema = report.checks.find((c) => c.id === "data.schema_version")!;
+    expect(schema.status).toBe("warn");
+  });
+});

@@ -18,7 +18,8 @@ import {
   deleteKnowledgeProject,
 } from "./vector-store.js";
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { statSync } from "node:fs";
+import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
 import { resolveBranch, resolveBranchForPath } from "./branches.js";
@@ -33,9 +34,23 @@ import {
   type BranchTag,
 } from "./branch-tags.js";
 
+export interface ProgressReport {
+  phase: "scan" | "embed_start" | "embed_batch" | "embed_done";
+  projectId: string;
+  sourceId: string;
+  filesScanned?: number;
+  bytesTotal?: number;        // undefined = unknown, fall back to chunk-count display
+  filesTotal?: number;
+  bytesEmbedded?: number;     // cumulative
+  chunksIndexed?: number;     // cumulative
+  batchBytes?: number;
+  batchDurationMs?: number;
+}
+
 export interface IndexOptions {
   onScanProgress?: (filesScanned: number) => void;
   onEmbedProgress?: (chunksIndexed: number) => void;
+  onProgress?: (report: ProgressReport) => void;
   signal?: AbortSignal;
   /** Branch to index. Defaults to current HEAD for code sources; "*" for non-code. */
   branch?: string;
@@ -53,7 +68,7 @@ export async function indexSource(
   mode: IndexMode,
   options: IndexOptions = {}
 ): Promise<IndexResult> {
-  const { onScanProgress, onEmbedProgress, signal } = options;
+  const { onScanProgress, onEmbedProgress, onProgress, signal } = options;
 
   const project = getProject(projectId);
   if (!project) throw new Error(`Project '${projectId}' not found`);
@@ -165,7 +180,30 @@ export async function indexSource(
   for (const id of preservedFromRemovals) alreadyEmbedded.add(id);
 
   // --- Phase 2: Chunk + embed changed sources, checkpoint per key ---
+
+  // Compute file-size totals for byte-accurate progress (code sources only).
+  // bytesTotal is an approximation — chunk content bytes differ slightly from file bytes
+  // due to overlap, but the ratio stays accurate enough for ETA estimation.
+  let bytesTotal: number | undefined;
+  if (isCode && toReindex.size > 0) {
+    let sum = 0;
+    if (isNonHeadBranch) {
+      for (const relPath of toReindex) {
+        const content = nonHeadContentCache.get(relPath);
+        if (content) sum += Buffer.byteLength(content, "utf8");
+      }
+    } else if (rootPath) {
+      for (const relPath of toReindex) {
+        try { sum += statSync(join(rootPath, relPath)).size; } catch { /* skip missing/unreadable */ }
+      }
+    }
+    if (sum > 0) bytesTotal = sum;
+  }
+
+  onProgress?.({ phase: "embed_start", projectId, sourceId, bytesTotal, filesTotal: toReindex.size });
+
   let chunksIndexed = 0;
+  let bytesEmbedded = 0;
   const batchSize = config.embedBatchSize;
   const batchDelayMs = config.embedBatchDelayMs;
 
@@ -176,6 +214,7 @@ export async function indexSource(
   async function flushBatch(): Promise<void> {
     if (keyBatches.length === 0) return;
 
+    const batchStart = Date.now();
     const allChunks = keyBatches.flatMap((kb) => kb.chunks);
 
     // Split into chunks that need embedding vs those already in LanceDB
@@ -232,6 +271,18 @@ export async function indexSource(
     chunksIndexed += allChunks.length;
     onEmbedProgress?.(chunksIndexed);
 
+    const batchBytes = toEmbed.reduce((sum, c) => sum + Buffer.byteLength(c.content, "utf8"), 0);
+    bytesEmbedded += batchBytes;
+    onProgress?.({
+      phase: "embed_batch",
+      projectId,
+      sourceId,
+      chunksIndexed,
+      bytesEmbedded,
+      batchBytes,
+      batchDurationMs: Date.now() - batchStart,
+    });
+
     keyBatches.length = 0;
     totalPending = 0;
   }
@@ -263,6 +314,7 @@ export async function indexSource(
     }
   }
   await flushBatch();
+  onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
 
   // Update last_indexed timestamp (hashes already persisted per-key above)
   const now = new Date().toISOString();

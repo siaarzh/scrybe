@@ -824,10 +824,10 @@ export async function runCli(): Promise<void> {
   program
     .command("init")
     .description("First-run wizard: provider setup, repo discovery, MCP auto-configuration")
-    .option("--skip-index", "Configure everything but defer the initial reindex")
-    .action(async (opts: { skipIndex?: boolean }) => {
+    .option("--register-only", "Register repos + write MCP config, skip indexing (CI/scripting)")
+    .action(async (opts: { registerOnly?: boolean }) => {
       const { runWizard } = await import("./onboarding/wizard.js");
-      await runWizard({ skipIndex: opts.skipIndex });
+      await runWizard({ registerOnly: opts.registerOnly });
     });
 
   // ─── Doctor command ────────────────────────────────────────────────────────
