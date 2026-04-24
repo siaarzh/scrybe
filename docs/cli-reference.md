@@ -14,11 +14,11 @@ Guides through: provider setup → repo discovery → `.scrybeignore` generation
 
 | Flag | Description |
 |------|-------------|
-| `--skip-index` | Complete all configuration steps but defer the initial index |
+| `--register-only` | Register repos and write MCP config, but skip the initial index (CI/scripting) |
 
 ```bash
 scrybe init
-scrybe init --skip-index
+scrybe init --register-only
 ```
 
 Config is written to `<DATA_DIR>/.env` and picked up automatically on subsequent runs. Local embedder: writes `SCRYBE_LOCAL_EMBEDDER` + `EMBEDDING_DIMENSIONS`. External provider: writes `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_API_KEY`.
