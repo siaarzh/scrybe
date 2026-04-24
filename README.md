@@ -36,6 +36,8 @@ No Docker. LanceDB runs in-process. All data lives in the OS user data directory
 - **Linux:** `~/.local/share/scrybe/`
 - **Mac:** `~/Library/Application Support/scrybe/`
 
+> **Platform support:** Windows and Linux are tested in CI on every commit. macOS support is best-effort — it runs in CI but has not yet been validated by macOS users in production. If you hit a macOS-specific issue, please [open an issue](https://github.com/siaarzh/scrybe/issues/new/choose).
+
 ## Code chunking
 
 Code files are chunked using Tree-sitter AST parsing, which aligns chunk boundaries with actual function, class, and method definitions. This significantly improves retrieval precision compared to arbitrary sliding-window splits.

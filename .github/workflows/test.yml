@@ -11,7 +11,13 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    # macOS coverage is best-effort until community validation — failures are visible but non-blocking
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -25,9 +31,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-all-MiniLM-L6-v2-${{ hashFiles('package-lock.json') }}
+          key: hf-all-MiniLM-L6-v2-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
-            hf-all-MiniLM-L6-v2-
+            hf-all-MiniLM-L6-v2-${{ runner.os }}-
 
       - name: Install dependencies
         run: npm ci
@@ -40,3 +46,5 @@ jobs:
         env:
           # Suppress any .env files from bleeding into CI
           SCRYBE_RERANK: "false"
+          # Explicit cache dir so all platforms write to the same path
+          HF_HOME: ~/.cache/huggingface
