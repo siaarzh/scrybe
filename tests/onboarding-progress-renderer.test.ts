@@ -6,6 +6,8 @@ function state(overrides: Partial<ProgressState> = {}): ProgressState {
     projectIdx: 1,
     projectTotal: 1,
     projectId: "myrepo",
+    filesEmbedded: 0,
+    filesTotal: null,
     bytesEmbedded: 0,
     bytesTotal: null,
     chunksIndexed: 0,
@@ -15,35 +17,36 @@ function state(overrides: Partial<ProgressState> = {}): ProgressState {
 }
 
 describe("formatProgressLine", () => {
-  it("shows chunk count when bytesTotal is null", () => {
+  it("shows chunk count when filesTotal is null", () => {
     const line = formatProgressLine(state({ chunksIndexed: 42 }));
     expect(line).toContain("42 chunks");
     expect(line).toContain("estimating...");
   });
 
-  it("shows percentage when bytesTotal is known", () => {
+  it("shows percentage based on file count", () => {
     const line = formatProgressLine(
-      state({ bytesTotal: 1000, bytesEmbedded: 500, throughputBps: 100 })
+      state({ filesTotal: 10, filesEmbedded: 5, bytesTotal: 1000, bytesEmbedded: 500, throughputBps: 100 })
     );
     expect(line).toContain("50%");
   });
 
-  it("clamps percentage at 100 when bytesEmbedded exceeds bytesTotal", () => {
+  it("clamps percentage at 100 — no overshoot from chunk overlap", () => {
     const line = formatProgressLine(
-      state({ bytesTotal: 1000, bytesEmbedded: 1100, throughputBps: 100 })
+      state({ filesTotal: 10, filesEmbedded: 12, bytesTotal: 1000, bytesEmbedded: 1200, throughputBps: 100 })
     );
     expect(line).toContain("100%");
     expect(line).not.toContain("110%");
+    expect(line).not.toContain("120%");
   });
 
   it("shows estimating when throughputBps is null even with bytesTotal", () => {
-    const line = formatProgressLine(state({ bytesTotal: 1000, bytesEmbedded: 200 }));
+    const line = formatProgressLine(state({ filesTotal: 10, filesEmbedded: 2, bytesTotal: 1000, bytesEmbedded: 200 }));
     expect(line).toContain("estimating...");
   });
 
   it("shows seconds ETA for short remaining time", () => {
     const line = formatProgressLine(
-      state({ bytesTotal: 1000, bytesEmbedded: 900, throughputBps: 100 })
+      state({ filesTotal: 10, filesEmbedded: 9, bytesTotal: 1000, bytesEmbedded: 900, throughputBps: 100 })
     );
     // remaining = 100 bytes / 100 bps = 1s
     expect(line).toContain("~1s remaining");
@@ -51,7 +54,7 @@ describe("formatProgressLine", () => {
 
   it("shows minutes ETA for longer remaining time", () => {
     const line = formatProgressLine(
-      state({ bytesTotal: 100_000, bytesEmbedded: 0, throughputBps: 1000 })
+      state({ filesTotal: 10, filesEmbedded: 0, bytesTotal: 100_000, bytesEmbedded: 0, throughputBps: 1000 })
     );
     // remaining = 100000 / 1000 = 100s → 1m 40s
     expect(line).toContain("~1m");
@@ -73,7 +76,6 @@ describe("formatProgressLine", () => {
 
 describe("updateThroughput", () => {
   it("returns sample directly on first call (prev=null)", () => {
-    // 1000 bytes in 500ms = 2000 bps
     expect(updateThroughput(null, 1000, 500)).toBe(2000);
   });
 

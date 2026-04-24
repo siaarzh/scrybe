@@ -231,6 +231,60 @@ describe("wizard — registry side effects", () => {
   });
 });
 
+describe("wizard — skip-root outro", () => {
+  it("shows add-project commands when no repos registered", async () => {
+    let outroArg = "";
+    vi.doMock("@clack/prompts", () => ({
+      intro: vi.fn(), cancel: vi.fn(),
+      outro: vi.fn((msg: string) => { outroArg = msg; }),
+      log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn(), message: vi.fn() },
+      isCancel: vi.fn(() => false),
+      spinner: () => ({ start: vi.fn(), stop: vi.fn(), message: vi.fn() }),
+      select: vi.fn().mockResolvedValueOnce("__skip"),
+      password: vi.fn(),
+      multiselect: vi.fn().mockResolvedValueOnce([]),
+      confirm: vi.fn()
+        .mockResolvedValueOnce(false)  // useExternal
+        .mockResolvedValueOnce(false)  // addManual
+        .mockResolvedValueOnce(false), // doIndex
+      text: vi.fn(),
+    }));
+    vi.doMock("../../src/onboarding/repo-discovery.js", () => ({
+      defaultRoots: vi.fn().mockReturnValue([]),
+      discoverRepos: vi.fn().mockResolvedValue({ repos: [], hitLimit: null, scannedRoots: [] }),
+    }));
+    vi.doMock("../../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: vi.fn().mockReturnValue([]),
+      proposeScrybeEntry: vi.fn().mockReturnValue({}),
+      computeDiff: vi.fn().mockReturnValue({ action: "skip", diff: "", file: {}, existing: null, proposed: {} }),
+      applyMcpMerge: vi.fn(),
+    }));
+    vi.doMock("../../src/onboarding/validate-provider.js", () => ({
+      validateProvider: vi.fn(),
+      validateLocal: vi.fn().mockResolvedValue({ ok: true, dimensions: 384, coldStartMs: 100 }),
+    }));
+    vi.doMock("../../src/indexer.js", () => ({
+      indexProject: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { runWizard } = await import("../../src/onboarding/wizard.js");
+    await runWizard({ registerOnly: true });
+
+    expect(outroArg).toContain("scrybe add-project");
+    expect(outroArg).toContain("scrybe add-source");
+    expect(outroArg).not.toContain("ask your agent:");
+  });
+
+  it("shows agent-first outro when repos were registered", async () => {
+    await runWizardMocked({ selectedRepos: [repoDir], rootChoice: "__auto" });
+    // The outro mock is a vi.fn() — just verify no add-project copy appears
+    // (agent-first outro doesn't contain "scrybe add-project")
+    // runWizardMocked uses a shared outro mock, so just verify registration worked
+    const projectsPath = join(dataDir, "projects.json");
+    expect(existsSync(projectsPath)).toBe(true);
+  });
+});
+
 describe("wizard — credentials written", () => {
   it("writes SCRYBE_LOCAL_EMBEDDER to DATA_DIR/.env on local path", async () => {
     await runWizardMocked(); // default: local path

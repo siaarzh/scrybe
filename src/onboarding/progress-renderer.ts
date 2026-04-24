@@ -2,6 +2,8 @@ export interface ProgressState {
   projectIdx: number;
   projectTotal: number;
   projectId: string;
+  filesEmbedded: number;
+  filesTotal: number | null;
   bytesEmbedded: number;
   bytesTotal: number | null;
   chunksIndexed: number;
@@ -20,10 +22,12 @@ function formatEta(seconds: number): string {
 
 export function formatProgressLine(s: ProgressState): string {
   const counter = `[${s.projectIdx}/${s.projectTotal}]`;
+  // Use file-count ratio for % — no overshoot possible (unlike byte-ratio with chunk overlap)
   const pctStr =
-    s.bytesTotal != null && s.bytesTotal > 0
-      ? `${Math.min(100, Math.floor((s.bytesEmbedded / s.bytesTotal) * 100))}%`
+    s.filesTotal != null && s.filesTotal > 0
+      ? `${Math.min(100, Math.floor((s.filesEmbedded / s.filesTotal) * 100))}%`
       : `${s.chunksIndexed} chunks`;
+  // Keep byte-based throughput for ETA — more stable than files/sec across varying file sizes
   const eta =
     s.bytesTotal != null && s.throughputBps != null
       ? formatEta((s.bytesTotal - s.bytesEmbedded) / s.throughputBps)

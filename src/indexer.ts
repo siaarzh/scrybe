@@ -42,6 +42,7 @@ export interface ProgressReport {
   bytesTotal?: number;        // undefined = unknown, fall back to chunk-count display
   filesTotal?: number;
   bytesEmbedded?: number;     // cumulative
+  filesEmbedded?: number;     // cumulative distinct files flushed — used for % display
   chunksIndexed?: number;     // cumulative
   batchBytes?: number;
   batchDurationMs?: number;
@@ -204,6 +205,7 @@ export async function indexSource(
 
   let chunksIndexed = 0;
   let bytesEmbedded = 0;
+  const filesSeenSoFar = new Set<string>();
   const batchSize = config.embedBatchSize;
   const batchDelayMs = config.embedBatchDelayMs;
 
@@ -271,6 +273,7 @@ export async function indexSource(
     chunksIndexed += allChunks.length;
     onEmbedProgress?.(chunksIndexed);
 
+    for (const { key } of keyBatches) filesSeenSoFar.add(key);
     const batchBytes = toEmbed.reduce((sum, c) => sum + Buffer.byteLength(c.content, "utf8"), 0);
     bytesEmbedded += batchBytes;
     onProgress?.({
@@ -279,6 +282,7 @@ export async function indexSource(
       sourceId,
       chunksIndexed,
       bytesEmbedded,
+      filesEmbedded: filesSeenSoFar.size,
       batchBytes,
       batchDurationMs: Date.now() - batchStart,
     });

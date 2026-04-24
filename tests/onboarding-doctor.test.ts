@@ -162,8 +162,19 @@ describe("runDoctor — report structure", () => {
 
 describe("runDoctor — fresh install profile", () => {
   it("reclassifies 4 data checks as ok when projects.json exists but schema.json absent", async () => {
-    // Simulate post-init state: projects registered, no index yet
-    writeFileSync(join(tmp, "projects.json"), "[]", "utf8");
+    // Simulate post-init state: one project with one source, no index yet
+    const fixtureProject = {
+      id: "test-proj",
+      description: "",
+      sources: [
+        {
+          source_id: "primary",
+          source_config: { type: "code", root_path: tmp, languages: [] },
+          last_indexed: null,
+        },
+      ],
+    };
+    writeFileSync(join(tmp, "projects.json"), JSON.stringify([fixtureProject]), "utf8");
     // schema.json intentionally absent
 
     vi.doMock("../src/onboarding/validate-provider.js", () => ({
@@ -185,6 +196,7 @@ describe("runDoctor — fresh install profile", () => {
     const schema = report.checks.find((c) => c.id === "data.schema_version")!;
     const lancedb = report.checks.find((c) => c.id === "data.lancedb")!;
     const branchTags = report.checks.find((c) => c.id === "data.branch_tags_db")!;
+    const lastIndexed = report.checks.find((c) => c.id === "project.test-proj.primary.last_indexed")!;
 
     expect(schema.status).toBe("ok");
     expect(schema.message).toContain("expected");
@@ -192,6 +204,8 @@ describe("runDoctor — fresh install profile", () => {
     expect(lancedb.message).toContain("expected");
     expect(branchTags.status).toBe("ok");
     expect(branchTags.message).toContain("expected");
+    expect(lastIndexed.status).toBe("ok");
+    expect(lastIndexed.message).toContain("expected");
   });
 
   it("still warns when projects.json absent (not fresh-install state)", async () => {

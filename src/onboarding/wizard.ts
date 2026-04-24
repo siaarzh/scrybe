@@ -382,6 +382,8 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
           projectIdx: i + 1,
           projectTotal: total,
           projectId,
+          filesEmbedded: 0,
+          filesTotal: null,
           bytesEmbedded: 0,
           bytesTotal: null,
           chunksIndexed: 0,
@@ -392,9 +394,11 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
           await indexProject(projectId, "incremental", {
             onProgress: (r) => {
               if (r.phase === "embed_start") {
+                pstate.filesTotal = r.filesTotal ?? null;
                 pstate.bytesTotal = r.bytesTotal ?? null;
               }
               if (r.phase === "embed_batch") {
+                pstate.filesEmbedded = r.filesEmbedded ?? pstate.filesEmbedded;
                 pstate.bytesEmbedded = r.bytesEmbedded ?? pstate.bytesEmbedded;
                 pstate.chunksIndexed = r.chunksIndexed ?? pstate.chunksIndexed;
                 if (r.batchBytes && r.batchDurationMs) {
@@ -418,8 +422,11 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
 
   // ── Done ───────────────────────────────────────────────────────────────────
   const allRegistered = listProjects();
-  p.outro(
-    [
+  const wizardAddedAnyProject = registeredNow.length > 0;
+
+  let outroLines: string[];
+  if (wizardAddedAnyProject) {
+    outroLines = [
       `Setup complete — ${allRegistered.length} project${allRegistered.length === 1 ? "" : "s"} registered.`,
       "",
       "Next: restart your editor, then ask your agent:",
@@ -428,6 +435,22 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
       "Scrybe fires automatically — no slash command needed.",
       "",
       "Troubleshoot: scrybe doctor",
-    ].join("\n")
-  );
+    ];
+  } else {
+    outroLines = [
+      mcpToApply.length > 0
+        ? "MCP config written. Now register a project to index:"
+        : "No projects registered yet. Add one manually:",
+      "",
+      "  scrybe add-project --id myrepo --desc \"My project\"",
+      "  scrybe add-source --project-id myrepo --source-id primary \\",
+      "    --type code --root /absolute/path/to/repo",
+      "  scrybe index --project-id myrepo --incremental",
+      "",
+      "Then restart your editor and ask your agent a question.",
+      "",
+      "Troubleshoot: scrybe doctor",
+    ];
+  }
+  p.outro(outroLines.join("\n"));
 }
