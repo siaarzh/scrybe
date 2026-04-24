@@ -92,7 +92,11 @@ describe("fetch poller — SHA delta detection", () => {
     // Commit to feat/example on the remote BEFORE starting the poller
     // (so the poller's first snapshot captures the pre-commit SHA,
     //  then the fetch updates local to the post-commit SHA)
-    execSync(`git -C "${remote.path}" checkout feat/example`, { stdio: "ignore" });
+    try {
+      execSync(`git -C "${remote.path}" checkout feat/example`, { stdio: "ignore" });
+    } catch {
+      execSync(`git -C "${remote.path}" checkout -b feat/example origin/feat/example`, { stdio: "ignore" });
+    }
     commitFile(remote, "new-remote-file.ts", "export const x = 1;\n", "remote advance");
     execSync(`git -C "${remote.path}" checkout -`, { stdio: "ignore" });
 

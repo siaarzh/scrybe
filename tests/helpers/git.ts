@@ -20,7 +20,12 @@ export function createBranch(handle: FixtureHandle, branch: string, fromBranch?:
 
 /** Switches to an existing branch. */
 export function switchBranch(handle: FixtureHandle, branch: string): void {
-  git(handle, `checkout "${branch}"`);
+  try {
+    git(handle, `checkout "${branch}"`);
+  } catch {
+    // DWIM checkout unreliable on Windows for slash-path branches — create explicit tracking branch
+    git(handle, `checkout -b "${branch}" "origin/${branch}"`);
+  }
 }
 
 /** Writes (or overwrites) a file and commits it. */
