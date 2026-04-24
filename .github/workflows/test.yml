@@ -35,6 +35,13 @@ jobs:
           restore-keys: |
             hf-all-MiniLM-L6-v2-${{ runner.os }}-
 
+      - name: Configure git for tests (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global init.defaultBranch main
+          git config --global --add safe.directory '*'
+
       - name: Install dependencies
         run: npm ci
 
