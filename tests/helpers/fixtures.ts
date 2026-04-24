@@ -126,6 +126,20 @@ export async function cloneFixture(name: string): Promise<FixtureHandle> {
   // Fetch all branches so tests can switch between them
   execSync("git fetch --all", { cwd: cloneDir, stdio: "ignore" });
 
+  // Explicitly create local tracking branches for all remote branches.
+  // git DWIM checkout is unreliable for slash-path branches (e.g. feat/example) on Windows.
+  try {
+    const raw = execSync("git branch -r", { cwd: cloneDir, encoding: "utf8" });
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.includes("->")) continue;
+      const localName = trimmed.replace(/^origin\//, "");
+      try {
+        execSync(`git branch "${localName}" "${trimmed}"`, { cwd: cloneDir, stdio: "ignore" });
+      } catch { /* already exists */ }
+    }
+  } catch { /* ignore — best effort */ }
+
   return {
     path: cloneDir,
     async cleanup() {

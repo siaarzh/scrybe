@@ -34,6 +34,11 @@ async function pollHealth(baseUrl: string, timeoutMs: number): Promise<void> {
 }
 
 export async function setup(): Promise<void> {
+  // Pre-build the multi-branch fixture once, before workers start.
+  // Avoids concurrent git operations on the same fixture dir on Windows.
+  const { ensureMultiBranchFixture } = await import("./helpers/fixtures.js");
+  ensureMultiBranchFixture("sample-multi-branch-repo");
+
   const sidecarPath = join(__dirname, "local-embedder.ts");
 
   // Use node + tsx/esm loader — works cross-platform without needing .cmd wrappers
