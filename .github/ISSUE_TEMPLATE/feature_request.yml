@@ -1,0 +1,54 @@
+name: Feature Request
+description: Suggest an improvement or new capability
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome. The clearer the problem statement, the more likely it gets prioritised.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the concrete situation where you hit this limitation. "I wanted to X but couldn't because Y."
+      placeholder: "When indexing a monorepo with 10k files, the embed step fails with a 400 error and I have to manually lower SCRYBE_EMBED_BATCH_SIZE to find a working value."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen? Don't worry if you don't have a full design — the problem statement is enough.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Workarounds you've tried, or other approaches that could solve the same problem.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Area
+      options:
+        - Indexing / embedding
+        - Search quality
+        - CLI / UX
+        - MCP server / agent integration
+        - Onboarding (scrybe init / doctor)
+        - Daemon / background watcher
+        - Performance
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Repo size, language, provider, use case — anything that helps us understand the priority.

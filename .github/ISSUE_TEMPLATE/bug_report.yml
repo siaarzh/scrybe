@@ -1,0 +1,103 @@
+name: Bug Report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The more detail you provide, the faster we can fix it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+      placeholder: "scrybe init crashed with: ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or actions that trigger the bug.
+      placeholder: |
+        1. Run `scrybe init`
+        2. Select "Voyage AI" as provider
+        3. Enter API key
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: "Should have indexed 42 files and printed '42 chunks indexed'"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Paste the exact error message or output.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: scrybe_version
+    attributes:
+      label: Scrybe version
+      description: "`scrybe --version`"
+      placeholder: "0.18.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js version
+      description: "`node --version`"
+      placeholder: "v22.5.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Embedding provider
+      options:
+        - Local (offline, default)
+        - Voyage AI
+        - OpenAI
+        - Mistral
+        - Custom / self-hosted
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`scrybe doctor` output"
+      description: Run `scrybe doctor` and paste the output here. Helps us rule out config issues fast.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else — repo size, language, network setup, etc.
