@@ -272,3 +272,100 @@ describe("cline + roo-code detection", () => {
     expect(read).toEqual(proposed);
   });
 });
+
+// ─── computeRemoveDiff ───────────────────────────────────────────────────────
+
+describe("computeRemoveDiff", () => {
+  it("action=skip when no scrybe entry present", async () => {
+    const { computeRemoveDiff, detectMcpConfigs } = await load(tmp);
+    writeFileSync(join(tmp, ".claude.json"), JSON.stringify({ mcpServers: { other: { command: "x", args: [] } } }));
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const diff = computeRemoveDiff(file);
+    expect(diff.action).toBe("skip");
+    expect(diff.existing).toBeNull();
+  });
+
+  it("action=skip when file missing", async () => {
+    const { computeRemoveDiff, detectMcpConfigs } = await load(tmp);
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const diff = computeRemoveDiff(file);
+    expect(diff.action).toBe("skip");
+  });
+
+  it("action=remove when scrybe entry present", async () => {
+    const { computeRemoveDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    writeFileSync(join(tmp, ".claude.json"), JSON.stringify({ mcpServers: { scrybe: proposed } }));
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const diff = computeRemoveDiff(file);
+    expect(diff.action).toBe("remove");
+    expect(diff.existing).toEqual(proposed);
+  });
+});
+
+// ─── applyMcpRemove ──────────────────────────────────────────────────────────
+
+describe("applyMcpRemove — JSON (claude-code)", () => {
+  it("removes scrybe entry, preserves other entries, creates backup", async () => {
+    const { applyMcpRemove, computeRemoveDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const claudeJson = join(tmp, ".claude.json");
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    writeFileSync(claudeJson, JSON.stringify({ mcpServers: { scrybe: proposed, other: { command: "x", args: [] } } }));
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const diff = computeRemoveDiff(file);
+    expect(diff.action).toBe("remove");
+    await applyMcpRemove(diff);
+    const written = JSON.parse(readFileSync(claudeJson, "utf8"));
+    expect(written.mcpServers?.scrybe).toBeUndefined();
+    expect(written.mcpServers?.other).toEqual({ command: "x", args: [] });
+    // backup exists
+    const { readdirSync } = await import("fs");
+    const backups = readdirSync(tmp).filter((f) => f.includes(".scrybe-backup-"));
+    expect(backups.length).toBeGreaterThan(0);
+  });
+
+  it("no-op on skip", async () => {
+    const { applyMcpRemove, computeRemoveDiff, detectMcpConfigs } = await load(tmp);
+    const claudeJson = join(tmp, ".claude.json");
+    writeFileSync(claudeJson, JSON.stringify({ mcpServers: {} }));
+    const before = readFileSync(claudeJson, "utf8");
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const diff = computeRemoveDiff(file);
+    expect(diff.action).toBe("skip");
+    await applyMcpRemove(diff);
+    expect(readFileSync(claudeJson, "utf8")).toBe(before);
+  });
+
+  it("no-op if file deleted between compute and apply", async () => {
+    const { applyMcpRemove, computeRemoveDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const claudeJson = join(tmp, ".claude.json");
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    writeFileSync(claudeJson, JSON.stringify({ mcpServers: { scrybe: proposed } }));
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const diff = computeRemoveDiff(file);
+    const { unlinkSync } = await import("fs");
+    unlinkSync(claudeJson);
+    await expect(applyMcpRemove(diff)).resolves.toBeUndefined();
+  });
+});
+
+describe("applyMcpRemove — TOML (codex)", () => {
+  it("removes [mcp_servers.scrybe] block, preserves other tables, creates backup", async () => {
+    const { applyMcpRemove, computeRemoveDiff, detectMcpConfigs } = await load(tmp);
+    const codexDir = join(tmp, ".codex");
+    mkdirSync(codexDir, { recursive: true });
+    const tomlPath = join(codexDir, "config.toml");
+    writeFileSync(tomlPath, `[mcp_servers.other]\ncommand = "other"\nargs = []\n\n[mcp_servers.scrybe]\ncommand = "npx"\nargs = ["-y", "scrybe-cli", "mcp"]\n`);
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
+    const diff = computeRemoveDiff(file);
+    expect(diff.action).toBe("remove");
+    await applyMcpRemove(diff);
+    const written = readFileSync(tomlPath, "utf8");
+    expect(written).not.toContain("[mcp_servers.scrybe]");
+    expect(written).toContain("[mcp_servers.other]");
+    // backup exists
+    const { readdirSync } = await import("fs");
+    const backups = readdirSync(codexDir).filter((f) => f.includes(".scrybe-backup-"));
+    expect(backups.length).toBeGreaterThan(0);
+  });
+});

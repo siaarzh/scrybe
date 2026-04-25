@@ -108,11 +108,63 @@ No flags.
 
 ### `status`
 
-Print full project JSON (sources, table names, last indexed timestamps, `branches_indexed` per source) and the data directory path.
+Without `--project-id`: shows a unified health layout — daemon state, version, DATA_DIR, and a registry summary (chunk count + last indexed per source, truncated to 5 by default).
+
+With `--project-id`: prints full project JSON (sources, table names, last indexed timestamps, `branches_indexed`) and the data directory path (previous behavior, unchanged).
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--project-id <id>` | ✓ | Project identifier |
+| `--project-id <id>` | — | Single-project JSON mode (legacy) |
+| `--json` | — | Machine-readable output (`schemaVersion: 1`) |
+| `--projects` | — | Hide daemon section, show only project registry |
+| `--all` | — | Show all projects (no truncation to 5) |
+| `--watch` | — | Live Ink dashboard (requires daemon) |
+
+```bash
+scrybe status
+scrybe status --json
+scrybe status --all
+scrybe status --project-id cmx-core
+```
+
+**JSON shape (`--json`):**
+
+```json
+{
+  "schemaVersion": 1,
+  "scrybeVersion": "0.19.0",
+  "dataDir": { "path": "...", "sizeBytes": 888888888 },
+  "daemon": { "running": true, "pid": 47231, "uptimeMs": 187200, "activeJobs": 0 },
+  "projects": [
+    { "id": "cmx-core", "sources": [{ "sourceId": "primary", "chunks": 12847, "lastIndexed": "..." }] }
+  ]
+}
+```
+
+---
+
+### `uninstall`
+
+Completely reverses everything scrybe writes outside the binary: stops the daemon, removes its MCP entry from all detected AI client configs, strips scrybe blocks from registered git hooks, and deletes DATA_DIR. Creates a timestamped backup (`.scrybe-backup-<epoch>`) for every user file before modifying it. Shows the full action plan before executing.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--dry-run` | — | Show plan and exit without making any changes |
+| `--yes` | — | Skip confirmation prompt (for CI/scripting) |
+
+```bash
+scrybe uninstall --dry-run   # preview
+scrybe uninstall             # interactive
+scrybe uninstall --yes       # non-interactive
+```
+
+**Exit codes:** `0` = success, `1` = partial failure (best-effort), `2` = preflight rejected (nothing done), `130` = user cancelled.
+
+After running `scrybe uninstall`, remove the CLI binary with:
+
+```bash
+npm uninstall -g scrybe-cli
+```
 
 ---
 
@@ -361,15 +413,11 @@ scrybe daemon stop
 
 ### `daemon status`
 
-Print the daemon's current status as JSON. Add `--watch` for a live Ink terminal dashboard (polls `/status` every 2 s and streams SSE events).
-
-| Flag | Description |
-|------|-------------|
-| `--watch` | Live terminal dashboard (requires daemon running) |
+**Deprecated** — use `scrybe status` instead. Prints a deprecation notice to stderr, then delegates to `scrybe status`. Will be removed in v2.0.
 
 ```bash
-scrybe daemon status
-scrybe daemon status --watch
+scrybe status          # use this instead
+scrybe status --watch  # live dashboard
 ```
 
 ---

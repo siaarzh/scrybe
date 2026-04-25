@@ -246,6 +246,29 @@ scrybe remove-project --id myrepo
 
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command reference.
 
+## Uninstalling
+
+To remove scrybe completely:
+
+```bash
+# Remove all indexes, MCP entries, git hook blocks, and DATA_DIR
+scrybe uninstall
+
+# Preview what will be removed without making changes
+scrybe uninstall --dry-run
+
+# Skip the confirmation prompt (for scripts)
+scrybe uninstall --yes
+```
+
+`scrybe uninstall` reverses everything scrybe writes outside the binary itself: stops the daemon, removes its entry from every detected AI client config (Claude Code, Cursor, Codex, Cline, Roo Code), strips scrybe blocks from all registered repo git hooks, and deletes the data directory. A timestamped backup is created for every user file before modification.
+
+After uninstalling:
+
+```bash
+npm uninstall -g scrybe-cli   # removes the CLI binary
+```
+
 ## Running as a background service
 
 Scrybe can run as a persistent daemon that keeps every project's index fresh automatically — no manual `scrybe index` required after the first full index.

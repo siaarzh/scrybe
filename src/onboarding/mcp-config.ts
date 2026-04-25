@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkS
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { randomBytes } from "crypto";
+import { createBackup } from "../util/backup.js";
 
 export type McpClientType = "claude-code" | "cursor" | "codex" | "cline" | "roo-code";
 
@@ -23,6 +24,13 @@ export interface McpEntryDiff {
   proposed: ScrybeMcpEntry;
   /** "add" = no current scrybe entry; "replace" = entry differs; "skip" = identical */
   action: "add" | "replace" | "skip";
+  diff: string;
+}
+
+export interface RemoveDiff {
+  file: McpConfigFile;
+  existing: ScrybeMcpEntry | null;
+  action: "remove" | "skip";
   diff: string;
 }
 
@@ -126,6 +134,35 @@ export async function applyMcpMerge(diff: McpEntryDiff): Promise<void> {
   }
 }
 
+export function computeRemoveDiff(file: McpConfigFile): RemoveDiff {
+  const existing = readScrybeEntry(file);
+  if (!existing) {
+    return { file, existing: null, action: "skip", diff: "(no scrybe entry present)" };
+  }
+  const isToml = file.type === "codex";
+  const existingStr = isToml ? serializeTomlEntry(existing) : JSON.stringify(existing, null, 2);
+  const diffLines = existingStr.split("\n").map((l) => `- ${l}`).join("\n");
+  const diff = isToml
+    ? `- [mcp_servers.scrybe]\n${diffLines}`
+    : `- "scrybe": ${diffLines}`;
+  return { file, existing, action: "remove", diff };
+}
+
+export async function applyMcpRemove(diff: RemoveDiff): Promise<void> {
+  if (diff.action === "skip") return;
+  const { path, type } = diff.file;
+  if (!existsSync(path)) {
+    console.warn(`[scrybe] applyMcpRemove: file no longer exists: ${path}`);
+    return;
+  }
+  createBackup(path);
+  if (type === "codex") {
+    applyTomlRemove(path);
+  } else {
+    applyJsonRemove(path);
+  }
+}
+
 // ─── JSON helpers (claude-code, cursor, cline, roo-code) ──────────────────────
 
 function readJsonScrybeEntry(path: string): ScrybeMcpEntry | null {
@@ -222,6 +259,32 @@ async function applyTomlMerge(path: string, proposed: ScrybeMcpEntry): Promise<v
   }
 
   atomicWrite(path, updated);
+}
+
+function applyJsonRemove(path: string): void {
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  if (raw["mcpServers"] && typeof raw["mcpServers"] === "object") {
+    delete (raw["mcpServers"] as Record<string, unknown>)["scrybe"];
+  }
+  atomicWrite(path, JSON.stringify(raw, null, 2) + "\n");
+}
+
+function applyTomlRemove(path: string): void {
+  let existing = "";
+  try {
+    existing = readFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+  // Remove [mcp_servers.scrybe] block, including any preceding blank lines
+  const sectionRe = /\n*\[mcp_servers\.scrybe\][\s\S]*?(?=\n\s*\[|\n*$)/;
+  const updated = existing.replace(sectionRe, "").replace(/\n{3,}/g, "\n\n");
+  atomicWrite(path, updated || "");
 }
 
 // ─── Shared ───────────────────────────────────────────────────────────────────

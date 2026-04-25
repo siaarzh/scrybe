@@ -9,6 +9,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.20.0] — 2026-04-25
+
+### Added
+
+- **`scrybe uninstall`** — single command that completely reverses everything scrybe writes to the filesystem: stops the daemon, removes MCP entries from all 5 detectable client configs (Claude Code, Cursor, Codex, Cline, Roo Code), strips scrybe blocks from all registered repo git hooks, and deletes DATA_DIR. Shows an action plan with backup paths before executing. Flags: `--dry-run` (plan only, no changes), `--yes` (skip confirmation prompt). All user-file modifications create timestamped backups (`<file>.scrybe-backup-<epoch>`).
+- **`scrybe status` (unified)** — without `--project-id`, shows a combined health layout: daemon state (● running / ○ not running) + registry summary (chunk count + last indexed per source). Flags: `--json` (machine-readable, `schemaVersion: 1`), `--projects` (registry only, hide daemon), `--all` (show all projects, no truncation), `--watch` (live Ink dashboard; requires daemon). `--project-id` retains the existing single-project JSON behavior.
+- **`src/util/backup.ts`** — `createBackup(path)` helper used by uninstall and hook removal.
+- **`countTableRows(tableName)`** in `src/vector-store.ts` — efficient LanceDB row count for status display.
+
+### Changed
+
+- **`scrybe daemon status`** — deprecated alias for `scrybe status`. Prints a deprecation notice to stderr, then delegates. Will be removed in v2.0.
+- **`scrybe hook uninstall`** — now creates timestamped backups of hook files before modifying them. Output includes backup paths.
+- **`scrybe daemon start`** error message updated to reference `scrybe status`.
+
+---
+
 ## [0.19.0] — 2026-04-25
 
 ### Added

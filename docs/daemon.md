@@ -92,11 +92,12 @@ The hook line calls `scrybe daemon kick --project-id myrepo` which reads the pid
 
 ## Autostart on login
 
-Install the daemon so it starts automatically when you log in:
+> **Note:** `scrybe daemon install`/`uninstall` (autostart management) are not yet implemented. Planned for v0.20+ as part of the "daemon-always-on" initiative.
+
+For now, start the daemon manually or via your OS task scheduler:
 
 ```bash
-scrybe daemon install    # installs for the current user only (no admin / sudo required)
-scrybe daemon uninstall  # removes the autostart entry; data is preserved
+scrybe daemon start   # foreground — add to OS autostart yourself
 ```
 
 ### Windows

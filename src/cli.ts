@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { join } from "path";
 import {
   listProjects,
   addProject,
@@ -86,25 +87,298 @@ export async function runCli(): Promise<void> {
 
   program
     .command("status")
-    .description("Show project info")
-    .requiredOption("--project-id <id>")
-    .action((opts: { projectId: string }) => {
-      const p = getProject(opts.projectId);
-      if (!p) {
-        console.error(`Project '${opts.projectId}' not found`);
-        process.exit(1);
+    .description("Show scrybe health (daemon + all projects) or single project info with --project-id")
+    .option("--project-id <id>", "Show single-project info (JSON, same as before)")
+    .option("--json", "Machine-readable output (schemaVersion: 1)")
+    .option("--projects", "Hide daemon section, show only project registry")
+    .option("--all", "Show all projects (no truncation)")
+    .option("--watch", "Live dashboard (requires daemon)")
+    .action(async (opts: { projectId?: string; json?: boolean; projects?: boolean; all?: boolean; watch?: boolean }) => {
+      // Single-project legacy mode
+      if (opts.projectId) {
+        const p = getProject(opts.projectId);
+        if (!p) {
+          console.error(`Project '${opts.projectId}' not found`);
+          process.exit(1);
+        }
+        const info = {
+          ...p,
+          sources: p.sources.map((s) => ({
+            ...s,
+            branches_indexed: s.source_config.type === "code"
+              ? getBranchesForSource(opts.projectId!, s.source_id)
+              : ["*"],
+          })),
+        };
+        console.log(JSON.stringify(info, null, 2));
+        console.log(`Data dir: ${config.dataDir}`);
+        return;
       }
-      const info = {
-        ...p,
-        sources: p.sources.map((s) => ({
-          ...s,
-          branches_indexed: s.source_config.type === "code"
-            ? getBranchesForSource(opts.projectId, s.source_id)
-            : ["*"],
-        })),
-      };
-      console.log(JSON.stringify(info, null, 2));
-      console.log(`Data dir: ${config.dataDir}`);
+
+      // --watch: delegate to live Ink dashboard
+      if (opts.watch) {
+        const { readPidfile } = await import("./daemon/pidfile.js");
+        const pidData = readPidfile();
+        if (!pidData?.port) {
+          console.error("[scrybe] watch mode requires daemon — run `scrybe daemon start`");
+          process.exit(1);
+        }
+        const { renderStatusDashboard } = await import("./daemon/status-cli.js");
+        await renderStatusDashboard();
+        return;
+      }
+
+      // Unified health layout
+      const { readPidfile } = await import("./daemon/pidfile.js");
+      const { countTableRows } = await import("./vector-store.js");
+      const pidData = readPidfile();
+
+      let daemonInfo: { running: false } | { running: true; pid: number; uptimeMs: number; activeJobs: number } =
+        { running: false };
+
+      if (pidData?.port) {
+        try {
+          const { DaemonClient } = await import("./daemon/client.js");
+          const client = new DaemonClient({ port: pidData.port });
+          const signal = AbortSignal.timeout(2000);
+          const s = await Promise.race([
+            client.status(),
+            new Promise<never>((_, rej) => signal.addEventListener("abort", () => rej(new Error("timeout")))),
+          ]);
+          daemonInfo = { running: true, pid: s.pid, uptimeMs: s.uptimeMs, activeJobs: s.queue.active + s.queue.pending };
+        } catch {
+          // unresponsive — pidfile exists but daemon isn't reachable
+        }
+      }
+
+      let projects: ReturnType<typeof listProjects> = [];
+      try { projects = listProjects(); } catch { /* DATA_DIR missing */ }
+
+      // Gather per-source chunk counts
+      const sourceSummaries = await Promise.all(
+        projects.map(async (p) => ({
+          id: p.id,
+          sources: await Promise.all(
+            p.sources.map(async (s) => ({
+              sourceId: s.source_id,
+              chunks: s.table_name ? await countTableRows(s.table_name) : 0,
+              lastIndexed: s.last_indexed ?? null,
+            }))
+          ),
+        }))
+      );
+
+      if (opts.json) {
+        const dirPath = config.dataDir;
+        const { statSync: st, existsSync: ex } = await import("fs");
+        let sizeBytes = 0;
+        try {
+          if (ex(dirPath)) {
+            const { readdirSync } = await import("fs");
+            for (const entry of readdirSync(dirPath, { recursive: true } as any)) {
+              try { sizeBytes += st(join(dirPath, entry as string)).size; } catch { /* skip */ }
+            }
+          }
+        } catch { /* ignore */ }
+        console.log(JSON.stringify({
+          schemaVersion: 1,
+          scrybeVersion: VERSION,
+          dataDir: { path: dirPath, sizeBytes },
+          daemon: daemonInfo,
+          projects: sourceSummaries,
+        }, null, 2));
+        return;
+      }
+
+      // Human-readable unified layout
+      function fmtUptime(ms: number): string {
+        const s = Math.floor(ms / 1000);
+        const d = Math.floor(s / 86400);
+        const h = Math.floor((s % 86400) / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        if (d > 0) return `${d}d ${h}h`;
+        if (h > 0) return `${h}h ${m}m`;
+        return `${m}m`;
+      }
+      function fmtRelative(iso: string | null): string {
+        if (!iso) return "never";
+        const diff = Date.now() - new Date(iso).getTime();
+        const s = Math.floor(diff / 1000);
+        if (s < 60) return "just now";
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m}m ago`;
+        const h = Math.floor(m / 60);
+        if (h < 24) return `${h}h ago`;
+        const d = Math.floor(h / 24);
+        return `${d}d ago`;
+      }
+
+      const headerLeft = `Scrybe v${VERSION}`;
+      const headerRight = `DATA_DIR: ${config.dataDir}`;
+      console.log(`${headerLeft.padEnd(40)}${headerRight}`);
+      console.log();
+
+      if (!opts.projects) {
+        if (daemonInfo.running) {
+          const uptime = fmtUptime(daemonInfo.uptimeMs);
+          const jobsStr = daemonInfo.activeJobs === 0 ? "0 jobs active" : `${daemonInfo.activeJobs} jobs active`;
+          console.log(`Daemon         ● running · PID ${daemonInfo.pid} · uptime ${uptime} · ${jobsStr}`);
+        } else {
+          console.log(`Daemon         ○ not running`);
+        }
+      }
+
+      const display = opts.all ? sourceSummaries : sourceSummaries.slice(0, 5);
+      const hidden = sourceSummaries.length - display.length;
+      console.log(`Projects       ${projects.length} registered`);
+      for (const p of display) {
+        for (const s of p.sources) {
+          const chunks = s.chunks.toLocaleString();
+          const last = fmtRelative(s.lastIndexed);
+          const label = `  ${p.id}`.padEnd(22) + s.sourceId.padEnd(16);
+          console.log(`${label}${chunks} chunks · last indexed ${last}`);
+        }
+      }
+      if (hidden > 0) {
+        console.log(`  (${hidden} more — use --all)`);
+      }
+    });
+
+  // ─── Uninstall ─────────────────────────────────────────────────────────────
+
+  program
+    .command("uninstall")
+    .description("Remove all scrybe data, MCP entries, and git hook blocks. Does not remove the CLI binary (use `npm uninstall -g scrybe-cli`).")
+    .option("--dry-run", "Show the plan and exit without making any changes", false)
+    .option("--yes", "Skip confirmation prompt (for CI/scripting)", false)
+    .action(async (opts: { dryRun: boolean; yes: boolean }) => {
+      const { buildUninstallPlan, preflightUninstallPlan, executeUninstallPlan } =
+        await import("./uninstall.js");
+
+      const plan = await buildUninstallPlan();
+
+      // Render plan
+      console.log("\nScrybe uninstall plan:\n");
+      if (plan.daemon.running) {
+        const jobsNote = plan.daemon.activeJobs > 0
+          ? ` — will stop, cancels ${plan.daemon.activeJobs} active reindex job(s)`
+          : " — will stop";
+        console.log(`  Daemon`);
+        console.log(`    ● Running (PID ${plan.daemon.pid})${jobsNote}`);
+      } else {
+        console.log(`  Daemon`);
+        console.log(`    ○ Not running`);
+      }
+      console.log();
+
+      const toRemove = plan.mcpRemovals.filter((d) => d.action === "remove");
+      if (toRemove.length > 0) {
+        console.log(`  MCP entries to remove (${toRemove.length} client(s))`);
+        const epoch = Math.floor(Date.now() / 1000);
+        for (const d of toRemove) {
+          console.log(`    ${d.file.path.padEnd(50)}→ backup: ${d.file.path}.scrybe-backup-${epoch}`);
+        }
+      } else {
+        console.log(`  MCP entries       none detected`);
+      }
+      console.log();
+
+      if (plan.hookRemovals.length > 0) {
+        const total = plan.hookRemovals.reduce((n, e) => n + e.hookFiles.length, 0);
+        const epoch = Math.floor(Date.now() / 1000);
+        console.log(`  Git hook blocks to remove (${plan.hookRemovals.length} repo(s), ${total} hook file(s))`);
+        for (const entry of plan.hookRemovals) {
+          for (const f of entry.hookFiles) {
+            console.log(`    ${f.padEnd(60)}→ backup: ${f}.scrybe-backup-${epoch}`);
+          }
+        }
+      } else {
+        console.log(`  Git hook blocks   none detected`);
+      }
+      console.log();
+
+      function fmtBytes(b: number): string {
+        if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
+        if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+        return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
+      }
+      const { existsSync } = await import("fs");
+      const dataDirExists = existsSync(plan.dataDir.path);
+      console.log(`  Data directory`);
+      if (dataDirExists) {
+        console.log(`    ${plan.dataDir.path} — ${fmtBytes(plan.dataDir.sizeBytes)}, ${plan.dataDir.projectCount} project(s)`);
+        console.log(`    Will be deleted. This removes all indexes and credentials stored inside.`);
+      } else {
+        console.log(`    ${plan.dataDir.path} — not present`);
+      }
+
+      const nothingToDo = !plan.daemon.running && toRemove.length === 0 &&
+        plan.hookRemovals.length === 0 && !dataDirExists;
+      if (nothingToDo) {
+        console.log("\nNothing to uninstall.");
+        return;
+      }
+
+      const preflight = await preflightUninstallPlan(plan);
+      if (!preflight.ok) {
+        console.error("\nPreflight failed:");
+        for (const err of preflight.errors) console.error(`  ✗ ${err}`);
+        process.exit(2);
+      }
+
+      if (opts.dryRun) {
+        console.log("\n[dry-run] No changes made.");
+        return;
+      }
+
+      if (!opts.yes) {
+        if (!process.stdin.isTTY) {
+          console.error("\n[scrybe] Non-interactive input; pass --yes to skip confirmation.");
+          process.exit(1);
+        }
+        const readline = await import("readline");
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const answer = await new Promise<string>((res) =>
+          rl.question("\nType 'yes' to proceed (anything else cancels): ", res)
+        );
+        rl.close();
+        if (answer.trim() !== "yes") {
+          console.log("Cancelled.");
+          process.exit(130);
+        }
+      }
+
+      const executeEpoch = Math.floor(Date.now() / 1000);
+      const result = await executeUninstallPlan(plan);
+
+      console.log("\nUninstall summary:");
+      for (const action of result.actions) {
+        const icon = action.status === "ok" ? "✓" : action.status === "skipped" ? "-" : "✗";
+        const msg = action.message ? ` (${action.message})` : "";
+        console.log(`  ${icon} ${action.kind}: ${action.target}${msg}`);
+      }
+
+      if (!result.success) {
+        console.error("\nSome actions failed. Check output above for details.");
+      }
+
+      const hookedFiles = plan.hookRemovals.flatMap((e) => e.hookFiles);
+      if (hookedFiles.length > 0) {
+        console.log("\nPlease verify these git hook files still work correctly:");
+        for (const f of hookedFiles) {
+          console.log(`  ${f}`);
+        }
+      }
+
+      const modifiedFiles =
+        toRemove.length + plan.hookRemovals.reduce((n, e) => n + e.hookFiles.length, 0);
+      if (modifiedFiles > 0) {
+        console.log(`\nBackups: ${modifiedFiles} file(s) created with \`.scrybe-backup-${executeEpoch}\` suffix.`);
+        console.log(`If anything breaks, restore the backup and open an issue at https://github.com/siaarzh/scrybe/issues`);
+      }
+
+      console.log("\nRun `npm uninstall -g scrybe-cli` to remove the CLI binary.");
+      process.exit(result.exitCode);
     });
 
   // ─── Source commands ───────────────────────────────────────────────────────
@@ -561,7 +835,7 @@ export async function runCli(): Promise<void> {
       const { isDaemonRunning } = await import("./daemon/pidfile.js");
       const { running } = await isDaemonRunning();
       if (running) {
-        console.error("[scrybe] Daemon is already running. Use 'scrybe daemon status' to check.");
+        console.error("[scrybe] Daemon is already running. Use 'scrybe status' to check.");
         process.exit(1);
       }
       const { runDaemon } = await import("./daemon/main.js");
@@ -596,30 +870,13 @@ export async function runCli(): Promise<void> {
 
   daemon
     .command("status")
-    .description("Show daemon status (--watch for live Ink dashboard)")
-    .option("--watch", "Live dashboard — polls /status every 2s and streams /events via SSE")
+    .description("[deprecated] Use `scrybe status` instead (will be removed in v2.0)")
+    .option("--watch", "Live dashboard")
     .action(async (opts: { watch?: boolean }) => {
-      if (opts.watch) {
-        // Lazy import — React/Ink only loaded when --watch is requested
-        const { renderStatusDashboard } = await import("./daemon/status-cli.js");
-        await renderStatusDashboard();
-        return;
-      }
-      const { readPidfile } = await import("./daemon/pidfile.js");
-      const pidData = readPidfile();
-      if (!pidData?.port) {
-        console.log("Daemon is not running.");
-        return;
-      }
-      const { DaemonClient } = await import("./daemon/client.js");
-      const client = new DaemonClient({ port: pidData.port });
-      try {
-        const s = await client.status();
-        console.log(JSON.stringify(s, null, 2));
-      } catch (err: any) {
-        console.error(`Failed to reach daemon: ${err.message}`);
-        process.exit(1);
-      }
+      process.stderr.write("[scrybe] 'daemon status' is deprecated — use 'scrybe status' instead (will be removed in v2.0)\n");
+      // Delegate to the top-level status command logic
+      const statusCmd = program.commands.find((c) => c.name() === "status");
+      if (statusCmd) await statusCmd.parseAsync(opts.watch ? ["--watch"] : [], { from: "user" });
     });
 
   daemon
@@ -723,7 +980,8 @@ export async function runCli(): Promise<void> {
       const { uninstallHooks } = await import("./daemon/hooks.js");
       const result = uninstallHooks(opts.repo);
       if (result.removed.length > 0) {
-        console.log(`Removed scrybe block from: ${result.removed.join(", ")}`);
+        console.log(`Removed scrybe block from: ${result.removed.map((r) => r.path).join(", ")}`);
+        console.log(`Backups: ${result.removed.map((r) => r.backupPath).join(", ")}`);
       }
       if (result.notFound.length > 0) {
         console.log(`No scrybe block found in: ${result.notFound.join(", ")}`);
@@ -885,7 +1143,7 @@ export async function runCli(): Promise<void> {
         console.log("Repo already registered in scrybe. Try:");
         console.log(`  scrybe index --project-id <id> --incremental`);
         console.log(`  scrybe search --project-id <id> "your query"`);
-        console.log(`  scrybe daemon status`);
+        console.log(`  scrybe status`);
       } else {
         console.log("Repo not yet registered. Run:");
         console.log(`  scrybe init          # full wizard (recommended)`);

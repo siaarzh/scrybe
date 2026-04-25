@@ -13,6 +13,7 @@
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { createBackup } from "../util/backup.js";
 
 const MARKER_BEGIN = "# >>> scrybe >>>";
 const MARKER_END = "# <<< scrybe <<<";
@@ -24,7 +25,7 @@ export interface HookInstallResult {
 }
 
 export interface HookUninstallResult {
-  removed: string[];     // hook names where the block was removed
+  removed: Array<{ path: string; backupPath: string }>;
   notFound: string[];    // hook names where no scrybe block existed
 }
 
@@ -85,7 +86,7 @@ export function installHooks(
  */
 export function uninstallHooks(repoRoot: string): HookUninstallResult {
   const hooksDir = join(repoRoot, ".git", "hooks");
-  const removed: string[] = [];
+  const removed: Array<{ path: string; backupPath: string }> = [];
   const notFound: string[] = [];
 
   for (const name of HOOK_NAMES) {
@@ -101,9 +102,10 @@ export function uninstallHooks(repoRoot: string): HookUninstallResult {
       continue;
     }
 
+    const backupPath = createBackup(hookPath);
     const stripped = stripMarkerBlock(content);
     writeFileSync(hookPath, stripped, { encoding: "utf8", mode: 0o755 });
-    removed.push(name);
+    removed.push({ path: hookPath, backupPath });
   }
 
   return { removed, notFound };

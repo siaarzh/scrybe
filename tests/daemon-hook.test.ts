@@ -99,6 +99,29 @@ describe("uninstallHooks", () => {
     expect(content).not.toContain("daemon kick");
   });
 
+  it("returns path and backupPath for each removed hook", () => {
+    installHooks(repoRoot, "/abs/dist/index.js", "my-project");
+    const result = uninstallHooks(repoRoot);
+
+    expect(result.removed.length).toBeGreaterThan(0);
+    for (const r of result.removed) {
+      expect(r.path).toBeTruthy();
+      expect(r.backupPath).toMatch(/\.scrybe-backup-\d+$/);
+      expect(existsSync(r.backupPath)).toBe(true);
+    }
+  });
+
+  it("backup contains original hook content before removal", () => {
+    mkdirSync(hooksDir(), { recursive: true });
+    writeFileSync(hookPath("post-commit"), "#!/bin/sh\necho custom\n", { mode: 0o755 });
+    installHooks(repoRoot, "/abs/dist/index.js", "my-project");
+    const originalContent = hookContent("post-commit");
+    const result = uninstallHooks(repoRoot);
+    const entry = result.removed.find((r) => r.path.endsWith("post-commit"));
+    expect(entry).toBeDefined();
+    expect(readFileSync(entry!.backupPath, "utf8")).toBe(originalContent);
+  });
+
   it("preserves non-scrybe content when uninstalling", () => {
     mkdirSync(hooksDir(), { recursive: true });
     writeFileSync(hookPath("post-commit"), "#!/bin/sh\necho custom\n", { mode: 0o755 });

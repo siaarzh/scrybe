@@ -343,6 +343,17 @@ export async function deleteChunks(chunkIds: string[], tableName: string): Promi
   await table.delete(`chunk_id IN (${ids})`);
 }
 
+/** Count rows in a named table. Returns 0 if table doesn't exist. */
+export async function countTableRows(tableName: string): Promise<number> {
+  try {
+    const table = await openExistingTable(tableName);
+    if (!table) return 0;
+    return await table.countRows();
+  } catch {
+    return 0;
+  }
+}
+
 /** Drop a named table entirely (used by removeSource / removeProject). */
 export async function dropTable(tableName: string): Promise<void> {
   const db = await getDb();
