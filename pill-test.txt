@@ -1,0 +1,1 @@
+$e=[char]27; $lc=[char]0xe0b6; $rc=[char]0xe0b4; Write-Host "$e[38;5;22m${lc}$e[48;5;22m        $e[38;5;255m 5$e[48;5;236m0% $e[38;5;240m       $e[0m$e[38;5;236m${rc}$e[0m"

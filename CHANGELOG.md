@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.22.0] — 2026-04-25
+
 ### Added
 
 - **Always-on mode** — `scrybe daemon install` registers an OS-level autostart entry so the daemon survives across reboots and runs at login without an agent open. Supported on Windows (Task Scheduler, HKCU\Run fallback), macOS (LaunchAgent plist), Linux systemd user units, and Linux cron fallback. The daemon detects the always-on context via `SCRYBE_DAEMON_KEEP_ALIVE=1` set in the launcher script and disables its shutdown timers.

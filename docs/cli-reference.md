@@ -29,7 +29,7 @@ MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.
 
 ### `doctor`
 
-One-shot diagnostics. Checks: DATA_DIR, Node version, provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, git hook presence, and MCP configuration for Claude Code and Cursor.
+One-shot diagnostics. Checks: DATA_DIR, Node version, provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
 
 | Flag | Description |
 |------|-------------|
@@ -132,20 +132,25 @@ scrybe status --project-id cmx-core
 ```json
 {
   "schemaVersion": 1,
-  "scrybeVersion": "0.19.0",
+  "scrybeVersion": "0.22.0",
   "dataDir": { "path": "...", "sizeBytes": 888888888 },
-  "daemon": { "running": true, "pid": 47231, "uptimeMs": 187200, "activeJobs": 0 },
+  "daemon": {
+    "running": true, "pid": 47231, "uptimeMs": 187200, "activeJobs": 0,
+    "clientCount": 1, "mode": "on-demand", "gracePeriodRemainingMs": null
+  },
   "projects": [
     { "id": "cmx-core", "sources": [{ "sourceId": "primary", "chunks": 12847, "lastIndexed": "..." }] }
   ]
 }
 ```
 
+`mode` is `"on-demand"` (daemon shuts down after agents disconnect) or `"always-on"` (running via OS autostart with `SCRYBE_DAEMON_KEEP_ALIVE=1`). `gracePeriodRemainingMs` is `null` unless the daemon is in the idle grace window counting down to shutdown.
+
 ---
 
 ### `uninstall`
 
-Completely reverses everything scrybe writes outside the binary: stops the daemon, removes its MCP entry from all detected AI client configs, strips scrybe blocks from registered git hooks, and deletes DATA_DIR. Creates a timestamped backup (`.scrybe-backup-<epoch>`) for every user file before modifying it. Shows the full action plan before executing.
+Completely reverses everything scrybe writes outside the binary: stops the daemon, removes its OS autostart entry (if installed), removes its MCP entry from all detected AI client configs, strips scrybe blocks from registered git hooks, and deletes DATA_DIR. Creates a timestamped backup (`.scrybe-backup-<epoch>`) for every user file before modifying it. Shows the full action plan before executing.
 
 | Flag | Required | Description |
 |------|----------|-------------|
@@ -434,15 +439,47 @@ scrybe daemon restart
 
 ### `daemon install`
 
-Install the daemon as a per-user autostart entry (no admin / sudo required). Platform-specific:
+Register the daemon as a per-user autostart entry so it starts at login (always-on mode). No admin / sudo required. Platform-specific:
 
-- **Windows** — logon Scheduled Task via `schtasks`, fallback to `HKCU\...\Run`
-- **macOS** — `~/Library/LaunchAgents/com.scrybe.daemon.plist` + `launchctl load`
-- **Linux** — `~/.config/systemd/user/scrybe.service` + `systemctl --user enable --now`
+- **Windows** — logon Scheduled Task via `schtasks`; fallback to `HKCU\Software\...\Run`
+- **macOS** — `~/Library/LaunchAgents/com.scrybe.daemon.plist` + `launchctl bootstrap`
+- **Linux (systemd)** — `~/.config/systemd/user/scrybe.service` + `systemctl --user enable --now`
+- **Linux (non-systemd)** — `@reboot` line in `crontab`
+
+The autostart entry sets `SCRYBE_DAEMON_KEEP_ALIVE=1` so the daemon disables its idle-shutdown timers.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--force` | | Reinstall even if already installed |
 
 ```bash
 scrybe daemon install
+scrybe daemon install --force   # reinstall / repair
+```
+
+---
+
+### `daemon uninstall`
+
+Remove the daemon autostart entry. Does not stop a running daemon or delete DATA_DIR.
+
+```bash
 scrybe daemon uninstall
+```
+
+---
+
+### `daemon ensure-running`
+
+Start the daemon if not running; no-op if already running. Quiet by default (no output). Intended for scripts and autotests that need the daemon up without interactive prompts.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--verbose` | | Print status to stdout |
+
+```bash
+scrybe daemon ensure-running
+scrybe daemon ensure-running --verbose
 ```
 
 ---
