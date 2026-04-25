@@ -33,6 +33,7 @@ const TOOLS = [
     description:
       "List all registered projects and their sources. Use this first to see what's indexed and searchable before calling search_code or search_knowledge.",
     inputSchema: { type: "object" as const, properties: {} },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "add_project",
@@ -57,6 +58,7 @@ const TOOLS = [
       },
       required: ["project_id"],
     },
+    annotations: { destructiveHint: true, openWorldHint: false },
   },
   {
     name: "update_project",
@@ -69,6 +71,7 @@ const TOOLS = [
       },
       required: ["project_id"],
     },
+    annotations: { openWorldHint: false },
   },
   {
     name: "add_source",
@@ -148,6 +151,7 @@ const TOOLS = [
       },
       required: ["project_id", "source_id"],
     },
+    annotations: { openWorldHint: false },
   },
   {
     name: "remove_source",
@@ -160,6 +164,7 @@ const TOOLS = [
       },
       required: ["project_id", "source_id"],
     },
+    annotations: { destructiveHint: true, openWorldHint: false },
   },
   {
     name: "search_code",
@@ -179,6 +184,7 @@ const TOOLS = [
       },
       required: ["project_id", "query"],
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "search_knowledge",
@@ -206,6 +212,7 @@ const TOOLS = [
       },
       required: ["project_id", "query"],
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "reindex_all",
@@ -216,6 +223,7 @@ const TOOLS = [
       properties: {},
       required: [],
     },
+    annotations: { idempotentHint: true, openWorldHint: true },
   },
   {
     name: "reindex_project",
@@ -242,6 +250,7 @@ const TOOLS = [
       },
       required: ["project_id"],
     },
+    annotations: { idempotentHint: true, openWorldHint: true },
   },
   {
     name: "reindex_source",
@@ -264,6 +273,7 @@ const TOOLS = [
       },
       required: ["project_id", "source_id"],
     },
+    annotations: { idempotentHint: true, openWorldHint: true },
   },
   {
     name: "list_branches",
@@ -282,6 +292,7 @@ const TOOLS = [
       },
       required: ["project_id"],
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "reindex_status",
@@ -293,6 +304,7 @@ const TOOLS = [
       },
       required: ["job_id"],
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "cancel_reindex",
@@ -305,6 +317,7 @@ const TOOLS = [
       },
       required: ["job_id"],
     },
+    annotations: { idempotentHint: true, openWorldHint: false },
   },
   {
     name: "list_jobs",
@@ -319,6 +332,7 @@ const TOOLS = [
         },
       },
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "list_pinned_branches",
@@ -333,6 +347,7 @@ const TOOLS = [
       },
       required: ["project_id"],
     },
+    annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
     name: "pin_branches",
@@ -350,6 +365,7 @@ const TOOLS = [
       },
       required: ["project_id", "branches"],
     },
+    annotations: { idempotentHint: true, openWorldHint: false },
   },
   {
     name: "unpin_branches",
@@ -365,6 +381,7 @@ const TOOLS = [
       },
       required: ["project_id", "branches"],
     },
+    annotations: { idempotentHint: true, openWorldHint: false },
   },
 ];
 
