@@ -8,7 +8,8 @@ import {
 import { loadCursor, saveCursor, deleteCursor } from "./cursors.js";
 import { getPlugin } from "./plugins/index.js";
 import type { AnyChunk } from "./plugins/base.js";
-import { embedBatched } from "./embedder.js";
+import { embedBatched, type HalvingSession } from "./embedder.js";
+import { readEntry, writeEntry, computeProbeSize } from "./embed-batch-state.js";
 import {
   upsert,
   deleteProject,
@@ -206,8 +207,15 @@ export async function indexSource(
   let chunksIndexed = 0;
   let bytesEmbedded = 0;
   const filesSeenSoFar = new Set<string>();
-  const batchSize = config.embedBatchSize;
   const batchDelayMs = config.embedBatchDelayMs;
+
+  const stateKey = `${projectId}:${sourceId}:${embConfig.base_url ?? "local"}:${embConfig.model}`;
+  const stateEntry = embConfig.provider_type !== "local" ? readEntry(stateKey) : null;
+  const probeSize = stateEntry !== null ? computeProbeSize(stateEntry, config.embedBatchSize) : config.embedBatchSize;
+  const batchSize = probeSize;
+  const halvingSession: HalvingSession | undefined = embConfig.provider_type !== "local"
+    ? { effectiveBatchSize: probeSize, maxFailed: stateEntry?.maxFailed ?? null, halved: false }
+    : undefined;
 
   // Cross-key accumulator: list of (key, chunks[]) pairs in order
   const keyBatches: Array<{ key: string; chunks: AnyChunk[] }> = [];
@@ -226,7 +234,7 @@ export async function indexSource(
     let embedVectors: number[][] = [];
     if (toEmbed.length > 0) {
       const texts = toEmbed.map((c) => c.content);
-      embedVectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs);
+      embedVectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs, halvingSession);
     }
 
     // Build chunk_id → vector lookup for newly embedded chunks
@@ -319,6 +327,14 @@ export async function indexSource(
   }
   await flushBatch();
   onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
+
+  if (halvingSession) {
+    const existingMaxFailed = stateEntry?.maxFailed ?? 0;
+    writeEntry(stateKey, {
+      lastSuccessful: halvingSession.effectiveBatchSize,
+      maxFailed: halvingSession.halved ? halvingSession.maxFailed! : existingMaxFailed,
+    });
+  }
 
   // Update last_indexed timestamp (hashes already persisted per-key above)
   const now = new Date().toISOString();

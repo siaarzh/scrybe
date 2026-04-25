@@ -33,7 +33,7 @@ Used for all `code` sources when an API provider is configured.
 | `EMBEDDING_BASE_URL` | — | Base URL for the embeddings endpoint. Set to switch providers. |
 | `EMBEDDING_MODEL` | auto | Model name. Auto-set for known providers; required for unknown ones. |
 | `EMBEDDING_DIMENSIONS` | auto | Vector dimensions. Auto-set for known providers; required for unknown ones. |
-| `EMBED_BATCH_SIZE` | `100` | Chunks per embedding request. Reduce if hitting rate limits. |
+| `EMBED_BATCH_SIZE` | `100` | Initial ceiling for chunks per embedding request. Scrybe auto-tunes the actual batch size per codebase and provider — you don't need to adjust this for normal use. |
 | `EMBED_BATCH_DELAY_MS` | `0` | Delay in ms between batches. |
 
 ---

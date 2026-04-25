@@ -7,6 +7,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Auto-tuned embedding batch sizing** — scrybe now auto-tunes embedding batch size to your codebase and provider combination. No manual `EMBED_BATCH_SIZE` tuning required. When a provider returns HTTP 400/413 (batch too large), scrybe halves the batch, retries, and converges to the right size via bounded binary search across runs. State is persisted per `(project, source, provider, model)` in `DATA_DIR/embed-batch-state.json`. `EMBED_BATCH_SIZE` remains as an initial ceiling, defaulting to 100.
+- **MCP tool annotations** — all 17 MCP tools now carry MCP 2025-03 behavioral hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Spec-compliant clients use these to decide presentation and auto-confirmation behavior.
+- **`applyMcpMerge` backup safety** — `scrybe init` now creates a timestamped backup (`<file>.scrybe-backup-<epoch>`) before modifying any existing MCP config file. First-ever creation (no existing file) is unchanged.
+- **`tests/helpers/backup-contract.ts`** — reusable `expectBackupCreated` / `expectNoBackupCreated` test helpers for verifying backup behavior across any install surface.
+
 ---
 
 ## [0.20.1] — 2026-04-25

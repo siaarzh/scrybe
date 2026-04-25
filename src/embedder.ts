@@ -5,6 +5,13 @@ import { embedLocalBatched, embedLocalQuery } from "./local-embedder.js";
 // Character limit proxy for token truncation (~4 chars/token, 8000 tokens)
 const MAX_CHARS = 32_000;
 
+/** Mutable state carried across batch iterations within a single indexing run. */
+export interface HalvingSession {
+  effectiveBatchSize: number;
+  maxFailed: number | null;
+  halved: boolean;
+}
+
 function truncate(text: string): string {
   return text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
 }
@@ -84,23 +91,66 @@ async function embedTexts(texts: string[], embConfig: EmbeddingConfig): Promise<
   throw new Error("embedTexts: exceeded retry limit");
 }
 
+function isBatchTooLargeError(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  if (status === 400 || status === 413) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /HTTP (400|413)/.test(msg);
+}
+
+async function embedWithHalving(
+  texts: string[],
+  embConfig: EmbeddingConfig,
+  session: HalvingSession
+): Promise<number[][]> {
+  try {
+    return await embedTexts(texts, embConfig);
+  } catch (err) {
+    if (!isBatchTooLargeError(err)) throw err;
+
+    if (texts.length === 1) {
+      throw Object.assign(
+        new Error("bad_chunk: single chunk rejected by embedding API"),
+        { cause: err, error_type: "bad_chunk" }
+      );
+    }
+
+    if (!session.halved) {
+      session.maxFailed = texts.length;
+      session.effectiveBatchSize = Math.max(1, Math.floor(texts.length / 2));
+      session.halved = true;
+    }
+
+    const mid = Math.floor(texts.length / 2);
+    const left = await embedWithHalving(texts.slice(0, mid), embConfig, session);
+    const right = await embedWithHalving(texts.slice(mid), embConfig, session);
+    return [...left, ...right];
+  }
+}
+
 export async function embedBatched(
   texts: string[],
   embConfig: EmbeddingConfig,
   batchSize: number,
-  batchDelayMs: number
+  batchDelayMs: number,
+  session?: HalvingSession
 ): Promise<number[][]> {
   if (embConfig.provider_type === "local") {
     return embedLocalBatched(texts, { modelId: embConfig.model, dimensions: embConfig.dimensions }, batchSize);
   }
   const results: number[][] = [];
-  for (let i = 0; i < texts.length; i += batchSize) {
+  for (let i = 0; i < texts.length; ) {
+    const thisBatch = session?.effectiveBatchSize ?? batchSize;
     if (i > 0 && batchDelayMs > 0) {
       await new Promise((r) => setTimeout(r, batchDelayMs));
     }
-    const batch = texts.slice(i, i + batchSize);
-    const embeddings = await embedTexts(batch, embConfig);
-    results.push(...embeddings);
+    const batch = texts.slice(i, i + thisBatch);
+    if (session) {
+      results.push(...await embedWithHalving(batch, embConfig, session));
+    } else {
+      results.push(...await embedTexts(batch, embConfig));
+    }
+    i += batch.length;
   }
   return results;
 }
