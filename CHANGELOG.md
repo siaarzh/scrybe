@@ -7,6 +7,40 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **`noun verb` CLI style** — all entity commands adopt `project add/update/remove/list`, `source add/update/remove/list`, `search code/knowledge`, `job list`, `branch list/pin/unpin`. Old flat-verb names (`add-project`, `add-source`, etc.) still work as deprecated aliases through v0.x — they print a deprecation notice to stderr and will be removed at v1.0.
+- **`-P`/`-S` short flags** — short forms for `--project-id` and `--source-id` on all commands that accept them. Other new short flags: `-y` (--yes), `-a` (--all), `-p` (--pinned on branch list), `-I` (--incremental), `-f` (--full).
+- **`scrybe daemon refresh`** — renamed from `daemon kick`; `kick` still works with a deprecation notice.
+- **`scrybe branch list/pin/unpin`** — new canonical group replacing `pin list/add/remove/clear`; old `pin` group still works with deprecation notices.
+- **`SCRYBE_NO_DEPRECATION_WARNING=1`** env var — suppresses all deprecation notices (useful for CI scripts that still use old command names).
+- **Shell completion** — `scrybe completion bash|zsh|powershell` prints a completion script.
+- **Per-command examples** — all commands have at least one example in `--help` output.
+- **`scrybe ps`** — global alias for `scrybe status`.
+- **`scrybe projects/sources/jobs/branches`** — documented plural shortcuts for `project/source/job/branch list`.
+- **`scrybe source list`** — new command listing all sources across all projects; supports `-P` to filter by project.
+
+### CLI migration guide (renamed in this release)
+
+All old commands continue to work through v0.x as deprecated aliases. They print a one-line deprecation notice to stderr and exit 0 — existing scripts are unaffected.
+
+| Old | New |
+|---|---|
+| `scrybe add-project` | `scrybe project add` |
+| `scrybe update-project` | `scrybe project update` |
+| `scrybe remove-project` | `scrybe project remove` |
+| `scrybe list-projects` | `scrybe project list` (or bare `scrybe projects`) |
+| `scrybe add-source` | `scrybe source add` |
+| `scrybe update-source` | `scrybe source update` |
+| `scrybe remove-source` | `scrybe source remove` |
+| `scrybe search <q>` | `scrybe search code <q>` |
+| `scrybe search-knowledge <q>` | `scrybe search knowledge <q>` |
+| `scrybe daemon kick` | `scrybe daemon refresh` |
+| `scrybe pin list` | `scrybe branch list --pinned` |
+| `scrybe pin add <b>` | `scrybe branch pin <b>` |
+| `scrybe pin remove <b>` | `scrybe branch unpin <b>` |
+| `scrybe pin clear` | `scrybe branch unpin --all` |
+
 ---
 
 ## [0.22.0] — 2026-04-25

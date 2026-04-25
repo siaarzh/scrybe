@@ -32,14 +32,14 @@ Projects are containers. Add sources to them separately.
 
 ```bash
 # Create the project
-scrybe add-project --id myrepo --desc "My frontend"
+scrybe project add --id myrepo --desc "My frontend"
 
 # Add a code source
-scrybe add-source --project-id myrepo --source-id code \
+scrybe source add -P myrepo -S code \
   --type code --root /absolute/path/to/repo --languages ts,vue
 
 # Optionally add a GitLab issues source
-scrybe add-source --project-id myrepo --source-id gitlab-issues \
+scrybe source add -P myrepo -S gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
@@ -64,10 +64,10 @@ See [configuration.md](configuration.md#scrybeignore) for full details.
 
 ```bash
 # Full index (required first time)
-scrybe index --project-id myrepo --full
+scrybe index -P myrepo --full
 
 # Or index a single source
-scrybe index --project-id myrepo --source-id code --full
+scrybe index -P myrepo -S code --full
 ```
 
 After the initial full index, use `--incremental` for day-to-day resyncs — it only processes changed files/issues.
@@ -76,10 +76,10 @@ After the initial full index, use `--incremental` for day-to-day resyncs — it 
 
 ```bash
 # Search code
-scrybe search --project-id myrepo "authentication login flow"
+scrybe search -P myrepo "authentication login flow"
 
 # Search knowledge (issues, etc.)
-scrybe search-knowledge --project-id myrepo "password reset broken"
+scrybe search knowledge -P myrepo "password reset broken"
 ```
 
 ## 7. Connect to Claude Code (MCP)
@@ -104,10 +104,10 @@ After adding, restart Claude Code. The `mcp__scrybe__*` tools become available i
 
 ```bash
 # After pulling new code
-scrybe index --project-id myrepo --source-id code --incremental
+scrybe index -P myrepo -S code --incremental
 
 # After new issues/comments in GitLab
-scrybe index --project-id myrepo --source-id gitlab-issues --incremental
+scrybe index -P myrepo -S gitlab-issues --incremental
 ```
 
 Or trigger it from Claude Code:

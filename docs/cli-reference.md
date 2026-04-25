@@ -62,9 +62,9 @@ scrybe --auto
 
 ## Project commands
 
-### `add-project`
+### `project add`
 
-Register a new project container. Sources are added separately with `add-source`.
+Register a new project container. Sources are added separately with `source add`.
 
 | Flag | Required | Description |
 |------|----------|-------------|
@@ -72,12 +72,12 @@ Register a new project container. Sources are added separately with `add-source`
 | `--desc <text>` | | Human-readable description |
 
 ```bash
-scrybe add-project --id myrepo --desc "My frontend"
+scrybe project add --id myrepo --desc "My frontend"
 ```
 
 ---
 
-### `update-project`
+### `project update`
 
 Update a project's description.
 
@@ -88,7 +88,7 @@ Update a project's description.
 
 ---
 
-### `remove-project`
+### `project remove`
 
 Unregister a project and drop all its source tables (vector data deleted).
 
@@ -98,7 +98,7 @@ Unregister a project and drop all its source tables (vector data deleted).
 
 ---
 
-### `list-projects`
+### `project list`
 
 List all registered projects and their sources, including indexing status and searchability.
 
@@ -175,7 +175,7 @@ npm uninstall -g scrybe-cli
 
 ## Source commands
 
-### `add-source`
+### `source add`
 
 Add an indexable source to a project.
 
@@ -211,11 +211,11 @@ Add an indexable source to a project.
 
 ```bash
 # Code source
-scrybe add-source --project-id myrepo --source-id code \
+scrybe source add --project-id myrepo --source-id code \
   --type code --root /path/to/repo --languages ts,vue
 
 # GitLab issues source
-scrybe add-source --project-id myrepo --source-id gitlab-issues \
+scrybe source add --project-id myrepo --source-id gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
@@ -224,7 +224,7 @@ scrybe add-source --project-id myrepo --source-id gitlab-issues \
 
 ---
 
-### `update-source`
+### `source update`
 
 Update an existing source's config. Only the flags you provide are changed — everything else stays as-is.
 
@@ -259,13 +259,13 @@ Update an existing source's config. Only the flags you provide are changed — e
 
 ```bash
 # Rotate a GitLab token
-scrybe update-source --project-id myrepo --source-id gitlab-issues \
+scrybe source update --project-id myrepo --source-id gitlab-issues \
   --gitlab-token glpat-newtoken
 ```
 
 ---
 
-### `remove-source`
+### `source remove`
 
 Remove a source from a project and drop its vector table.
 
@@ -374,7 +374,7 @@ scrybe search --project-id myrepo --branch feat/my-feature "new feature implemen
 
 ---
 
-### `search-knowledge`
+### `search knowledge`
 
 Semantic search over indexed knowledge sources (GitLab issues, etc.).
 
@@ -387,9 +387,9 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash
-scrybe search-knowledge --project-id myrepo "password reset broken"
-scrybe search-knowledge --project-id myrepo --source-types ticket "login error"
-scrybe search-knowledge --project-id myrepo --source-types ticket_comment "architectural decision"
+scrybe search knowledge --project-id myrepo "password reset broken"
+scrybe search knowledge --project-id myrepo --source-types ticket "login error"
+scrybe search knowledge --project-id myrepo --source-types ticket_comment "architectural decision"
 ```
 
 ---
@@ -484,7 +484,7 @@ scrybe daemon ensure-running --verbose
 
 ---
 
-### `daemon kick`
+### `daemon refresh`
 
 Trigger an immediate incremental reindex for a project by posting to the daemon's `/kick` endpoint. Used by git hooks.
 
@@ -496,7 +496,7 @@ Trigger an immediate incremental reindex for a project by posting to the daemon'
 | `--mode <mode>` | | `full` or `incremental` (default: `incremental`) |
 
 ```bash
-scrybe daemon kick --project-id myrepo
+scrybe daemon refresh --project-id myrepo
 ```
 
 ---
@@ -531,11 +531,11 @@ scrybe hook uninstall --project-id myrepo
 
 ---
 
-## Pinned-branch commands
+## Branch commands
 
 Pinned branches are code branches the daemon keeps indexed in the background (via periodic `git fetch` + incremental reindex). Only `code` sources support pinning.
 
-### `pin list`
+### `branch list --pinned`
 
 Print the pinned branches for a project source.
 
@@ -545,12 +545,12 @@ Print the pinned branches for a project source.
 | `--source-id <id>` | | Source identifier (default: `primary`) |
 
 ```bash
-scrybe pin list --project-id cmx-ionic
+scrybe branch list --pinned --project-id cmx-ionic
 ```
 
 ---
 
-### `pin add`
+### `branch pin`
 
 Add one or more branch names to the pinned list. Merges with the existing list (deduped). Emits a warning for unknown remote refs or when the total count exceeds 20. If the daemon is running, newly-pinned branches are backfilled immediately.
 
@@ -561,12 +561,12 @@ Add one or more branch names to the pinned list. Merges with the existing list (
 | `<branch...>` | ✓ | Branch names (positional) |
 
 ```bash
-scrybe pin add --project-id cmx-ionic main dev dev-2 dev-3 beta
+scrybe branch pin --project-id cmx-ionic main dev dev-2 dev-3 beta
 ```
 
 ---
 
-### `pin remove`
+### `branch unpin`
 
 Remove specific branch names from the pinned list. Orphaned chunks remain until `scrybe gc` is run.
 
@@ -577,12 +577,12 @@ Remove specific branch names from the pinned list. Orphaned chunks remain until 
 | `<branch...>` | ✓ | Branch names to remove (positional) |
 
 ```bash
-scrybe pin remove --project-id cmx-ionic dev-3
+scrybe branch unpin --project-id cmx-ionic dev-3
 ```
 
 ---
 
-### `pin clear`
+### `branch unpin --all`
 
 Remove all pinned branches for a source. Asks for confirmation unless `--yes` is passed.
 
@@ -593,5 +593,5 @@ Remove all pinned branches for a source. Asks for confirmation unless `--yes` is
 | `--yes` | | Skip confirmation prompt |
 
 ```bash
-scrybe pin clear --project-id cmx-ionic --yes
+scrybe branch unpin --all --project-id cmx-ionic --yes
 ```

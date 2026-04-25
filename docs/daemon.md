@@ -55,16 +55,16 @@ By default the daemon only keeps the current HEAD of each project fresh. To also
 
 ```bash
 # Pin branches for background indexing
-scrybe pin add --project-id cmx-ionic main dev dev-2 dev-3 beta
+scrybe branch pin --project-id cmx-ionic main dev dev-2 dev-3 beta
 
 # List pinned branches
-scrybe pin list --project-id cmx-ionic
+scrybe branch list --pinned --project-id cmx-ionic
 
 # Remove a pin (does NOT delete existing chunks — run scrybe gc to clean up)
-scrybe pin remove --project-id cmx-ionic dev-3
+scrybe branch unpin --project-id cmx-ionic dev-3
 
 # Clear all pins for a source
-scrybe pin clear --project-id cmx-ionic --yes
+scrybe branch unpin --all --project-id cmx-ionic --yes
 ```
 
 Pinned branches are stored in `projects.json` under each source's `pinned_branches` field. The daemon fetches only those branches (narrow refspec) and queues a reindex whenever a pinned ref advances.
@@ -86,7 +86,7 @@ scrybe hook uninstall --project-id myrepo
 
 Hooks use a marker-delimited block (`# >>> scrybe >>>` / `# <<< scrybe <<<`) so they're non-destructive on existing hook files. `uninstall` strips only the scrybe block.
 
-The hook line calls `scrybe daemon kick --project-id myrepo` which reads the pidfile port and POSTs to `/kick`. If the daemon is not running the command exits 0 silently.
+The hook line calls `scrybe daemon refresh --project-id myrepo` which reads the pidfile port and POSTs to `/kick`. If the daemon is not running the command exits 0 silently.
 
 ---
 
@@ -251,7 +251,7 @@ On the next `scrybe daemon start`, a stale pidfile is detected (PID not alive + 
 - Verify `@parcel/watcher` has permission to watch the directory (antivirus / OneDrive on Windows can interfere).
 
 **Pinned branch not being indexed:**
-- Confirm `scrybe pin list --project-id <id>` shows the branch.
+- Confirm `scrybe branch list --pinned --project-id <id>` shows the branch.
 - Check that a remote named `origin` exists: `git remote -v` in the project root.
 - Run `git fetch origin` manually once to establish credentials (the daemon's fetch poller uses whatever credential helper is configured).
 - Check daemon logs: `tail <DATA_DIR>/daemon-log.jsonl | jq .` for `warn` entries on the branch.

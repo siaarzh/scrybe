@@ -301,7 +301,7 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
   }
 
   if (selectedPaths.length === 0 && existingRoots.size === 0) {
-    p.log.warn("No repos selected. Run `scrybe add-project` to register repos manually.");
+    p.log.warn("No repos selected. Run `scrybe project add` to register repos manually.");
   }
 
   // ── Step 3: Register repos + gen .scrybeignore ────────────────────────────
@@ -483,10 +483,10 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
         ? "MCP config written. Now register a project to index:"
         : "No projects registered yet. Add one manually:",
       "",
-      "  scrybe add-project --id myrepo --desc \"My project\"",
-      "  scrybe add-source --project-id myrepo --source-id primary \\",
+      "  scrybe project add --id myrepo --desc \"My project\"",
+      "  scrybe source add -P myrepo -S primary \\",
       "    --type code --root /absolute/path/to/repo",
-      "  scrybe index --project-id myrepo --incremental",
+      "  scrybe index -P myrepo",
       "",
       "Then restart your editor and ask your agent a question.",
       "",

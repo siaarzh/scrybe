@@ -232,7 +232,7 @@ describe("wizard — registry side effects", () => {
 });
 
 describe("wizard — skip-root outro", () => {
-  it("shows add-project commands when no repos registered", async () => {
+  it("shows project add commands when no repos registered", async () => {
     let outroArg = "";
     vi.doMock("@clack/prompts", () => ({
       intro: vi.fn(), cancel: vi.fn(),
@@ -270,8 +270,8 @@ describe("wizard — skip-root outro", () => {
     const { runWizard } = await import("../../src/onboarding/wizard.js");
     await runWizard({ registerOnly: true });
 
-    expect(outroArg).toContain("scrybe add-project");
-    expect(outroArg).toContain("scrybe add-source");
+    expect(outroArg).toContain("scrybe project add");
+    expect(outroArg).toContain("scrybe source add");
     expect(outroArg).not.toContain("ask your agent:");
   });
 

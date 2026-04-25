@@ -68,7 +68,7 @@ Knowledge sources use natural language text rather than code, so a different emb
 Add a GitLab issues source to any project:
 
 ```bash
-scrybe add-source \
+scrybe source add \
   --project-id myrepo \
   --source-id gitlab-issues \
   --type ticket \
@@ -84,8 +84,8 @@ Indexing is cursor-based and incremental — only issues updated since the last 
 To rotate a token, remove and re-add the source:
 
 ```bash
-scrybe remove-source --project-id myrepo --source-id gitlab-issues
-scrybe add-source --project-id myrepo --source-id gitlab-issues \
+scrybe source remove --project-id myrepo --source-id gitlab-issues
+scrybe source add --project-id myrepo --source-id gitlab-issues \
   --type ticket --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 --gitlab-token glpat-new-token
 ```
@@ -112,8 +112,8 @@ The wizard handles everything: picks an embedding provider, validates your API k
 npm install -g scrybe-cli
 
 # 2. Register a project
-scrybe add-project --id myrepo --desc "My project"
-scrybe add-source --project-id myrepo --source-id primary \
+scrybe project add --id myrepo --desc "My project"
+scrybe source add --project-id myrepo --source-id primary \
   --type code --root /path/to/repo --languages ts,vue
 
 # 3. Configure credentials (one-time)
@@ -210,14 +210,14 @@ Projects are containers; sources are the actual indexable units (a code repo, Gi
 
 ```bash
 # Create a project
-scrybe add-project --id myrepo --desc "My frontend"
+scrybe project add --id myrepo --desc "My frontend"
 
 # Add a code source
-scrybe add-source --project-id myrepo --source-id code \
+scrybe source add --project-id myrepo --source-id code \
   --type code --root /path/to/repo --languages ts,vue
 
 # Add a GitLab issues source
-scrybe add-source --project-id myrepo --source-id gitlab-issues \
+scrybe source add --project-id myrepo --source-id gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
@@ -231,17 +231,17 @@ scrybe index --project-id myrepo --source-id code --incremental
 
 # Search code / knowledge
 scrybe search --project-id myrepo "authentication login flow"
-scrybe search-knowledge --project-id myrepo "password reset broken"
+scrybe search knowledge --project-id myrepo "password reset broken"
 
 # List projects and their sources
-scrybe list-projects
+scrybe project list
 
 # Show project info
 scrybe status --project-id myrepo
 
 # Remove a source or a whole project
-scrybe remove-source --project-id myrepo --source-id gitlab-issues
-scrybe remove-project --id myrepo
+scrybe source remove --project-id myrepo --source-id gitlab-issues
+scrybe project remove --id myrepo
 ```
 
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command reference.
@@ -287,8 +287,8 @@ scrybe daemon install
 scrybe hook install --project-id myrepo
 
 # Pin branches for background indexing beyond current HEAD
-scrybe pin add --project-id cmx-ionic main dev dev-2 dev-3 beta
-scrybe pin list --project-id cmx-ionic
+scrybe branch pin --project-id cmx-ionic main dev dev-2 dev-3 beta
+scrybe branch list --pinned --project-id cmx-ionic
 ```
 
 The daemon exposes a local HTTP API on `127.0.0.1:58451` (ephemeral fallback if busy). Port is persisted in `<DATA_DIR>/daemon.pid` so all clients — CLI, MCP server, VS Code extension — discover it automatically.
