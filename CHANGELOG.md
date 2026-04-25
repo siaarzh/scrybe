@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.23.0] — 2026-04-25
+
 ### Added
 
 - **`noun verb` CLI style** — all entity commands adopt `project add/update/remove/list`, `source add/update/remove/list`, `search code/knowledge`, `job list`, `branch list/pin/unpin`. Old flat-verb names (`add-project`, `add-source`, etc.) still work as deprecated aliases through v0.x — they print a deprecation notice to stderr and will be removed at v1.0.
@@ -19,6 +23,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 - **`scrybe ps`** — global alias for `scrybe status`.
 - **`scrybe projects/sources/jobs/branches`** — documented plural shortcuts for `project/source/job/branch list`.
 - **`scrybe source list`** — new command listing all sources across all projects; supports `-P` to filter by project.
+
+### Changed (internal / architectural)
+
+- **Branch-state facade** (`src/branch-state.ts`) — `branches.ts` + `branch-tags.ts` + `hashes.ts` consolidated into one deep module. `withBranchSession(input, fn)` callback API ensures hash + tag updates are always atomic; `knownChunkIds` pre-fetched at session open eliminates the old `preservedFromRemovals` accumulator. Bug fixed by construction: `applyFile(outcome)` makes "save hash without tags" or "save tags without hash" unrepresentable. `closeDB()` replaces `closeBranchTagsDB` for schema migration and test isolation. `hashFile()` moved to `plugins/code.ts` (its only caller).
+- **CLI/MCP shared tool layer** (`src/tools/`) — all 19 MCP tools extracted to `src/tools/{project,source,search,reindex,branch}.ts`. Each tool carries spec + handler + cliArgs + cliOpts + formatCli. `cli.ts` and `mcp-server.ts` are now thin registration layers. Every tool defined exactly once; grep for any tool name returns exactly 1 definition site. `cli.ts` 1780 → 864 LOC; `mcp-server.ts` 797 → 167 LOC.
 
 ### CLI migration guide (renamed in this release)
 
