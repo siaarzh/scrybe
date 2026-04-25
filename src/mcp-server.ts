@@ -1,3 +1,4 @@
+import { hostname } from "os";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -809,6 +810,80 @@ export async function runMcpServer(): Promise<void> {
     }
   });
 
+  await bootstrapDaemon();
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+// ─── On-demand daemon lifecycle (M-D11.1) ────────────────────────────────────
+
+const _clientId = `${hostname()}:${process.pid}:${Date.now()}`;
+const HEARTBEAT_MS = parseInt(process.env["SCRYBE_DAEMON_HEARTBEAT_MS"] ?? "30000", 10);
+let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+let _unregisterCalled = false;
+
+async function bootstrapDaemon(): Promise<void> {
+  if (process.env["SCRYBE_NO_AUTO_DAEMON"] === "1") return;
+
+  const { isContainer } = await import("./daemon/container-detect.js");
+  if (isContainer()) return;
+
+  const { isDaemonRunning } = await import("./daemon/pidfile.js");
+  const { running } = await isDaemonRunning();
+  if (!running) {
+    const { spawnDaemonDetached } = await import("./daemon/spawn-detached.js");
+    spawnDaemonDetached({});
+  }
+
+  _startHeartbeatLoop();
+}
+
+function _startHeartbeatLoop(): void {
+  process.stdin.on("end", () => { _unregisterAndExit().catch(() => {}); });
+  process.stdout.on("error", () => { _unregisterAndExit().catch(() => {}); });
+
+  // Send first heartbeat immediately; daemon may not be up yet — errors are silent
+  _sendHeartbeat().catch(() => {});
+
+  _heartbeatInterval = setInterval(() => {
+    _sendHeartbeat().catch(() => {});
+  }, HEARTBEAT_MS);
+  _heartbeatInterval.unref?.();
+}
+
+async function _sendHeartbeat(): Promise<void> {
+  const { readPidfile } = await import("./daemon/pidfile.js");
+  const pidData = readPidfile();
+  if (!pidData?.port) return;
+  try {
+    await fetch(`http://127.0.0.1:${pidData.port}/clients/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId: _clientId, pid: process.pid }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch { /* daemon not up yet — silent, will retry on next tick */ }
+}
+
+async function _unregisterAndExit(): Promise<void> {
+  if (_unregisterCalled) return;
+  _unregisterCalled = true;
+
+  if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
+
+  try {
+    const { readPidfile } = await import("./daemon/pidfile.js");
+    const pidData = readPidfile();
+    if (pidData?.port) {
+      await fetch(`http://127.0.0.1:${pidData.port}/clients/unregister`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId: _clientId }),
+        signal: AbortSignal.timeout(2000),
+      });
+    }
+  } catch { /* best-effort */ }
+
+  process.exit(0);
 }

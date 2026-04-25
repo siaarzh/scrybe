@@ -1,3 +1,6 @@
+import { createWriteStream } from "fs";
+import { mkdir } from "fs/promises";
+import { join } from "path";
 import { closeBranchTagsDB } from "../branch-tags.js";
 import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
@@ -10,14 +13,25 @@ import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.j
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
 import { onStateChange } from "./idle-state.js";
 import { listProjects } from "../registry.js";
+import { LifecycleManager } from "./lifecycle.js";
+import { rotateIfNeeded } from "./log-rotate.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
 let shutdownCalled = false;
+let _lifecycle: LifecycleManager | null = null;
+let _logWrite: ((line: string) => void) | null = null;
+
+function daemonLog(msg: string): void {
+  const line = `${new Date().toISOString()} ${msg}\n`;
+  process.stderr.write(line);
+  _logWrite?.(line);
+}
 
 async function shutdown(signal: string): Promise<void> {
   if (shutdownCalled) return;
   shutdownCalled = true;
-  process.stderr.write(`[scrybe daemon] ${signal} — shutting down\n`);
+  _lifecycle?.stop();
+  daemonLog(`[scrybe daemon] ${signal} — shutting down`);
   await stopHttpServer();
   await stopWatcher();
   await stopGitWatcher();
@@ -65,13 +79,35 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
 export async function runDaemon(): Promise<void> {
   checkAndMigrate();
 
+  // Set up log file
+  const logsDir = join(config.dataDir, "logs");
+  await mkdir(logsDir, { recursive: true });
+  const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(logsDir, "daemon.log");
+  rotateIfNeeded(logPath);
+  const logStream = createWriteStream(logPath, { flags: "a" });
+  _logWrite = (line) => { try { logStream.write(line); } catch { /* ignore */ } };
+
+  const lifecycle = new LifecycleManager();
+  _lifecycle = lifecycle;
+
   const startedAt = new Date();
 
   const { port } = await startHttpServer({
     startedAt,
     onShutdown: () => { shutdown("HTTP /shutdown").catch(() => {}); },
     onKick: kickHandler,
+    onHeartbeat: (clientId, pid) => lifecycle.registerOrUpdate({ clientId, pid }),
+    onUnregister: (clientId) => lifecycle.unregister(clientId),
+    getClientCount: () => lifecycle.getClientCount(),
+    getMode: () => lifecycle.isAlwaysOn() ? "always-on" : "on-demand",
+    getGracePeriodRemainingMs: () => lifecycle.gracePeriodRemainingMs(),
   });
+
+  lifecycle.on("shutdown", (reason) => {
+    daemonLog(`[scrybe daemon] no active clients (${reason}) — shutting down`);
+    shutdown(reason).catch(() => {});
+  });
+  lifecycle.start();
 
   // Wire queue → SSE ring buffer (must happen after startHttpServer exports pushEvent)
   initQueue({ pushEvent });
@@ -110,9 +146,7 @@ export async function runDaemon(): Promise<void> {
   process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => {}); });
   process.on("SIGINT", () => { shutdown("SIGINT").catch(() => {}); });
 
-  process.stderr.write(
-    `[scrybe daemon] started pid=${process.pid} port=${port} dataDir=${config.dataDir}\n`
-  );
+  daemonLog(`[scrybe daemon] started pid=${process.pid} port=${port} dataDir=${config.dataDir}`);
 
   // Never resolves — HTTP server + queue keep event loop alive until signal/shutdown
   await new Promise<never>(() => {});

@@ -7,6 +7,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **On-demand daemon mode** — MCP server now automatically spawns a detached daemon process on startup (when no daemon is running). The daemon stops ~10 minutes after the last agent disconnects, so scrybe's background indexing runs exactly as long as needed without persistent OS-level services.
+- **MCP client heartbeat protocol** — MCP server sends a heartbeat to the daemon every 30 s via `POST /clients/heartbeat`. On graceful shutdown (stdin close, stdout error), it sends `POST /clients/unregister` and exits. The daemon tracks live clients and shuts down automatically when all disconnect (configurable grace period).
+- **`LifecycleManager`** — daemon-side state machine (`src/daemon/lifecycle.ts`) that tracks heartbeats, prunes stale clients every 30 s, fires a no-client-ever safety timer (15 min), and a grace timer (10 min) after clients drop to zero. All timer thresholds are tunable via undocumented env vars.
+- **`scrybe daemon ensure-running`** — new CLI verb; idempotent, quiet by default. Starts the daemon if not running; no-op if already running. `--verbose` prints status. Intended for scripts and autotests.
+- **Container detection** (`src/daemon/container-detect.ts`) — detects Docker (`/.dockerenv`, cgroup keywords), Kubernetes, and WSL2 (`WSL_DISTRO_NAME`). Auto-spawn and always-on mode are skipped in containerized environments.
+- **Daemon log file** — daemon now appends startup/shutdown messages to `<DATA_DIR>/logs/daemon.log` with size-based rotation (default 10 MB × 3 backups). Path and rotation parameters tunable via undocumented env vars.
+- **`SCRYBE_NO_AUTO_DAEMON`** env var (documented) — set to `1` to disable MCP-side auto-spawn. Daemon must be started manually via `scrybe daemon start`.
+- **`SCRYBE_DAEMON_KEEP_ALIVE`** env var (documented) — set to `1` to disable the grace and no-client-ever shutdown timers (always-on mode). Set automatically by OS-level autostart entries (M-D11.2).
+- **`scrybe status` lifecycle fields** — daemon section now shows active client count, mode (`on-demand` / `always-on`), and grace-period countdown when applicable.
+
 ---
 
 ## [0.21.0] — 2026-04-25

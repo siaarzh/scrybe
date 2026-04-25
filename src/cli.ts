@@ -133,8 +133,15 @@ export async function runCli(): Promise<void> {
       const { countTableRows } = await import("./vector-store.js");
       const pidData = readPidfile();
 
-      let daemonInfo: { running: false } | { running: true; pid: number; uptimeMs: number; activeJobs: number } =
-        { running: false };
+      let daemonInfo: { running: false } | {
+        running: true;
+        pid: number;
+        uptimeMs: number;
+        activeJobs: number;
+        clientCount: number;
+        mode: "on-demand" | "always-on";
+        gracePeriodRemainingMs: number | null;
+      } = { running: false };
 
       if (pidData?.port) {
         try {
@@ -145,7 +152,15 @@ export async function runCli(): Promise<void> {
             client.status(),
             new Promise<never>((_, rej) => signal.addEventListener("abort", () => rej(new Error("timeout")))),
           ]);
-          daemonInfo = { running: true, pid: s.pid, uptimeMs: s.uptimeMs, activeJobs: s.queue.active + s.queue.pending };
+          daemonInfo = {
+            running: true,
+            pid: s.pid,
+            uptimeMs: s.uptimeMs,
+            activeJobs: s.queue.active + s.queue.pending,
+            clientCount: s.clientCount ?? 0,
+            mode: s.mode ?? "on-demand",
+            gracePeriodRemainingMs: s.gracePeriodRemainingMs ?? null,
+          };
         } catch {
           // unresponsive — pidfile exists but daemon isn't reachable
         }
@@ -222,7 +237,12 @@ export async function runCli(): Promise<void> {
         if (daemonInfo.running) {
           const uptime = fmtUptime(daemonInfo.uptimeMs);
           const jobsStr = daemonInfo.activeJobs === 0 ? "0 jobs active" : `${daemonInfo.activeJobs} jobs active`;
-          console.log(`Daemon         ● running · PID ${daemonInfo.pid} · uptime ${uptime} · ${jobsStr}`);
+          const clientStr = daemonInfo.clientCount === 1 ? "1 client" : `${daemonInfo.clientCount} clients`;
+          const graceStr = daemonInfo.gracePeriodRemainingMs !== null
+            ? ` · grace in ~${Math.ceil(daemonInfo.gracePeriodRemainingMs / 60000)}m`
+            : "";
+          console.log(`Daemon         ● running · PID ${daemonInfo.pid} · uptime ${uptime} · ${clientStr}${graceStr} · ${jobsStr}`);
+          console.log(`Mode           ${daemonInfo.mode}`);
         } else {
           console.log(`Daemon         ○ not running`);
         }
@@ -965,6 +985,26 @@ export async function runCli(): Promise<void> {
         console.error(`Failed to reach daemon: ${err.message}`);
         process.exit(1);
       }
+    });
+
+  daemon
+    .command("ensure-running")
+    .description("Start the daemon if not running (idempotent, quiet by default)")
+    .option("--verbose", "Print status to stdout")
+    .action(async (opts: { verbose?: boolean }) => {
+      if (process.env["SCRYBE_NO_AUTO_DAEMON"] === "1") {
+        if (opts.verbose) console.log("SCRYBE_NO_AUTO_DAEMON is set — skipping.");
+        return;
+      }
+      const { isDaemonRunning } = await import("./daemon/pidfile.js");
+      const { running } = await isDaemonRunning();
+      if (running) {
+        if (opts.verbose) console.log("Daemon is already running.");
+        return;
+      }
+      const { spawnDaemonDetached } = await import("./daemon/spawn-detached.js");
+      spawnDaemonDetached({});
+      if (opts.verbose) console.log("Daemon started.");
     });
 
   // ─── Hook commands ────────────────────────────────────────────────────────

@@ -58,6 +58,10 @@ export interface DaemonStatus {
   };
   recentEvents: DaemonEvent[];
   lastError: DaemonEvent | null;
+  // M-D11: on-demand lifecycle fields
+  clientCount?: number;
+  mode?: "on-demand" | "always-on";
+  gracePeriodRemainingMs?: number | null;
 }
 
 export interface KickRequest {
@@ -85,6 +89,11 @@ let _sseSeq = 0;
 let _server: http.Server | null = null;
 let _onShutdown: (() => void) | undefined;
 let _onKick: ((r: KickRequest) => Promise<KickResponse>) | undefined;
+let _onHeartbeat: ((clientId: string, pid: number) => void) | undefined;
+let _onUnregister: ((clientId: string) => void) | undefined;
+let _getClientCount: (() => number) | undefined;
+let _getMode: (() => "on-demand" | "always-on") | undefined;
+let _getGracePeriodRemainingMs: (() => number | null) | undefined;
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
@@ -119,10 +128,20 @@ export async function startHttpServer(opts: {
   startedAt: Date;
   onShutdown?: () => void;
   onKick?: (r: KickRequest) => Promise<KickResponse>;
+  onHeartbeat?: (clientId: string, pid: number) => void;
+  onUnregister?: (clientId: string) => void;
+  getClientCount?: () => number;
+  getMode?: () => "on-demand" | "always-on";
+  getGracePeriodRemainingMs?: () => number | null;
 }): Promise<{ port: number }> {
   _startedAt = opts.startedAt;
   _onShutdown = opts.onShutdown;
   _onKick = opts.onKick;
+  _onHeartbeat = opts.onHeartbeat;
+  _onUnregister = opts.onUnregister;
+  _getClientCount = opts.getClientCount;
+  _getMode = opts.getMode;
+  _getGracePeriodRemainingMs = opts.getGracePeriodRemainingMs;
   _state = "cold";
 
   _server = http.createServer((req, res) => {
@@ -232,6 +251,9 @@ function buildStatus(): DaemonStatus {
     queue: getQueueStats(),
     recentEvents: _ring.slice(-10),
     lastError: _ring.filter((e) => e.level === "error").at(-1) ?? null,
+    clientCount: _getClientCount?.() ?? 0,
+    mode: _getMode?.() ?? "on-demand",
+    gracePeriodRemainingMs: _getGracePeriodRemainingMs?.() ?? null,
   };
 }
 
@@ -335,6 +357,22 @@ async function handle(
   if (method === "POST" && path === "/shutdown") {
     jsonRes(res, 200, { state: "stopping" });
     setImmediate(() => _onShutdown?.());
+    return;
+  }
+
+  // ── POST /clients/heartbeat ────────────────────────────────────────────
+  if (method === "POST" && path === "/clients/heartbeat") {
+    const body = (await readBody(req)) as { clientId?: string; pid?: number };
+    if (body.clientId) _onHeartbeat?.(body.clientId, body.pid ?? 0);
+    jsonRes(res, 200, { ok: true });
+    return;
+  }
+
+  // ── POST /clients/unregister ───────────────────────────────────────────
+  if (method === "POST" && path === "/clients/unregister") {
+    const body = (await readBody(req)) as { clientId?: string };
+    if (body.clientId) _onUnregister?.(body.clientId);
+    jsonRes(res, 200, { ok: true });
     return;
   }
 
