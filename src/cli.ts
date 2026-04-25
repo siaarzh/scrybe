@@ -874,9 +874,30 @@ export async function runCli(): Promise<void> {
     .option("--watch", "Live dashboard")
     .action(async (opts: { watch?: boolean }) => {
       process.stderr.write("[scrybe] 'daemon status' is deprecated — use 'scrybe status' instead (will be removed in v2.0)\n");
-      // Delegate to the top-level status command logic
-      const statusCmd = program.commands.find((c) => c.name() === "status");
-      if (statusCmd) await statusCmd.parseAsync(opts.watch ? ["--watch"] : [], { from: "user" });
+      const { readPidfile } = await import("./daemon/pidfile.js");
+      if (opts.watch) {
+        const pidData = readPidfile();
+        if (!pidData?.port) {
+          console.error("[scrybe] watch mode requires daemon — run `scrybe daemon start`");
+          process.exit(1);
+        }
+        const { renderStatusDashboard } = await import("./daemon/status-cli.js");
+        await renderStatusDashboard();
+        return;
+      }
+      const pidData = readPidfile();
+      if (!pidData?.port) {
+        console.log("Daemon is not running.");
+        return;
+      }
+      try {
+        const { DaemonClient } = await import("./daemon/client.js");
+        const client = new DaemonClient({ port: pidData.port });
+        const s = await client.status();
+        console.log(JSON.stringify(s));
+      } catch {
+        console.log("Daemon is not running.");
+      }
     });
 
   daemon

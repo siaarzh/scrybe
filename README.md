@@ -36,7 +36,7 @@ No Docker. LanceDB runs in-process. All data lives in the OS user data directory
 - **Linux:** `~/.local/share/scrybe/`
 - **Mac:** `~/Library/Application Support/scrybe/`
 
-> **Platform support:** Windows and Linux are tested in CI on every commit. macOS support is best-effort — it runs in CI but has not yet been validated by macOS users in production. If you hit a macOS-specific issue, please [open an issue](https://github.com/siaarzh/scrybe/issues/new/choose).
+> **Platform support:** Windows, Linux, and macOS are all tested in CI on every commit (matrix: `ubuntu-latest`, `windows-latest`, `macos-latest`). All three platforms are fully supported.
 
 ## Code chunking
 

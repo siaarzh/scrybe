@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.20.1] — 2026-04-25
+
+### Fixed
+
+- **`scrybe daemon status` regression** — M-D8's delegation via `statusCmd.parseAsync` caused `daemon status` to emit the human-readable `scrybe status` header (`Scrybe v0.20.0 ...`) instead of the expected plain-text / JSON output. Rewrote `daemon status` action to call daemon helpers directly: offline → prints `"Daemon is not running."`; online → prints raw `DaemonStatus` JSON. Tests on all three platforms now pass.
+- **macOS CI no longer `continue-on-error`** — the three failing tests were a Windows/Linux/macOS regression (not macOS-specific). With the above fix all platforms are green; dropped the non-blocking flag so macOS failures are now build-blocking.
+
+---
+
 ## [0.20.0] — 2026-04-25
 
 ### Added
