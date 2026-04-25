@@ -9,6 +9,7 @@ const MARKER_BEGIN = "# >>> scrybe >>>";
 
 export interface UninstallPlan {
   daemon: { running: boolean; pid?: number; port?: number; activeJobs: number };
+  autostart: { installed: boolean; method?: string };
   mcpRemovals: RemoveDiff[];
   hookRemovals: HookRemoveEntry[];
   dataDir: { path: string; sizeBytes: number; projectCount: number };
@@ -91,6 +92,19 @@ export async function buildUninstallPlan(): Promise<UninstallPlan> {
   const dataDirPath = config.dataDir;
   const sizeBytes = existsSync(dataDirPath) ? dirSize(dataDirPath) : 0;
 
+  // Autostart install state (best-effort)
+  let autostartInstalled = false;
+  let autostartMethod: string | undefined;
+  try {
+    const { isContainer } = await import("./daemon/container-detect.js");
+    if (!isContainer()) {
+      const { getInstallStatus } = await import("./daemon/install/index.js");
+      const s = await getInstallStatus();
+      autostartInstalled = s.installed;
+      autostartMethod = s.method;
+    }
+  } catch { /* ignore */ }
+
   return {
     daemon: {
       running: daemonRunning,
@@ -98,6 +112,7 @@ export async function buildUninstallPlan(): Promise<UninstallPlan> {
       port: pidData?.port,
       activeJobs,
     },
+    autostart: { installed: autostartInstalled, method: autostartMethod },
     mcpRemovals,
     hookRemovals,
     dataDir: { path: dataDirPath, sizeBytes, projectCount: projects.length },
@@ -196,6 +211,24 @@ export async function executeUninstallPlan(plan: UninstallPlan): Promise<Uninsta
       anyFailed = true;
       actions.push({ kind: "hooks", target: entry.repoPath, status: "failed",
         message: err.message });
+    }
+  }
+
+  // 3b. Remove autostart entry
+  if (plan.autostart.installed) {
+    try {
+      const { uninstallAutostart } = await import("./daemon/install/index.js");
+      const result = await uninstallAutostart();
+      actions.push({
+        kind: "autostart",
+        target: plan.autostart.method ?? "autostart",
+        status: result.removed ? "ok" : "skipped",
+        message: result.removed ? undefined : "entry not found",
+      });
+    } catch (err: any) {
+      anyFailed = true;
+      actions.push({ kind: "autostart", target: plan.autostart.method ?? "autostart",
+        status: "failed", message: err.message });
     }
   }
 

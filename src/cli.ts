@@ -166,6 +166,17 @@ export async function runCli(): Promise<void> {
         }
       }
 
+      // Fetch always-on install status (best-effort, don't block status on it)
+      let alwaysOnMethod: string | null = null;
+      try {
+        const { isContainer } = await import("./daemon/container-detect.js");
+        if (!isContainer()) {
+          const { getInstallStatus } = await import("./daemon/install/index.js");
+          const installStatus = await getInstallStatus();
+          if (installStatus.installed) alwaysOnMethod = installStatus.method ?? "autostart";
+        }
+      } catch { /* ignore */ }
+
       let projects: ReturnType<typeof listProjects> = [];
       try { projects = listProjects(); } catch { /* DATA_DIR missing */ }
 
@@ -242,7 +253,11 @@ export async function runCli(): Promise<void> {
             ? ` · grace in ~${Math.ceil(daemonInfo.gracePeriodRemainingMs / 60000)}m`
             : "";
           console.log(`Daemon         ● running · PID ${daemonInfo.pid} · uptime ${uptime} · ${clientStr}${graceStr} · ${jobsStr}`);
-          console.log(`Mode           ${daemonInfo.mode}`);
+          const modeStr = alwaysOnMethod ? `always-on (${alwaysOnMethod})` : daemonInfo.mode;
+          console.log(`Mode           ${modeStr}`);
+        } else if (alwaysOnMethod) {
+          console.log(`Daemon         ○ not running · autostart registered (${alwaysOnMethod})`);
+          console.log(`Mode           always-on (${alwaysOnMethod})`);
         } else {
           console.log(`Daemon         ○ not running`);
         }
@@ -317,6 +332,13 @@ export async function runCli(): Promise<void> {
       }
       console.log();
 
+      if (plan.autostart.installed) {
+        console.log(`  Always-on autostart entry to remove (${plan.autostart.method ?? "unknown"})`);
+      } else {
+        console.log(`  Autostart         not installed`);
+      }
+      console.log();
+
       function fmtBytes(b: number): string {
         if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;
         if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
@@ -333,7 +355,7 @@ export async function runCli(): Promise<void> {
       }
 
       const nothingToDo = !plan.daemon.running && toRemove.length === 0 &&
-        plan.hookRemovals.length === 0 && !dataDirExists;
+        plan.hookRemovals.length === 0 && !plan.autostart.installed && !dataDirExists;
       if (nothingToDo) {
         console.log("\nNothing to uninstall.");
         return;
@@ -984,6 +1006,50 @@ export async function runCli(): Promise<void> {
       } catch (err: any) {
         console.error(`Failed to reach daemon: ${err.message}`);
         process.exit(1);
+      }
+    });
+
+  daemon
+    .command("install")
+    .description("Register the daemon for autostart at login (always-on mode)")
+    .option("--force", "Reinstall even if already installed")
+    .action(async (opts: { force?: boolean }) => {
+      const { isContainer } = await import("./daemon/container-detect.js");
+      if (isContainer()) {
+        console.error("Container environment — autostart is not supported.");
+        process.exit(1);
+      }
+      const { getInstallStatus, installAutostart } = await import("./daemon/install/index.js");
+      const existing = await getInstallStatus();
+      if (existing.installed && !opts.force) {
+        console.log(`Already installed (${existing.method ?? "unknown"}). Use --force to reinstall.`);
+        if (existing.detail?.taskName)  console.log(`  task:   ${existing.detail.taskName}`);
+        if (existing.detail?.plistPath) console.log(`  plist:  ${existing.detail.plistPath}`);
+        if (existing.detail?.unitPath)  console.log(`  unit:   ${existing.detail.unitPath}`);
+        return;
+      }
+      try {
+        const status = await installAutostart({ force: opts.force });
+        console.log(`Always-on enabled · ${status.method ?? "autostart"}`);
+        if (status.detail?.taskName)  console.log(`  task:   ${status.detail.taskName}`);
+        if (status.detail?.plistPath) console.log(`  plist:  ${status.detail.plistPath}`);
+        if (status.detail?.unitPath)  console.log(`  unit:   ${status.detail.unitPath}`);
+      } catch (err: any) {
+        console.error(`Failed to install autostart: ${err?.message ?? String(err)}`);
+        process.exit(1);
+      }
+    });
+
+  daemon
+    .command("uninstall")
+    .description("Remove daemon autostart entry (does not stop the daemon or delete data)")
+    .action(async () => {
+      const { uninstallAutostart } = await import("./daemon/install/index.js");
+      const result = await uninstallAutostart();
+      if (result.removed) {
+        console.log(`Always-on removed (${result.method ?? "unknown"})`);
+      } else {
+        console.log("No autostart entry found.");
       }
     });
 

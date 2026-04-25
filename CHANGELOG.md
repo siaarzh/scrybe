@@ -9,6 +9,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ### Added
 
+- **Always-on mode** — `scrybe daemon install` registers an OS-level autostart entry so the daemon survives across reboots and runs at login without an agent open. Supported on Windows (Task Scheduler, HKCU\Run fallback), macOS (LaunchAgent plist), Linux systemd user units, and Linux cron fallback. The daemon detects the always-on context via `SCRYBE_DAEMON_KEEP_ALIVE=1` set in the launcher script and disables its shutdown timers.
+- **`scrybe daemon uninstall`** — removes the autostart entry. Does not stop the daemon or delete data.
+- **Wizard always-on prompt** (Step 4.5) — after MCP config, before initial index. Container environments skip the prompt entirely. "No" (default) is a non-destructive decline; on-demand mode continues to work.
+- **`scrybe doctor` always-on check** — surfaces install state as `ok`/`skip` (no warn-count increment when not installed).
+- **`scrybe status` always-on state** — shows whether autostart is registered even when the daemon is not running.
+- **`scrybe uninstall` autostart reversal** — the uninstall plan now includes the autostart entry; `--yes` removes it along with MCP entries, git hooks, and DATA_DIR.
+
 - **On-demand daemon mode** — MCP server now automatically spawns a detached daemon process on startup (when no daemon is running). The daemon stops ~10 minutes after the last agent disconnects, so scrybe's background indexing runs exactly as long as needed without persistent OS-level services.
 - **MCP client heartbeat protocol** — MCP server sends a heartbeat to the daemon every 30 s via `POST /clients/heartbeat`. On graceful shutdown (stdin close, stdout error), it sends `POST /clients/unregister` and exits. The daemon tracks live clients and shuts down automatically when all disconnect (configurable grace period).
 - **`LifecycleManager`** — daemon-side state machine (`src/daemon/lifecycle.ts`) that tracks heartbeats, prunes stale clients every 30 s, fires a no-client-ever safety timer (15 min), and a grace timer (10 min) after clients drop to zero. All timer thresholds are tunable via undocumented env vars.

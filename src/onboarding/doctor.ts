@@ -373,6 +373,28 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
+  // Always-on install status
+  try {
+    const { isContainer } = await import("../daemon/container-detect.js");
+    if (isContainer()) {
+      checks.push(skip("daemon.always_on", SEC_DAEMON, "Always-on mode",
+        "Containerized environment — not applicable"));
+    } else {
+      const { getInstallStatus } = await import("../daemon/install/index.js");
+      const installStatus = await getInstallStatus();
+      if (installStatus.installed) {
+        checks.push(ok("daemon.always_on", SEC_DAEMON, "Always-on mode",
+          `Installed (${installStatus.method ?? "unknown"})`,
+          { method: installStatus.method }));
+      } else {
+        checks.push(skip("daemon.always_on", SEC_DAEMON, "Always-on mode",
+          "Not installed — run `scrybe daemon install` to keep the daemon running at login"));
+      }
+    }
+  } catch {
+    checks.push(skip("daemon.always_on", SEC_DAEMON, "Always-on mode", "Could not check install status"));
+  }
+
   // Git hooks — check per code source (best-effort; skip if not a git repo)
   for (const project of projects) {
     for (const source of project.sources) {

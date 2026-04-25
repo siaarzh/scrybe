@@ -28,6 +28,7 @@ describe("preflightUninstallPlan", () => {
 
     const plan = {
       daemon: { running: false, activeJobs: 0 },
+      autostart: { installed: false },
       mcpRemovals: [],   // no MCP files to check
       hookRemovals: [],
       dataDir: { path: join(tmp, "data"), sizeBytes: 0, projectCount: 0 },
@@ -43,6 +44,7 @@ describe("preflightUninstallPlan", () => {
     // Point to a file that doesn't exist (accessSync will fail)
     const plan = {
       daemon: { running: false, activeJobs: 0 },
+      autostart: { installed: false },
       mcpRemovals: [{
         file: { type: "claude-code" as const, path: join(tmp, "nonexistent", ".claude.json"), exists: true },
         existing: { command: "npx", args: ["-y", "scrybe-cli", "mcp"] },
@@ -62,6 +64,7 @@ describe("preflightUninstallPlan", () => {
 
     const plan = {
       daemon: { running: false, activeJobs: 0 },
+      autostart: { installed: false },
       mcpRemovals: [{
         file: { type: "cursor" as const, path: join(tmp, "nonexistent.json"), exists: false },
         existing: null,
@@ -88,6 +91,7 @@ describe("executeUninstallPlan", () => {
 
     const plan = {
       daemon: { running: false, activeJobs: 0 },
+      autostart: { installed: false },
       mcpRemovals: [],
       hookRemovals: [],
       dataDir: { path: dataDir, sizeBytes: 100, projectCount: 0 },
@@ -105,6 +109,7 @@ describe("executeUninstallPlan", () => {
 
     const plan = {
       daemon: { running: false, activeJobs: 0 },
+      autostart: { installed: false },
       mcpRemovals: [],
       hookRemovals: [],
       dataDir: { path: join(tmp, "nonexistent-data"), sizeBytes: 0, projectCount: 0 },
@@ -131,6 +136,7 @@ describe("executeUninstallPlan", () => {
 
     const plan = {
       daemon: { running: false, activeJobs: 0 },
+      autostart: { installed: false },
       mcpRemovals: [diff],
       hookRemovals: [],
       dataDir: { path: join(tmp, "nonexistent"), sizeBytes: 0, projectCount: 0 },
@@ -149,6 +155,7 @@ describe("executeUninstallPlan", () => {
 
     const plan = {
       daemon: { running: false, activeJobs: 0 },
+      autostart: { installed: false },
       mcpRemovals: [{
         // Non-existent dir — applyMcpRemove will be called but find no file → no-op (no error)
         // To simulate actual failure, use a path we can't write via a readonly scenario

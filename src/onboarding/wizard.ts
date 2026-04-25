@@ -359,6 +359,47 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
     p.log.warn("Restart your editor to pick up the new MCP config.");
   }
 
+  // ── Step 4.5: Always-on daemon prompt ─────────────────────────────────────
+  const { isContainer } = await import("../daemon/container-detect.js");
+  if (isContainer()) {
+    p.log.info("Containerized environment — always-on mode skipped (daemon runs on-demand when an agent uses scrybe).");
+  } else {
+    p.log.message(
+      "Background daemon — keep your index in sync automatically.\n\n" +
+      "  The daemon runs while your agent is using scrybe and stops ~10 min after you\n" +
+      "  close the agent. Files you change are re-indexed in the background.\n"
+    );
+    const alwaysOn = await p.confirm({
+      message: "Keep scrybe running even when no agent is open? (useful for git pull, overnight ticket polling)",
+      initialValue: false,
+    });
+    if (p.isCancel(alwaysOn)) { p.cancel("Setup cancelled."); return; }
+
+    if (alwaysOn) {
+      const spin = p.spinner();
+      spin.start("Registering autostart...");
+      try {
+        const { installAutostart } = await import("../daemon/install/index.js");
+        const status = await installAutostart();
+        const { spawnDaemonDetached } = await import("../daemon/spawn-detached.js");
+        spawnDaemonDetached({});
+        // Brief wait so pidfile is likely present before we read it
+        await new Promise((r) => setTimeout(r, 1200));
+        const { readPidfile } = await import("../daemon/pidfile.js");
+        const pidData = readPidfile();
+        const pidStr = pidData ? `PID ${pidData.pid} · port ${pidData.port}` : "starting";
+        spin.stop(`Always-on enabled · ${status.method ?? "autostart"} · daemon started · ${pidStr}`);
+      } catch (err: any) {
+        spin.stop(
+          `Could not register autostart: ${err?.message ?? String(err)}\n` +
+          "  Continuing. Run `scrybe daemon install` later or use on-demand mode only."
+        );
+      }
+    } else {
+      p.log.info("Always-on declined. Daemon runs on-demand while an agent uses scrybe.");
+    }
+  }
+
   // ── Step 5: Initial index ──────────────────────────────────────────────────
   const toIndex = registeredNow.length > 0 ? registeredNow : [];
 
