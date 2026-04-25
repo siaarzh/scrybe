@@ -127,6 +127,8 @@ export async function applyMcpMerge(diff: McpEntryDiff): Promise<void> {
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
+  if (existsSync(path)) createBackup(path);
+
   if (type === "codex") {
     await applyTomlMerge(path, diff.proposed);
   } else {

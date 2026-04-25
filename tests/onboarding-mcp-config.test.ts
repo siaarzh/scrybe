@@ -154,6 +154,27 @@ describe("applyMcpMerge", () => {
     await applyMcpMerge(computeDiff(file, proposed));
     expect(existsSync(file.path)).toBe(true);
   });
+
+  it("creates backup when modifying existing file", async () => {
+    const { applyMcpMerge, computeDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const { expectBackupCreated } = await import("./helpers/backup-contract.js");
+    const claudeJson = join(tmp, ".claude.json");
+    const old = { command: "node", args: ["/old/path/dist/index.js", "mcp"] };
+    writeFileSync(claudeJson, JSON.stringify({ mcpServers: { scrybe: old } }));
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    const diff = computeDiff(file, proposed);
+    await expectBackupCreated(claudeJson, () => applyMcpMerge(diff));
+  });
+
+  it("does not create backup when creating file for first time", async () => {
+    const { applyMcpMerge, computeDiff, detectMcpConfigs, proposeScrybeEntry } = await load(tmp);
+    const { expectNoBackupCreated } = await import("./helpers/backup-contract.js");
+    const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
+    const proposed = proposeScrybeEntry({ binResolution: "npx" });
+    const diff = computeDiff(file, proposed);
+    await expectNoBackupCreated(file.path, () => applyMcpMerge(diff));
+  });
 });
 
 // ─── Codex (TOML) ────────────────────────────────────────────────────────────
