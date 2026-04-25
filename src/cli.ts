@@ -14,7 +14,7 @@ import {
 } from "./registry.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { indexProject, indexSource } from "./indexer.js";
-import { getBranchesForSource, getAllChunkIdsForSource } from "./branch-tags.js";
+import { listBranches, getAllChunkIdsForSource } from "./branch-state.js";
 import { listChunkIds, deleteChunks } from "./vector-store.js";
 import { validateGitlabToken } from "./plugins/gitlab-issues.js";
 import { config, VERSION } from "./config.js";
@@ -500,7 +500,7 @@ export async function runCli(): Promise<void> {
           process.exit(1);
         }
       } else {
-        const branches = getBranchesForSource(opts.projectId, opts.sourceId);
+        const branches = listBranches(opts.projectId, opts.sourceId);
         console.log(JSON.stringify({ branches }, null, 2));
       }
     });
@@ -593,7 +593,7 @@ export async function runCli(): Promise<void> {
           process.exit(1);
         }
       } else {
-        const branches = getBranchesForSource(opts.projectId, opts.sourceId);
+        const branches = listBranches(opts.projectId, opts.sourceId);
         console.log(JSON.stringify({ branches }, null, 2));
       }
     });
@@ -1084,7 +1084,7 @@ export async function runCli(): Promise<void> {
           sources: p.sources.map((s) => ({
             ...s,
             branches_indexed: s.source_config.type === "code"
-              ? getBranchesForSource(opts.projectId!, s.source_id)
+              ? listBranches(opts.projectId!, s.source_id)
               : ["*"],
           })),
         };

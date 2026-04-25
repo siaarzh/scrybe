@@ -17,7 +17,7 @@
 import * as parcel from "@parcel/watcher";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { resolveBranchForPath } from "../branches.js";
+import { resolveBranchForPath } from "../branch-state.js";
 import { enqueue } from "./queue.js";
 import { touchActive } from "./idle-state.js";
 import type { DaemonEvent } from "./http-server.js";

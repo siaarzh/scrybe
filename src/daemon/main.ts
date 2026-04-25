@@ -1,7 +1,7 @@
 import { createWriteStream } from "fs";
 import { mkdir } from "fs/promises";
 import { join } from "path";
-import { closeBranchTagsDB } from "../branch-tags.js";
+import { closeDB } from "../branch-state.js";
 import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config } from "../config.js";
@@ -38,7 +38,7 @@ async function shutdown(signal: string): Promise<void> {
   stopFetchPoller();
   stopQueue();
   cancelAllJobs();
-  closeBranchTagsDB();
+  closeDB();
   removePidfile();
   process.exit(0);
 }

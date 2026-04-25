@@ -11,7 +11,7 @@
  * Disable all fetching: SCRYBE_DAEMON_NO_FETCH=1
  */
 import { execSync } from "node:child_process";
-import { getBranchesForSource } from "../branch-tags.js";
+import { listBranches } from "../branch-state.js";
 import { getSource } from "../registry.js";
 import { getState } from "./idle-state.js";
 import { enqueue } from "./queue.js";
@@ -139,7 +139,7 @@ async function pollProject(ps: PollerState): Promise<void> {
   }
 
   // Which pinned branches have never been indexed (backfill candidates)
-  const indexedBranches = new Set(getBranchesForSource(ps.projectId, ps.sourceId));
+  const indexedBranches = new Set(listBranches(ps.projectId, ps.sourceId));
 
   try {
     execSync(

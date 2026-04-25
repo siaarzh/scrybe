@@ -1,10 +1,20 @@
 import { createRequire } from "module";
 import { execSync } from "child_process";
-import { readFileSync } from "fs";
+import { createReadStream, readFileSync } from "fs";
 import { basename } from "path";
+import { createHash } from "node:crypto";
 import { walkRepoFiles, chunkLines, getLanguage, makeChunkId } from "../chunker.js";
-import { hashFile } from "../hashes.js";
 import { config } from "../config.js";
+
+function hashFile(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", reject);
+  });
+}
 import type { CodeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { SourcePlugin, AnyChunk } from "./base.js";
 

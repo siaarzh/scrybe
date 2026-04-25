@@ -1,7 +1,7 @@
 /**
  * Phase 6 — Fetch poller: backfill detection, SHA delta detection, no-fetch skip.
  * Uses two real clones (remote + local) to simulate git fetch workflows.
- * Mocks queue.enqueue and branch-tags.getBranchesForSource for isolation.
+ * Mocks queue.enqueue and branch-state.listBranches for isolation.
  * Relies on isolate.ts (setupFiles) for per-test DATA_DIR + module reset.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -21,9 +21,13 @@ vi.mock("../src/daemon/queue.js", () => ({
   stopQueue: vi.fn(),
 }));
 
-vi.mock("../src/branch-tags.js", () => ({
-  getBranchesForSource: vi.fn().mockReturnValue([]),
-  closeBranchTagsDB: vi.fn(),
+vi.mock("../src/branch-state.js", () => ({
+  listBranches: vi.fn().mockReturnValue([]),
+  closeDB: vi.fn(),
+  getAllChunkIdsForSource: vi.fn().mockReturnValue(new Set()),
+  getChunkIdsForBranch: vi.fn().mockReturnValue(new Set()),
+  resolveBranch: vi.fn().mockReturnValue("main"),
+  resolveBranchForPath: vi.fn().mockReturnValue("main"),
 }));
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -52,7 +56,7 @@ afterEach(async () => {
 describe("fetch poller — backfill", () => {
   it("queues incremental reindex for a pinned branch never indexed before", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
-    // getBranchesForSource returns [] by default → branch never indexed
+    // listBranches returns [] by default → branch never indexed
 
     const { addProject, addSource, updateSource, listProjects } = await import("../src/registry.js");
     addProject({ id: "fp-p1", description: "fetch-poller test" });
@@ -85,9 +89,9 @@ describe("fetch poller — backfill", () => {
 describe("fetch poller — SHA delta detection", () => {
   it("queues reindex when a pinned branch advances on the remote", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
-    const { getBranchesForSource } = await import("../src/branch-tags.js");
+    const { listBranches } = await import("../src/branch-state.js");
     // Pretend the branch was already indexed — only SHA changes should trigger
-    vi.mocked(getBranchesForSource).mockReturnValue(["origin/feat/example"]);
+    vi.mocked(listBranches).mockReturnValue(["origin/feat/example"]);
 
     // Commit to feat/example on the remote BEFORE starting the poller
     // (so the poller's first snapshot captures the pre-commit SHA,
@@ -151,7 +155,7 @@ describe("fetch poller — SHA delta detection", () => {
 describe("fetch poller — lifecycle", () => {
   it("stopFetchPoller cancels all timers (no enqueue after stop)", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
-    // getBranchesForSource = [] → would normally queue on first cycle
+    // listBranches = [] → would normally queue on first cycle
 
     const { addProject, addSource, updateSource, listProjects } = await import("../src/registry.js");
     addProject({ id: "fp-p4", description: "fetch-poller test" });

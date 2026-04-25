@@ -10,8 +10,7 @@ import {
   ftsSearchKnowledge,
 } from "./vector-store.js";
 import { rerank } from "./reranker.js";
-import { resolveBranch } from "./branches.js";
-import { getChunkIdsForBranch } from "./branch-tags.js";
+import { resolveBranch, getChunkIdsForBranch } from "./branch-state.js";
 import type { SearchResult, KnowledgeSearchResult, Source } from "./types.js";
 
 const MAX_RERANK_CANDIDATES = 500;

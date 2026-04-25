@@ -24,7 +24,7 @@ import { VERSION, config } from "./config.js";
 import { checkAndMigrate } from "./schema-version.js";
 import { searchCode, searchKnowledge } from "./search.js";
 import { submitJob, submitSourceJob, submitAllJob, getJobStatus, cancelJob, listJobs } from "./jobs.js";
-import { getBranchesForSource } from "./branch-tags.js";
+import { listBranches } from "./branch-state.js";
 import { listPinned, addPinned, removePinned, InvalidSourceTypeError, SourceNotFoundError, ProjectNotFoundError } from "./pinned-branches.js";
 import type { IndexMode, Source, SourceConfig, EmbeddingConfig } from "./types.js";
 
@@ -720,7 +720,7 @@ export async function runMcpServer(): Promise<void> {
             // Non-code sources are branch-agnostic; always report "*" for them
             // since they don't participate in branch_tags after v0.14.1.
             branches: s.source_config.type === "code"
-              ? getBranchesForSource(projectId, s.source_id)
+              ? listBranches(projectId, s.source_id)
               : ["*"],
           }));
           return jsonResult(result);

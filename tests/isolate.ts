@@ -35,10 +35,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Close SQLite branch-tags handle before module reset nukes it
+  // Close SQLite branch-state handle before module reset nukes it
   try {
-    const { closeBranchTagsDB } = await import("../src/branch-tags.js");
-    closeBranchTagsDB();
+    const { closeDB } = await import("../src/branch-state.js");
+    closeDB();
   } catch {
     // module not yet loaded in this test — no-op
   }

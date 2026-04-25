@@ -39,7 +39,7 @@ describe("gc — orphan chunk cleanup", () => {
     const tableName = src.table_name!;
 
     const { listChunkIds } = await import("../src/vector-store.js");
-    const { getAllChunkIdsForSource, removeTagsForBranch } = await import("../src/branch-tags.js");
+    const { getAllChunkIdsForSource, deleteBranch } = await import("../src/branch-state.js");
 
     // Initially no orphans — every LanceDB row is tagged under at least one branch
     const lanceIdsBefore = await listChunkIds(project.projectId, tableName);
@@ -49,7 +49,7 @@ describe("gc — orphan chunk cleanup", () => {
 
     // Simulate branch deletion: drop all feat/example tags.
     // alphaFarewell is unique to feat/example → its chunk becomes an orphan.
-    removeTagsForBranch(project.projectId, project.sourceId, "feat/example");
+    deleteBranch(project.projectId, project.sourceId, "feat/example");
 
     const lanceIdsAfter = await listChunkIds(project.projectId, tableName);
     const taggedAfter = getAllChunkIdsForSource(project.projectId, project.sourceId);

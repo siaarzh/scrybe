@@ -82,7 +82,7 @@ describe("branch isolation", () => {
     const tableName = src.table_name!;
 
     const { listChunkIds } = await import("../src/vector-store.js");
-    const { getChunkIdsForBranch } = await import("../src/branch-tags.js");
+    const { getChunkIdsForBranch } = await import("../src/branch-state.js");
 
     const lanceIds = new Set(await listChunkIds(project.projectId, tableName));
     const defaultIds = getChunkIdsForBranch(project.projectId, project.sourceId, defaultBranch);
@@ -111,8 +111,8 @@ describe("branch isolation", () => {
     switchBranch(fixture, "feat/example");
     await runIndex(project.projectId, project.sourceId, "incremental");
 
-    const { getBranchesForSource } = await import("../src/branch-tags.js");
-    const branches = getBranchesForSource(project.projectId, project.sourceId);
+    const { listBranches } = await import("../src/branch-state.js");
+    const branches = listBranches(project.projectId, project.sourceId);
 
     expect(branches).toContain(defaultBranch);
     expect(branches).toContain("feat/example");

@@ -8,7 +8,7 @@ import {
 } from "fs";
 import { join } from "path";
 import { config } from "./config.js";
-import { closeBranchTagsDB } from "./branch-tags.js";
+import { closeDB } from "./branch-state.js";
 
 export const CURRENT_SCHEMA_VERSION = 2;
 
@@ -70,7 +70,7 @@ export function checkAndMigrate(): { migrated: boolean; version: number } {
   }
 
   // Close and delete branch-tags.db → fresh start
-  closeBranchTagsDB();
+  closeDB();
   const dbPath = branchTagsDbPath();
   if (existsSync(dbPath)) {
     try { unlinkSync(dbPath); } catch { /* ignore */ }
