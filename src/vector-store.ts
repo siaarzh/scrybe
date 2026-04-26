@@ -190,6 +190,7 @@ export async function createFtsIndex(tableName: string): Promise<void> {
     config: lancedb.Index.fts({ stem: false, lowercase: true }),
     replace: true,
   });
+  await maybeCompact(table);
 }
 
 export async function deleteProject(projectId: string, tableName: string): Promise<void> {
@@ -298,6 +299,7 @@ export async function createKnowledgeFtsIndex(tableName: string): Promise<void> 
     config: lancedb.Index.fts({ stem: false, lowercase: true }),
     replace: true,
   });
+  await maybeCompact(table);
 }
 
 export async function deleteKnowledgeProject(projectId: string, tableName: string): Promise<void> {
@@ -317,11 +319,12 @@ export async function deleteKnowledgeSource(
   await table.delete(
     `project_id = '${escapeSql(projectId)}' AND source_path = '${escapeSql(sourcePath)}'`
   );
+  await maybeCompact(table);
 }
 
 // ─── Compaction ───────────────────────────────────────────────────────────────
 
-const COMPACT_THRESHOLD = parseInt(process.env.SCRYBE_LANCE_COMPACT_THRESHOLD ?? "10", 10);
+export const COMPACT_THRESHOLD = parseInt(process.env.SCRYBE_LANCE_COMPACT_THRESHOLD ?? "10", 10);
 const ONE_HOUR_MS = 3_600_000;
 
 /**
@@ -337,11 +340,13 @@ async function maybeCompact(table: lancedb.Table): Promise<void> {
 /**
  * Full-purge compaction — removes all old versions with no grace period.
  * Called by `scrybe gc` where the user explicitly requested maximum reclaim.
+ * Returns bytes reclaimed by the prune step (0 if table missing or nothing to reclaim).
  */
-export async function compactTable(tableName: string): Promise<void> {
+export async function compactTable(tableName: string): Promise<number> {
   const table = await openExistingTable(tableName);
-  if (!table) return;
-  await table.optimize({ cleanupOlderThan: new Date() });
+  if (!table) return 0;
+  const stats = await table.optimize({ cleanupOlderThan: new Date() });
+  return stats.prune?.bytesRemoved ?? 0;
 }
 
 /**

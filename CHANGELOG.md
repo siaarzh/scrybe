@@ -9,13 +9,46 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.26.0] — 2026-04-26
+
+M-D16 — Bloat UX + Compaction Coverage. Folds in three bugfixes from the post-v0.25.2 fresh-user audit, replaces the misleading "stale Lance versions" footer with an honest at-a-glance HEALTH column, and closes three `maybeCompact` coverage gaps in the vector-store layer. Minor bump because the `ps` human output drops the cryptic VERS column and replaces it with a HEALTH column — soft-breaking for anything that scraped the previous text.
+
+### Added
+
+- **`HEALTH` column in `scrybe ps --all` output.** Each row renders either `Healthy` or `Bloated *`. The asterisk references a footer legend `* run 'scrybe gc' to reclaim disk space` that only appears when at least one source is bloated. Silence = healthy. Replaces the previous `VERS` column (Lance manifest count, internal jargon).
+- **Bloat threshold = `2 × SCRYBE_LANCE_COMPACT_THRESHOLD`** (default 20). Fires only when auto-compact has tried but couldn't reclaim — actionable signal, not noise during normal indexing. Tunable via the existing env var (no new var introduced).
+- **`flags: string[]` field per source in `scrybe ps --json`.** Bloated source emits `["bloat"]`, healthy source emits `[]`. Additive only; `schemaVersion` stays at `1`. `versionCount` retained for diagnostics.
+- **`scrybe gc` final line reports actual reclaimed bytes** — `Done. Reclaimed N.N <unit> across N table(s).` Sourced from `OptimizeStats.prune.bytesRemoved` (real Lance-reported number). Always prints, even when 0 B (steady-state-after-recent-gc case).
+
+### Fixed
+
+- **`scrybe ps` previously warned "stale Lance versions detected" based on total disk size > 100 MB.** This compared total `.lance` directory size against 100 MB and labelled the result "stale" — for users with several indexed projects (1+ GB of legitimate vector data), the warning fired permanently and never went away after `scrybe gc`. Lance also keeps VERS=2 immediately after `optimize({cleanupOlderThan: now})` because the compaction itself writes a new manifest version — that's healthy steady-state, not bloat. The signal was wrong by design; the fix replaces total-size with per-table version count crossing the auto-compact threshold (the only honest cheap signal we can compute without parsing manifests). Surfaced via the new HEALTH column above.
+- **Three `maybeCompact` coverage gaps in `src/vector-store.ts`.** The M-D13 invariant was "every write op trailed by `await maybeCompact(table)`". Three callsites violated it: `deleteKnowledgeSource` (line 320), `createFtsIndex` (line 191), and `createKnowledgeFtsIndex` (line 299). Added the missing trailing call in each. Practical impact is small (1-3 missed compaction triggers per index pass, vs hundreds for upserts) but the invariant matters for predictability.
+- **`scrybe gc` hangs after prompt response.** `process.stdin.once("data", ...)` resumed stdin (flowing mode) but never paused it. After the once-listener fired, stdin stayed open and kept the event loop alive, so the process never exited even after `Pruned N empty project(s).` printed. Fixed by calling `process.stdin.pause()` inside the data callback before resolving. Same pattern bug fixed in 3 other prompts: `branch unpin --all`, deprecated `pin clear --all`, and zero-arg `scrybe` register-prompt.
+- **`scrybe gc` reports orphan counts capped at 10.** `listChunkIds()` in `vector-store.ts` called `.query()...toArray()` without `.limit()`. LanceDB defaults the result-set limit to 10 when none is set, so every source with >10 orphans always reported "10 orphan chunk(s)". Fixed by adding `.limit(Number.MAX_SAFE_INTEGER)` to read all rows.
+- **`scrybe projects` falsely flags local-embedder sources as "Not searchable — missing config".** `isSearchable()` in `registry.ts` always demanded `EMBEDDING_API_KEY`/`OPENAI_API_KEY`, even when the source's resolved embedding config has `provider_type === "local"` (in-process Xenova WASM model needs no API key). Searches succeeded but the listing UI showed every source with a red ✗ and a "Requires env var EMBEDDING_API_KEY" line. Fixed by short-circuiting `isSearchable()` to return `{ ok: true }` when `provider_type === "local"`.
+
+### Changed
+
+- **`compactTable(tableName)` now returns `Promise<number>`** (bytes reclaimed) instead of `Promise<void>`. Existing callers in `src/migrations.ts` and tests that ignore the return value are unaffected.
+- **`COMPACT_THRESHOLD` is now exported from `src/vector-store.ts`** (was file-private). Used by the CLI to compute the bloat tip threshold without re-parsing the env var.
+
+### Tests
+
+- New `tests/scenarios/bloat-display.test.ts` (Scenario 13) — covers HEALTH column rendering across healthy/bloated/post-gc states, the conditional legend block, the absence of the dropped VERS column, and `ps --json` `flags` field. Also adds two regression assertions for the [Unreleased] bugs that v0.25.2 fixed but no scenario test ever caught: `gc`-prompt-no-stdin-hang and `gc`-orphan-count-not-capped-at-10.
+- New `tests/registry-searchable.test.ts` — direct unit coverage of `isSearchable()` for local-provider, api-provider with/without keys, OPENAI_API_KEY legacy fallback, and never-indexed sources.
+- Extended `tests/scenarios/gc.test.ts` (Scenario 7) — asserts the new `Reclaimed N <unit> across N table(s)` line in `scrybe gc` output.
+- Extended `tests/vector-store.test.ts` — asserts `compactTable` returns a non-negative number, and returns 0 when called on a missing table.
+
+---
+
 ## [0.25.2] — 2026-04-26
 
 ### Fixed
 
-- **`scrybe gc` hangs after prompt response** — `process.stdin.once("data", ...)` resumed stdin (flowing mode) but never paused it. After the once-listener fired, stdin stayed open and kept the event loop alive, so the process never exited even after `Pruned N empty project(s).` printed. Fixed by calling `process.stdin.pause()` inside the data callback before resolving. Same pattern bug in 3 other prompts: `branch unpin --all`, deprecated `pin clear --all`, and zero-arg `scrybe` register-prompt.
-- **`scrybe gc` reports orphan counts capped at 10** — `listChunkIds()` in `vector-store.ts` called `.query()...toArray()` without `.limit()`. LanceDB defaults the result-set limit to 10 when none is set, so every source with >10 orphans always reported "10 orphan chunk(s)". Fixed by adding `.limit(Number.MAX_SAFE_INTEGER)` to read all rows.
-- **`scrybe projects` falsely flags local-embedder sources as "Not searchable — missing config"** — `isSearchable()` in `registry.ts` always demanded `EMBEDDING_API_KEY`/`OPENAI_API_KEY`, even when the source's resolved embedding config has `provider_type === "local"` (in-process Xenova WASM model needs no API key). Searches succeeded but the listing UI showed every source with a red ✗ and a "Requires env var EMBEDDING_API_KEY" line. Fixed by short-circuiting `isSearchable()` to return `{ ok: true }` when `provider_type === "local"`.
+- **`scrybe gc` hangs after prompt response** — see v0.26.0 entry; fix shipped in v0.25.2 but the regression scenario was added in v0.26.0.
+- **`scrybe gc` reports orphan counts capped at 10** — see v0.26.0 entry; fix shipped in v0.25.2 but the regression scenario was added in v0.26.0.
+- **`scrybe projects` falsely flags local-embedder sources as "Not searchable — missing config"** — see v0.26.0 entry; fix shipped in v0.25.2 but the unit test was added in v0.26.0.
 
 ---
 

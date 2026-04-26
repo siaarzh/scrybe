@@ -3,7 +3,7 @@ import { join } from "path";
 import { getProject, listProjects, addProject, addSource, removeProject } from "./registry.js";
 import { indexProject, indexSource } from "./indexer.js";
 import { listBranches, getAllChunkIdsForSource } from "./branch-state.js";
-import { listChunkIds, deleteChunks, compactTable, getTableStats } from "./vector-store.js";
+import { listChunkIds, deleteChunks, compactTable, getTableStats, COMPACT_THRESHOLD } from "./vector-store.js";
 import { config, VERSION } from "./config.js";
 import { checkAndMigrate } from "./schema-version.js";
 import { warnDeprecated } from "./cli-deprecation.js";
@@ -24,6 +24,13 @@ import type { Source, SourceConfig } from "./types.js";
 // ─── CLI output helper ────────────────────────────────────────────────────────
 
 import type { JobResult } from "./tools/types.js";
+
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
 
 function printResult<T>(result: T | JobResult<T>, formatCli?: (r: T) => string): void {
   // Non-job result: print directly
@@ -396,10 +403,16 @@ export async function runCli(): Promise<void> {
         const allSources = projects.flatMap((p) => p.sources.filter((s) => s.table_name));
         if (allSources.length > 0) {
           console.log("\nCompacting Lance tables...");
+          let totalBytesReclaimed = 0;
+          let tablesTouched = 0;
           for (const s of allSources) {
-            try { await compactTable(s.table_name!); } catch { /* ignore — table may be gone */ }
+            try {
+              const bytes = await compactTable(s.table_name!);
+              totalBytesReclaimed += bytes;
+              tablesTouched += 1;
+            } catch { /* ignore — table may be gone */ }
           }
-          console.log("Done.");
+          console.log(`Done. Reclaimed ${fmtSize(totalBytesReclaimed)} across ${tablesTouched} table(s).`);
         }
       }
 
@@ -474,7 +487,7 @@ export async function runCli(): Promise<void> {
       } catch { /* ignore */ }
       let projects: ReturnType<typeof listProjects> = [];
       try { projects = listProjects(); } catch { /* DATA_DIR missing */ }
-      const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => { const stats = s.table_name ? await getTableStats(s.table_name) : { sizeBytes: 0, versionCount: 0 }; return { sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null, sizeBytes: stats.sizeBytes, versionCount: stats.versionCount }; })) })));
+      const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => { const stats = s.table_name ? await getTableStats(s.table_name) : { sizeBytes: 0, versionCount: 0 }; const flags: string[] = stats.versionCount > 2 * COMPACT_THRESHOLD ? ["bloat"] : []; return { sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null, sizeBytes: stats.sizeBytes, versionCount: stats.versionCount, flags }; })) })));
       if (opts.json) {
         const dirPath = config.dataDir;
         const { statSync: st, existsSync: ex } = await import("fs");
@@ -485,7 +498,6 @@ export async function runCli(): Promise<void> {
       }
       function fmtUptime(ms: number): string { const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`; }
       function fmtRelative(iso: string | null): string { if (!iso) return "never"; const diff = Date.now() - new Date(iso).getTime(), s = Math.floor(diff / 1000); if (s < 60) return "just now"; const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`; const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`; return `${Math.floor(h / 24)}d ago`; }
-      function fmtSize(bytes: number): string { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`; return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`; }
       const updateBanner = await updateBannerP;
       if (updateBanner) console.log(`\n⬆ ${updateBanner}\n`);
       console.log(`${"Scrybe v" + VERSION}`.padEnd(40) + `DATA_DIR: ${config.dataDir}`);
@@ -506,18 +518,20 @@ export async function runCli(): Promise<void> {
       const hidden = sourceSummaries.length - display.length;
       console.log(`Projects       ${projects.length} registered`);
       if (display.some((p) => p.sources.length > 0)) {
-        console.log(`  ${"PROJECT".padEnd(20)}${"SOURCE".padEnd(18)}${"CHUNKS".padStart(8)}  ${"SIZE".padEnd(10)}${"VERS".padStart(4)}  LAST INDEXED`);
+        console.log(`  ${"PROJECT".padEnd(20)}${"SOURCE".padEnd(18)}${"CHUNKS".padStart(8)}  ${"SIZE".padEnd(10)}${"HEALTH".padEnd(12)}LAST INDEXED`);
       }
       for (const p of display) {
         for (const s of p.sources) {
           const size = s.sizeBytes > 0 ? fmtSize(s.sizeBytes) : "—";
-          const vers = s.versionCount > 0 ? String(s.versionCount) : "—";
-          console.log(`  ${p.id.slice(0, 19).padEnd(20)}${s.sourceId.slice(0, 17).padEnd(18)}${s.chunks.toLocaleString().padStart(8)}  ${size.padEnd(10)}${vers.padStart(4)}  ${fmtRelative(s.lastIndexed)}`);
+          const health = s.flags.includes("bloat") ? "Bloated *" : "Healthy";
+          console.log(`  ${p.id.slice(0, 19).padEnd(20)}${s.sourceId.slice(0, 17).padEnd(18)}${s.chunks.toLocaleString().padStart(8)}  ${size.padEnd(10)}${health.padEnd(12)}${fmtRelative(s.lastIndexed)}`);
         }
       }
       if (hidden > 0) console.log(`  (${hidden} more — use --all)`);
-      const totalSizeBytes = sourceSummaries.flatMap((p) => p.sources).reduce((sum, s) => sum + s.sizeBytes, 0);
-      if (totalSizeBytes > 100 * 1024 * 1024) console.log(`\n⚠ ${fmtSize(totalSizeBytes)} of stale Lance versions detected. Run 'scrybe gc' to reclaim.`);
+      const anyBloated = sourceSummaries.some((p) => p.sources.some((s) => s.flags.includes("bloat")));
+      if (anyBloated) {
+        console.log(`\n  * run 'scrybe gc' to reclaim disk space`);
+      }
     });
 
   // ─── uninstall ────────────────────────────────────────────────────────────

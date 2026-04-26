@@ -61,4 +61,30 @@ describe("maybeCompact + compactTable (Fix 4)", () => {
     expect(stats.sizeBytes).toBeGreaterThan(0);
     expect(stats.versionCount).toBeGreaterThanOrEqual(1);
   });
+
+  // M-D16 Fix C — compactTable returns bytes reclaimed (was Promise<void>).
+  it("compactTable returns a non-negative number of bytes reclaimed", async () => {
+    fixture = await cloneFixture("sample-multi-branch-repo");
+    project = await createTempProject({ rootPath: fixture.path });
+
+    // One full index, then a re-index that orphans data → compaction has work to do.
+    await runIndex(project.projectId, project.sourceId, "full");
+    await runIndex(project.projectId, project.sourceId, "full");
+    await runIndex(project.projectId, project.sourceId, "full");
+
+    const { getSource } = await import("../src/registry.js");
+    const src = getSource(project.projectId, project.sourceId)!;
+
+    const { compactTable } = await import("../src/vector-store.js");
+    const reclaimed = await compactTable(src.table_name!);
+
+    expect(typeof reclaimed).toBe("number");
+    expect(reclaimed).toBeGreaterThanOrEqual(0);
+  });
+
+  it("compactTable on a missing table returns 0", async () => {
+    const { compactTable } = await import("../src/vector-store.js");
+    const reclaimed = await compactTable("definitely_not_a_real_table_md16");
+    expect(reclaimed).toBe(0);
+  });
 });
