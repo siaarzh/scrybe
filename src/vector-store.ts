@@ -1,6 +1,6 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Schema, Field, Utf8, Int32, Float32, FixedSizeList } from "apache-arrow";
-import { mkdirSync } from "fs";
+import { mkdirSync, statSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { config } from "./config.js";
 import type { CodeChunk, SearchResult, KnowledgeChunk, KnowledgeSearchResult } from "./types.js";
@@ -115,6 +115,7 @@ export async function upsert(
     vector: Float32Array.from(vectors[i]),
   }));
   await table.add(rows);
+  await maybeCompact(table);
 }
 
 export async function search(
@@ -195,6 +196,7 @@ export async function deleteProject(projectId: string, tableName: string): Promi
   const table = await openExistingTable(tableName);
   if (!table) return;
   await table.delete(`project_id = '${escapeSql(projectId)}'`);
+  await maybeCompact(table);
 }
 
 export async function deleteFileChunks(
@@ -207,6 +209,7 @@ export async function deleteFileChunks(
   await table.delete(
     `project_id = '${escapeSql(projectId)}' AND file_path = '${escapeSql(filePath)}'`
   );
+  await maybeCompact(table);
 }
 
 // ─── Knowledge table operations ───────────────────────────────────────────────
@@ -232,6 +235,7 @@ export async function upsertKnowledge(
     vector: Float32Array.from(vectors[i]),
   }));
   await table.add(rows);
+  await maybeCompact(table);
 }
 
 export async function searchKnowledge(
@@ -300,6 +304,7 @@ export async function deleteKnowledgeProject(projectId: string, tableName: strin
   const table = await openExistingTable(tableName);
   if (!table) return;
   await table.delete(`project_id = '${escapeSql(projectId)}'`);
+  await maybeCompact(table);
 }
 
 export async function deleteKnowledgeSource(
@@ -312,6 +317,58 @@ export async function deleteKnowledgeSource(
   await table.delete(
     `project_id = '${escapeSql(projectId)}' AND source_path = '${escapeSql(sourcePath)}'`
   );
+}
+
+// ─── Compaction ───────────────────────────────────────────────────────────────
+
+const COMPACT_THRESHOLD = parseInt(process.env.SCRYBE_LANCE_COMPACT_THRESHOLD ?? "10", 10);
+const ONE_HOUR_MS = 3_600_000;
+
+/**
+ * Compact a table when version count exceeds the threshold.
+ * Keeps a 1h grace window so concurrent daemon readers still see their snapshot.
+ */
+async function maybeCompact(table: lancedb.Table): Promise<void> {
+  const versions = await table.listVersions();
+  if (versions.length < COMPACT_THRESHOLD) return;
+  await table.optimize({ cleanupOlderThan: new Date(Date.now() - ONE_HOUR_MS) });
+}
+
+/**
+ * Full-purge compaction — removes all old versions with no grace period.
+ * Called by `scrybe gc` where the user explicitly requested maximum reclaim.
+ */
+export async function compactTable(tableName: string): Promise<void> {
+  const table = await openExistingTable(tableName);
+  if (!table) return;
+  await table.optimize({ cleanupOlderThan: new Date() });
+}
+
+/**
+ * Return size (bytes) and version count for a table.
+ * Size is computed by walking the .lance directory on disk.
+ */
+export async function getTableStats(tableName: string): Promise<{ sizeBytes: number; versionCount: number }> {
+  const table = await openExistingTable(tableName);
+  const versionCount = table ? (await table.listVersions()).length : 0;
+
+  const tableDir = join(DB_PATH, `${tableName}.lance`);
+  let sizeBytes = 0;
+  if (existsSync(tableDir)) {
+    const walkDir = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walkDir(full);
+        } else {
+          try { sizeBytes += statSync(full).size; } catch { /* ignore races */ }
+        }
+      }
+    };
+    walkDir(tableDir);
+  }
+
+  return { sizeBytes, versionCount };
 }
 
 // ─── Table lifecycle ──────────────────────────────────────────────────────────
@@ -341,6 +398,7 @@ export async function deleteChunks(chunkIds: string[], tableName: string): Promi
   if (!table) return;
   const ids = chunkIds.map((id) => `'${escapeSql(id)}'`).join(", ");
   await table.delete(`chunk_id IN (${ids})`);
+  await maybeCompact(table);
 }
 
 /** Count rows in a named table. Returns 0 if table doesn't exist. */

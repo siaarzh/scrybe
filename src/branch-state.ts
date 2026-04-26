@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, renameSync, lstatSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, renameSync, lstatSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { config } from "./config.js";
 import { getSource } from "./registry.js";
@@ -216,6 +216,27 @@ export function deleteBranch(projectId: string, sourceId: string, branch: string
   deleteBranchHashesFile(projectId, sourceId, branch);
 }
 
+/**
+ * Delete ALL branch_tags rows + ALL hash files for every branch of a (project, source).
+ * Called by removeProject/removeSource before dropping the LanceDB table, so that a
+ * subsequent project re-add + --full index starts with a clean slate (no stale
+ * knownChunkIds that would cause the skip-embed fast-path to fire on every chunk).
+ */
+export function wipeSource(projectId: string, sourceId: string): void {
+  getDB().prepare(
+    "DELETE FROM branch_tags WHERE project_id=? AND source_id=?"
+  ).run(projectId, sourceId);
+
+  const dir = hashesDir();
+  if (!existsSync(dir)) return;
+  const prefix = `${projectId}__${sourceId}__`;
+  for (const file of readdirSync(dir)) {
+    if (file.startsWith(prefix) && file.endsWith(".json")) {
+      try { unlinkSync(join(dir, file)); } catch { /* ignore ENOENT races */ }
+    }
+  }
+}
+
 /** Count how many branch-tag rows reference a chunk (used to detect orphans). */
 export function countTagsForChunk(chunkId: string): number {
   const row = getDB().prepare(
@@ -249,7 +270,9 @@ class BranchSessionImpl implements BranchSession {
     this.priorHashes = Object.freeze({ ...this._hashes });
     // Pre-fetch at session open — "preserved from removals" benefit is free
     // because we snapshot before any tags are deleted.
-    this.knownChunkIds = getAllChunkIdsForSource(projectId, sourceId);
+    // Full mode: table was just wiped → knownChunkIds must be empty so that every
+    // chunk is treated as new and actually sent to the embedder / written to LanceDB.
+    this.knownChunkIds = mode === "full" ? new Set() : getAllChunkIdsForSource(projectId, sourceId);
   }
 
   applyFile(path: string, outcome: FileOutcome): void {

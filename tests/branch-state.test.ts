@@ -223,3 +223,74 @@ describe("branch-state session CRUD", () => {
     );
   });
 });
+
+describe("wipeSource (Fix 1)", () => {
+  it("wipeSource deletes all branch_tags for every branch of a source", async () => {
+    const { withBranchSession, wipeSource, getAllChunkIdsForSource } = await import("../src/branch-state.js");
+
+    // Tag chunks on two branches
+    await withBranchSession({ projectId: P, sourceId: S, branch: "main", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/a.ts", { kind: "embedded", hash: "h1", tags: [makeTag({ chunkId: "wipe-a" })] });
+      }
+    );
+    await withBranchSession({ projectId: P, sourceId: S, branch: "feat/x", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/b.ts", { kind: "embedded", hash: "h2", tags: [makeTag({ chunkId: "wipe-b", filePath: "src/b.ts" })] });
+      }
+    );
+
+    expect(getAllChunkIdsForSource(P, S).size).toBeGreaterThan(0);
+
+    wipeSource(P, S);
+
+    expect(getAllChunkIdsForSource(P, S).size).toBe(0);
+  });
+
+  it("wipeSource deletes all hash files for the source prefix", async () => {
+    const { withBranchSession, wipeSource } = await import("../src/branch-state.js");
+    const { existsSync, readdirSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { config } = await import("../src/config.js");
+
+    // Create hash entries on two branches (saveBranchHashesAtomic is triggered by applyFile)
+    await withBranchSession({ projectId: P, sourceId: S, branch: "main", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/a.ts", { kind: "embedded", hash: "h1", tags: [makeTag({ chunkId: "wh-a" })] });
+      }
+    );
+    await withBranchSession({ projectId: P, sourceId: S, branch: "feat/y", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/b.ts", { kind: "embedded", hash: "h2", tags: [makeTag({ chunkId: "wh-b", filePath: "src/b.ts" })] });
+      }
+    );
+
+    const hashesDir = join(config.dataDir, "hashes");
+    const prefix = `${P}__${S}__`;
+    const before = existsSync(hashesDir) ? readdirSync(hashesDir).filter((f) => f.startsWith(prefix)) : [];
+    expect(before.length).toBeGreaterThan(0);
+
+    wipeSource(P, S);
+
+    const after = existsSync(hashesDir) ? readdirSync(hashesDir).filter((f) => f.startsWith(prefix)) : [];
+    expect(after.length).toBe(0);
+  });
+
+  it("full-mode session starts with empty knownChunkIds (Fix 1 — line 252 ternary)", async () => {
+    const { withBranchSession } = await import("../src/branch-state.js");
+
+    // Tag a chunk on main via incremental session
+    await withBranchSession({ projectId: P, sourceId: S, branch: B, mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/a.ts", { kind: "embedded", hash: "h1", tags: [makeTag({ chunkId: "known-001" })] });
+      }
+    );
+
+    // Full-mode session must NOT see existing chunks as "known"
+    await withBranchSession({ projectId: P, sourceId: S, branch: B, mode: "full" },
+      async (session) => {
+        expect(session.knownChunkIds.size).toBe(0);
+      }
+    );
+  });
+});

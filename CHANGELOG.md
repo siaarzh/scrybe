@@ -9,6 +9,28 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.23.2] — 2026-04-26
+
+### Fixed
+
+- **`--full` reindex is a no-op after `project remove` → `project add`** — `removeProject`/`removeSource` now call `wipeSource` before dropping the LanceDB table. `wipeSource` deletes all `branch_tags` rows and all `hashes/*.json` files for every branch of the removed source. Previously these were left behind, causing `BranchSessionImpl` to snapshot stale `knownChunkIds` on the next full reindex, which made the skip-embed fast-path fire on every chunk → 0 rows written to LanceDB → silent false success.
+- **Full-mode session starts with empty `knownChunkIds`** — `BranchSessionImpl` constructor now conditionally pre-fetches: incremental mode reads the existing set (cross-branch dedup), full mode starts with an empty set so that every chunk is treated as new and actually sent to the embedder.
+- **`files_reindexed` reported pre-count instead of actual count** — `indexer.ts` previously set `files_reindexed: toReindex.size` (files *scheduled*) before embedding ran. Now `filesReindexed` is a running counter incremented per file only when `newKeyChunks.length > 0` (chunks actually written to LanceDB). This fixes the misleading `"0 chunks indexed, 2 files reindexed"` output.
+- **Exit code 2 when files scheduled but 0 chunks written** — `scrybe index` now exits with code 2 (not 0) when `files_reindexed > 0 && chunks_indexed === 0`, distinguishing false success from "nothing to do" (both 0 → exit 0). Affected CI scripts that `|| true` the index command are unaffected; scripts that check `== 0` will now correctly detect the failure.
+- **`search code -P <id> <query>` flag collision** — parent `search` command declared `-P` as a short flag, causing Commander to consume it before delegating to the `code`/`knowledge` subcommands. Removed `-P` from parent (kept `--project-id` long form). `-P` on `search code` and `search knowledge` now works correctly.
+- **LanceDB table bloat grows unbounded** — `vector-store.ts` now calls `table.optimize({ cleanupOlderThan })` after every `upsert` and row-level `delete` when the version count exceeds `SCRYBE_LANCE_COMPACT_THRESHOLD` (default: 10, hidden env override). A 1-hour grace window protects concurrent daemon readers. `scrybe gc` performs a full-purge compaction (no grace) on all registered tables after removing orphan chunks.
+
+### Added
+
+- **`scrybe ps` bloat columns** — `scrybe status` / `scrybe ps` now shows table size and version count per source: `52,633 chunks · 7.3 GB · 142 versions · last indexed 26m ago`. Footer warning when total exceeds 100 MB: `⚠ 14.2 GB of stale Lance versions detected. Run 'scrybe gc' to reclaim.`
+- **Migration registry** — `schema.json` now tracks `migrations_applied` and `last_written_by`. On first post-upgrade start, a `compact-tables-v0.23.2` migration runs once and compacts every existing table (full-purge, no grace). Subsequent starts skip it. Non-destructive: does not bump the schema version, does not wipe hashes or branch-tags.
+
+### Behavior changes
+
+- `scrybe index` exits with code 2 (not 0) when `files_reindexed > 0 && chunks_indexed === 0`. Previously this was a silent false success.
+
+---
+
 ## [0.23.1] — 2026-04-26
 
 ### Fixed

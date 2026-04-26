@@ -3,7 +3,7 @@ import { join } from "path";
 import { getProject, listProjects, addProject, addSource } from "./registry.js";
 import { indexProject, indexSource } from "./indexer.js";
 import { listBranches, getAllChunkIdsForSource } from "./branch-state.js";
-import { listChunkIds, deleteChunks } from "./vector-store.js";
+import { listChunkIds, deleteChunks, compactTable, getTableStats } from "./vector-store.js";
 import { config, VERSION } from "./config.js";
 import { checkAndMigrate } from "./schema-version.js";
 import { warnDeprecated } from "./cli-deprecation.js";
@@ -37,7 +37,7 @@ function printResult<T>(result: T | JobResult<T>, formatCli?: (r: T) => string):
 // ─── Main CLI ─────────────────────────────────────────────────────────────────
 
 export async function runCli(): Promise<void> {
-  checkAndMigrate();
+  await checkAndMigrate();
   const program = new Command();
   program.name("scrybe").description("Self-hosted semantic code search").version(VERSION);
 
@@ -147,7 +147,7 @@ export async function runCli(): Promise<void> {
   const searchGroup = program.command("search")
     .description("Search code or knowledge sources")
     .addArgument(new Argument("[query...]", "deprecated — use: search code <query>").argOptional())
-    .option("-P, --project-id <id>", "Project ID (deprecated bare form)")
+    .option("--project-id <id>", "Project ID (deprecated bare form)")
     .option("--top-k <n>", "Number of results (deprecated bare form)", "10")
     .option("--branch <name>", "Branch to search (deprecated bare form)")
     .action(async (queryParts: string[], opts: any) => {
@@ -300,6 +300,10 @@ export async function runCli(): Promise<void> {
           totalChunks += result.chunks_indexed; totalReindexed += result.files_reindexed; totalRemoved += result.files_removed;
         }
         if (sourceIds.length > 1) console.log(`\nTotal: ${totalChunks} chunks indexed, ${totalReindexed} files reindexed, ${totalRemoved} files removed`);
+        if (totalReindexed > 0 && totalChunks === 0) {
+          console.error("[scrybe] Warning: files were scheduled for reindex but 0 chunks were written. Run with --full or check embedding config.");
+          process.exit(2);
+        }
       } else {
         console.log(`Indexing '${opts.projectId}' (all sources) (${mode})...`);
         const results = await indexProject(opts.projectId, mode, {
@@ -309,6 +313,10 @@ export async function runCli(): Promise<void> {
         });
         const totals = results.reduce((acc, r) => ({ chunks: acc.chunks + r.chunks_indexed, reindexed: acc.reindexed + r.files_reindexed, removed: acc.removed + r.files_removed }), { chunks: 0, reindexed: 0, removed: 0 });
         console.log(`\nDone (${results.length} source(s)): ${totals.chunks} chunks indexed, ${totals.reindexed} files reindexed, ${totals.removed} files removed`);
+        if (totals.reindexed > 0 && totals.chunks === 0) {
+          console.error("[scrybe] Warning: files were scheduled for reindex but 0 chunks were written. Run with --full or check embedding config.");
+          process.exit(2);
+        }
       }
     });
 
@@ -342,8 +350,19 @@ export async function runCli(): Promise<void> {
           if (!opts.dryRun) { await deleteChunks(orphans, s.table_name); totalDeleted += orphans.length; }
         }
       }
-      if (totalOrphans === 0) { console.log("No orphan chunks found."); return; }
-      console.log(opts.dryRun ? `\nDry run: ${totalOrphans} orphan chunk(s) found (not deleted).` : `\nGC complete: ${totalDeleted} orphan chunk(s) deleted.`);
+      if (totalOrphans === 0) { console.log("No orphan chunks found."); }
+      else { console.log(opts.dryRun ? `\nDry run: ${totalOrphans} orphan chunk(s) found (not deleted).` : `\nGC complete: ${totalDeleted} orphan chunk(s) deleted.`); }
+      if (!opts.dryRun) {
+        // Full-purge compaction on all tables — no grace period, user explicitly requested reclaim
+        const allSources = projects.flatMap((p) => p.sources.filter((s) => s.table_name));
+        if (allSources.length > 0) {
+          console.log("\nCompacting Lance tables...");
+          for (const s of allSources) {
+            try { await compactTable(s.table_name!); } catch { /* ignore — table may be gone */ }
+          }
+          console.log("Done.");
+        }
+      }
     });
 
   // ─── status ───────────────────────────────────────────────────────────────
@@ -398,7 +417,7 @@ export async function runCli(): Promise<void> {
       } catch { /* ignore */ }
       let projects: ReturnType<typeof listProjects> = [];
       try { projects = listProjects(); } catch { /* DATA_DIR missing */ }
-      const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => ({ sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null }))) })));
+      const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => { const stats = s.table_name ? await getTableStats(s.table_name) : { sizeBytes: 0, versionCount: 0 }; return { sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null, sizeBytes: stats.sizeBytes, versionCount: stats.versionCount }; })) })));
       if (opts.json) {
         const dirPath = config.dataDir;
         const { statSync: st, existsSync: ex } = await import("fs");
@@ -409,6 +428,7 @@ export async function runCli(): Promise<void> {
       }
       function fmtUptime(ms: number): string { const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`; }
       function fmtRelative(iso: string | null): string { if (!iso) return "never"; const diff = Date.now() - new Date(iso).getTime(), s = Math.floor(diff / 1000); if (s < 60) return "just now"; const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`; const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`; return `${Math.floor(h / 24)}d ago`; }
+      function fmtSize(bytes: number): string { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`; return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`; }
       console.log(`${"Scrybe v" + VERSION}`.padEnd(40) + `DATA_DIR: ${config.dataDir}`);
       console.log();
       if (!opts.projects) {
@@ -426,8 +446,10 @@ export async function runCli(): Promise<void> {
       const display = opts.all ? sourceSummaries : sourceSummaries.slice(0, 5);
       const hidden = sourceSummaries.length - display.length;
       console.log(`Projects       ${projects.length} registered`);
-      for (const p of display) for (const s of p.sources) console.log(`${"  " + p.id}`.padEnd(22) + s.sourceId.padEnd(16) + `${s.chunks.toLocaleString()} chunks · last indexed ${fmtRelative(s.lastIndexed)}`);
+      for (const p of display) for (const s of p.sources) { const bloat = s.sizeBytes > 0 ? ` · ${fmtSize(s.sizeBytes)} · ${s.versionCount} versions` : ""; console.log(`${"  " + p.id}`.padEnd(22) + s.sourceId.padEnd(16) + `${s.chunks.toLocaleString()} chunks${bloat} · last indexed ${fmtRelative(s.lastIndexed)}`); }
       if (hidden > 0) console.log(`  (${hidden} more — use --all)`);
+      const totalSizeBytes = sourceSummaries.flatMap((p) => p.sources).reduce((sum, s) => sum + s.sizeBytes, 0);
+      if (totalSizeBytes > 100 * 1024 * 1024) console.log(`\n⚠ ${fmtSize(totalSizeBytes)} of stale Lance versions detected. Run 'scrybe gc' to reclaim.`);
     });
 
   // ─── uninstall ────────────────────────────────────────────────────────────

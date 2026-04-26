@@ -120,3 +120,22 @@ describe("ps alias for status", () => {
     expect(r1.stdout).toBe(r2.stdout);
   });
 });
+
+describe("search code -P flag (Fix 3 — no parent collision)", () => {
+  it("search code -P is not consumed by parent search command", () => {
+    // Before fix: parent `search` declared `-P` and Commander consumed it there,
+    // so `search code -P foo "q"` errored with "required option not specified".
+    const r = run(["search", "code", "-P", "no-such-proj", "test query"]);
+    expect(r.stderr).not.toContain("required option");
+    expect(r.stderr).not.toContain("unknown option");
+    // Project won't be found, but the flag must parse without error
+    expect(r.stderr).toMatch(/not found|no such/i);
+  });
+
+  it("search knowledge -P is not consumed by parent search command", () => {
+    const r = run(["search", "knowledge", "-P", "no-such-proj", "test query"]);
+    expect(r.stderr).not.toContain("required option");
+    expect(r.stderr).not.toContain("unknown option");
+    expect(r.stderr).toMatch(/not found|no such/i);
+  });
+});

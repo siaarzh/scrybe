@@ -77,7 +77,7 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
  * Phase 5+: Git ref watcher, fetch poller.
  */
 export async function runDaemon(): Promise<void> {
-  checkAndMigrate();
+  await checkAndMigrate();
 
   // Set up log file
   const logsDir = join(config.dataDir, "logs");

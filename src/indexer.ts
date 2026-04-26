@@ -169,6 +169,7 @@ export async function indexSource(
       onProgress?.({ phase: "embed_start", projectId, sourceId, bytesTotal, filesTotal: toReindex.size });
 
       let chunksIndexed = 0;
+      let filesReindexed = 0;
       let bytesEmbedded = 0;
       const filesSeenSoFar = new Set<string>();
       const batchDelayMs = config.embedBatchDelayMs;
@@ -211,6 +212,7 @@ export async function indexSource(
             } else {
               await upsertKnowledge(newKeyChunks as KnowledgeChunk[], keyVectors, tableName, embConfig.dimensions);
             }
+            filesReindexed++;
           }
 
           // Checkpoint: save hash + add branch tags atomically.
@@ -310,7 +312,7 @@ export async function indexSource(
         source_id: sourceId,
         chunks_indexed: chunksIndexed,
         files_scanned: filesScanned,
-        files_reindexed: toReindex.size,
+        files_reindexed: filesReindexed,
         files_removed: toRemove.size,
       };
     }

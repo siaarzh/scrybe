@@ -9,8 +9,18 @@ import {
 import { join } from "path";
 import { config } from "./config.js";
 import { closeDB } from "./branch-state.js";
+import { runPendingMigrations } from "./migrations.js";
 
 export const CURRENT_SCHEMA_VERSION = 2;
+
+// Updated on each release so schema.json records which version last wrote it
+const SCRYBE_VERSION = "0.23.2";
+
+interface SchemaDoc {
+  version: number;
+  migrations_applied: string[];
+  last_written_by: string;
+}
 
 function schemaFilePath(): string {
   return join(config.dataDir, "schema.json");
@@ -24,58 +34,74 @@ function branchTagsDbPath(): string {
   return join(config.dataDir, "branch-tags.db");
 }
 
-function readVersion(): number {
+function readSchemaDoc(): SchemaDoc {
   const p = schemaFilePath();
-  if (!existsSync(p)) return 1;
+  if (!existsSync(p)) return { version: 1, migrations_applied: [], last_written_by: "" };
   try {
-    const raw = JSON.parse(readFileSync(p, "utf8")) as { version?: number };
-    return typeof raw.version === "number" ? raw.version : 1;
+    const raw = JSON.parse(readFileSync(p, "utf8")) as Partial<SchemaDoc>;
+    return {
+      version: typeof raw.version === "number" ? raw.version : 1,
+      migrations_applied: Array.isArray(raw.migrations_applied) ? raw.migrations_applied : [],
+      last_written_by: typeof raw.last_written_by === "string" ? raw.last_written_by : "",
+    };
   } catch {
-    return 1;
+    return { version: 1, migrations_applied: [], last_written_by: "" };
   }
 }
 
-function writeVersion(v: number): void {
-  mkdirSync(join(config.dataDir), { recursive: true });
-  writeFileSync(schemaFilePath(), JSON.stringify({ version: v }, null, 2), "utf8");
-}
-
-export function checkAndMigrate(): { migrated: boolean; version: number } {
-  const current = readVersion();
-
-  if (current >= CURRENT_SCHEMA_VERSION) {
-    return { migrated: false, version: current };
-  }
-
-  if (process.env.SCRYBE_SKIP_MIGRATION === "1") {
-    console.error(
-      "[scrybe] SCRYBE_SKIP_MIGRATION=1: running in read-only compatibility mode. " +
-      "Branch features are disabled. Run without SCRYBE_SKIP_MIGRATION and re-index to upgrade."
-    );
-    return { migrated: false, version: current };
-  }
-
-  console.error(
-    `\n[scrybe] Upgrading index to branch-aware format (v${CURRENT_SCHEMA_VERSION}).` +
-    "\nThis is a one-time full reindex — all projects will be re-embedded on next index run." +
-    "\nTo skip and run read-only: set SCRYBE_SKIP_MIGRATION=1.\n"
+function writeSchemaDoc(doc: SchemaDoc): void {
+  mkdirSync(config.dataDir, { recursive: true });
+  writeFileSync(
+    schemaFilePath(),
+    JSON.stringify({ ...doc, last_written_by: SCRYBE_VERSION }, null, 2),
+    "utf8"
   );
+}
 
-  // Delete hash files → forces full reindex on next index command
-  const hashes = hashesDir();
-  if (existsSync(hashes)) {
-    for (const f of readdirSync(hashes)) {
-      try { unlinkSync(join(hashes, f)); } catch { /* ignore ENOENT races */ }
+export async function checkAndMigrate(): Promise<{ migrated: boolean; version: number }> {
+  const doc = readSchemaDoc();
+
+  if (doc.version < CURRENT_SCHEMA_VERSION) {
+    if (process.env.SCRYBE_SKIP_MIGRATION === "1") {
+      console.error(
+        "[scrybe] SCRYBE_SKIP_MIGRATION=1: running in read-only compatibility mode. " +
+        "Branch features are disabled. Run without SCRYBE_SKIP_MIGRATION and re-index to upgrade."
+      );
+      return { migrated: false, version: doc.version };
     }
+
+    console.error(
+      `\n[scrybe] Upgrading index to branch-aware format (v${CURRENT_SCHEMA_VERSION}).` +
+      "\nThis is a one-time full reindex — all projects will be re-embedded on next index run." +
+      "\nTo skip and run read-only: set SCRYBE_SKIP_MIGRATION=1.\n"
+    );
+
+    // Delete hash files → forces full reindex on next index command
+    const hashes = hashesDir();
+    if (existsSync(hashes)) {
+      for (const f of readdirSync(hashes)) {
+        try { unlinkSync(join(hashes, f)); } catch { /* ignore ENOENT races */ }
+      }
+    }
+
+    // Close and delete branch-tags.db → fresh start
+    closeDB();
+    const dbPath = branchTagsDbPath();
+    if (existsSync(dbPath)) {
+      try { unlinkSync(dbPath); } catch { /* ignore */ }
+    }
+
+    doc.version = CURRENT_SCHEMA_VERSION;
+    doc.migrations_applied = [];
+    writeSchemaDoc(doc);
+    return { migrated: true, version: CURRENT_SCHEMA_VERSION };
   }
 
-  // Close and delete branch-tags.db → fresh start
-  closeDB();
-  const dbPath = branchTagsDbPath();
-  if (existsSync(dbPath)) {
-    try { unlinkSync(dbPath); } catch { /* ignore */ }
+  // Version is current — run any pending registry migrations
+  const updatedApplied = await runPendingMigrations(doc.migrations_applied);
+  if (updatedApplied.length !== doc.migrations_applied.length) {
+    writeSchemaDoc({ ...doc, migrations_applied: updatedApplied });
   }
 
-  writeVersion(CURRENT_SCHEMA_VERSION);
-  return { migrated: true, version: CURRENT_SCHEMA_VERSION };
+  return { migrated: false, version: doc.version };
 }

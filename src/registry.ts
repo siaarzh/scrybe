@@ -3,6 +3,7 @@ import { join, dirname } from "path";
 import { createHash } from "crypto";
 import { config } from "./config.js";
 import { dropTable } from "./vector-store.js";
+import { wipeSource } from "./branch-state.js";
 import { getPlugin } from "./plugins/index.js";
 import type { Project, Source, EmbeddingConfig } from "./types.js";
 
@@ -116,8 +117,13 @@ export async function removeProject(id: string): Promise<void> {
   const project = projects.find((p) => p.id === id);
   if (!project) throw new Error(`Project '${id}' not found`);
 
-  // Drop all source tables
+  // Wipe branch_tags + hash files, then drop LanceDB table for each source
   for (const source of project.sources) {
+    try {
+      wipeSource(id, source.source_id);
+    } catch (err) {
+      console.warn(`[scrybe] Failed to wipe source '${source.source_id}':`, err);
+    }
     if (source.table_name) {
       try {
         await dropTable(source.table_name);
@@ -175,6 +181,11 @@ export async function removeSource(projectId: string, sourceId: string): Promise
   const source = projects[pIdx].sources.find((s) => s.source_id === sourceId);
   if (!source) throw new Error(`Source '${sourceId}' not found in project '${projectId}'`);
 
+  try {
+    wipeSource(projectId, sourceId);
+  } catch (err) {
+    console.warn(`[scrybe] Failed to wipe source '${sourceId}':`, err);
+  }
   if (source.table_name) {
     try {
       await dropTable(source.table_name);

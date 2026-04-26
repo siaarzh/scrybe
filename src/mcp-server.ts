@@ -59,7 +59,7 @@ function jsonResult(data: unknown) {
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 export async function runMcpServer(): Promise<void> {
-  checkAndMigrate();
+  await checkAndMigrate();
   const server = new Server(
     { name: "scrybe", version: VERSION },
     { capabilities: { tools: {} } }
