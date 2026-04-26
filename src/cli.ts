@@ -1,6 +1,6 @@
 import { Command, Argument, createCommand } from "commander";
 import { join } from "path";
-import { getProject, listProjects, addProject, addSource } from "./registry.js";
+import { getProject, listProjects, addProject, addSource, removeProject } from "./registry.js";
 import { indexProject, indexSource } from "./indexer.js";
 import { listBranches, getAllChunkIdsForSource } from "./branch-state.js";
 import { listChunkIds, deleteChunks, compactTable, getTableStats } from "./vector-store.js";
@@ -34,10 +34,30 @@ function printResult<T>(result: T | JobResult<T>, formatCli?: (r: T) => string):
   // Job result: caller handles awaiting (via the registration loop); just print job_id
 }
 
+// ─── Update notifier (F1) ────────────────────────────────────────────────────
+
+async function checkForUpdates(): Promise<string | null> {
+  if (process.env["NO_UPDATE_NOTIFIER"] || process.env["CI"]) return null;
+  try {
+    const { default: updateNotifier } = await import("update-notifier");
+    const { createRequire } = await import("module");
+    const req = createRequire(import.meta.url);
+    const pkg = req("../package.json") as { name: string; version: string };
+    const notifier = updateNotifier({ pkg, updateCheckInterval: 24 * 60 * 60 * 1000 });
+    await notifier.fetchInfo();
+    if (notifier.update && notifier.update.latest !== pkg.version) {
+      return `Update available: ${pkg.version} → ${notifier.update.latest}  (npm install -g scrybe-cli)`;
+    }
+  } catch { /* offline or rate-limited — ignore */ }
+  return null;
+}
+
 // ─── Main CLI ─────────────────────────────────────────────────────────────────
 
 export async function runCli(): Promise<void> {
   await checkAndMigrate();
+  // Start update check early (non-blocking) so result is ready by the time ps/status renders
+  const updateBannerP = checkForUpdates();
   const program = new Command();
   program.name("scrybe").description("Self-hosted semantic code search").version(VERSION);
 
@@ -96,6 +116,21 @@ export async function runCli(): Promise<void> {
     });
   }
 
+  // ─── Subcommand aliases (rm/delete/ls) ───────────────────────────────────
+  // Commander `.alias()` must be called on the command object itself.
+  // We find the commands by name after the registration loop.
+  for (const [groupName, verbs] of [
+    ["project", [["remove", ["rm", "delete"]], ["list", ["ls"]]]],
+    ["source",  [["remove", ["rm", "delete"]], ["list", ["ls"]]]],
+  ] as [string, [string, string[]][]][]) {
+    const grp = groups.get(groupName);
+    if (!grp) continue;
+    for (const [verb, aliases] of verbs) {
+      const found = grp.commands.find((c) => c.name() === verb);
+      if (found) for (const a of aliases) found.alias(a);
+    }
+  }
+
   // ─── Global plural shortcuts (no deprecation) ─────────────────────────────
 
   program.command("projects").description("List all registered projects (shorthand for project list)")
@@ -152,6 +187,10 @@ export async function runCli(): Promise<void> {
     .option("--branch <name>", "Branch to search (deprecated bare form)")
     .action(async (queryParts: string[], opts: any) => {
       if (queryParts.length === 0) { searchGroup.help(); return; }
+      if (!opts.projectId) {
+        console.error(`[scrybe] Missing project ID. Try: scrybe search code -P <id> "${queryParts.join(" ")}"  (run 'scrybe project list' to see ids)`);
+        process.exit(1);
+      }
       warnDeprecated("search <query>", "search code <query>");
       try {
         const result = await searchCodeTool.handler({
@@ -363,6 +402,24 @@ export async function runCli(): Promise<void> {
           console.log("Done.");
         }
       }
+
+      // C5: prune registry entries with zero sources
+      if (!opts.projectId) {
+        const allProjects = listProjects();
+        const empty = allProjects.filter((p) => p.sources.length === 0);
+        if (empty.length > 0) {
+          if (opts.dryRun) {
+            console.log(`\nDry run: ${empty.length} empty project(s) would be pruned: ${empty.map((p) => p.id).join(", ")}`);
+          } else if (process.stdin.isTTY) {
+            process.stdout.write(`\nPrune ${empty.length} empty project(s) (${empty.map((p) => p.id).join(", ")})? [y/N] `);
+            const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (d) => resolve(d.toString().trim().toLowerCase() === "y")); });
+            if (confirmed) {
+              for (const p of empty) { try { await removeProject(p.id); } catch { /* ignore */ } }
+              console.log(`Pruned ${empty.length} empty project(s).`);
+            }
+          }
+        }
+      }
     });
 
   // ─── status ───────────────────────────────────────────────────────────────
@@ -429,6 +486,8 @@ export async function runCli(): Promise<void> {
       function fmtUptime(ms: number): string { const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`; }
       function fmtRelative(iso: string | null): string { if (!iso) return "never"; const diff = Date.now() - new Date(iso).getTime(), s = Math.floor(diff / 1000); if (s < 60) return "just now"; const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`; const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`; return `${Math.floor(h / 24)}d ago`; }
       function fmtSize(bytes: number): string { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`; return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`; }
+      const updateBanner = await updateBannerP;
+      if (updateBanner) console.log(`\n⬆ ${updateBanner}\n`);
       console.log(`${"Scrybe v" + VERSION}`.padEnd(40) + `DATA_DIR: ${config.dataDir}`);
       console.log();
       if (!opts.projects) {
@@ -446,7 +505,16 @@ export async function runCli(): Promise<void> {
       const display = opts.all ? sourceSummaries : sourceSummaries.slice(0, 5);
       const hidden = sourceSummaries.length - display.length;
       console.log(`Projects       ${projects.length} registered`);
-      for (const p of display) for (const s of p.sources) { const bloat = s.sizeBytes > 0 ? ` · ${fmtSize(s.sizeBytes)} · ${s.versionCount} versions` : ""; console.log(`${"  " + p.id}`.padEnd(22) + s.sourceId.padEnd(16) + `${s.chunks.toLocaleString()} chunks${bloat} · last indexed ${fmtRelative(s.lastIndexed)}`); }
+      if (display.some((p) => p.sources.length > 0)) {
+        console.log(`  ${"PROJECT".padEnd(20)}${"SOURCE".padEnd(18)}${"CHUNKS".padStart(8)}  ${"SIZE".padEnd(10)}${"VERS".padStart(4)}  LAST INDEXED`);
+      }
+      for (const p of display) {
+        for (const s of p.sources) {
+          const size = s.sizeBytes > 0 ? fmtSize(s.sizeBytes) : "—";
+          const vers = s.versionCount > 0 ? String(s.versionCount) : "—";
+          console.log(`  ${p.id.slice(0, 19).padEnd(20)}${s.sourceId.slice(0, 17).padEnd(18)}${s.chunks.toLocaleString().padStart(8)}  ${size.padEnd(10)}${vers.padStart(4)}  ${fmtRelative(s.lastIndexed)}`);
+        }
+      }
       if (hidden > 0) console.log(`  (${hidden} more — use --all)`);
       const totalSizeBytes = sourceSummaries.flatMap((p) => p.sources).reduce((sum, s) => sum + s.sizeBytes, 0);
       if (totalSizeBytes > 100 * 1024 * 1024) console.log(`\n⚠ ${fmtSize(totalSizeBytes)} of stale Lance versions detected. Run 'scrybe gc' to reclaim.`);
@@ -617,7 +685,7 @@ export async function runCli(): Promise<void> {
       console.log(result.removed ? `Always-on removed (${result.method ?? "unknown"})` : "No autostart entry found.");
     });
 
-  daemon.command("ensure-running").description("Start the daemon if not running (idempotent, quiet by default)")
+  daemon.command("up").alias("ensure-running").description("Start the daemon if not running (idempotent, quiet by default)")
     .option("--verbose", "Print status to stdout")
     .action(async (opts: { verbose?: boolean }) => {
       if (process.env["SCRYBE_NO_AUTO_DAEMON"] === "1") { if (opts.verbose) console.log("SCRYBE_NO_AUTO_DAEMON is set — skipping."); return; }
@@ -673,7 +741,17 @@ export async function runCli(): Promise<void> {
     .addHelpText("after", "\nExample:\n  scrybe doctor")
     .action(async (opts: { json?: boolean; strict?: boolean }) => {
       const { runDoctor } = await import("./onboarding/doctor.js");
-      const report = await runDoctor();
+      let report;
+      if (!opts.json && process.stdout.isTTY) {
+        const { spinner } = await import("@clack/prompts");
+        const spin = spinner();
+        spin.start("Running diagnostics...");
+        report = await runDoctor();
+        const { ok: okN, warn: warnN, fail: failN } = report.summary;
+        spin.stop(`Done — ${okN} ok · ${warnN} warn · ${failN} fail`);
+      } else {
+        report = await runDoctor();
+      }
       if (opts.json) { console.log(JSON.stringify(report, null, 2)); } else { printDoctorReport(report); }
       if (report.summary.fail > 0 || (opts.strict && report.summary.warn > 0)) process.exit(1);
     });
@@ -687,10 +765,7 @@ export async function runCli(): Promise<void> {
 
   // ─── Zero-config default action ───────────────────────────────────────────
 
-  program.option("--auto", "Auto-register and index current directory as a scrybe project (must be a git repo)")
-    .hook("preAction", () => { /* no-op; --auto handled in default action */ });
-
-  program.action(async (opts: { auto?: boolean }) => {
+  program.action(async () => {
     const { execSync } = await import("child_process");
     const { basename } = await import("path");
     const cwd = process.cwd();
@@ -699,11 +774,17 @@ export async function runCli(): Promise<void> {
     if (!isGit) { console.error("Not a git repository. Run `scrybe init` to set up scrybe."); process.exit(1); }
     const projects = listProjects();
     const alreadyRegistered = projects.some((p) => p.sources.some((s) => s.source_config.type === "code" && (s.source_config as any).root_path === cwd));
-    if (!opts.auto) {
-      if (alreadyRegistered) { console.log("Repo already registered in scrybe. Try:"); console.log(`  scrybe index -P <id>`); console.log(`  scrybe search code -P <id> "your query"`); console.log(`  scrybe status`); } else { console.log("Repo not yet registered. Run:"); console.log(`  scrybe init          # full wizard (recommended)`); console.log(`  scrybe --auto        # quick register + index current repo`); }
+    if (alreadyRegistered) {
+      console.log("Repo already registered in scrybe. Try:");
+      console.log(`  scrybe index -P <id>`);
+      console.log(`  scrybe search code -P <id> "your query"`);
+      console.log(`  scrybe status`);
       return;
     }
-    if (!process.stdin.isTTY) { console.error("--auto requires an interactive terminal. Run `scrybe init` instead."); process.exit(1); }
+    if (!process.stdin.isTTY) {
+      console.log("Repo not yet registered. Run:"); console.log(`  scrybe init          # full wizard (recommended)`);
+      return;
+    }
     const projectId = basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, "-");
     process.stdout.write(`Register '${projectId}' at ${cwd} and run incremental index? [y/N] `);
     const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (d) => resolve(d.toString().trim().toLowerCase() === "y")); });

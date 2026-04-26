@@ -320,15 +320,16 @@ export async function runDoctor(): Promise<DoctorReport> {
       // Chunk count check (only for sources with a table)
       if (source.table_name) {
         try {
-          const { listChunkIds } = await import("../vector-store.js");
-          const ids = await listChunkIds(project.id, source.table_name);
-          if (ids.length === 0) {
+          // D2: use countTableRows (same counter as `scrybe ps`) to avoid discrepancy
+          const { countTableRows } = await import("../vector-store.js");
+          const count = await countTableRows(source.table_name);
+          if (count === 0) {
             checks.push(warn(`project.${project.id}.${sid}.chunk_count`,
               SEC_PROJ, `${sid} — chunks`, "0 chunks in index",
               `Run full reindex: scrybe index --project-id ${project.id} --source-ids ${sid} --full`));
           } else {
             checks.push(ok(`project.${project.id}.${sid}.chunk_count`,
-              SEC_PROJ, `${sid} — chunks`, `${ids.length} chunks`, { count: ids.length }));
+              SEC_PROJ, `${sid} — chunks`, `${count.toLocaleString()} chunks`, { count }));
           }
         } catch {
           checks.push(skip(`project.${project.id}.${sid}.chunk_count`,
@@ -419,9 +420,13 @@ export async function runDoctor(): Promise<DoctorReport> {
   // ── 6. MCP configuration ────────────────────────────────────────────────────
   const SEC_MCP = "MCP Configuration";
 
+  const CLIENT_NAMES: Record<string, string> = {
+    "claude-code": "Claude Code", "cursor": "Cursor",
+    "codex": "Codex", "cline": "Cline", "roo-code": "Roo Code",
+  };
   const proposed = proposeScrybeEntry({ binResolution: "npx" });
   for (const file of detectMcpConfigs()) {
-    const clientLabel = file.type === "claude-code" ? "Claude Code" : "Cursor";
+    const clientLabel = CLIENT_NAMES[file.type] ?? file.type;
     const checkId = `mcp.${file.type}`;
 
     if (!file.exists) {

@@ -272,16 +272,21 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
 
   if (repoOptions.length > 0) {
     const selected = await p.multiselect({
-      message: "Choose repos — Select repos to register",
-      options: repoOptions,
+      message: "Choose repos — Select repos to register (ESC or Space to skip)",
+      options: [
+        ...repoOptions,
+        { value: "__skip_selection", label: "Skip — don't register any repo now" },
+      ],
       required: false,
     });
-    if (p.isCancel(selected)) { p.cancel("Setup cancelled."); return; }
-    selectedPaths = selected as string[];
+    // W8: ESC → treat as skip, continue wizard
+    if (!p.isCancel(selected)) {
+      selectedPaths = (selected as string[]).filter((v) => v !== "__skip_selection");
+    }
   }
 
-  // Manual add
-  const addManual = await p.confirm({
+  // W1: Only ask manual-add if user didn't explicitly skip
+  const addManual = rootChoice !== "__skip" && await p.confirm({
     message: "Add a repo by path manually?",
     initialValue: false,
   });
@@ -336,27 +341,43 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
   const mcpDiffs = mcpConfigs.map((file) => computeDiff(file, proposed));
   const mcpToApply = mcpDiffs.filter((d) => d.action !== "skip");
 
+  // W4: per-client name map
+  const CLIENT_NAMES: Record<string, string> = {
+    "claude-code": "Claude Code",
+    "cursor": "Cursor",
+    "codex": "Codex",
+    "cline": "Cline",
+    "roo-code": "Roo Code",
+  };
+
+  let appliedCount = 0;
   if (mcpToApply.length === 0) {
     p.log.info("MCP config — all clients already configured");
   } else {
     p.log.message(`MCP config — ${mcpToApply.length} client(s) to update`);
     for (const diff of mcpToApply) {
-      const clientName = diff.file.type === "claude-code" ? "Claude Code" : "Cursor";
+      const clientName = CLIENT_NAMES[diff.file.type] ?? diff.file.type;
       p.log.info(`${clientName}: ${diff.action}\n${diff.diff}`);
       const confirm = await p.confirm({
         message: `Apply ${diff.action} to ${diff.file.path}?`,
-        initialValue: true,
+        initialValue: false, // W2: default No — user must opt-in
       });
       if (p.isCancel(confirm)) { p.cancel("Setup cancelled."); return; }
       if (confirm) {
         await applyMcpMerge(diff);
         p.log.success(`${clientName} updated`);
+        appliedCount++;
       }
+    }
+    // W3: accurate outro depending on whether anything was actually applied
+    if (appliedCount === 0) {
+      p.log.info("MCP config: nothing applied. Run 'scrybe init' again to add MCP entries later.");
     }
   }
 
-  if (mcpToApply.length > 0) {
-    p.log.warn("Restart your editor to pick up the new MCP config.");
+  // W5: only warn about restart if something was applied; W6: reword to "agent"
+  if (appliedCount > 0) {
+    p.log.warn("Restart your agent (Claude Code, Cursor, etc.) to pick up the new MCP config.");
   }
 
   // ── Step 4.5: Always-on daemon prompt ─────────────────────────────────────
@@ -364,39 +385,62 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
   if (isContainer()) {
     p.log.info("Containerized environment — always-on mode skipped (daemon runs on-demand when an agent uses scrybe).");
   } else {
-    p.log.message(
-      "Background daemon — keep your index in sync automatically.\n\n" +
-      "  The daemon runs while your agent is using scrybe and stops ~10 min after you\n" +
-      "  close the agent. Files you change are re-indexed in the background.\n"
-    );
-    const alwaysOn = await p.confirm({
-      message: "Keep scrybe running even when no agent is open? (useful for git pull, overnight ticket polling)",
-      initialValue: false,
-    });
-    if (p.isCancel(alwaysOn)) { p.cancel("Setup cancelled."); return; }
+    // W7: check if autostart is already registered
+    const { getInstallStatus } = await import("../daemon/install/index.js");
+    const installStatus = await getInstallStatus();
+    const alreadyAlwaysOn = installStatus.installed;
 
-    if (alwaysOn) {
-      const spin = p.spinner();
-      spin.start("Registering autostart...");
-      try {
-        const { installAutostart } = await import("../daemon/install/index.js");
-        const status = await installAutostart();
-        const { spawnDaemonDetached } = await import("../daemon/spawn-detached.js");
-        spawnDaemonDetached({});
-        // Brief wait so pidfile is likely present before we read it
-        await new Promise((r) => setTimeout(r, 1200));
-        const { readPidfile } = await import("../daemon/pidfile.js");
-        const pidData = readPidfile();
-        const pidStr = pidData ? `PID ${pidData.pid} · port ${pidData.port}` : "starting";
-        spin.stop(`Always-on enabled · ${status.method ?? "autostart"} · daemon started · ${pidStr}`);
-      } catch (err: any) {
-        spin.stop(
-          `Could not register autostart: ${err?.message ?? String(err)}\n` +
-          "  Continuing. Run `scrybe daemon install` later or use on-demand mode only."
-        );
+    if (alreadyAlwaysOn) {
+      const keepAlwaysOn = await p.confirm({
+        message: `Always-on currently enabled (${installStatus.method ?? "autostart"}). Keep it? (No = switch to on-demand)`,
+        initialValue: true,
+      });
+      if (p.isCancel(keepAlwaysOn)) { p.cancel("Setup cancelled."); return; }
+      if (!keepAlwaysOn) {
+        const spin = p.spinner();
+        spin.start("Disabling always-on...");
+        try {
+          const { uninstallAutostart } = await import("../daemon/install/index.js");
+          await uninstallAutostart();
+          spin.stop("Always-on disabled. Daemon will run on-demand while an agent uses scrybe.");
+        } catch (err: any) {
+          spin.stop(`Could not disable: ${err?.message ?? String(err)}`);
+        }
       }
     } else {
-      p.log.info("Always-on declined. Daemon runs on-demand while an agent uses scrybe.");
+      p.log.message(
+        "Background daemon — keep your index in sync automatically.\n\n" +
+        "  The daemon runs while your agent is using scrybe and stops ~10 min after you\n" +
+        "  close the agent. Files you change are re-indexed in the background.\n"
+      );
+      const alwaysOn = await p.confirm({
+        message: "Keep scrybe running even when no agent is open? (useful for git pull, overnight ticket polling)",
+        initialValue: false,
+      });
+      if (p.isCancel(alwaysOn)) { p.cancel("Setup cancelled."); return; }
+
+      if (alwaysOn) {
+        const spin = p.spinner();
+        spin.start("Registering autostart...");
+        try {
+          const { installAutostart } = await import("../daemon/install/index.js");
+          const status = await installAutostart();
+          const { spawnDaemonDetached } = await import("../daemon/spawn-detached.js");
+          spawnDaemonDetached({});
+          await new Promise((r) => setTimeout(r, 1200));
+          const { readPidfile } = await import("../daemon/pidfile.js");
+          const pidData = readPidfile();
+          const pidStr = pidData ? `PID ${pidData.pid} · port ${pidData.port}` : "starting";
+          spin.stop(`Always-on enabled · ${status.method ?? "autostart"} · daemon started · ${pidStr}`);
+        } catch (err: any) {
+          spin.stop(
+            `Could not register autostart: ${err?.message ?? String(err)}\n` +
+            "  Continuing. Run `scrybe daemon install` later or use on-demand mode only."
+          );
+        }
+      } else {
+        p.log.info("Always-on declined. Daemon runs on-demand while an agent uses scrybe.");
+      }
     }
   }
 
@@ -470,16 +514,16 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
     outroLines = [
       `Setup complete — ${allRegistered.length} project${allRegistered.length === 1 ? "" : "s"} registered.`,
       "",
-      "Next: restart your editor, then ask your agent:",
+      "Next: restart your agent (Claude Code, Cursor, etc.), then ask it:",
       `  "How does <topic> work in ${allRegistered[0]?.id ?? "<project>"}?"`,
       "",
-      "Scrybe fires automatically — no slash command needed.",
+      "Your agent will call scrybe automatically on relevant queries (no slash command needed).",
       "",
       "Troubleshoot: scrybe doctor",
     ];
   } else {
     outroLines = [
-      mcpToApply.length > 0
+      appliedCount > 0
         ? "MCP config written. Now register a project to index:"
         : "No projects registered yet. Add one manually:",
       "",
@@ -488,7 +532,7 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
       "    --type code --root /absolute/path/to/repo",
       "  scrybe index -P myrepo",
       "",
-      "Then restart your editor and ask your agent a question.",
+      "Then restart your agent and ask it a question.",
       "",
       "Troubleshoot: scrybe doctor",
     ];

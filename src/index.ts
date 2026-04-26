@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Suppress Node.js experimental-feature warnings (e.g. SQLite) from user output
+process.removeAllListeners("warning");
 import { runMcpServer } from "./mcp-server.js";
 import { runCli } from "./cli.js";
 import { cancelAllJobs } from "./jobs.js";

@@ -56,16 +56,24 @@ export const listProjectsTool: Tool<Record<string, never>, ProjectRow[]> = {
   cliOpts: () => ({}),
   formatCli: (projects) => {
     if (projects.length === 0) return "No projects registered.";
-    return projects.map((p) => {
-      const header = `\n${p.id} — ${p.description || "(no description)"}`;
+    const nonSearchableReasons: string[] = [];
+    const lines = projects.map((p) => {
+      const header = `\n${p.id}${p.description ? ` — ${p.description}` : ""}`;
       if (p.sources.length === 0) return `${header}\n  (no sources)`;
       const srcLines = p.sources.map((s) => {
-        const indexed = s.last_indexed ? `indexed: ${s.last_indexed}` : "never indexed";
-        const searchable = s.searchable ? "searchable" : `not searchable: ${s.searchable_reason}`;
-        return `  [${s.source_id}] type=${s.source_type}  ${indexed}  ${searchable}`;
+        let icon: string;
+        if (!s.last_indexed) { icon = "○"; }
+        else if (s.searchable) { icon = "✓"; }
+        else { icon = "✗"; nonSearchableReasons.push(`  ${p.id}/${s.source_id}: ${s.searchable_reason}`); }
+        const indexed = s.last_indexed ? s.last_indexed.replace("T", " ").slice(0, 16) : "never";
+        return `  ${icon} ${s.source_id.padEnd(20)} ${s.source_type.padEnd(10)} ${indexed}`;
       });
       return `${header}\n${srcLines.join("\n")}`;
-    }).join("");
+    });
+    const footer = nonSearchableReasons.length > 0
+      ? `\n\n✗ Not searchable — missing config:\n${nonSearchableReasons.join("\n")}`
+      : "";
+    return lines.join("") + footer;
   },
 };
 
@@ -116,16 +124,21 @@ export const updateProjectTool: Tool<
     },
     annotations: { openWorldHint: false },
     cliArgs: (cmd: Command) => cmd
-      .requiredOption("--id <id>", "Project identifier")
+      .argument("[id]", "Project identifier (positional)")
+      .option("--id <id>", "Project identifier (flag, backward-compat alias for positional)")
       .option("--desc <text>", "New description")
-      .addHelpText("after", "\nExample:\n  scrybe project update --id myrepo --desc \"Updated description\""),
+      .addHelpText("after", "\nExample:\n  scrybe project update myrepo --desc \"Updated description\""),
   },
   handler: async ({ project_id, description }) => {
     return updateProject(project_id, {
       ...(description !== undefined && { description }),
     }) as { id: string; description: string };
   },
-  cliOpts: ([opts]) => ({ project_id: String(opts.id), description: opts.desc ? String(opts.desc) : undefined }),
+  cliOpts: ([arg, opts]) => {
+    const id = (arg as string | undefined) ?? (opts as any).id;
+    if (!id) throw new Error("project id required (positional or --id)");
+    return { project_id: String(id), description: (opts as any).desc ? String((opts as any).desc) : undefined };
+  },
   formatCli: (updated) => `Updated project '${updated.id}'`,
 };
 
@@ -144,13 +157,18 @@ export const removeProjectTool: Tool<
     },
     annotations: { destructiveHint: true, openWorldHint: false },
     cliArgs: (cmd: Command) => cmd
-      .requiredOption("--id <id>", "Project identifier")
-      .addHelpText("after", "\nExample:\n  scrybe project remove --id myrepo"),
+      .argument("[id]", "Project identifier (positional)")
+      .option("--id <id>", "Project identifier (flag, backward-compat alias for positional)")
+      .addHelpText("after", "\nExamples:\n  scrybe project remove myrepo\n  scrybe project rm myrepo"),
   },
   handler: async ({ project_id }) => {
     await removeProject(project_id);
     return { ok: true, project_id };
   },
-  cliOpts: ([opts]) => ({ project_id: String(opts.id) }),
+  cliOpts: ([arg, opts]) => {
+    const id = (arg as string | undefined) ?? (opts as any).id;
+    if (!id) throw new Error("project id required (positional or --id)");
+    return { project_id: String(id) };
+  },
   formatCli: ({ project_id }) => `Removed project '${project_id}'`,
 };

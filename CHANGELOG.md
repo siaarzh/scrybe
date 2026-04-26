@@ -9,6 +9,40 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.24.0] — 2026-04-26
+
+### Breaking
+
+- **`--auto` flag removed.** Bare `scrybe` inside an unregistered git repo now performs the same register-and-index flow directly (no flag needed). Non-TTY and already-registered cases fall back to the hint output as before.
+
+### Added
+
+- **`daemon up`** — new canonical name for `scrybe daemon ensure-running`. `ensure-running` still works as an alias through v0.x.
+- **`project rm` / `project delete` / `project ls`** — Commander aliases on `project remove` and `project list`. Same for `source rm`, `source ls`, `source delete`.
+- **`project remove <id>` positional** — project id now accepted as a positional arg (`scrybe project rm myrepo`); `--id` flag kept as backward-compat alias. Same for `project update`.
+- **`scrybe ps` — aligned columns** — source lines now print as `PROJECT  SOURCE  CHUNKS  SIZE  VERS  LAST INDEXED` with fixed-width padding.
+- **`gc` — prune empty projects (C5)** — after chunk-orphan pass + Lance compaction, `gc` offers to remove registry entries with zero sources (interactive confirm in TTY, skipped in non-TTY / with `-P`).
+- **`search code/knowledge` missing `-P` hint (C12)** — deprecated bare `scrybe search <query>` without `--project-id` now prints a helpful hint instead of "Project 'undefined' not found".
+- **Update-available banner (F1)** — `scrybe ps` / `scrybe status` show a one-line banner when a newer `scrybe-cli` version is available on npm (24 h cache, suppressed by `NO_UPDATE_NOTIFIER=1` or `CI=1`).
+- **`scrybe doctor` spinner (D1)** — doctor shows a `@clack/prompts` spinner while running checks; prints summary on completion.
+
+### Fixed
+
+- **Wizard W1** — "Add a repo by path manually?" prompt no longer fires after user chose Skip.
+- **Wizard W2** — MCP client "Apply to …" prompts default to **No** (user must opt-in).
+- **Wizard W3** — Outro correctly reports "nothing applied" when user declined all MCP prompts.
+- **Wizard W4** — MCP client diff blocks now labeled with correct name (Claude Code / Cursor / Codex / Cline / Roo Code) instead of always "Cursor".
+- **Wizard W5** — "Restart your agent" hint suppressed when 0 MCP configs were applied.
+- **Wizard W6** — All "Restart your editor" messages reworded to "Restart your agent (Claude Code, Cursor, etc.)".
+- **Wizard W7** — Always-on prompt checks existing autostart state; offers Keep/Switch-to-on-demand when already enabled.
+- **Wizard W8** — ESC during repo multiselect continues wizard instead of cancelling. Explicit "Skip" item added.
+- **Doctor D2** — Chunk count now uses `countTableRows` (same as `ps`) instead of `listChunkIds.length`, eliminating the reported discrepancy.
+- **Doctor D3 / MCP label** — Doctor MCP section uses correct per-client names (same fix as W4).
+- **`project list` readability (C3)** — per-source lines now show `✓` / `○` / `✗` status icon + padded columns. Non-searchable reasons consolidated in a footer block.
+- **SQLite ExperimentalWarning suppressed (C1)** — `process.removeAllListeners("warning")` at entrypoint; warning no longer leaks on every CLI invocation.
+
+---
+
 ## [0.23.2] — 2026-04-26
 
 ### Fixed
