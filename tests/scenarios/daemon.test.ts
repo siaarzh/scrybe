@@ -10,9 +10,12 @@ import { describe, it, expect, afterEach } from "vitest";
 import { spawn, spawnSync } from "child_process";
 import { existsSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
+import { platform } from "os";
 import { makeScenarioEnv, runScrybe, ENTRY, type ScenarioEnv } from "./helpers/spawn.js";
 import { makeTempRepo, type TempRepo } from "./helpers/repo.js";
 import { sidecar } from "../helpers/sidecar.js";
+
+const skipOnMacCI = process.env["CI"] === "true" && platform() === "darwin";
 
 const NODE = process.execPath;
 
@@ -130,7 +133,7 @@ describe("Scenario 9 — daemon on-demand auto-spawn via `daemon up`", () => {
   });
 });
 
-describe("Scenario 14 — FS-watch reindex roundtrip", () => {
+describe.skipIf(skipOnMacCI)("Scenario 14 — FS-watch reindex roundtrip", () => {
   it("new file content is findable via search within 10s after write", async () => {
     env = makeScenarioEnv();
     repo = makeTempRepo({ "src/index.ts": "export const existing = 1;\n" });

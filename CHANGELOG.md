@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.25.1] — 2026-04-26
+
+### Fixed
+
+- **Scenario 14 (FS-watch roundtrip) flaky on macOS CI** — wrapped in `describe.skipIf(skipOnMacCI)` to mirror the existing pattern in `tests/daemon-fs-watch.test.ts` and `tests/daemon-git-checkout.test.ts`. macOS GH Actions runners cannot reliably deliver FSEvents within the test deadline (already documented in v0.19.0 CHANGELOG: "macOS is best-effort — watcher tests skipped in CI sandbox"). The new scenario shipped without that guard. Test still runs on Linux, Windows, and on local macOS.
+
+---
+
 ## [0.25.0] — 2026-04-26
 
 ### Added
