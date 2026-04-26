@@ -1,7 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, renameSync } from "node:fs";
-import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, renameSync, lstatSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { config } from "./config.js";
 import { getSource } from "./registry.js";
 import type { SourceConfig } from "./types.js";
@@ -145,19 +144,27 @@ export function closeDB(): void {
 /** Resolve the current HEAD branch name from a git repo at repoPath. */
 export function resolveBranchForPath(repoPath: string): string {
   try {
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-      cwd: repoPath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (branch === "HEAD") {
-      return execSync("git rev-parse HEAD", {
-        cwd: repoPath,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim().slice(0, 12);
+    const gitPath = join(repoPath, ".git");
+    if (!existsSync(gitPath)) return "*";
+
+    let headPath: string;
+    const stat = lstatSync(gitPath);
+    if (stat.isDirectory()) {
+      headPath = join(gitPath, "HEAD");
+    } else if (stat.isFile()) {
+      // git worktree: .git file contains "gitdir: /path/to/actual/.git/worktrees/X"
+      const ptr = readFileSync(gitPath, "utf8").trim();
+      const m = /^gitdir:\s*(.+)$/.exec(ptr);
+      if (!m) return "*";
+      headPath = join(resolve(repoPath, m[1].trim()), "HEAD");
+    } else {
+      return "*";
     }
-    return branch;
+
+    if (!existsSync(headPath)) return "*";
+    const head = readFileSync(headPath, "utf8").trim();
+    if (!head.startsWith("ref: ")) return head.slice(0, 12); // detached HEAD
+    return head.slice("ref: ".length).replace(/^refs\/heads\//, "");
   } catch {
     return "*";
   }
