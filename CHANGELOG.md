@@ -9,6 +9,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.23.1] — 2026-04-26
+
+### Fixed
+
+- **Windows: console-window flashes at session start** — three sources eliminated, net effect 6 → 0 flashes when Claude Code launches the MCP server.
+  - `branch-state.resolveBranchForPath` now reads `.git/HEAD` directly (with worktree pointer support) instead of shelling out to `git rev-parse`. Removes one flash per registered code project at daemon boot.
+  - `daemon/install/windows`: all `schtasks`/`reg` `spawnSync` calls now pass `windowsHide: true` (defensive — autostart-setup path).
+  - `daemon/spawn-detached` on Windows: routes the detached daemon spawn through a tiny `wscript.exe` + auto-generated VBS launcher in `DATA_DIR`. `windowsHide: true` only sets `SW_HIDE`, not `CREATE_NO_WINDOW`, so `node.exe` would still briefly allocate a console; `wscript.exe` is GUI-subsystem (no console allocation) and `Run cmd, 0, False` launches the child fully hidden.
+
+---
+
 ## [0.23.0] — 2026-04-25
 
 ### Added
