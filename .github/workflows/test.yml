@@ -53,3 +53,10 @@ jobs:
           SCRYBE_RERANK: "false"
           # Explicit cache dir so all platforms write to the same path
           HF_HOME: ~/.cache/huggingface
+
+      - name: Scenario tests
+        run: npm run test:scenarios
+        env:
+          SCRYBE_RERANK: "false"
+          HF_HOME: ~/.cache/huggingface
+          NO_UPDATE_NOTIFIER: "1"

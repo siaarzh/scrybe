@@ -9,6 +9,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.25.0] — 2026-04-26
+
+### Added
+
+- **Scenario test harness** (`tests/scenarios/`) — CLI-level tests that spawn the real built binary against a clean DATA_DIR. Catches Commander parsing bugs, output formatting regressions, exit codes, cross-command state, and daemon lifecycle — class of bugs that passed 400+ unit tests undetected.
+  - `tests/scenarios/helpers/spawn.ts` — `runScrybe()` / `runScrybeWithStdin()` primitives
+  - `tests/scenarios/helpers/repo.ts` — `makeTempRepo()` with `commit()` / `branch()` / `checkout()`
+  - `tests/scenarios/serializers.ts` — snapshot redaction (paths, timestamps, sizes, PIDs, ports, versions)
+  - 9 scenario files, 48 tests covering: fresh register→index→search, remove→re-add→full (M-D13 Fix 1), Lance bloat threshold (M-D13 Fix 4), migration registry idempotency (M-D13 Fix 6), search `-P` flag collision (M-D13 Fix 3), branch CLI contract, gc cleanup, wizard no-answers, uninstall, daemon on-demand, FS-watch roundtrip, DATA_DIR wipe+restart.
+- **`test:scenarios` npm script** — runs `vitest run --config vitest.scenarios.config.ts`; independent of unit suite.
+- **`test:all` npm script** — `npm run test && npm run build && npm run test:scenarios` sequential.
+- **CI: scenario step added** — GH Actions test.yml runs `npm run test:scenarios` after `npm test` on ubuntu/macos/windows matrix.
+
+---
+
 ## [0.24.0] — 2026-04-26
 
 ### Breaking
