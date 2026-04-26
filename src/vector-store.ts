@@ -384,6 +384,7 @@ export async function listChunkIds(projectId: string, tableName: string): Promis
     .query()
     .select(["chunk_id"])
     .where(`project_id = '${escapeSql(projectId)}'`)
+    .limit(Number.MAX_SAFE_INTEGER)
     .toArray();
   return rows.map((r) => String(r.chunk_id));
 }

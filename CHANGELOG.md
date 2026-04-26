@@ -9,6 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.25.2] — 2026-04-26
+
+### Fixed
+
+- **`scrybe gc` hangs after prompt response** — `process.stdin.once("data", ...)` resumed stdin (flowing mode) but never paused it. After the once-listener fired, stdin stayed open and kept the event loop alive, so the process never exited even after `Pruned N empty project(s).` printed. Fixed by calling `process.stdin.pause()` inside the data callback before resolving. Same pattern bug in 3 other prompts: `branch unpin --all`, deprecated `pin clear --all`, and zero-arg `scrybe` register-prompt.
+- **`scrybe gc` reports orphan counts capped at 10** — `listChunkIds()` in `vector-store.ts` called `.query()...toArray()` without `.limit()`. LanceDB defaults the result-set limit to 10 when none is set, so every source with >10 orphans always reported "10 orphan chunk(s)". Fixed by adding `.limit(Number.MAX_SAFE_INTEGER)` to read all rows.
+- **`scrybe projects` falsely flags local-embedder sources as "Not searchable — missing config"** — `isSearchable()` in `registry.ts` always demanded `EMBEDDING_API_KEY`/`OPENAI_API_KEY`, even when the source's resolved embedding config has `provider_type === "local"` (in-process Xenova WASM model needs no API key). Searches succeeded but the listing UI showed every source with a red ✗ and a "Requires env var EMBEDDING_API_KEY" line. Fixed by short-circuiting `isSearchable()` to return `{ ok: true }` when `provider_type === "local"`.
+
+---
+
 ## [0.25.1] — 2026-04-26
 
 ### Fixed

@@ -269,7 +269,7 @@ export async function runCli(): Promise<void> {
           if (!opts.yes) {
             process.stdout.write(`Clear all pinned branches for ${opts.projectId}/${opts.sourceId}? [y/N] `);
             const confirmed = await new Promise<boolean>((resolve) => {
-              process.stdin.once("data", (data) => resolve(data.toString().trim().toLowerCase() === "y"));
+              process.stdin.once("data", (data) => { process.stdin.pause(); resolve(data.toString().trim().toLowerCase() === "y"); });
             });
             if (!confirmed) { console.log("Aborted."); return; }
           }
@@ -412,7 +412,7 @@ export async function runCli(): Promise<void> {
             console.log(`\nDry run: ${empty.length} empty project(s) would be pruned: ${empty.map((p) => p.id).join(", ")}`);
           } else if (process.stdin.isTTY) {
             process.stdout.write(`\nPrune ${empty.length} empty project(s) (${empty.map((p) => p.id).join(", ")})? [y/N] `);
-            const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (d) => resolve(d.toString().trim().toLowerCase() === "y")); });
+            const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (d) => { process.stdin.pause(); resolve(d.toString().trim().toLowerCase() === "y"); }); });
             if (confirmed) {
               for (const p of empty) { try { await removeProject(p.id); } catch { /* ignore */ } }
               console.log(`Pruned ${empty.length} empty project(s).`);
@@ -787,7 +787,7 @@ export async function runCli(): Promise<void> {
     }
     const projectId = basename(cwd).toLowerCase().replace(/[^a-z0-9-]/g, "-");
     process.stdout.write(`Register '${projectId}' at ${cwd} and run incremental index? [y/N] `);
-    const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (d) => resolve(d.toString().trim().toLowerCase() === "y")); });
+    const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (d) => { process.stdin.pause(); resolve(d.toString().trim().toLowerCase() === "y"); }); });
     if (!confirmed) { console.log("Aborted."); return; }
     addProject({ id: projectId, description: "" });
     addSource(projectId, { source_id: "primary", source_config: { type: "code", root_path: cwd, languages: [] } });
@@ -918,7 +918,7 @@ export async function runCli(): Promise<void> {
       warnDeprecated("pin clear", "branch unpin --all");
       if (!opts.yes) {
         process.stdout.write(`Clear all pinned branches for ${opts.projectId}/${opts.sourceId}? [y/N] `);
-        const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (data) => resolve(data.toString().trim().toLowerCase() === "y")); });
+        const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (data) => { process.stdin.pause(); resolve(data.toString().trim().toLowerCase() === "y"); }); });
         if (!confirmed) { console.log("Aborted."); return; }
       }
       console.log(JSON.stringify(clearPinned(opts.projectId, opts.sourceId), null, 2));

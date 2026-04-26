@@ -266,6 +266,7 @@ export function isSearchable(source: Source): { ok: boolean; reason?: string } {
     return { ok: false, reason: "Never indexed — run a full index first" };
   }
   const emb = resolveEmbeddingConfig(source);
+  if (emb.provider_type === "local") return { ok: true };
   const key =
     process.env[emb.api_key_env] ??
     process.env["OPENAI_API_KEY"] ??
