@@ -89,10 +89,13 @@ export async function runMcpServer(): Promise<void> {
     }
   });
 
-  await bootstrapDaemon();
-
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Daemon bootstrap (probe + spawn) can take ~2s when execPath mismatches —
+  // e.g. when MCP is spawned by VS Code's bundled Node. Run it in the
+  // background so the MCP handshake isn't blocked behind it.
+  bootstrapDaemon().catch(() => {});
 }
 
 // ─── On-demand daemon lifecycle (M-D11.1) ────────────────────────────────────

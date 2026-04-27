@@ -9,6 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.26.1] — 2026-04-27
+
+Patch — unblocks the MCP handshake when scrybe is spawned by the Claude Code VS Code extension.
+
+### Fixed
+
+- **`Error loading webview: Could not register service worker: InvalidStateError` on new chats in the Claude Code VS Code extension.** `runMcpServer()` awaited `bootstrapDaemon()` *before* calling `server.connect(transport)`, so the MCP stdio handshake was blocked behind daemon-bootstrap work. Inside bootstrap, `isDaemonRunning()` falls into a 2-second HTTP `/health` probe whenever `pidfile.execPath !== process.execPath` — which is *always* the case when MCP is spawned by VS Code's bundled Node binary against a daemon started by system Node. The resulting ~2 s stall in MCP startup raced with the extension's webview init and left the document in an invalid state for service-worker registration. Fixed by connecting the transport first and running `bootstrapDaemon()` as fire-and-forget afterwards — the handshake is now immediate, daemon spawn/probe happens in the background, and the first heartbeat retries silently until the daemon is up. CLI-spawned MCP (terminal Claude Code) was unaffected because its `execPath` matched the daemon's.
+
+---
+
 ## [0.26.0] — 2026-04-26
 
 M-D16 — Bloat UX + Compaction Coverage. Folds in three bugfixes from the post-v0.25.2 fresh-user audit, replaces the misleading "stale Lance versions" footer with an honest at-a-glance HEALTH column, and closes three `maybeCompact` coverage gaps in the vector-store layer. Minor bump because the `ps` human output drops the cryptic VERS column and replaces it with a HEALTH column — soft-breaking for anything that scraped the previous text.
