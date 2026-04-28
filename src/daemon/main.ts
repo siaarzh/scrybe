@@ -7,7 +7,7 @@ import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
-import { initQueue, enqueue, stopQueue } from "./queue.js";
+import { initQueue, enqueue, submitToQueue, stopQueue } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
@@ -48,22 +48,23 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
     ? [{ id: req.projectId }]
     : listProjects();
 
-  const jobs = await Promise.all(
-    projects.map(async (p) => {
-      const jobId = await enqueue({
-        projectId: p.id,
-        sourceId: req.sourceId,
-        branch: req.branch,
-        mode: req.mode,
-      });
-      return {
-        jobId,
-        projectId: p.id,
-        sourceId: req.sourceId ?? "all",
-        branch: req.branch ?? "HEAD",
-      };
-    })
-  );
+  const jobs = projects.map((p) => {
+    const result = submitToQueue({
+      projectId: p.id,
+      sourceId: req.sourceId,
+      branch: req.branch,
+      mode: req.mode,
+    });
+    return {
+      jobId: result.jobId,
+      projectId: p.id,
+      sourceId: req.sourceId ?? "all",
+      branch: req.branch ?? "HEAD",
+      status: result.status,
+      queuePosition: result.queuePosition,
+      duplicateOfPending: result.duplicateOfPending,
+    };
+  });
 
   return { jobs };
 }

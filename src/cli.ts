@@ -21,9 +21,16 @@ import {
 import { searchCodeTool } from "./tools/search.js";
 import type { Source, SourceConfig } from "./types.js";
 
-// ─── CLI output helper ────────────────────────────────────────────────────────
+// ─── CLI output helpers ───────────────────────────────────────────────────────
 
 import type { JobResult } from "./tools/types.js";
+
+function formatIndexResult(chunks: number, reindexed: number, removed: number): string {
+  if (removed > 0 && chunks === 0 && reindexed === 0) {
+    return `${removed} file(s) removed from index. Run 'scrybe gc' to reclaim disk space.`;
+  }
+  return `${chunks} chunks indexed, ${reindexed} files reindexed, ${removed} files removed`;
+}
 
 function fmtSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -321,7 +328,7 @@ export async function runCli(): Promise<void> {
               onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
             });
             const totals = results.reduce((acc, r) => ({ chunks: acc.chunks + r.chunks_indexed, reindexed: acc.reindexed + r.files_reindexed, removed: acc.removed + r.files_removed }), { chunks: 0, reindexed: 0, removed: 0 });
-            console.log(`\n  Done (${results.length} source(s)): ${totals.chunks} chunks indexed, ${totals.reindexed} files reindexed, ${totals.removed} files removed`);
+            console.log(`\n  Done (${results.length} source(s)): ${formatIndexResult(totals.chunks, totals.reindexed, totals.removed)}`);
           } catch (err) { console.error(`\n  Failed: ${err instanceof Error ? err.message : String(err)}`); failed++; }
         }
         console.log(`\nAll projects processed. ${failed > 0 ? `${failed} failed.` : "All succeeded."}`);
@@ -342,7 +349,7 @@ export async function runCli(): Promise<void> {
             onEmbedProgress(n) { process.stdout.write(`\r  [${sid}] Embedding... ${n} chunks`); },
             ...(opts.branch && { branch: opts.branch }),
           });
-          console.log(`\n  [${sid}] Done: ${result.chunks_indexed} chunks indexed, ${result.files_reindexed} files reindexed, ${result.files_removed} files removed`);
+          console.log(`\n  [${sid}] Done: ${formatIndexResult(result.chunks_indexed, result.files_reindexed, result.files_removed)}`);
           totalChunks += result.chunks_indexed; totalReindexed += result.files_reindexed; totalRemoved += result.files_removed;
         }
         if (sourceIds.length > 1) console.log(`\nTotal: ${totalChunks} chunks indexed, ${totalReindexed} files reindexed, ${totalRemoved} files removed`);
@@ -358,7 +365,7 @@ export async function runCli(): Promise<void> {
           ...(opts.branch && { branch: opts.branch }),
         });
         const totals = results.reduce((acc, r) => ({ chunks: acc.chunks + r.chunks_indexed, reindexed: acc.reindexed + r.files_reindexed, removed: acc.removed + r.files_removed }), { chunks: 0, reindexed: 0, removed: 0 });
-        console.log(`\nDone (${results.length} source(s)): ${totals.chunks} chunks indexed, ${totals.reindexed} files reindexed, ${totals.removed} files removed`);
+        console.log(`\nDone (${results.length} source(s)): ${formatIndexResult(totals.chunks, totals.reindexed, totals.removed)}`);
         if (totals.reindexed > 0 && totals.chunks === 0) {
           console.error("[scrybe] Warning: files were scheduled for reindex but 0 chunks were written. Run with --full or check embedding config.");
           process.exit(2);

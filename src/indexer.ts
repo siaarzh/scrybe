@@ -13,13 +13,29 @@ import {
   deleteKnowledgeProject,
 } from "./vector-store.js";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { appendFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
 import { withBranchSession, resolveBranchForPath, type BranchSession, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage } from "./chunker.js";
+
+// ─── Indexer debug mode ───────────────────────────────────────────────────────
+// Set SCRYBE_DEBUG_INDEXER=1 to emit structured JSONL to daemon-log.jsonl.
+// Useful for diagnosing "deleted file still shows up in search" reports.
+
+function debugEnabled(): boolean {
+  return process.env["SCRYBE_DEBUG_INDEXER"] === "1";
+}
+
+function debugEmit(record: Record<string, unknown>): void {
+  if (!debugEnabled()) return;
+  const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl");
+  try {
+    appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), debug: true, ...record }) + "\n", "utf8");
+  } catch { /* non-fatal */ }
+}
 
 export interface ProgressReport {
   phase: "scan" | "embed_start" | "embed_batch" | "embed_done";
@@ -104,7 +120,10 @@ export async function indexSource(
         currentSources = await plugin.scanSources(project, source, cursor);
       }
 
-      const effectiveCursor = isNonHeadBranch ? null : cursor;
+      // Code sources scan the full filesystem and detect deletions via hash diff —
+      // the cursor is irrelevant for them. Only knowledge sources (e.g. GitLab issues)
+      // use cursor-based incremental fetching where toRemove must stay empty.
+      const effectiveCursor = (isNonHeadBranch || isCode) ? null : cursor;
       const merged = effectiveCursor ? { ...oldHashes, ...currentSources } : currentSources;
 
       let filesScanned = 0;
@@ -121,6 +140,18 @@ export async function indexSource(
         Object.keys(merged).filter((p) => oldHashes[p] !== merged[p])
       );
 
+      debugEmit({
+        event: "indexer.phase1",
+        projectId,
+        sourceId,
+        branch,
+        mode,
+        oldHashesCount: Object.keys(oldHashes).length,
+        currentSourcesCount: Object.keys(currentSources).length,
+        toRemove: [...toRemove],
+        toReindexCount: toReindex.size,
+      });
+
       if (mode === "full") {
         if (isCode) {
           await deleteProject(projectId, tableName);
@@ -135,6 +166,7 @@ export async function indexSource(
         for (const p of toRemove) {
           checkAbort(signal);
           session.applyFile(p, { kind: "removed" });
+          debugEmit({ event: "indexer.applyFile", projectId, sourceId, branch, path: p, kind: "removed" });
         }
         // Remove only tags (not hashes) for files that will be re-embedded.
         // Hash will be updated by the "embedded" outcome in flushBatch.
@@ -306,8 +338,8 @@ export async function indexSource(
         }
       }
 
-      return {
-        status: "ok",
+      const result = {
+        status: "ok" as const,
         project_id: projectId,
         source_id: sourceId,
         chunks_indexed: chunksIndexed,
@@ -315,6 +347,20 @@ export async function indexSource(
         files_reindexed: filesReindexed,
         files_removed: toRemove.size,
       };
+
+      debugEmit({
+        event: "indexer.result",
+        projectId,
+        sourceId,
+        branch,
+        mode,
+        chunksIndexed,
+        filesScanned,
+        filesReindexed,
+        filesRemoved: toRemove.size,
+      });
+
+      return result;
     }
   );
 }

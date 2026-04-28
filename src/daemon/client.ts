@@ -3,11 +3,71 @@
  * Contract 15: imported by M-D3 VS Code extension and test helpers.
  */
 import { readPidfile } from "./pidfile.js";
+import { spawnDaemonDetached } from "./spawn-detached.js";
+import { isContainer } from "./container-detect.js";
 import type {
   DaemonStatus, DaemonEvent, KickRequest, KickResponse,
 } from "./http-server.js";
 
 export type { DaemonStatus, DaemonEvent, KickRequest, KickResponse };
+
+export type EnsureRunningResult =
+  | { ok: true }
+  | { ok: false; reason: "container" | "opted-out" | "spawn-failed" | "health-timeout" };
+
+const DAEMON_OPT_OUT_ENV = "SCRYBE_NO_AUTO_DAEMON";
+
+/**
+ * Ensure the daemon is running, starting it if needed.
+ *
+ * Returns { ok: true } when the daemon is reachable.
+ * Returns { ok: false, reason } for the two in-process opt-out paths (container/opted-out)
+ * or for genuine spawn failures.
+ *
+ * Callers should use in-process indexing for "container" and "opted-out", and surface the
+ * diagnostic message for "spawn-failed" and "health-timeout".
+ */
+export async function ensureRunning(timeoutMs = 3000): Promise<EnsureRunningResult> {
+  // Explicit opt-out
+  if (process.env[DAEMON_OPT_OUT_ENV] === "1") {
+    return { ok: false, reason: "opted-out" };
+  }
+  // Container environments: Docker, Kubernetes, WSL2 — in-process only
+  if (isContainer()) {
+    return { ok: false, reason: "container" };
+  }
+
+  const existing = DaemonClient.fromPidfile();
+  if (existing) {
+    try {
+      await existing.health();
+      return { ok: true };
+    } catch {
+      // Stale pidfile — proceed to spawn
+    }
+  }
+
+  // Spawn daemon and wait for it to become healthy
+  try {
+    spawnDaemonDetached({});
+  } catch {
+    return { ok: false, reason: "spawn-failed" };
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const client = DaemonClient.fromPidfile();
+    if (client) {
+      try {
+        await client.health();
+        return { ok: true };
+      } catch { /* not ready yet */ }
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
+  return { ok: false, reason: "health-timeout" };
+}
 
 export class DaemonClient {
   private readonly _baseUrl: string;
@@ -37,6 +97,36 @@ export class DaemonClient {
 
   async kick(req: KickRequest): Promise<KickResponse> {
     return this._post("/kick", req);
+  }
+
+  /** Submit a reindex request. Returns immediately with job_id + queue status. */
+  async submitReindex(req: KickRequest): Promise<KickResponse> {
+    return this._post("/kick", req);
+  }
+
+  /** Get status of a specific job from the daemon's SQLite store. */
+  async jobStatus(jobId: string): Promise<unknown> {
+    return this._get(`/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  /** List jobs, optionally filtered. */
+  async listJobs(opts: { status?: string; projectId?: string } = {}): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (opts.status) params.set("status", opts.status);
+    if (opts.projectId) params.set("project_id", opts.projectId);
+    const qs = params.toString();
+    return this._get(`/jobs${qs ? `?${qs}` : ""}`);
+  }
+
+  /** Get running + queued jobs for a project (or all projects). */
+  async queueStatus(projectId?: string): Promise<{ running: unknown[]; queued: unknown[] }> {
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return this._get(`/queue-status${qs}`);
+  }
+
+  /** Cancel a running or queued job. */
+  async cancelJob(jobId: string): Promise<{ cancelled: boolean }> {
+    return this._delete(`/jobs/${encodeURIComponent(jobId)}`);
   }
 
   async pause(): Promise<{ state: string }> {
@@ -120,6 +210,12 @@ export class DaemonClient {
       body: body != null ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) throw new Error(`POST ${path} returned ${res.status}`);
+    return res.json() as Promise<T>;
+  }
+
+  private async _delete<T = unknown>(path: string): Promise<T> {
+    const res = await fetch(`${this._baseUrl}${path}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(`DELETE ${path} returned ${res.status}`);
     return res.json() as Promise<T>;
   }
 }

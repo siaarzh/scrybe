@@ -94,7 +94,7 @@ function deleteBranchHashesFile(projectId: string, sourceId: string, branch: str
 
 let _db: DatabaseSync | null = null;
 
-function getDB(): DatabaseSync {
+export function getDB(): DatabaseSync {
   if (_db) return _db;
 
   const dbPath = join(config.dataDir, "branch-tags.db");
@@ -123,6 +123,24 @@ function getDB(): DatabaseSync {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS jobs (
+      job_id        TEXT PRIMARY KEY,
+      project_id    TEXT NOT NULL,
+      source_id     TEXT,
+      branch        TEXT,
+      mode          TEXT NOT NULL,
+      status        TEXT NOT NULL,
+      phase         TEXT,
+      queued_at     INTEGER NOT NULL,
+      started_at    INTEGER,
+      finished_at   INTEGER,
+      error_message TEXT,
+      origin        TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_project_status
+      ON jobs(project_id, status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_queued_at
+      ON jobs(queued_at);
   `);
   db.prepare("INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1')").run();
 

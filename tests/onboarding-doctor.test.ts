@@ -105,7 +105,8 @@ describe("runDoctor — data integrity", () => {
   });
 
   it("ok on current schema version", async () => {
-    writeFileSync(join(tmp, "schema.json"), JSON.stringify({ version: 2 }));
+    const { CURRENT_SCHEMA_VERSION } = await import("../src/schema-version.js");
+    writeFileSync(join(tmp, "schema.json"), JSON.stringify({ version: CURRENT_SCHEMA_VERSION }));
     const report = await runFresh();
     const check = report.checks.find((c) => c.id === "data.schema_version")!;
     expect(check.status).toBe("ok");

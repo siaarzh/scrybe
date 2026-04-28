@@ -9,6 +9,7 @@ import {
   reindexStatusTool,
   cancelReindexTool,
   listJobsTool,
+  queueStatusTool,
 } from "./reindex.js";
 import { listBranchesTool, listPinnedBranchesTool, pinBranchesTool, unpinBranchesTool } from "./branch.js";
 
@@ -34,6 +35,7 @@ export const allTools: Tool<any, any>[] = [
   reindexStatusTool,
   cancelReindexTool,
   listJobsTool,
+  queueStatusTool,
   // Branch
   listBranchesTool,
   listPinnedBranchesTool,

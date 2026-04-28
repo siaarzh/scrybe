@@ -58,7 +58,7 @@ describe("enqueue — basic job submission", () => {
 
     const jobId = await enqueue({ projectId: "proj1", mode: "incremental" });
     expect(jobId).toBe("job-abc");
-    expect(submitJob).toHaveBeenCalledWith("proj1", "incremental", undefined, undefined);
+    expect(submitJob).toHaveBeenCalledWith("proj1", "incremental", undefined, undefined, expect.any(String));
   });
 
   it("uses submitSourceJob when sourceId is provided", async () => {
@@ -70,7 +70,7 @@ describe("enqueue — basic job submission", () => {
 
     const jobId = await enqueue({ projectId: "proj1", sourceId: "primary", mode: "incremental" });
     expect(jobId).toBe("job-src");
-    expect(submitSourceJob).toHaveBeenCalledWith("proj1", "primary", "incremental", undefined);
+    expect(submitSourceJob).toHaveBeenCalledWith("proj1", "primary", "incremental", undefined, expect.any(String));
   });
 
   it("emits job.started event via pushEvent", async () => {
