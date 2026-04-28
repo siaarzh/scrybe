@@ -18,8 +18,8 @@ afterEach(() => {
 });
 
 // Allow migration so branch filtering is active (SCRYBE_SKIP_MIGRATION=1 disables it).
-// Harmless on fresh DATA_DIR — migration just creates schema.json and tables.
-const NO_SKIP = { SCRYBE_SKIP_MIGRATION: "0" };
+// Force in-process mode — daemon routing is tested in two-writer-race.test.ts.
+const NO_SKIP = { SCRYBE_SKIP_MIGRATION: "0", SCRYBE_NO_AUTO_DAEMON: "1" };
 
 describe("Scenario 18 — incremental deletion (Fix C)", () => {
   it("deleted file content is removed from branch-scoped search after incremental reindex", () => {

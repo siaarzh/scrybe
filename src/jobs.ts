@@ -96,6 +96,7 @@ async function runTasks(jobId: string): Promise<void> {
     task.status = "running";
     task.started_at = Date.now();
     task.phase = "scanning";
+    try { updateJobStatus(jobId, { phase: "scanning", started_at: task.started_at }); } catch { /* non-fatal */ }
 
     try {
       const result = await indexSource(job.project_id, task.source_id, task.mode, {
@@ -107,7 +108,10 @@ async function runTasks(jobId: string): Promise<void> {
         },
         onEmbedProgress(n) {
           task.chunks_indexed = n;
-          task.phase = "embedding";
+          if (task.phase !== "embedding") {
+            task.phase = "embedding";
+            try { updateJobStatus(jobId, { phase: "embedding" }); } catch { /* non-fatal */ }
+          }
         },
       });
       task.status = "done";

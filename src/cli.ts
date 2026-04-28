@@ -19,7 +19,8 @@ import {
   addSourceTool, updateSourceTool, removeSourceTool,
 } from "./tools/source.js";
 import { searchCodeTool } from "./tools/search.js";
-import type { Source, SourceConfig } from "./types.js";
+import { ensureRunning, DaemonClient } from "./daemon/client.js";
+import type { Source, SourceConfig, IndexMode } from "./types.js";
 
 // ─── CLI output helpers ───────────────────────────────────────────────────────
 
@@ -64,6 +65,87 @@ async function checkForUpdates(): Promise<string | null> {
     }
   } catch { /* offline or rate-limited — ignore */ }
   return null;
+}
+
+// ─── Daemon-routed index helper ───────────────────────────────────────────────
+
+async function runIndexViaDaemon(
+  client: DaemonClient,
+  projectId: string,
+  sourceId: string | undefined,
+  mode: IndexMode,
+  branch: string | undefined,
+  detach: boolean,
+): Promise<void> {
+  const resp = await client.submitReindex({ projectId, sourceId, branch, mode });
+  const job = resp.jobs[0];
+  if (!job) throw new Error("Daemon returned no job");
+
+  if (detach) {
+    const pos = job.queuePosition != null ? ` (queue position: ${job.queuePosition})` : "";
+    console.log(`Job ${job.status ?? "queued"}: ${job.jobId}${pos}`);
+    return;
+  }
+
+  const target = sourceId ?? "(all sources)";
+  if (job.queuePosition != null && job.queuePosition > 0) {
+    console.log(`Queued ${projectId}/${target} at position ${job.queuePosition} (job_id: ${job.jobId})`);
+  } else {
+    console.log(`Indexing ${projectId}/${target} (${mode})... (job_id: ${job.jobId})`);
+  }
+
+  let sigintFired = false;
+  const onSigint = (): void => {
+    if (sigintFired) return;
+    sigintFired = true;
+    process.stdout.write("\n");
+    client.cancelJob(job.jobId).catch(() => {});
+    console.log("Cancelling...");
+  };
+  process.once("SIGINT", onSigint);
+
+  const startMs = Date.now();
+  const spinFrames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+  let spinIdx = 0;
+
+  while (!sigintFired) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (sigintFired) break;
+
+    type JobPollRow = { status: string; phase?: string | null; error_message?: string | null };
+    let row: JobPollRow | null = null;
+    try {
+      row = await client.jobStatus(job.jobId) as JobPollRow;
+    } catch { /* daemon may not be running yet */ }
+
+    const elapsed = ((Date.now() - startMs) / 1000).toFixed(0);
+    const phase = row?.phase ?? "";
+    const spinner = spinFrames[spinIdx++ % spinFrames.length];
+
+    if (phase) {
+      process.stdout.write(`\r  ${spinner} ${phase}... ${elapsed}s  `);
+    } else {
+      process.stdout.write(`\r  ${spinner} waiting... ${elapsed}s  `);
+    }
+
+    if (!row) continue;
+    if (row.status === "done") {
+      process.stdout.write("\n");
+      console.log("Done.");
+      break;
+    } else if (row.status === "failed") {
+      process.stdout.write("\n");
+      console.error(`Failed: ${row.error_message ?? "unknown error"}`);
+      process.exitCode = 1;
+      break;
+    } else if (row.status === "cancelled") {
+      process.stdout.write("\n");
+      console.log("Cancelled.");
+      break;
+    }
+  }
+
+  process.removeListener("SIGINT", onSigint);
 }
 
 // ─── Main CLI ─────────────────────────────────────────────────────────────────
@@ -310,8 +392,9 @@ export async function runCli(): Promise<void> {
     .option("-f, --full", "Full reindex (clears and rebuilds from scratch)", false)
     .option("-I, --incremental", "Incremental reindex (default)", false)
     .option("--branch <name>", "Branch name to index (default: current HEAD for code sources)")
-    .addHelpText("after", "\nExamples:\n  scrybe index -P myrepo\n  scrybe index -P myrepo -S primary,gitlab-issues\n  scrybe index --all\n  scrybe index -P myrepo -f -S primary")
-    .action(async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean; branch?: string }) => {
+    .option("--detach", "Submit to daemon and return immediately (prints job_id, no progress stream)", false)
+    .addHelpText("after", "\nExamples:\n  scrybe index -P myrepo\n  scrybe index -P myrepo -S primary,gitlab-issues\n  scrybe index --all\n  scrybe index -P myrepo -f -S primary\n  scrybe index -P myrepo --detach  # submit and exit (CI use)")
+    .action(async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean; branch?: string; detach: boolean }) => {
       if (config.embeddingConfigError) { console.error(`[scrybe] ${config.embeddingConfigError}`); process.exit(1); }
       if (opts.all) {
         if (opts.projectId) console.warn("Warning: --project-id is ignored when --all is specified");
@@ -339,6 +422,37 @@ export async function runCli(): Promise<void> {
       const mode = opts.full ? "full" : "incremental";
       const sourceIds = opts.sourceIds?.split(",").map((s: string) => s.trim()).filter(Boolean);
       if (opts.full && !sourceIds?.length) { console.error("Error: --full requires --source-ids (e.g. --source-ids primary,gitlab-issues)"); process.exit(1); }
+
+      // Route through daemon when available — prevents cross-process write races.
+      const daemon = await ensureRunning();
+      if (daemon.ok) {
+        const client = DaemonClient.fromPidfile();
+        if (client) {
+          try {
+            await runIndexViaDaemon(
+              client,
+              opts.projectId,
+              sourceIds?.length === 1 ? sourceIds[0] : undefined,
+              mode,
+              opts.branch,
+              opts.detach,
+            );
+          } catch (err: unknown) {
+            console.error(`[scrybe] ${err instanceof Error ? err.message : String(err)}`);
+            process.exit(1);
+          }
+          return;
+        }
+      } else if (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout") {
+        console.error(
+          "[scrybe] Error: the scrybe daemon failed to start.\n" +
+          "Reindex requires the daemon to coordinate writes.\n" +
+          "Diagnose with: scrybe doctor\n" +
+          "Single-shot:   SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
+        );
+        process.exit(1);
+      }
+      // Falls through for container / SCRYBE_NO_AUTO_DAEMON=1 (in-process path)
       if (sourceIds?.length) {
         const target = sourceIds.map((sid) => `${opts.projectId}/${sid}`).join(", ");
         console.log(`Indexing ${target} (${mode})...`);
