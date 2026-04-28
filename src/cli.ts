@@ -521,19 +521,51 @@ export async function runCli(): Promise<void> {
       else { console.log(opts.dryRun ? `\nDry run: ${totalOrphans} orphan chunk(s) found (not deleted).` : `\nGC complete: ${totalDeleted} orphan chunk(s) deleted.`); }
       if (!opts.dryRun) {
         // Full-purge compaction on all tables — no grace period, user explicitly requested reclaim
-        const allSources = projects.flatMap((p) => p.sources.filter((s) => s.table_name));
+        const allSources = projects.flatMap((p) =>
+          p.sources.filter((s) => s.table_name).map((s) => ({ projectId: p.id, source: s }))
+        );
         if (allSources.length > 0) {
           console.log("\nCompacting Lance tables...");
-          let totalBytesReclaimed = 0;
-          let tablesTouched = 0;
-          for (const s of allSources) {
+          type Row = { projectId: string; sourceId: string; result: Awaited<ReturnType<typeof compactTable>> };
+          const rows: Row[] = [];
+          for (const { projectId, source } of allSources) {
             try {
-              const bytes = await compactTable(s.table_name!);
-              totalBytesReclaimed += bytes;
-              tablesTouched += 1;
+              const result = await compactTable(source.table_name!);
+              rows.push({ projectId, sourceId: source.source_id, result });
             } catch { /* ignore — table may be gone */ }
           }
-          console.log(`Done. Reclaimed ${fmtSize(totalBytesReclaimed)} across ${tablesTouched} table(s).`);
+
+          const real = rows.filter((r) => r.result.hadRealWork);
+          const idle = rows.filter((r) => !r.result.hadRealWork);
+
+          for (const { projectId, sourceId, result } of real) {
+            const detail: string[] = [];
+            if (result.fragmentsMerged > 0) {
+              detail.push(`${result.fragmentsMerged} fragment${result.fragmentsMerged === 1 ? "" : "s"} merged`);
+            }
+            if (result.versionsPruned > 0) {
+              detail.push(`${result.versionsPruned} version${result.versionsPruned === 1 ? "" : "s"} pruned`);
+            }
+            const detailStr = detail.length > 0 ? `   (${detail.join(", ")})` : "";
+            console.log(`  ${projectId}/${sourceId}    ${fmtSize(result.bytesFreed)} reclaimed${detailStr}`);
+          }
+          if (idle.length > 0) {
+            const word = idle.length === 1 ? "table" : "tables";
+            if (real.length > 0) {
+              console.log(`  …${idle.length} more already compact`);
+            } else {
+              console.log(`  all ${idle.length} ${word} already compact`);
+            }
+          }
+
+          const realBytes = real.reduce((sum, r) => sum + r.result.bytesFreed, 0);
+          const overheadBytes = idle.reduce((sum, r) => sum + r.result.bytesFreed, 0);
+          const overheadStr = overheadBytes > 0 ? ` · ${fmtSize(overheadBytes)} manifest overhead` : "";
+          if (real.length > 0) {
+            console.log(`Done. Reclaimed ${fmtSize(realBytes)} across ${real.length} of ${rows.length} tables${overheadStr}.`);
+          } else {
+            console.log(`Done. 0 B reclaimed${overheadStr}.`);
+          }
         }
       }
 

@@ -64,8 +64,8 @@ describe("maybeCompact + compactTable (Fix 4)", () => {
     expect(stats.versionCount).toBeGreaterThanOrEqual(1);
   });
 
-  // M-D16 Fix C — compactTable returns bytes reclaimed (was Promise<void>).
-  it("compactTable returns a non-negative number of bytes reclaimed", async () => {
+  // v0.27.3 — compactTable returns a CompactResult with bytesFreed, hadRealWork, fragmentsMerged, versionsPruned.
+  it("compactTable returns a CompactResult with non-negative bytesFreed", async () => {
     fixture = await cloneFixture("sample-multi-branch-repo");
     project = await createTempProject({ rootPath: fixture.path });
 
@@ -78,16 +78,21 @@ describe("maybeCompact + compactTable (Fix 4)", () => {
     const src = getSource(project.projectId, project.sourceId)!;
 
     const { compactTable } = await import("../src/vector-store.js");
-    const reclaimed = await compactTable(src.table_name!);
+    const result = await compactTable(src.table_name!);
 
-    expect(typeof reclaimed).toBe("number");
-    expect(reclaimed).toBeGreaterThanOrEqual(0);
+    expect(typeof result.bytesFreed).toBe("number");
+    expect(result.bytesFreed).toBeGreaterThanOrEqual(0);
+    expect(typeof result.hadRealWork).toBe("boolean");
+    expect(typeof result.fragmentsMerged).toBe("number");
+    expect(typeof result.versionsPruned).toBe("number");
   });
 
-  it("compactTable on a missing table returns 0", async () => {
+  it("compactTable on a missing table returns an empty CompactResult", async () => {
     const { compactTable } = await import("../src/vector-store.js");
-    const reclaimed = await compactTable("definitely_not_a_real_table_md16");
-    expect(reclaimed).toBe(0);
+    const result = await compactTable("definitely_not_a_real_table_md16");
+    expect(result).toEqual({
+      bytesFreed: 0, hadRealWork: false, fragmentsMerged: 0, versionsPruned: 0,
+    });
   });
 
   // M21.1 — repeated full reindex must not balloon disk after explicit gc.
@@ -138,8 +143,10 @@ describe("maybeCompact + compactTable (Fix 4)", () => {
 
     await compactTable(src.table_name!); // first call may free real bytes
     const second = await compactTable(src.table_name!);
-    // Pre-fix this returned ~1.96 MB on every steady-state call. Post-fix it's
-    // bounded by the manifest-file size delta between consecutive optimize writes.
-    expect(second).toBeLessThan(1024);
+    // Pre-fix this returned ~1.96 MB on every steady-state call. Post-fix:
+    // hadRealWork must be false (only manifest churn happened) and bytesFreed
+    // is bounded by the size delta between consecutive manifest writes (<1 KB).
+    expect(second.hadRealWork).toBe(false);
+    expect(second.bytesFreed).toBeLessThan(1024);
   });
 });

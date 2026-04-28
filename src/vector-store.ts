@@ -404,35 +404,73 @@ async function maybeCompact(table: lancedb.Table): Promise<void> {
 }
 
 /**
+ * Result of a compaction call. The disk delta alone can't tell users whether
+ * the bytes are real reclaim or pure manifest churn from the optimize() call
+ * itself (which writes a new manifest version every time it runs and prunes
+ * the prior one — ~400 B of noise per call). The compaction stats let callers
+ * separate those signals.
+ */
+export interface CompactResult {
+  /** max(0, dirSize before - dirSize after) — measured on disk. Includes manifest churn. */
+  bytesFreed: number;
+  /** True iff compaction merged or wrote fragments, or pruned >1 manifest version. */
+  hadRealWork: boolean;
+  /** Number of small fragments retired by compaction (CompactionStats.fragmentsRemoved). */
+  fragmentsMerged: number;
+  /** Number of manifest versions pruned. ≥1 every call (the optimize call self-prunes); >1 means real catch-up. */
+  versionsPruned: number;
+}
+
+const EMPTY_COMPACT_RESULT: CompactResult = {
+  bytesFreed: 0, hadRealWork: false, fragmentsMerged: 0, versionsPruned: 0,
+};
+
+/**
  * End-of-burst compaction — fires unconditionally (no version threshold) but
  * keeps the grace window. Called after each indexing run to clean up fragments
  * accumulated during the burst without disturbing concurrent readers.
- * Returns actual bytes freed from disk (measured pre/post).
  */
-export async function compactTableWithGrace(tableName: string): Promise<number> {
+export async function compactTableWithGrace(tableName: string): Promise<CompactResult> {
   const table = await openExistingTable(tableName);
-  if (!table) return 0;
+  if (!table) return EMPTY_COMPACT_RESULT;
   const before = dirSizeBytes(tableName);
-  await table.optimize({ cleanupOlderThan: new Date(Date.now() - GRACE_MS) });
+  const stats = await table.optimize({ cleanupOlderThan: new Date(Date.now() - GRACE_MS) });
   const after = dirSizeBytes(tableName);
-  return Math.max(0, before - after);
+  return classify(before, after, stats);
 }
 
 /**
  * Full-purge compaction — removes all old versions with no grace period.
  * Called by `scrybe gc` where the user explicitly requested maximum reclaim.
- * Returns actual bytes freed from disk (measured pre/post). Lance's
- * `OptimizeStats.prune.bytesRemoved` is unreliable — it counts bytes referenced
- * by the dropped manifest version, not bytes physically deleted, so it reports
- * phantom reclaim on every call even when nothing is freed.
+ * Lance's `OptimizeStats.prune.bytesRemoved` is unreliable — it counts bytes
+ * referenced by the dropped manifest version, not bytes physically deleted —
+ * so the disk delta is measured directly. Compaction stats are returned so
+ * callers can distinguish real reclaim from manifest-rewrite noise.
  */
-export async function compactTable(tableName: string): Promise<number> {
+export async function compactTable(tableName: string): Promise<CompactResult> {
   const table = await openExistingTable(tableName);
-  if (!table) return 0;
+  if (!table) return EMPTY_COMPACT_RESULT;
   const before = dirSizeBytes(tableName);
-  await table.optimize({ cleanupOlderThan: new Date() });
+  const stats = await table.optimize({ cleanupOlderThan: new Date() });
   const after = dirSizeBytes(tableName);
-  return Math.max(0, before - after);
+  return classify(before, after, stats);
+}
+
+function classify(
+  before: number,
+  after: number,
+  stats: { compaction: { fragmentsRemoved: number; fragmentsAdded: number; filesRemoved: number; filesAdded: number }; prune: { oldVersionsRemoved: number } }
+): CompactResult {
+  const hadRealWork =
+    stats.compaction.filesRemoved > 0 ||
+    stats.compaction.filesAdded > 0 ||
+    stats.prune.oldVersionsRemoved > 1;
+  return {
+    bytesFreed: Math.max(0, before - after),
+    hadRealWork,
+    fragmentsMerged: stats.compaction.fragmentsRemoved,
+    versionsPruned: stats.prune.oldVersionsRemoved,
+  };
 }
 
 /**

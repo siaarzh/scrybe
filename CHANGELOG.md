@@ -9,6 +9,23 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.27.3] — 2026-04-28
+
+### Changed
+
+- **`scrybe gc` output now distinguishes real reclaim from manifest churn.** Each `optimize` call writes a fresh manifest version and prunes the prior one, costing ~400 B of disk delta even when nothing meaningful happens. Pre-fix output blended the two and printed `Reclaimed 402 B` on idle reruns. New format:
+  - Per-table line for tables that did real work, with detail (e.g. `cmx-api-tests/primary    5.1 MB reclaimed   (4 versions pruned)`).
+  - Tables that did nothing are collapsed into `…N more already compact` (or `all N tables already compact` when none did real work).
+  - Summary line splits real reclaim from `manifest overhead` (e.g. `Done. Reclaimed 5.8 MB across 2 of 7 tables · 80 B manifest overhead.` or `Done. 0 B reclaimed · 408 B manifest overhead.`).
+- **`compactTable(tableName)` now returns `Promise<CompactResult>`** instead of `Promise<number>`. Fields: `bytesFreed` (disk delta), `hadRealWork` (true iff `compaction.filesRemoved>0 || filesAdded>0 || prune.oldVersionsRemoved>1`), `fragmentsMerged`, `versionsPruned`. `compactTableWithGrace` returns the same type. Callers in `migrations.ts` already ignored the return value; no behavior change there.
+
+### Tests
+
+- Updated `tests/vector-store.test.ts`: assertions now read `.bytesFreed`/`.hadRealWork` on the new `CompactResult`. Steady-state second-call assertion: `hadRealWork === false` AND `bytesFreed < 1024`.
+- Updated regex in `tests/scenarios/gc.test.ts` and `tests/scenarios/bloat-display.test.ts` to match the new summary format (`Reclaimed N across M of K tables` or `0 B reclaimed`).
+
+---
+
 ## [0.27.2] — 2026-04-28
 
 ### Fixed

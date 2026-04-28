@@ -84,7 +84,7 @@ describe("Scenario 13 — HEALTH column rendering (M-D16 Fix B)", () => {
     // Run gc.
     const gc = runScrybe(["gc"], env, LOW_THRESHOLD);
     expect(gc.exit).toBe(0);
-    expect(gc.stdout).toMatch(/Reclaimed [\d.]+ (B|KB|MB|GB) across \d+ table\(s\)\./);
+    expect(gc.stdout).toMatch(/(Reclaimed [\d.]+ (B|KB|MB|GB) across \d+ of \d+ tables|0 B reclaimed)/);
 
     // After gc, no bloat marker, no legend.
     const after = runScrybe(["ps", "--all"], env, LOW_THRESHOLD);

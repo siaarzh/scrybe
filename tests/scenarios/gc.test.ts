@@ -32,8 +32,9 @@ describe("Scenario 7 — gc reclaims disk (M-D13 Fix 4-5)", () => {
     // Should mention either "No orphan chunks found" or "compacting" or "GC complete"
     const combined = r.stdout + r.stderr;
     expect(combined).toMatch(/orphan|compact|No orphan|GC complete/i);
-    // M-D16 Fix C: gc reports actual reclaimed bytes, even when 0
-    expect(r.stdout).toMatch(/Reclaimed [\d.]+ (B|KB|MB|GB) across \d+ table\(s\)\./);
+    // v0.27.3: gc reports either real reclaim ("Reclaimed N across M of K tables")
+    // or steady-state ("0 B reclaimed"), with optional manifest-overhead suffix.
+    expect(r.stdout).toMatch(/(Reclaimed [\d.]+ (B|KB|MB|GB) across \d+ of \d+ tables|0 B reclaimed)/);
   });
 
   it("gc --dry-run reports without deleting", () => {
