@@ -11,6 +11,8 @@ import {
   cancelJob,
   listJobs,
 } from "../jobs.js";
+import { getQueueStatus } from "../jobs-store.js";
+import { ensureRunning, DaemonClient } from "../daemon/client.js";
 import { config } from "../config.js";
 import type { IndexMode } from "../types.js";
 import type { Tool, JobResult } from "./types.js";
@@ -64,6 +66,33 @@ export const reindexProjectTool: Tool<
       throw new Error("source_ids is required for mode: full");
     }
     if (!getProject(project_id)) throw new Error(`Project '${project_id}' not found`);
+
+    // Route through daemon when available (prevents cross-process write races)
+    const daemon = await ensureRunning();
+    if (daemon.ok) {
+      const client = DaemonClient.fromPidfile();
+      if (client) {
+        const resp = await client.submitReindex({ projectId: project_id, sourceId: source_ids?.[0], branch, mode: m });
+        const job = resp.jobs[0];
+        if (!job) throw new Error("Daemon returned no job");
+        return {
+          job_id: job.jobId,
+          status: job.status ?? "started",
+          project_id,
+          mode: m,
+          ...(job.queuePosition != null && { queue_position: job.queuePosition }),
+          ...(job.duplicateOfPending && { duplicate_of_pending: true }),
+        };
+      }
+    }
+
+    // In-process fallback (container / opted-out / daemon unavailable)
+    if (!daemon.ok && (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout")) {
+      throw Object.assign(new Error(
+        "The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\n" +
+        "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
+      ), { error_type: "daemon_unavailable" });
+    }
     const jobResult = submitJob(project_id, m, source_ids, branch);
     if (typeof jobResult === "object" && "error" in jobResult) {
       throw new Error(`A reindex job is already running for this project (job: ${jobResult.job_id})`);
@@ -96,6 +125,33 @@ export const reindexSourceTool: Tool<
     if (embErr) throw new Error(embErr);
     const m: IndexMode = mode === "full" ? "full" : "incremental";
     if (!getProject(project_id)) throw new Error(`Project '${project_id}' not found`);
+
+    // Route through daemon when available
+    const daemon = await ensureRunning();
+    if (daemon.ok) {
+      const client = DaemonClient.fromPidfile();
+      if (client) {
+        const resp = await client.submitReindex({ projectId: project_id, sourceId: source_id, branch, mode: m });
+        const job = resp.jobs[0];
+        if (!job) throw new Error("Daemon returned no job");
+        return {
+          job_id: job.jobId,
+          status: job.status ?? "started",
+          project_id,
+          source_id,
+          mode: m,
+          ...(job.queuePosition != null && { queue_position: job.queuePosition }),
+          ...(job.duplicateOfPending && { duplicate_of_pending: true }),
+        };
+      }
+    }
+
+    if (!daemon.ok && (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout")) {
+      throw Object.assign(new Error(
+        "The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\n" +
+        "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
+      ), { error_type: "daemon_unavailable" });
+    }
     const sourceJobResult = submitSourceJob(project_id, source_id, m, branch);
     if (typeof sourceJobResult === "object" && "error" in sourceJobResult) {
       throw new Error(`A reindex job is already running for this project (job: ${sourceJobResult.job_id})`);
@@ -121,15 +177,27 @@ export const reindexStatusTool: Tool<
   },
   handler: async ({ job_id }) => {
     const status = getJobStatus(job_id);
-    if (!status) throw new Error(`Job '${job_id}' not found (jobs are lost on server restart)`);
-    if (status.status === "done" && status.project_id === "*") {
-      const projects = listProjects().map((p) => ({
-        project_id: p.id,
-        sources: p.sources.map((s) => ({ source_id: s.source_id, last_indexed: s.last_indexed })),
-      }));
-      return { ...status, projects };
+    if (status) {
+      if (status.status === "done" && status.project_id === "*") {
+        const projects = listProjects().map((p) => ({
+          project_id: p.id,
+          sources: p.sources.map((s) => ({ source_id: s.source_id, last_indexed: s.last_indexed })),
+        }));
+        return { ...status, projects };
+      }
+      return status;
     }
-    return status;
+
+    // Try daemon's SQLite (cross-process jobs)
+    const client = DaemonClient.fromPidfile();
+    if (client) {
+      try {
+        const row = await client.jobStatus(job_id);
+        if (row) return row;
+      } catch { /* daemon may not be running */ }
+    }
+
+    throw new Error(`Job '${job_id}' not found`);
   },
 };
 
@@ -167,7 +235,7 @@ export const listJobsTool: Tool<
     inputSchema: {
       type: "object",
       properties: {
-        status: { type: "string", enum: ["running", "done", "failed", "cancelled"], description: "Filter by status (omit for all jobs)" },
+        status: { type: "string", enum: ["queued", "running", "done", "failed", "cancelled"], description: "Filter by status (omit for all jobs)" },
       },
     },
     annotations: { readOnlyHint: true, openWorldHint: false },
@@ -189,5 +257,39 @@ export const listJobsTool: Tool<
       const taskSummary = job.tasks.map((t: any) => `${t.source_id}:${t.status}`).join(", ");
       return `[${job.job_id}] ${job.project_id} | ${job.status} | ${elapsed} | ${taskSummary || job.current_project || ""}`;
     }).join("\n");
+  },
+};
+
+export const queueStatusTool: Tool<
+  { project_id?: string },
+  { running: unknown[]; queued: unknown[] }
+> = {
+  spec: {
+    name: "queue_status",
+    description:
+      "Check what is currently running or queued in the reindex queue. " +
+      "Before triggering a reindex, call this to see if the daemon already has a pending or in-flight job for the project — polling reindex_status on the existing job is cheaper than submitting a duplicate.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "Filter to a specific project (omit for all)" },
+      },
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  handler: async ({ project_id }) => {
+    // Prefer daemon's view (includes jobs from all processes)
+    const client = DaemonClient.fromPidfile();
+    if (client) {
+      try {
+        return await client.queueStatus(project_id);
+      } catch { /* daemon not running */ }
+    }
+    // In-process fallback
+    try {
+      return getQueueStatus(project_id);
+    } catch {
+      return { running: [], queued: [] };
+    }
   },
 };

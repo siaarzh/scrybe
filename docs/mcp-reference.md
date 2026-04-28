@@ -182,7 +182,9 @@ No parameters.
 
 ### `reindex_project`
 
-Trigger background reindexing of sources in a project. Returns a `job_id` to poll.
+Trigger background reindexing of sources in a project. Routes through the daemon queue when the daemon is running (prevents cross-process LanceDB write conflicts). Returns a `job_id` to poll with `reindex_status`.
+
+> **Tip:** Before triggering a reindex, call `queue_status(project_id)` to check if the daemon already has a pending or in-flight job. Polling `reindex_status` on the existing job is cheaper than submitting a duplicate.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -191,11 +193,13 @@ Trigger background reindexing of sources in a project. Returns a `job_id` to pol
 | `mode` | string | | `"full"` or `"incremental"` (default: `"incremental"`) |
 | `branch` | string | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources. |
 
+**Returns:** `{ job_id, status, project_id, mode, queue_position?, duplicate_of_pending? }`
+
 ---
 
 ### `reindex_source`
 
-Trigger background reindexing of a single source. Returns a `job_id` to poll.
+Trigger background reindexing of a single source. Routes through the daemon queue when available. Returns a `job_id` to poll.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -208,7 +212,7 @@ Trigger background reindexing of a single source. Returns a `job_id` to poll.
 
 ### `reindex_status`
 
-Get the status of a background reindex job.
+Get the status of a background reindex job. Checks the in-process job map first, then falls back to the durable SQLite job store (cross-process, survives daemon restart).
 
 | Parameter   | Type   | Required | Description                          |
 |-------------|--------|----------|--------------------------------------|
@@ -218,21 +222,33 @@ Get the status of a background reindex job.
 
 Each entry in `tasks` has: `{ source_id, mode, status, phase, files_scanned, chunks_indexed, started_at, finished_at, error }`
 
-`status` values: `"running"`, `"done"`, `"failed"`, `"cancelled"`
+`status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`
 
 Task `status` values: `"pending"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`
 
 ---
 
+### `queue_status`
+
+Check what is currently running or queued in the reindex queue. Use this before calling `reindex_project` to avoid submitting a duplicate job.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | | Filter to a specific project (omit for all projects) |
+
+**Returns:** `{ running: [...], queued: [...] }` — each entry has `job_id`, `project_id`, `source_id`, `mode`, `started_at`/`queued_at`.
+
+---
+
 ### `list_jobs`
 
-List all background reindex jobs (like `docker ps`). Does not require a `job_id`.
+List background reindex jobs from the durable SQLite store. Cross-process: shows jobs submitted by the daemon, MCP, or CLI. Does not require a `job_id`.
 
 | Parameter | Type   | Required | Description                     |
 |-----------|--------|----------|---------------------------------|
 | `status`  | string |          | Filter by job status (optional) |
 
-Accepted `status` values: `"running"`, `"done"`, `"failed"`, `"cancelled"`. Omit to return all jobs.
+Accepted `status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`. Omit to return all jobs.
 
 **Returns:** `{ jobs[], count }`
 

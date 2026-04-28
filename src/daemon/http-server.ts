@@ -10,9 +10,11 @@ import {
   addPinned, removePinned, clearPinned, listPinned,
   InvalidSourceTypeError, ProjectNotFoundError, SourceNotFoundError,
 } from "../pinned-branches.js";
-import { getQueueStats } from "./queue.js";
+import { getQueueStats, getPending } from "./queue.js";
 import { getWatcherHealth } from "./watcher.js";
 import { getGitWatcherHealth, getCachedBranch } from "./git-watcher.js";
+import { listJobRows, getJobRow, getQueueStatus } from "../jobs-store.js";
+import { cancelJob } from "../jobs.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -62,6 +64,8 @@ export interface DaemonStatus {
   clientCount?: number;
   mode?: "on-demand" | "always-on";
   gracePeriodRemainingMs?: number | null;
+  // Plan 21: running jobs from SQLite
+  runningJobs?: Array<{ job_id: string; project_id: string; source_id: string | null; mode: string; started_at: number | null; phase: string | null }>;
 }
 
 export interface KickRequest {
@@ -72,7 +76,15 @@ export interface KickRequest {
 }
 
 export interface KickResponse {
-  jobs: Array<{ jobId: string; projectId: string; sourceId: string; branch: string }>;
+  jobs: Array<{
+    jobId: string;
+    projectId: string;
+    sourceId: string;
+    branch: string;
+    status?: "queued" | "running";
+    queuePosition?: number;
+    duplicateOfPending?: boolean;
+  }>;
 }
 
 // ─── Module state ──────────────────────────────────────────────────────────
@@ -254,6 +266,18 @@ function buildStatus(): DaemonStatus {
     clientCount: _getClientCount?.() ?? 0,
     mode: _getMode?.() ?? "on-demand",
     gracePeriodRemainingMs: _getGracePeriodRemainingMs?.() ?? null,
+    runningJobs: (() => {
+      try {
+        return listJobRows({ status: "running" }).map((r) => ({
+          job_id: r.job_id,
+          project_id: r.project_id,
+          source_id: r.source_id,
+          mode: r.mode,
+          started_at: r.started_at,
+          phase: r.phase,
+        }));
+      } catch { return []; }
+    })(),
   };
 }
 
@@ -336,6 +360,50 @@ async function handle(
     const body = (await readBody(req)) as KickRequest;
     const result = _onKick ? await _onKick(body) : { jobs: [] };
     jsonRes(res, 200, result);
+    return;
+  }
+
+  // ── GET /jobs ──────────────────────────────────────────────────────────
+  if (method === "GET" && path.startsWith("/jobs")) {
+    const url = new URL(`http://x${path}`);
+    const jobId = path === "/jobs" ? null : path.slice("/jobs/".length);
+
+    if (jobId) {
+      // GET /jobs/:id
+      try {
+        const row = getJobRow(jobId);
+        if (!row) { jsonRes(res, 404, { error: "not_found" }); return; }
+        jsonRes(res, 200, row);
+      } catch { jsonRes(res, 200, { error: "unavailable" }); }
+    } else {
+      // GET /jobs?status=X&project_id=Y
+      try {
+        const rows = listJobRows({
+          status: url.searchParams.get("status") ?? undefined,
+          projectId: url.searchParams.get("project_id") ?? undefined,
+        });
+        jsonRes(res, 200, { jobs: rows, count: rows.length });
+      } catch { jsonRes(res, 200, { jobs: [], count: 0 }); }
+    }
+    return;
+  }
+
+  // ── DELETE /jobs/:id ───────────────────────────────────────────────────
+  if (method === "DELETE" && path.startsWith("/jobs/")) {
+    const jobId = path.slice("/jobs/".length);
+    const cancelled = cancelJob(jobId);
+    jsonRes(res, 200, { job_id: jobId, cancelled });
+    return;
+  }
+
+  // ── GET /queue-status ─────────────────────────────────────────────────
+  if (method === "GET" && path.startsWith("/queue-status")) {
+    const url = new URL(`http://x${path}`);
+    const projectId = url.searchParams.get("project_id") ?? undefined;
+    try {
+      const qs = getQueueStatus(projectId);
+      jsonRes(res, 200, qs);
+    } catch { jsonRes(res, 200, { running: [], queued: [] }); }
     return;
   }
 

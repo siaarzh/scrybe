@@ -48,6 +48,9 @@ export function runScrybe(
       SCRYBE_DAEMON_PORT: "0",
       SCRYBE_DAEMON_NO_FETCH: "1",
       SCRYBE_SKIP_MIGRATION: "1",
+      // Prevent scrybe index / gc from spawning a background daemon in scenario tests.
+      // Tests that specifically need daemon routing (e.g. two-writer-race) override this.
+      SCRYBE_NO_AUTO_DAEMON: "1",
       // Wire sidecar embedder so index commands embed without API keys
       EMBEDDING_BASE_URL: sidecar.baseUrl,
       EMBEDDING_MODEL: sidecar.model,
@@ -84,6 +87,7 @@ export function runScrybeWithStdin(
       SCRYBE_DAEMON_PORT: "0",
       SCRYBE_DAEMON_NO_FETCH: "1",
       SCRYBE_SKIP_MIGRATION: "1",
+      SCRYBE_NO_AUTO_DAEMON: "1",
       EMBEDDING_BASE_URL: sidecar.baseUrl,
       EMBEDDING_MODEL: sidecar.model,
       EMBEDDING_DIMENSIONS: String(sidecar.dimensions),

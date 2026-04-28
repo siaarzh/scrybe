@@ -22,32 +22,32 @@ afterEach(() => {
 });
 
 describe("checkAndMigrate", () => {
-  it("first run (no schema.json): deletes hash files and writes schema version 2", async () => {
+  it("first run (no schema.json): deletes hash files and writes current schema version", async () => {
     seedOldIndex();
-    const { checkAndMigrate } = await import("../src/schema-version.js");
+    const { checkAndMigrate, CURRENT_SCHEMA_VERSION } = await import("../src/schema-version.js");
 
     const result = await checkAndMigrate();
 
     expect(result.migrated).toBe(true);
-    expect(result.version).toBe(2);
+    expect(result.version).toBe(CURRENT_SCHEMA_VERSION);
 
     // Hash files removed
     expect(existsSync(join(dataDir(), "hashes", "proj__primary.json"))).toBe(false);
 
-    // schema.json written with version 2
+    // schema.json written with current version
     const schema = JSON.parse(readFileSync(join(dataDir(), "schema.json"), "utf8")) as { version: number };
-    expect(schema.version).toBe(2);
+    expect(schema.version).toBe(CURRENT_SCHEMA_VERSION);
   });
 
-  it("second run: idempotent — returns migrated=false, version=2", async () => {
+  it("second run: idempotent — returns migrated=false, current version", async () => {
     seedOldIndex();
-    const { checkAndMigrate } = await import("../src/schema-version.js");
+    const { checkAndMigrate, CURRENT_SCHEMA_VERSION } = await import("../src/schema-version.js");
 
     await checkAndMigrate(); // first — migrates
     const second = await checkAndMigrate(); // second — no-op
 
     expect(second.migrated).toBe(false);
-    expect(second.version).toBe(2);
+    expect(second.version).toBe(CURRENT_SCHEMA_VERSION);
   });
 
   it("SCRYBE_SKIP_MIGRATION=1: skips migration, hash files preserved", async () => {

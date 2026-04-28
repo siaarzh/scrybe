@@ -47,6 +47,34 @@ function makeKnowledgeSchema(dimensions: number): Schema {
 let _db: lancedb.Connection | null = null;
 const _tableCache = new Map<string, lancedb.Table>();
 
+function isCommitConflict(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /commit conflict|cannot be automatically resolved/i.test(msg);
+}
+
+function evictTableCache(tableName: string): void {
+  _tableCache.delete(tableName);
+}
+
+async function writeWithRetry<T>(
+  tableName: string,
+  op: (t: lancedb.Table) => Promise<T>
+): Promise<T> {
+  const table = await openExistingTable(tableName);
+  if (!table) throw new Error(`Table '${tableName}' not found`);
+  try {
+    return await op(table);
+  } catch (err) {
+    if (!isCommitConflict(err)) throw err;
+    // Stale handle — evict, reopen, single retry
+    evictTableCache(tableName);
+    const fresh = await openExistingTable(tableName);
+    if (!fresh) throw err;
+    process.stderr.write(`[scrybe] commit conflict on '${tableName}' — evicting cached table handle and retrying\n`);
+    return await op(fresh);
+  }
+}
+
 async function getDb(): Promise<lancedb.Connection> {
   if (!_db) {
     mkdirSync(DB_PATH, { recursive: true });
@@ -198,10 +226,12 @@ export async function createFtsIndex(tableName: string): Promise<void> {
 }
 
 export async function deleteProject(projectId: string, tableName: string): Promise<void> {
-  const table = await openExistingTable(tableName);
-  if (!table) return;
-  await table.delete(`project_id = '${escapeSql(projectId)}'`);
-  await maybeCompact(table);
+  const existing = await openExistingTable(tableName);
+  if (!existing) return;
+  await writeWithRetry(tableName, async (t) => {
+    await t.delete(`project_id = '${escapeSql(projectId)}'`);
+    await maybeCompact(t);
+  });
 }
 
 export async function deleteFileChunks(
@@ -209,12 +239,14 @@ export async function deleteFileChunks(
   filePath: string,
   tableName: string
 ): Promise<void> {
-  const table = await openExistingTable(tableName);
-  if (!table) return;
-  await table.delete(
-    `project_id = '${escapeSql(projectId)}' AND file_path = '${escapeSql(filePath)}'`
-  );
-  await maybeCompact(table);
+  const existing = await openExistingTable(tableName);
+  if (!existing) return;
+  await writeWithRetry(tableName, async (t) => {
+    await t.delete(
+      `project_id = '${escapeSql(projectId)}' AND file_path = '${escapeSql(filePath)}'`
+    );
+    await maybeCompact(t);
+  });
 }
 
 // ─── Knowledge table operations ───────────────────────────────────────────────
@@ -307,10 +339,12 @@ export async function createKnowledgeFtsIndex(tableName: string): Promise<void> 
 }
 
 export async function deleteKnowledgeProject(projectId: string, tableName: string): Promise<void> {
-  const table = await openExistingTable(tableName);
-  if (!table) return;
-  await table.delete(`project_id = '${escapeSql(projectId)}'`);
-  await maybeCompact(table);
+  const existing = await openExistingTable(tableName);
+  if (!existing) return;
+  await writeWithRetry(tableName, async (t) => {
+    await t.delete(`project_id = '${escapeSql(projectId)}'`);
+    await maybeCompact(t);
+  });
 }
 
 export async function deleteKnowledgeSource(
@@ -318,12 +352,14 @@ export async function deleteKnowledgeSource(
   sourcePath: string,
   tableName: string
 ): Promise<void> {
-  const table = await openExistingTable(tableName);
-  if (!table) return;
-  await table.delete(
-    `project_id = '${escapeSql(projectId)}' AND source_path = '${escapeSql(sourcePath)}'`
-  );
-  await maybeCompact(table);
+  const existing = await openExistingTable(tableName);
+  if (!existing) return;
+  await writeWithRetry(tableName, async (t) => {
+    await t.delete(
+      `project_id = '${escapeSql(projectId)}' AND source_path = '${escapeSql(sourcePath)}'`
+    );
+    await maybeCompact(t);
+  });
 }
 
 // ─── Compaction ───────────────────────────────────────────────────────────────
@@ -404,11 +440,13 @@ export async function listChunkIds(projectId: string, tableName: string): Promis
  */
 export async function deleteChunks(chunkIds: string[], tableName: string): Promise<void> {
   if (chunkIds.length === 0) return;
-  const table = await openExistingTable(tableName);
-  if (!table) return;
+  const existing = await openExistingTable(tableName);
+  if (!existing) return;
   const ids = chunkIds.map((id) => `'${escapeSql(id)}'`).join(", ");
-  await table.delete(`chunk_id IN (${ids})`);
-  await maybeCompact(table);
+  await writeWithRetry(tableName, async (t) => {
+    await t.delete(`chunk_id IN (${ids})`);
+    await maybeCompact(t);
+  });
 }
 
 /** Count rows in a named table. Returns 0 if table doesn't exist. */

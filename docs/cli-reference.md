@@ -290,6 +290,11 @@ Index or reindex a project (all sources), specific sources, or all registered pr
 | `--full` | | Full reindex — clears and rebuilds from scratch. Requires `--source-ids` |
 | `--incremental` | | Only process changed files / updated issues since last run (default) |
 | `--branch <name>` | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources |
+| `--detach` | | Submit the job to the daemon and return immediately with the job_id (no progress stream). For CI/scripted use. |
+
+When the scrybe daemon is running, `scrybe index` routes the job through the daemon queue (serialised writes, no cross-process LanceDB conflicts). Use `SCRYBE_NO_AUTO_DAEMON=1` to force in-process mode.
+
+Incremental deletion: files removed from disk are removed from branch-scoped search after the next incremental run. The underlying LanceDB rows remain as orphans until `scrybe gc` is run.
 
 ```bash
 # Incremental reindex of all registered projects
@@ -307,6 +312,9 @@ scrybe index --project-id myrepo --source-ids gitlab-issues
 
 # Index a specific git branch
 scrybe index --project-id myrepo --source-ids primary --branch feat/my-feature
+
+# Submit to daemon and return job_id immediately (CI use)
+scrybe index --project-id myrepo --detach
 ```
 
 ---

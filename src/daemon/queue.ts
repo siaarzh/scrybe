@@ -9,11 +9,13 @@
  * pushEvent is injected rather than imported to avoid a circular dependency with
  * http-server.ts (which imports queue.ts for getQueueStats).
  */
+import { randomBytes } from "node:crypto";
 import { cpus } from "node:os";
 import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { submitJob, submitSourceJob, getJobStatus } from "../jobs.js";
+import { insertJob, updateJobStatus, getQueueStatus } from "../jobs-store.js";
 import type { DaemonEvent } from "./http-server.js";
 import type { IndexMode } from "../types.js";
 
@@ -36,6 +38,7 @@ export interface QueueRequest {
 }
 
 interface PendingItem extends QueueRequest {
+  jobId: string;
   resolve: (jobId: string) => void;
   reject: (err: Error) => void;
 }
@@ -64,6 +67,58 @@ export function getQueueStats(): { active: number; pending: number; maxConcurren
   return { active: _active.size, pending: _pending.length, maxConcurrent: MAX_CONCURRENT };
 }
 
+export interface SubmitResult {
+  jobId: string;
+  status: "queued" | "running";
+  queuePosition?: number;
+  duplicateOfPending: boolean;
+}
+
+/**
+ * Submit a job to the queue immediately — returns without waiting for the job to start.
+ * Use this from HTTP handlers so /kick never hangs.
+ */
+export function submitToQueue(req: QueueRequest): SubmitResult {
+  const jobId = randomBytes(4).toString("hex");
+  const now = Date.now();
+
+  const duplicateOfPending = _pending.some(
+    (p) =>
+      p.projectId === req.projectId &&
+      p.sourceId === req.sourceId &&
+      (p.mode ?? "incremental") === (req.mode ?? "incremental") &&
+      p.branch === req.branch
+  );
+
+  // Write to SQLite as "queued" so it's visible to list_jobs immediately
+  try {
+    insertJob({
+      job_id: jobId,
+      project_id: req.projectId,
+      source_id: req.sourceId ?? null,
+      branch: req.branch ?? null,
+      mode: req.mode ?? "incremental",
+      status: "queued",
+      phase: null,
+      queued_at: now,
+      started_at: null,
+      finished_at: null,
+      error_message: null,
+      origin: "daemon",
+    });
+  } catch { /* non-fatal */ }
+
+  const item: PendingItem = { ...req, jobId, resolve: () => {}, reject: () => {} };
+  _pending.push(item);
+  drain();
+
+  if (_active.has(jobId)) {
+    return { jobId, status: "running", duplicateOfPending };
+  }
+  const queuePosition = _pending.findIndex((p) => p.jobId === jobId);
+  return { jobId, status: "queued", queuePosition: queuePosition >= 0 ? queuePosition : undefined, duplicateOfPending };
+}
+
 /**
  * Submit a job through the queue.
  * Resolves with the job_id once the job STARTS (not when it completes).
@@ -71,10 +126,21 @@ export function getQueueStats(): { active: number; pending: number; maxConcurren
  * waits in the pending list until a slot opens.
  */
 export function enqueue(req: QueueRequest): Promise<string> {
+  const jobId = randomBytes(4).toString("hex");
   return new Promise<string>((resolve, reject) => {
-    _pending.push({ ...req, resolve, reject });
+    _pending.push({ ...req, jobId, resolve, reject });
     drain();
   });
+}
+
+/** Return pending jobs (queued but not yet started). Used by /status and queue_status. */
+export function getPending(): Array<{ jobId: string; projectId: string; sourceId?: string; mode: IndexMode; queuedAt?: number }> {
+  return _pending.map((p) => ({
+    jobId: p.jobId,
+    projectId: p.projectId,
+    sourceId: p.sourceId,
+    mode: p.mode ?? "incremental",
+  }));
 }
 
 /** Drain all pending items and stop all watch timers. Call on daemon shutdown. */
@@ -110,8 +176,8 @@ function drain(): void {
     const startedAt = new Date().toISOString();
 
     const result = item.sourceId
-      ? submitSourceJob(item.projectId, item.sourceId, item.mode ?? "incremental", item.branch)
-      : submitJob(item.projectId, item.mode ?? "incremental", undefined, item.branch);
+      ? submitSourceJob(item.projectId, item.sourceId, item.mode ?? "incremental", item.branch, item.jobId)
+      : submitJob(item.projectId, item.mode ?? "incremental", undefined, item.branch, item.jobId);
 
     if (typeof result !== "string") {
       // jobs.ts says already_running — project added to active via an out-of-band submitJob call;

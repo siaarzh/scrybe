@@ -1,6 +1,7 @@
 import { randomBytes } from "crypto";
 import { indexProject, indexSource } from "./indexer.js";
 import { listProjects, getProject } from "./registry.js";
+import { insertJob, updateJobStatus, getJobRow, listJobRows, jobRowToState } from "./jobs-store.js";
 import type { IndexMode, JobState, SourceTask } from "./types.js";
 
 type StoredJob = JobState & {
@@ -59,6 +60,13 @@ function finalizeJobStatus(job: StoredJob): void {
     job.status = "done";
   }
   job.finished_at = Date.now();
+  try {
+    updateJobStatus(job.job_id, {
+      status: job.status,
+      finished_at: job.finished_at,
+      error_message: job.error ?? null,
+    });
+  } catch { /* non-fatal — SQLite write failure doesn't block indexing */ }
 }
 
 async function runTasks(jobId: string): Promise<void> {
@@ -88,6 +96,7 @@ async function runTasks(jobId: string): Promise<void> {
     task.status = "running";
     task.started_at = Date.now();
     task.phase = "scanning";
+    try { updateJobStatus(jobId, { phase: "scanning", started_at: task.started_at }); } catch { /* non-fatal */ }
 
     try {
       const result = await indexSource(job.project_id, task.source_id, task.mode, {
@@ -99,7 +108,10 @@ async function runTasks(jobId: string): Promise<void> {
         },
         onEmbedProgress(n) {
           task.chunks_indexed = n;
-          task.phase = "embedding";
+          if (task.phase !== "embedding") {
+            task.phase = "embedding";
+            try { updateJobStatus(jobId, { phase: "embedding" }); } catch { /* non-fatal */ }
+          }
         },
       });
       task.status = "done";
@@ -130,12 +142,14 @@ async function runTasks(jobId: string): Promise<void> {
  * Submit a background job to reindex one or more sources in a project.
  * - mode "full" requires explicit sourceIds
  * - If a running job for this project exists, returns { error, job_id } instead of throwing
+ * - preJobId: if provided, use this as the job_id (for daemon-queue pre-registration)
  */
 export function submitJob(
   projectId: string,
   mode: IndexMode,
   sourceIds?: string[],
-  branch?: string
+  branch?: string,
+  preJobId?: string
 ): string | { error: "already_running"; job_id: string } {
   if (mode === "full" && !sourceIds?.length) {
     throw new Error("full reindex requires explicit source_ids");
@@ -165,7 +179,7 @@ export function submitJob(
   const tasks: SourceTask[] = sources.map((sid) => makePendingTask(sid, mode));
 
   const job: StoredJob = {
-    job_id: randomBytes(4).toString("hex"),
+    job_id: preJobId ?? randomBytes(4).toString("hex"),
     project_id: projectId,
     mode,
     status: "running",
@@ -179,6 +193,27 @@ export function submitJob(
   };
 
   _jobs.set(job.job_id, job);
+  try {
+    if (preJobId) {
+      // Already inserted as "queued" by daemon — update to "running"
+      updateJobStatus(preJobId, { status: "running", started_at: job.started_at });
+    } else {
+      insertJob({
+        job_id: job.job_id,
+        project_id: projectId,
+        source_id: sources.length === 1 ? sources[0] : null,
+        branch: branch ?? null,
+        mode,
+        status: "running",
+        phase: null,
+        queued_at: job.started_at,
+        started_at: job.started_at,
+        finished_at: null,
+        error_message: null,
+        origin: "cli",
+      });
+    }
+  } catch { /* non-fatal */ }
 
   // Fire-and-forget
   runTasks(job.job_id).catch((err: unknown) => {
@@ -187,6 +222,9 @@ export function submitJob(
       j.status = "failed";
       j.error = classifyErrorMessage(err);
       j.finished_at = Date.now();
+      try {
+        updateJobStatus(j.job_id, { status: "failed", finished_at: j.finished_at, error_message: j.error });
+      } catch { /* non-fatal */ }
     }
   });
 
@@ -198,7 +236,8 @@ export function submitSourceJob(
   projectId: string,
   sourceId: string,
   mode: IndexMode,
-  branch?: string
+  branch?: string,
+  preJobId?: string
 ): string | { error: "already_running"; job_id: string } {
   const existingJobId = findRunningJobForProject(projectId);
   if (existingJobId) {
@@ -210,7 +249,7 @@ export function submitSourceJob(
   taskControllers.set(sourceId, new AbortController());
 
   const job: StoredJob = {
-    job_id: randomBytes(4).toString("hex"),
+    job_id: preJobId ?? randomBytes(4).toString("hex"),
     project_id: projectId,
     source_id: sourceId,
     mode,
@@ -225,6 +264,26 @@ export function submitSourceJob(
   };
 
   _jobs.set(job.job_id, job);
+  try {
+    if (preJobId) {
+      updateJobStatus(preJobId, { status: "running", started_at: job.started_at });
+    } else {
+      insertJob({
+        job_id: job.job_id,
+        project_id: projectId,
+        source_id: sourceId,
+        branch: branch ?? null,
+        mode,
+        status: "running",
+        phase: null,
+        queued_at: job.started_at,
+        started_at: job.started_at,
+        finished_at: null,
+        error_message: null,
+        origin: "cli",
+      });
+    }
+  } catch { /* non-fatal */ }
 
   runTasks(job.job_id).catch((err: unknown) => {
     const j = _jobs.get(job.job_id);
@@ -232,6 +291,9 @@ export function submitSourceJob(
       j.status = "failed";
       j.error = classifyErrorMessage(err);
       j.finished_at = Date.now();
+      try {
+        updateJobStatus(j.job_id, { status: "failed", finished_at: j.finished_at, error_message: j.error });
+      } catch { /* non-fatal */ }
     }
   });
 
@@ -257,6 +319,22 @@ export function submitAllJob(): string {
   };
 
   _jobs.set(job.job_id, job);
+  try {
+    insertJob({
+      job_id: job.job_id,
+      project_id: "*",
+      source_id: null,
+      branch: null,
+      mode: "incremental",
+      status: "running",
+      phase: null,
+      queued_at: job.started_at,
+      started_at: job.started_at,
+      finished_at: null,
+      error_message: null,
+      origin: "cli",
+    });
+  } catch { /* non-fatal */ }
 
   (async () => {
     const projects = listProjects();
@@ -280,6 +358,7 @@ export function submitAllJob(): string {
           if (jj) {
             jj.status = "cancelled";
             jj.finished_at = Date.now();
+            try { updateJobStatus(jj.job_id, { status: "cancelled", finished_at: jj.finished_at }); } catch { /* non-fatal */ }
           }
           return;
         }
@@ -295,6 +374,7 @@ export function submitAllJob(): string {
       if (failed.length > 0) {
         j.error = `${failed.length} project(s) failed: ${failed.map((f) => `${f.project}: ${f.error}`).join("; ")}`;
       }
+      try { updateJobStatus(j.job_id, { status: j.status, finished_at: j.finished_at, error_message: j.error ?? null }); } catch { /* non-fatal */ }
     }
   })().catch((err: unknown) => {
     const j = _jobs.get(job.job_id);
@@ -302,6 +382,7 @@ export function submitAllJob(): string {
       j.status = "failed";
       j.error = classifyErrorMessage(err);
       j.finished_at = Date.now();
+      try { updateJobStatus(j.job_id, { status: "failed", finished_at: j.finished_at, error_message: j.error }); } catch { /* non-fatal */ }
     }
   });
 
@@ -310,10 +391,17 @@ export function submitAllJob(): string {
 
 export function getJobStatus(jobId: string): JobState | null {
   const job = _jobs.get(jobId);
-  if (!job) return null;
-  // Strip internal controller fields
-  const { controller: _c, taskControllers: _tc, ...state } = job;
-  return state;
+  if (job) {
+    const { controller: _c, taskControllers: _tc, ...state } = job;
+    return state;
+  }
+  // Fall back to SQLite — cross-process or post-restart
+  try {
+    const row = getJobRow(jobId);
+    return row ? jobRowToState(row) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function cancelJob(jobId: string, sourceId?: string): boolean {
@@ -347,13 +435,26 @@ export function cancelAllJobs(): void {
   }
 }
 
-/** List all jobs, optionally filtered by status. Sorted by started_at descending. */
+/** List all jobs, optionally filtered by status. Reads from SQLite for cross-process visibility. */
 export function listJobs(statusFilter?: string): JobState[] {
-  const all: JobState[] = [];
-  for (const job of _jobs.values()) {
-    const { controller: _c, taskControllers: _tc, ...state } = job;
-    all.push(state);
+  try {
+    const rows = listJobRows({ status: statusFilter });
+    return rows.map((row) => {
+      const inMemory = _jobs.get(row.job_id);
+      if (inMemory) {
+        const { controller: _c, taskControllers: _tc, ...state } = inMemory;
+        return state;
+      }
+      return jobRowToState(row);
+    });
+  } catch {
+    // SQLite unavailable — fall back to in-memory map
+    const all: JobState[] = [];
+    for (const job of _jobs.values()) {
+      const { controller: _c, taskControllers: _tc, ...state } = job;
+      all.push(state);
+    }
+    const filtered = statusFilter ? all.filter((j) => j.status === statusFilter) : all;
+    return filtered.sort((a, b) => b.started_at - a.started_at);
   }
-  const filtered = statusFilter ? all.filter((j) => j.status === statusFilter) : all;
-  return filtered.sort((a, b) => b.started_at - a.started_at);
 }

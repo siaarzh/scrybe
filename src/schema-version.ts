@@ -11,7 +11,7 @@ import { config } from "./config.js";
 import { closeDB } from "./branch-state.js";
 import { runPendingMigrations } from "./migrations.js";
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 // Updated on each release so schema.json records which version last wrote it
 const SCRYBE_VERSION = "0.23.2";
@@ -61,7 +61,8 @@ function writeSchemaDoc(doc: SchemaDoc): void {
 export async function checkAndMigrate(): Promise<{ migrated: boolean; version: number }> {
   const doc = readSchemaDoc();
 
-  if (doc.version < CURRENT_SCHEMA_VERSION) {
+  if (doc.version < 2) {
+    // v1 → branch-aware format: full reset required (one-time, destructive)
     if (process.env.SCRYBE_SKIP_MIGRATION === "1") {
       console.error(
         "[scrybe] SCRYBE_SKIP_MIGRATION=1: running in read-only compatibility mode. " +
@@ -71,7 +72,7 @@ export async function checkAndMigrate(): Promise<{ migrated: boolean; version: n
     }
 
     console.error(
-      `\n[scrybe] Upgrading index to branch-aware format (v${CURRENT_SCHEMA_VERSION}).` +
+      "\n[scrybe] Upgrading index to branch-aware format (v2)." +
       "\nThis is a one-time full reindex — all projects will be re-embedded on next index run." +
       "\nTo skip and run read-only: set SCRYBE_SKIP_MIGRATION=1.\n"
     );
@@ -93,6 +94,18 @@ export async function checkAndMigrate(): Promise<{ migrated: boolean; version: n
 
     doc.version = CURRENT_SCHEMA_VERSION;
     doc.migrations_applied = [];
+    writeSchemaDoc(doc);
+    return { migrated: true, version: CURRENT_SCHEMA_VERSION };
+  }
+
+  if (doc.version < CURRENT_SCHEMA_VERSION) {
+    // v2 → v3: additive — jobs table created by IF NOT EXISTS in getDB(). No data loss.
+    doc.version = CURRENT_SCHEMA_VERSION;
+    // Run pending registry migrations before finalizing the version bump.
+    const updatedApplied = await runPendingMigrations(doc.migrations_applied);
+    if (updatedApplied.length !== doc.migrations_applied.length) {
+      doc.migrations_applied = updatedApplied;
+    }
     writeSchemaDoc(doc);
     return { migrated: true, version: CURRENT_SCHEMA_VERSION };
   }

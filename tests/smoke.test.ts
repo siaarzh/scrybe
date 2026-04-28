@@ -3,7 +3,7 @@
  * Exercises: registry → chunker → embedder HTTP → LanceDB upsert → FTS → hybrid search.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { writeFileSync } from "fs";
+import { writeFileSync, unlinkSync } from "fs";
 import { join } from "path";
 import { cloneFixture, type FixtureHandle } from "./helpers/fixtures.js";
 import { createTempProject, type TempProject } from "./helpers/project.js";
@@ -69,13 +69,13 @@ describe("smoke — full pipeline regression", () => {
     expect(typeof hit.score).toBe("number");
   });
 
-  it("deleted file chunks are removed on incremental reindex", async () => {
+  it("deleted file chunks are removed on full reindex", async () => {
     fixture = await cloneFixture("sample-repo");
     project = await createTempProject({ rootPath: fixture.path });
 
     await runIndex(project.projectId, project.sourceId, "full");
 
-    const token = sentinel("delete");
+    const token = sentinel("delete-full");
     const tempFile = join(fixture.path, "src", "temp.ts");
     writeFileSync(
       tempFile,
@@ -88,8 +88,7 @@ describe("smoke — full pipeline regression", () => {
     const before = await search(project.projectId, token);
     expect(before.length).toBeGreaterThan(0);
 
-    // Delete the file and reindex — full reindex to detect deletion
-    const { unlinkSync } = await import("fs");
+    // Delete the file and full-reindex
     unlinkSync(tempFile);
     await runIndex(project.projectId, project.sourceId, "full");
 
@@ -97,5 +96,63 @@ describe("smoke — full pipeline regression", () => {
     const after = await search(project.projectId, token);
     const fromDeletedFile = after.filter((r) => r.file_path.includes("temp.ts"));
     expect(fromDeletedFile).toHaveLength(0);
+  });
+
+  it("deleted file chunks are removed on incremental reindex (branch-scoped)", async () => {
+    fixture = await cloneFixture("sample-repo");
+    project = await createTempProject({ rootPath: fixture.path });
+
+    // Full index establishes the baseline
+    await runIndex(project.projectId, project.sourceId, "full");
+
+    const token = sentinel("delete-incremental");
+    const tempFile = join(fixture.path, "src", "temp-inc.ts");
+    writeFileSync(
+      tempFile,
+      `// ${token}\nexport const incValue = "${token}";\n`,
+      "utf8"
+    );
+
+    // Incremental index registers the new file in hashes + branch_tags
+    await runIndex(project.projectId, project.sourceId, "incremental");
+
+    const { resolveBranchForPath } = await import("../src/branch-state.js");
+    const branch = resolveBranchForPath(fixture.path);
+
+    // Verify sentinel is findable via branch-scoped search before deletion
+    const before = await search(project.projectId, token, { branch });
+    expect(before.length).toBeGreaterThan(0);
+    expect(before.some((r) => r.file_path.includes("temp-inc.ts"))).toBe(true);
+
+    // Delete the file and run incremental reindex
+    unlinkSync(tempFile);
+    const result = await runIndex(project.projectId, project.sourceId, "incremental");
+
+    // Incremental should report the file as removed
+    expect(result.files_removed).toBeGreaterThan(0);
+
+    // Branch-scoped search must not return the deleted file's content
+    const after = await search(project.projectId, token, { branch });
+    const fromDeletedFile = after.filter((r) => r.file_path.includes("temp-inc.ts"));
+    expect(fromDeletedFile).toHaveLength(0);
+
+    // Stretch: orphan chunks still exist in Lance (not yet gc'd)
+    const { listChunkIds, deleteChunks } = await import("../src/vector-store.js");
+    const { getSource } = await import("../src/registry.js");
+    const source = getSource(project.projectId, project.sourceId)!;
+    const allChunkIds = await listChunkIds(project.projectId, source.table_name!);
+    // There may be other chunks; we just verify Lance was NOT wiped
+    expect(allChunkIds.length).toBeGreaterThan(0);
+
+    // After gc the orphaned chunks (those not tagged) should be gone
+    const { getAllChunkIdsForSource } = await import("../src/branch-state.js");
+    const taggedIds = getAllChunkIdsForSource(project.projectId, project.sourceId);
+    const orphans = allChunkIds.filter((id) => !taggedIds.has(id));
+    if (orphans.length > 0) {
+      await deleteChunks(orphans, source.table_name!);
+      const afterGc = await listChunkIds(project.projectId, source.table_name!);
+      const orphansAfterGc = afterGc.filter((id) => !taggedIds.has(id));
+      expect(orphansAfterGc).toHaveLength(0);
+    }
   });
 });
