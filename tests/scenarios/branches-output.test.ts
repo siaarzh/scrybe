@@ -64,9 +64,11 @@ describe("Scenario 15 — branch annotations on search results (Plan 20)", () =>
     runScrybe(["index", "-P", "s15b-proj", "-S", "primary", "-f"], env, WITH_BRANCH_TAGS);
 
     // Create a feature branch and index again (same file → same chunk_id).
-    // Use -f (full) to force branch tag write even when hashes are unchanged.
+    // Incremental mode correctly writes branch tags for the new branch even when
+    // content is unchanged: knownChunkIds skips the embedder, but applyFile still
+    // INSERT-OR-IGNOREs branch_tags rows for the active branch.
     repo.branch("feat/plan20");
-    runScrybe(["index", "-P", "s15b-proj", "-S", "primary", "--branch", "feat/plan20", "-f"], env, WITH_BRANCH_TAGS);
+    runScrybe(["index", "-P", "s15b-proj", "-S", "primary", "--branch", "feat/plan20", "--incremental"], env, WITH_BRANCH_TAGS);
 
     const r = runScrybe(
       ["search", "code", "-P", "s15b-proj", "--branch", "feat/plan20", "--top-k", "3", "sharedHelper"],
@@ -90,10 +92,9 @@ describe("Scenario 15 — branch annotations on search results (Plan 20)", () =>
     // Index on default branch
     runScrybe(["index", "-P", "s15c-proj", "-S", "primary", "-f"], env, WITH_BRANCH_TAGS);
 
-    // Index the same content on a second branch.
-    // Use -f (full) to guarantee branch tags are written even for unchanged content.
+    // Index the same content on a second branch — incremental mode is sufficient.
     repo.branch("feat/second");
-    runScrybe(["index", "-P", "s15c-proj", "-S", "primary", "--branch", "feat/second", "-f"], env, WITH_BRANCH_TAGS);
+    runScrybe(["index", "-P", "s15c-proj", "-S", "primary", "--branch", "feat/second", "--incremental"], env, WITH_BRANCH_TAGS);
 
     const r = runScrybe(
       ["search", "code", "-P", "s15c-proj", "--branch", "feat/second", "helloWorld"],
@@ -126,5 +127,45 @@ describe("Scenario 15 — branch annotations on search results (Plan 20)", () =>
     // In compat mode the branch filter is skipped, so chunks still surface
     expect(r.stdout.length).toBeGreaterThan(0);
     expect(r.stdout).toMatch(/compatFn/);
+  });
+
+  // Regression for plan 20.1: incremental indexing on a new branch (working tree
+  // unchanged) must write branch_tags rows for the new branch — otherwise
+  // search --branch <new> silently returns empty even though chunks live in
+  // LanceDB. Investigation in plan 20.1 confirmed the indexer does this
+  // correctly; this test guards against future regressions in that path.
+  // Asserts exit codes on every step so a CLI flag mismatch can never silently
+  // skip an index call.
+  it("incremental index on a new branch writes tags (plan 20.1 regression)", () => {
+    env = makeScenarioEnv();
+    repo = makeTempRepo({
+      "src/regress.ts": "export function regressFn(): string { return 'plan20.1'; }\n",
+    });
+
+    setupProject("s15e-proj");
+
+    const r1 = runScrybe(["index", "-P", "s15e-proj", "-S", "primary", "-f"], env, WITH_BRANCH_TAGS);
+    expect(r1.exit).toBe(0);
+
+    repo.branch("feat/regress");
+
+    // Use the long flag so a future short-flag rename (e.g. -i vs -I) can't
+    // silently break this and recreate the symptom that spawned plan 20.1.
+    const r2 = runScrybe(
+      ["index", "-P", "s15e-proj", "-S", "primary", "--branch", "feat/regress", "--incremental"],
+      env, WITH_BRANCH_TAGS
+    );
+    expect(r2.exit).toBe(0);
+
+    // Search filtered to the new branch must return the chunk AND annotate it
+    // with both branches.
+    const r3 = runScrybe(
+      ["search", "code", "-P", "s15e-proj", "--branch", "feat/regress", "regressFn"],
+      env, WITH_BRANCH_TAGS
+    );
+    expect(r3.exit).toBe(0);
+    expect(r3.stdout).toContain("regressFn");
+    expect(r3.stdout).toContain("Branches:");
+    expect(r3.stdout).toContain("feat/regress");
   });
 });
