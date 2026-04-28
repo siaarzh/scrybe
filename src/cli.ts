@@ -710,8 +710,8 @@ export async function runCli(): Promise<void> {
 
   const daemon = program.command("daemon").description("Manage the background scrybe daemon");
 
-  daemon.command("start").description("Start the background daemon (runs in foreground)")
-    .addHelpText("after", "\nExample:\n  scrybe daemon start")
+  daemon.command("start").description("Run the daemon attached to this terminal (use `daemon up` to background it)")
+    .addHelpText("after", "\nExamples:\n  scrybe daemon up      # start in background (typical use)\n  scrybe daemon start   # run attached — Ctrl+C stops it (used by OS autostart hooks)")
     .action(async () => {
       const { isDaemonRunning } = await import("./daemon/pidfile.js");
       const { running } = await isDaemonRunning();

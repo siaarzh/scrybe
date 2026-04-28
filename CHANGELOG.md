@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.27.2] — 2026-04-28
+
+### Fixed
+
+- **`scrybe daemon start --help` description was self-contradicting** — `Start the background daemon (runs in foreground)`. Replaced with `Run the daemon attached to this terminal (use \`daemon up\` to background it)` plus a two-line example block showing both. The `start` subcommand is the actual daemon entry point used by OS autostart hooks (`spawn-detached`, `daemon install`); `up` is the user-facing "ensure backgrounded" command. The old wording made it look like a bug.
+
+---
+
 ## [0.27.1] — 2026-04-28
 
 ### Fixed
