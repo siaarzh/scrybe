@@ -365,28 +365,74 @@ export async function deleteKnowledgeSource(
 // ─── Compaction ───────────────────────────────────────────────────────────────
 
 export const COMPACT_THRESHOLD = parseInt(process.env.SCRYBE_LANCE_COMPACT_THRESHOLD ?? "10", 10);
-const ONE_HOUR_MS = 3_600_000;
+
+// Grace window for `optimize({ cleanupOlderThan })`. Long enough for a typical
+// search+rerank to complete, short enough that a multi-batch indexing burst
+// can't accumulate gigabytes of orphaned fragments before pruning runs.
+// Tunable via SCRYBE_LANCE_GRACE_MS.
+const DEFAULT_GRACE_MS = 60_000;
+const GRACE_MS = (() => {
+  const raw = parseInt(process.env.SCRYBE_LANCE_GRACE_MS ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_GRACE_MS;
+})();
+
+function dirSizeBytes(tableName: string): number {
+  const tableDir = join(DB_PATH, `${tableName}.lance`);
+  if (!existsSync(tableDir)) return 0;
+  let total = 0;
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else { try { total += statSync(full).size; } catch { /* ignore races */ } }
+    }
+  };
+  walk(tableDir);
+  return total;
+}
 
 /**
  * Compact a table when version count exceeds the threshold.
- * Keeps a 1h grace window so concurrent daemon readers still see their snapshot.
+ * Keeps a brief grace window (default 60s) so an in-flight cross-process search
+ * still sees its snapshot. The 1h grace used previously caused multi-GB bloat
+ * during sustained indexing bursts.
  */
 async function maybeCompact(table: lancedb.Table): Promise<void> {
   const versions = await table.listVersions();
   if (versions.length < COMPACT_THRESHOLD) return;
-  await table.optimize({ cleanupOlderThan: new Date(Date.now() - ONE_HOUR_MS) });
+  await table.optimize({ cleanupOlderThan: new Date(Date.now() - GRACE_MS) });
+}
+
+/**
+ * End-of-burst compaction — fires unconditionally (no version threshold) but
+ * keeps the grace window. Called after each indexing run to clean up fragments
+ * accumulated during the burst without disturbing concurrent readers.
+ * Returns actual bytes freed from disk (measured pre/post).
+ */
+export async function compactTableWithGrace(tableName: string): Promise<number> {
+  const table = await openExistingTable(tableName);
+  if (!table) return 0;
+  const before = dirSizeBytes(tableName);
+  await table.optimize({ cleanupOlderThan: new Date(Date.now() - GRACE_MS) });
+  const after = dirSizeBytes(tableName);
+  return Math.max(0, before - after);
 }
 
 /**
  * Full-purge compaction — removes all old versions with no grace period.
  * Called by `scrybe gc` where the user explicitly requested maximum reclaim.
- * Returns bytes reclaimed by the prune step (0 if table missing or nothing to reclaim).
+ * Returns actual bytes freed from disk (measured pre/post). Lance's
+ * `OptimizeStats.prune.bytesRemoved` is unreliable — it counts bytes referenced
+ * by the dropped manifest version, not bytes physically deleted, so it reports
+ * phantom reclaim on every call even when nothing is freed.
  */
 export async function compactTable(tableName: string): Promise<number> {
   const table = await openExistingTable(tableName);
   if (!table) return 0;
-  const stats = await table.optimize({ cleanupOlderThan: new Date() });
-  return stats.prune?.bytesRemoved ?? 0;
+  const before = dirSizeBytes(tableName);
+  await table.optimize({ cleanupOlderThan: new Date() });
+  const after = dirSizeBytes(tableName);
+  return Math.max(0, before - after);
 }
 
 /**
@@ -396,24 +442,7 @@ export async function compactTable(tableName: string): Promise<number> {
 export async function getTableStats(tableName: string): Promise<{ sizeBytes: number; versionCount: number }> {
   const table = await openExistingTable(tableName);
   const versionCount = table ? (await table.listVersions()).length : 0;
-
-  const tableDir = join(DB_PATH, `${tableName}.lance`);
-  let sizeBytes = 0;
-  if (existsSync(tableDir)) {
-    const walkDir = (dir: string): void => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walkDir(full);
-        } else {
-          try { sizeBytes += statSync(full).size; } catch { /* ignore races */ }
-        }
-      }
-    };
-    walkDir(tableDir);
-  }
-
-  return { sizeBytes, versionCount };
+  return { sizeBytes: dirSizeBytes(tableName), versionCount };
 }
 
 // ─── Table lifecycle ──────────────────────────────────────────────────────────

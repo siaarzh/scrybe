@@ -11,6 +11,7 @@ import {
   createKnowledgeFtsIndex,
   upsertKnowledge,
   deleteKnowledgeProject,
+  compactTableWithGrace,
 } from "./vector-store.js";
 import { createHash } from "node:crypto";
 import { appendFileSync, statSync } from "node:fs";
@@ -341,6 +342,14 @@ export async function indexSource(
           console.warn("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only):", err);
         }
       }
+
+      // End-of-burst compaction. Each upsert batch produces a Lance version;
+      // without this, fragments accumulate across the run and only get pruned
+      // after maybeCompact's threshold trips. Uses the standard grace, so
+      // concurrent cross-process searches finish safely.
+      try {
+        await compactTableWithGrace(tableName);
+      } catch { /* non-fatal */ }
 
       const result = {
         status: "ok" as const,

@@ -9,6 +9,26 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.27.1] — 2026-04-28
+
+### Fixed
+
+- **Daemon-driven indexing balloons table disk usage by 10-30×.** Observed live: `cmx-core/primary` grew from 895 MB to 27.12 GB across one ~25 min indexing burst (+199 net chunks). Root cause: `maybeCompact` used a 1-hour grace on `cleanupOlderThan`, designed to protect concurrent readers. During a sustained burst every Lance manifest version is younger than the grace, so prune frees nothing and orphaned fragments accumulate for the duration. Fix:
+  - Grace shortened from 1h to **60s** (tunable via `SCRYBE_LANCE_GRACE_MS`). Long enough for any reasonable cross-process search+rerank to complete; short enough that bursts can't accumulate gigabytes.
+  - **End-of-burst compaction** added to `indexSource` — fires once after each indexing run, bounded by the same grace. Tables stay tight without waiting for `maybeCompact`'s version-count threshold to trip.
+- **`scrybe gc` reported phantom "Reclaimed N MB" with no actual disk change.** `OptimizeStats.prune.bytesRemoved` from LanceDB is the size *referenced* by the dropped manifest version, not bytes physically deleted. The same data files often remain referenced by retained versions, so disk is unchanged but `bytesRemoved` is non-zero. Repeated `gc` runs printed the same fictional reclaim every call. Fix: `compactTable` now measures disk usage before and after via a directory walk and returns the actual delta (`max(0, before - after)`). In steady state, the second `gc` honestly reports `Reclaimed 0 B`.
+
+### Added
+
+- **`SCRYBE_LANCE_GRACE_MS`** env var — overrides the default 60 s grace window used by `maybeCompact` and `compactTableWithGrace` for `optimize({ cleanupOlderThan })`. Increase it if you run very long-lived cross-process searches against the same DATA_DIR.
+- **`compactTableWithGrace(tableName)`** in `vector-store.ts` — end-of-burst variant of `compactTable` that respects the grace window. Returns measured disk-delta bytes freed.
+
+### Tests
+
+- Extended `tests/vector-store.test.ts` with two M21.1 regressions: (a) six back-to-back full reindexes stay within 3× of the first run's disk size (pre-fix this would balloon 5-30×); (b) two consecutive `compactTable` calls on a steady-state table — the second returns exactly 0, confirming honest reporting.
+
+---
+
 ## [0.27.0] — 2026-04-28
 
 ### Added
