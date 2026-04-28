@@ -247,6 +247,10 @@ export async function indexSource(
             filesReindexed++;
           }
 
+          // Test-only: widen conflict window for two-writer race tests.
+          const writeDelayMs = parseInt(process.env["SCRYBE_TEST_WRITE_DELAY_MS"] ?? "0", 10);
+          if (writeDelayMs > 0) await new Promise((r) => setTimeout(r, writeDelayMs));
+
           // Checkpoint: save hash + add branch tags atomically.
           // For non-code sources, no tags are recorded (they're branch-agnostic).
           if (isCode) {

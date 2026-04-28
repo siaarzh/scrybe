@@ -64,6 +64,8 @@ export interface DaemonStatus {
   clientCount?: number;
   mode?: "on-demand" | "always-on";
   gracePeriodRemainingMs?: number | null;
+  // Plan 21: running jobs from SQLite
+  runningJobs?: Array<{ job_id: string; project_id: string; source_id: string | null; mode: string; started_at: number | null; phase: string | null }>;
 }
 
 export interface KickRequest {
@@ -264,6 +266,18 @@ function buildStatus(): DaemonStatus {
     clientCount: _getClientCount?.() ?? 0,
     mode: _getMode?.() ?? "on-demand",
     gracePeriodRemainingMs: _getGracePeriodRemainingMs?.() ?? null,
+    runningJobs: (() => {
+      try {
+        return listJobRows({ status: "running" }).map((r) => ({
+          job_id: r.job_id,
+          project_id: r.project_id,
+          source_id: r.source_id,
+          mode: r.mode,
+          started_at: r.started_at,
+          phase: r.phase,
+        }));
+      } catch { return []; }
+    })(),
   };
 }
 

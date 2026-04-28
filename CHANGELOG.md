@@ -10,6 +10,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 ### Added
 
 - **Branch annotations on `search_code` results.** `SearchResult` now carries `source_id: string` and `branches: string[]` on every hit. `branches` lists all branch names the chunk is tagged on for its (project, source), sorted master/main first then alphabetical. Returns `[]` in compat mode (`SCRYBE_SKIP_MIGRATION=1`). CLI output shows a `Branches: a, b, c` line per hit when the array is non-empty.
+- **`queue_status` MCP tool.** Returns currently running and queued reindex jobs for a project (or all projects). Lets agents check whether the daemon already has an in-flight job before submitting a duplicate.
+- **Durable job history (schema v3).** Jobs are now persisted to `branch-tags.db` (new `jobs` table, schema bump v2→v3 — additive, no data loss). `list_jobs` reads from SQLite for cross-process visibility; job history survives daemon restarts.
+- **Daemon routes MCP reindex calls.** `reindex_project` and `reindex_source` now route through the daemon when it is running, serialising writes via the daemon queue. Eliminates the cross-process LanceDB commit-conflict race that caused `CommitConflictError` under concurrent watchers. Opt-out: `SCRYBE_NO_AUTO_DAEMON=1`.
+- **New HTTP endpoints on daemon.** `GET /jobs`, `GET /jobs/:id`, `DELETE /jobs/:id`, `GET /queue-status` — expose the durable job store over HTTP.
+- **`SCRYBE_DEBUG_INDEXER=1` diagnostic mode.** Emits structured JSONL to `daemon-log.jsonl` on every index run: hash counts, per-file deletion events, and a result summary. Use when investigating "deleted file still shows in search" reports.
+
+### Fixed
+
+- **Incremental reindex now detects deleted files.** Code sources were incorrectly skipping the deletion pass because `saveCursor` was writing a cursor for all sources, making `effectiveCursor` truthy and `toRemove` always empty. Fixed: code sources always use `null` effectiveCursor so deletion runs from the hash diff.
+- **LanceDB write retry on commit conflict.** `vector-store` write helpers (`deleteProject`, `deleteFileChunks`, `deleteChunks`, `deleteKnowledgeSource/Project`) now evict the cached table handle and retry once on `CommitConflictError`. Prevents the "phantom transaction / stale `read_version`" failure seen in the opt-out path.
+- **`npm test` no longer runs scenario tests.** Scenario and e2e tests are now excluded from the unit vitest config. They continue to run under `npm run test:scenarios`. Eliminates Windows error dialogs and phantom file-level failures during the unit run.
+
+### Changed
+
+- **CLI output for deletion-only incremental runs.** When `files_removed > 0` and `chunks_indexed === 0`, the done line now reads `N file(s) removed from index. Run 'scrybe gc' to reclaim disk space.` instead of the generic counter line.
 
 ---
 
