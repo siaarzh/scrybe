@@ -45,12 +45,14 @@ export interface SearchResult {
   chunk_id: string;
   score: number;
   project_id: string;
+  source_id: string;
   file_path: string;
   start_line: number;
   end_line: number;
   language: string;
   symbol_name: string;
   content: string;
+  branches: string[];  // master/main first, rest alphabetical; [] in compat mode
 }
 
 export interface KnowledgeChunk {

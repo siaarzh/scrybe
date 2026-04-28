@@ -294,3 +294,93 @@ describe("wipeSource (Fix 1)", () => {
     );
   });
 });
+
+describe("getBranchesForChunks", () => {
+  it("empty chunkIds returns empty Map without hitting DB", async () => {
+    const { getBranchesForChunks } = await import("../src/branch-state.js");
+    const result = getBranchesForChunks(P, S, []);
+    expect(result.size).toBe(0);
+  });
+
+  it("unknown chunk_id returns no entry in the Map", async () => {
+    const { getBranchesForChunks } = await import("../src/branch-state.js");
+    const result = getBranchesForChunks(P, S, ["no-such-chunk-id"]);
+    expect(result.has("no-such-chunk-id")).toBe(false);
+  });
+
+  it("returns branches for known chunk_ids", async () => {
+    const { withBranchSession, getBranchesForChunks } = await import("../src/branch-state.js");
+
+    await withBranchSession({ projectId: P, sourceId: S, branch: "master", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/a.ts", { kind: "embedded", hash: "h1", tags: [makeTag({ chunkId: "gc-shared" })] });
+      }
+    );
+    await withBranchSession({ projectId: P, sourceId: S, branch: "feat/x", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/a.ts", { kind: "embedded", hash: "h1", tags: [makeTag({ chunkId: "gc-shared" })] });
+      }
+    );
+    await withBranchSession({ projectId: P, sourceId: S, branch: "master", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/b.ts", { kind: "embedded", hash: "h2", tags: [makeTag({ chunkId: "gc-master-only", filePath: "src/b.ts" })] });
+      }
+    );
+
+    const map = getBranchesForChunks(P, S, ["gc-shared", "gc-master-only"]);
+    expect(map.has("gc-shared")).toBe(true);
+    expect(map.has("gc-master-only")).toBe(true);
+
+    const sharedBranches = map.get("gc-shared")!;
+    expect(sharedBranches).toContain("master");
+    expect(sharedBranches).toContain("feat/x");
+
+    const masterOnlyBranches = map.get("gc-master-only")!;
+    expect(masterOnlyBranches).toEqual(["master"]);
+  });
+
+  it("master/main sort first, then alphabetical", async () => {
+    const { withBranchSession, getBranchesForChunks } = await import("../src/branch-state.js");
+    const cid = "gc-sort-test";
+
+    for (const branch of ["zebra", "master", "apple", "main"]) {
+      await withBranchSession({ projectId: P, sourceId: S, branch, mode: "incremental" },
+        async (session) => {
+          session.applyFile("src/x.ts", { kind: "embedded", hash: "h3", tags: [makeTag({ chunkId: cid })] });
+        }
+      );
+    }
+
+    const map = getBranchesForChunks(P, S, [cid]);
+    const branches = map.get(cid)!;
+
+    // master and main must come first
+    expect(branches[0] === "master" || branches[0] === "main").toBe(true);
+    expect(branches[1] === "master" || branches[1] === "main").toBe(true);
+    // rest are alphabetical
+    expect(branches[2]).toBe("apple");
+    expect(branches[3]).toBe("zebra");
+  });
+
+  it("ignores tags from other (project, source) tuples", async () => {
+    const { withBranchSession, getBranchesForChunks } = await import("../src/branch-state.js");
+    const cid = "gc-isolation-test";
+
+    // Tag on a DIFFERENT source
+    await withBranchSession({ projectId: P, sourceId: "other-source", branch: "main", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/z.ts", { kind: "embedded", hash: "h4", tags: [makeTag({ chunkId: cid })] });
+      }
+    );
+    // Tag on a DIFFERENT project
+    await withBranchSession({ projectId: "other-proj", sourceId: S, branch: "main", mode: "incremental" },
+      async (session) => {
+        session.applyFile("src/z.ts", { kind: "embedded", hash: "h4", tags: [makeTag({ chunkId: cid })] });
+      }
+    );
+
+    // Query for (P, S) — must see no entries
+    const map = getBranchesForChunks(P, S, [cid]);
+    expect(map.has(cid)).toBe(false);
+  });
+});

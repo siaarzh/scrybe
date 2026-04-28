@@ -142,12 +142,14 @@ export async function search(
     chunk_id: String(row.chunk_id),
     score: 1 - (Number(row._distance ?? 0) ** 2) / 2,
     project_id: String(row.project_id),
+    source_id: "",   // threaded in by search.ts fan-out
     file_path: String(row.file_path),
     start_line: Number(row.start_line),
     end_line: Number(row.end_line),
     language: String(row.language),
     symbol_name: String(row.symbol_name),
     content: String(row.content),
+    branches: [] as string[],  // annotated by search.ts after rerank
   }));
 }
 
@@ -173,12 +175,14 @@ export async function ftsSearch(
     chunk_id: String(row.chunk_id),
     score: 0,
     project_id: String(row.project_id),
+    source_id: "",   // threaded in by search.ts fan-out
     file_path: String(row.file_path),
     start_line: Number(row.start_line),
     end_line: Number(row.end_line),
     language: String(row.language),
     symbol_name: String(row.symbol_name),
     content: String(row.content),
+    branches: [] as string[],  // annotated by search.ts after rerank
   }));
 }
 

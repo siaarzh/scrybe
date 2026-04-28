@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Branch annotations on `search_code` results.** `SearchResult` now carries `source_id: string` and `branches: string[]` on every hit. `branches` lists all branch names the chunk is tagged on for its (project, source), sorted master/main first then alphabetical. Returns `[]` in compat mode (`SCRYBE_SKIP_MIGRATION=1`). CLI output shows a `Branches: a, b, c` line per hit when the array is non-empty.
+
 ---
 
 ## [0.26.1] — 2026-04-27

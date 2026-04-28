@@ -143,7 +143,10 @@ Semantic search over indexed code sources in a project.
 | `top_k` | number | | Number of results (default: 10) |
 | `branch` | string | | Branch to search (default: current HEAD of the source repo). Use `list_branches` to see indexed branches. |
 
-**Returns:** array of `{ file_path, start_line, end_line, language, symbol_name, content, score }`
+**Returns:** array of `{ chunk_id, score, project_id, source_id, file_path, start_line, end_line, language, symbol_name, content, branches: string[] }`
+
+- `source_id` — the source the chunk came from (e.g. `"primary"`).
+- `branches` — all branch names the chunk is tagged on for this (project, source), sorted master/main first then alphabetical. Returns `[]` in compat mode (`SCRYBE_SKIP_MIGRATION=1`).
 
 ---
 

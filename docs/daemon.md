@@ -280,6 +280,29 @@ Typical latency: **< 5 s** from file save to searchable in HOT state.
 
 ---
 
+## Data flow: branch switch → search hit
+
+```
+git checkout <branch>
+    → @parcel/watcher emits change on .git/HEAD (and refs/**)
+    → daemon debounces 300 ms (SCRYBE_DAEMON_GIT_DEBOUNCE_MS)
+    → resolveBranchForPath() reads new HEAD; branchChanged=true
+    → enqueues incremental reindex job for the project (mode: "incremental")
+    → indexer: hash scan vs. branch's hash file → embed only changed chunks
+    → search_code / scrybe search now returns content for the new branch
+```
+
+Trigger latency is **~300 ms** from the checkout completing to the job being enqueued. End-to-end time to searchable depends on the indexer step:
+
+- **Branch indexed before** — hash scan finds no deltas, fast path completes in seconds.
+- **First time on this branch** — only chunks differing from previously indexed branches are re-embedded (content-addressed IDs dedup the rest); typically still well under a minute on a feature branch.
+
+Watch it live with `scrybe daemon status --watch` — a checkout shows up as a `watcher.event` with `branchChanged: true`, followed by `job.started` / `job.completed`.
+
+The same path also fires on a new commit on the current branch (`branchChanged: false`); rapid commits are coalesced into a single enqueue by the 300 ms debounce.
+
+---
+
 ## Architecture notes for M-D3 (VS Code extension)
 
 - **Spawn pattern:** extension should spawn `scrybe daemon start` detached (`stdio: "ignore"`, `unref()`). Daemon survives VS Code close.

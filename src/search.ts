@@ -10,7 +10,7 @@ import {
   ftsSearchKnowledge,
 } from "./vector-store.js";
 import { rerank } from "./reranker.js";
-import { resolveBranch, getChunkIdsForBranch } from "./branch-state.js";
+import { resolveBranch, getChunkIdsForBranch, getBranchesForChunks } from "./branch-state.js";
 import type { SearchResult, KnowledgeSearchResult, Source } from "./types.js";
 
 const MAX_RERANK_CANDIDATES = 500;
@@ -148,13 +148,34 @@ export async function searchCode(
           results = results.filter((r) => postFilterIds!.has(r.chunk_id));
         }
 
-        return results;
+        // Thread source_id onto each result before the cross-source merge
+        return results.map((r) => ({ ...r, source_id: source.source_id, branches: [] as string[] }));
       })
   );
 
   const merged = allResults.length === 1 ? allResults[0] : mergeRrf(allResults, config.rrfK);
-  if (!config.rerankEnabled || merged.length === 0) return merged.slice(0, topK);
-  return rerank(query, merged, topK);
+
+  let finalResults: SearchResult[];
+  if (!config.rerankEnabled || merged.length === 0) {
+    finalResults = merged.slice(0, topK);
+  } else {
+    finalResults = await rerank(query, merged, topK);
+  }
+
+  // Annotate top-K with branch info — one SQL query per source
+  const bySource = new Map<string, string[]>();
+  for (const r of finalResults) {
+    if (!bySource.has(r.source_id)) bySource.set(r.source_id, []);
+    bySource.get(r.source_id)!.push(r.chunk_id);
+  }
+
+  const branchesByChunk = new Map<string, string[]>();
+  for (const [sourceId, chunkIds] of bySource) {
+    const map = getBranchesForChunks(projectId, sourceId, chunkIds);
+    for (const [cid, branches] of map) branchesByChunk.set(cid, branches);
+  }
+
+  return finalResults.map((r) => ({ ...r, branches: branchesByChunk.get(r.chunk_id) ?? [] }));
 }
 
 export async function searchKnowledge(

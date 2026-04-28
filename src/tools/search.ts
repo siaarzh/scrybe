@@ -49,7 +49,10 @@ export const searchCodeTool: Tool<
   }),
   formatCli: (results) => results.map((r) => {
     const sym = r.symbol_name ? ` · ${r.symbol_name}` : "";
-    return `\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})${sym}\n${r.content.slice(0, 300)}`;
+    const branchLine = r.branches.length > 0
+      ? `\n  Branches: ${r.branches.join(", ")}`
+      : "";
+    return `\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})${sym}${branchLine}\n${r.content.slice(0, 300)}`;
   }).join(""),
 };
 

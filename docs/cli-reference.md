@@ -372,6 +372,16 @@ scrybe search --project-id myrepo "authentication login flow"
 scrybe search --project-id myrepo --branch feat/my-feature "new feature implementation"
 ```
 
+Example output:
+
+```
+[0.842] src/auth/login.ts:12-34 (typescript) · loginUser
+  Branches: master, feat/my-feature
+export function loginUser(email: string, password: string) {
+```
+
+Each hit shows a `Branches: ...` line when the chunk is indexed on one or more branches. The list is sorted master/main first, then alphabetical.
+
 ---
 
 ### `search knowledge`

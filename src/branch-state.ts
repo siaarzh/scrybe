@@ -237,6 +237,46 @@ export function wipeSource(projectId: string, sourceId: string): void {
   }
 }
 
+/**
+ * Reverse lookup: for each chunk_id, return all branches it's tagged on
+ * across the given (project, source). Empty array for unknown chunk_ids.
+ *
+ * Uses idx_branch_tags_chunk. Single IN-query — no batching needed
+ * (top-K caps at ~50, SQLite host-param limit is 32766+).
+ *
+ * Sort order: master/main first, then alphabetical.
+ */
+export function getBranchesForChunks(
+  projectId: string,
+  sourceId: string,
+  chunkIds: string[]
+): Map<string, string[]> {
+  if (chunkIds.length === 0) return new Map();
+
+  const placeholders = chunkIds.map(() => "?").join(", ");
+  const rows = getDB().prepare(
+    `SELECT chunk_id, branch FROM branch_tags WHERE project_id=? AND source_id=? AND chunk_id IN (${placeholders})`
+  ).all(projectId, sourceId, ...chunkIds) as { chunk_id: string; branch: string }[];
+
+  const map = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!map.has(row.chunk_id)) map.set(row.chunk_id, []);
+    map.get(row.chunk_id)!.push(row.branch);
+  }
+
+  // Sort: master/main first, then alphabetical
+  for (const [cid, branches] of map) {
+    map.set(cid, branches.sort((a, b) => {
+      const aPriority = (a === "master" || a === "main") ? 0 : 1;
+      const bPriority = (b === "master" || b === "main") ? 0 : 1;
+      if (aPriority !== bPriority) return aPriority - bPriority;
+      return a.localeCompare(b);
+    }));
+  }
+
+  return map;
+}
+
 /** Count how many branch-tag rows reference a chunk (used to detect orphans). */
 export function countTagsForChunk(chunkId: string): number {
   const row = getDB().prepare(
