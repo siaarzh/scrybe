@@ -81,17 +81,23 @@ describe("FS watcher — unhealthy detection (unit)", () => {
 
 describe("daemon /status — watcher health reflected via HTTP (integration)", () => {
   let daemon: TempDaemon | null = null;
+  // Hoisted so afterEach can clean up AFTER daemon.stop() (daemon holds branch-tags.db open).
+  let testDataDir: string | null = null;
+  let testRepoDir: string | null = null;
 
   afterEach(async () => {
     if (daemon) { await daemon.stop(); daemon = null; }
+    // Cleanup AFTER stop — daemon closes SQLite handles on shutdown.
+    if (testDataDir) { try { rmSync(testDataDir, { recursive: true, force: true }); } catch { /* ignore */ } testDataDir = null; }
+    if (testRepoDir) { try { rmSync(testRepoDir, { recursive: true, force: true }); } catch { /* ignore */ } testRepoDir = null; }
   });
 
   it("reports watcherHealthy=false for a project whose root_path does not exist", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "scrybe-accept-bad-"));
-    const badPath = join(dataDir, "nonexistent-repo");
+    testDataDir = mkdtempSync(join(tmpdir(), "scrybe-accept-bad-"));
+    const badPath = join(testDataDir, "nonexistent-repo");
 
     writeFileSync(
-      join(dataDir, "projects.json"),
+      join(testDataDir, "projects.json"),
       JSON.stringify([{
         id: "test-unhealthy-http",
         description: "Acceptance test project",
@@ -104,7 +110,7 @@ describe("daemon /status — watcher health reflected via HTTP (integration)", (
       "utf8",
     );
 
-    daemon = await startTempDaemon({ dataDir, projects: [] });
+    daemon = await startTempDaemon({ dataDir: testDataDir, projects: [] });
 
     // Give watcher a moment to attempt (and fail) the subscription
     await new Promise<void>((r) => setTimeout(r, 1000));
@@ -115,29 +121,27 @@ describe("daemon /status — watcher health reflected via HTTP (integration)", (
     expect(proj).toBeDefined();
     expect(proj!.watcherHealthy).toBe(false);
     expect(proj!.gitWatcherHealthy).toBe(false);
-
-    rmSync(dataDir, { recursive: true, force: true });
   });
 
   it("reports watcherHealthy=true for a project whose root_path exists", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "scrybe-accept-good-"));
-    const repoDir = mkdtempSync(join(tmpdir(), "scrybe-accept-repo-"));
+    testDataDir = mkdtempSync(join(tmpdir(), "scrybe-accept-good-"));
+    testRepoDir = mkdtempSync(join(tmpdir(), "scrybe-accept-repo-"));
 
     writeFileSync(
-      join(dataDir, "projects.json"),
+      join(testDataDir, "projects.json"),
       JSON.stringify([{
         id: "test-healthy-http",
         description: "Acceptance test healthy project",
         sources: [{
           source_id: "primary",
-          source_config: { type: "code", root_path: repoDir },
+          source_config: { type: "code", root_path: testRepoDir },
           embedding: { base_url: "http://127.0.0.1:12345", model: "test", dimensions: 384, api_key_env: "EMBEDDING_API_KEY" },
         }],
       }]),
       "utf8",
     );
 
-    daemon = await startTempDaemon({ dataDir, projects: [] });
+    daemon = await startTempDaemon({ dataDir: testDataDir, projects: [] });
 
     // Give watcher time to subscribe
     await new Promise<void>((r) => setTimeout(r, 1000));
@@ -147,8 +151,5 @@ describe("daemon /status — watcher health reflected via HTTP (integration)", (
 
     expect(proj).toBeDefined();
     expect(proj!.watcherHealthy).toBe(true);
-
-    rmSync(dataDir, { recursive: true, force: true });
-    rmSync(repoDir, { recursive: true, force: true });
   });
 });

@@ -27,6 +27,7 @@ export function spawnScrybe(
         SCRYBE_DAEMON_PORT: "0",
         SCRYBE_DAEMON_NO_FETCH: "1",
         SCRYBE_SKIP_MIGRATION: "1",
+        SCRYBE_NO_AUTO_DAEMON: "1",
         EMBEDDING_BASE_URL: sidecar.baseUrl,
         EMBEDDING_MODEL: sidecar.model,
         EMBEDDING_DIMENSIONS: String(sidecar.dimensions),
