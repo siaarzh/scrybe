@@ -23,6 +23,9 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Plan files (local working documents)
+.plans/
+
 # Local AI tools & configs
 .claude/
 .claude-instant/
