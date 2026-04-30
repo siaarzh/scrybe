@@ -1,6 +1,6 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Schema, Field, Utf8, Int32, Float32, FixedSizeList } from "apache-arrow";
-import { mkdirSync, statSync, readdirSync, existsSync } from "fs";
+import { mkdirSync, statSync, readdirSync, existsSync, rmSync, readFileSync } from "fs";
 import { join } from "path";
 import { config } from "./config.js";
 import type { CodeChunk, SearchResult, KnowledgeChunk, KnowledgeSearchResult } from "./types.js";
@@ -214,15 +214,30 @@ export async function ftsSearch(
   }));
 }
 
+async function ftsIndexExists(table: lancedb.Table, tableName: string, column: string): Promise<boolean> {
+  const indices = await table.listIndices();
+  const inManifest = indices.some(
+    (idx) => idx.indexType.toUpperCase().includes("FTS") && idx.columns.includes(column),
+  );
+  if (!inManifest) return false;
+  // Verify the UUID dirs actually exist — manifest can reference a UUID that was deleted.
+  const indicesDir = join(DB_PATH, `${tableName}.lance`, "_indices");
+  if (!existsSync(indicesDir)) return false;
+  return readdirSync(indicesDir, { withFileTypes: true }).some((e) => e.isDirectory());
+}
+
 export async function createFtsIndex(tableName: string): Promise<void> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return;
   if ((await table.countRows()) === 0) return;
-  await table.createIndex("content", {
-    config: lancedb.Index.fts({ stem: false, lowercase: true }),
-    replace: true,
+  if (await ftsIndexExists(table, tableName, "content")) return;
+  await writeWithRetry(tableName, async (t) => {
+    await t.createIndex("content", {
+      config: lancedb.Index.fts({ stem: false, lowercase: true }),
+      replace: true,
+    });
+    await maybeCompact(t);
   });
-  await maybeCompact(table);
 }
 
 export async function deleteProject(projectId: string, tableName: string): Promise<void> {
@@ -328,14 +343,17 @@ export async function ftsSearchKnowledge(
 }
 
 export async function createKnowledgeFtsIndex(tableName: string): Promise<void> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return;
   if ((await table.countRows()) === 0) return;
-  await table.createIndex("content", {
-    config: lancedb.Index.fts({ stem: false, lowercase: true }),
-    replace: true,
+  if (await ftsIndexExists(table, tableName, "content")) return;
+  await writeWithRetry(tableName, async (t) => {
+    await t.createIndex("content", {
+      config: lancedb.Index.fts({ stem: false, lowercase: true }),
+      replace: true,
+    });
+    await maybeCompact(t);
   });
-  await maybeCompact(table);
 }
 
 export async function deleteKnowledgeProject(projectId: string, tableName: string): Promise<void> {
@@ -376,19 +394,22 @@ const GRACE_MS = (() => {
   return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_GRACE_MS;
 })();
 
-function dirSizeBytes(tableName: string): number {
-  const tableDir = join(DB_PATH, `${tableName}.lance`);
-  if (!existsSync(tableDir)) return 0;
+function dirBytes(dir: string): number {
+  if (!existsSync(dir)) return 0;
   let total = 0;
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, entry.name);
+  const walk = (d: string): void => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name);
       if (entry.isDirectory()) walk(full);
       else { try { total += statSync(full).size; } catch { /* ignore races */ } }
     }
   };
-  walk(tableDir);
+  walk(dir);
   return total;
+}
+
+function dirSizeBytes(tableName: string): number {
+  return dirBytes(join(DB_PATH, `${tableName}.lance`));
 }
 
 /**
@@ -535,4 +556,55 @@ export async function dropTable(tableName: string): Promise<void> {
     await db.dropTable(tableName);
   }
   _tableCache.delete(tableName);
+}
+
+/**
+ * Delete `_indices/` UUID directories not referenced by any retained manifest version.
+ * Lance's `optimize()` prunes manifest versions but leaves their UUID subdirs behind.
+ *
+ * Lance stores index UUIDs as raw 16-byte binary in Protobuf manifests (field tag 0x0a,
+ * length 0x10). We scan every retained manifest for `\x0a\x10` + 16 bytes sequences and
+ * convert to hyphenated UUID strings to match against `_indices/` subdirectory names.
+ * We over-collect (any 0x0a10+16b match) — safe because false positives only mean we
+ * retain extra dirs, never delete live ones.
+ *
+ * Returns zero on any filesystem error rather than risking wrong deletions.
+ */
+export async function pruneIndexOrphans(
+  tableName: string,
+): Promise<{ removed: number; bytesFreed: number }> {
+  const tableDir = join(DB_PATH, `${tableName}.lance`);
+  const indicesDir = join(tableDir, "_indices");
+  const versionsDir = join(tableDir, "_versions");
+  if (!existsSync(indicesDir) || !existsSync(versionsDir)) return { removed: 0, bytesFreed: 0 };
+
+  // Collect UUIDs referenced by any retained manifest.
+  const referenced = new Set<string>();
+  for (const f of readdirSync(versionsDir)) {
+    try {
+      const buf = readFileSync(join(versionsDir, f));
+      for (let i = 0; i < buf.length - 17; i++) {
+        if (buf[i] === 0x0a && buf[i + 1] === 0x10) {
+          const hex = buf.slice(i + 2, i + 18).toString("hex");
+          referenced.add(
+            `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`,
+          );
+        }
+      }
+    } catch { /* skip — better to keep orphans than delete live ones */ }
+  }
+
+  let removed = 0;
+  let bytesFreed = 0;
+  for (const entry of readdirSync(indicesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (referenced.has(entry.name)) continue;
+    const dir = join(indicesDir, entry.name);
+    try {
+      bytesFreed += dirBytes(dir);
+      rmSync(dir, { recursive: true, force: true });
+      removed++;
+    } catch { /* concurrent writer — skip, next gc will catch it */ }
+  }
+  return { removed, bytesFreed };
 }

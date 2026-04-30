@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.27.4] — 2026-04-30
+
+### Fixed
+
+- **`scrybe gc` now reclaims orphaned FTS index directories — 30 MB+ on actively-developed repos.** Every incremental `indexSource` run was unconditionally rebuilding the Lance FTS index via `createIndex("content", { replace: true })`, leaving the prior index version's UUID directory behind in `<table>.lance/_indices/`. Lance's `optimize()` prunes manifest versions but does not delete unreferenced `_indices/` UUID dirs. Over hundreds of FS-watcher ticks these accumulated without bound: `cmx-api-tests/primary` reached 3 891 orphan dirs totaling 36 MB on a 48 MB table (75 % bloat).
+  - **`createFtsIndex` / `createKnowledgeFtsIndex` are now idempotent.** A `listIndices()` check (plus a disk existence guard that catches manifests referencing deleted UUID dirs) skips `createIndex` when the index already exists and its files are present. Lance's `optimize()` keeps the index fresh thereafter.
+  - **`pruneIndexOrphans(tableName)` cleans up existing orphan dirs** by reading retained manifest files, extracting all 16-byte binary UUIDs (Protobuf field-tag `\x0a\x10` + 16 bytes), and deleting any `_indices/` subdirectory not referenced. Called automatically at the end of every `indexSource` run (with a debug-only log) and explicitly during `scrybe gc` (reported in the per-table reclaim line).
+  - **`scrybe gc` output now includes FTS orphan count** in the per-table detail, e.g. `scrybe/primary  7.3 MB reclaimed   (2 fragments merged, 8 versions pruned, 4 FTS orphans)`.
+  - **No-op incremental runs now skip FTS creation and compaction entirely** (`didWork = toReindex.size + toRemove.size > 0`). Sub-2 s "no file changed" jobs — previously 35 % of all daemon work — now complete without touching the Lance table.
+  - **Fetch poller no longer re-queues reindexes for pinned branches that don't exist on the remote.** `resolveRemoteSha` returning `null` (branch not found) previously triggered an infinite `neverIndexed` loop that compounded the FTS bloat. Now emits a one-shot `watcher.event` warning per daemon process and skips.
+
+---
+
 ## [0.27.3] — 2026-04-28
 
 ### Changed

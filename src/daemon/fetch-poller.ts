@@ -43,6 +43,7 @@ interface PollerState {
   rootPath: string;
   timer: ReturnType<typeof setTimeout> | null;
   retries: number;
+  warnedMissing: Set<string>;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────
@@ -71,6 +72,7 @@ export function startFetchPoller(projects: Project[]): void {
         rootPath,
         timer: null,
         retries: 0,
+        warnedMissing: new Set(),
       };
       _pollers.set(key, ps);
       schedulePoller(ps, 0); // run immediately for backfill + initial fetch
@@ -158,7 +160,20 @@ async function pollProject(ps: PollerState): Promise<void> {
     const shaBefore = shasBefore.get(branch);
     const neverIndexed = !indexedBranches.has(remoteBranch);
 
-    if (neverIndexed || (shaAfter != null && shaAfter !== shaBefore)) {
+    if (shaAfter == null) {
+      if (!ps.warnedMissing.has(branch)) {
+        _push?.({
+          ts: new Date().toISOString(),
+          level: "warn",
+          event: "watcher.event",
+          projectId: ps.projectId,
+          detail: { phase: "fetch-poller", missingRemote: remoteBranch },
+        });
+        ps.warnedMissing.add(branch);
+      }
+      continue;
+    }
+    if (neverIndexed || shaAfter !== shaBefore) {
       await enqueue({
         projectId: ps.projectId,
         sourceId: ps.sourceId,

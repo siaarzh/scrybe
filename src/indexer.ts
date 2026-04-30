@@ -12,6 +12,7 @@ import {
   upsertKnowledge,
   deleteKnowledgeProject,
   compactTableWithGrace,
+  pruneIndexOrphans,
 } from "./vector-store.js";
 import { createHash } from "node:crypto";
 import { appendFileSync, statSync } from "node:fs";
@@ -331,7 +332,9 @@ export async function indexSource(
         saveCursor(projectId, sourceId, now);
       }
 
-      if (config.hybridEnabled) {
+      const didWork = toReindex.size + toRemove.size > 0;
+
+      if (didWork && config.hybridEnabled) {
         try {
           if (isCode) {
             await createFtsIndex(tableName);
@@ -343,13 +346,15 @@ export async function indexSource(
         }
       }
 
-      // End-of-burst compaction. Each upsert batch produces a Lance version;
-      // without this, fragments accumulate across the run and only get pruned
-      // after maybeCompact's threshold trips. Uses the standard grace, so
-      // concurrent cross-process searches finish safely.
-      try {
-        await compactTableWithGrace(tableName);
-      } catch { /* non-fatal */ }
+      if (didWork) {
+        try { await compactTableWithGrace(tableName); } catch { /* non-fatal */ }
+        try {
+          const pruneResult = await pruneIndexOrphans(tableName);
+          if (pruneResult.removed > 0) {
+            debugEmit({ event: "indexer.pruneOrphans", projectId, sourceId, ...pruneResult });
+          }
+        } catch { /* non-fatal */ }
+      }
 
       const result = {
         status: "ok" as const,

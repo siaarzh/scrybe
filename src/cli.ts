@@ -3,7 +3,7 @@ import { join } from "path";
 import { getProject, listProjects, addProject, addSource, removeProject } from "./registry.js";
 import { indexProject, indexSource } from "./indexer.js";
 import { listBranches, getAllChunkIdsForSource } from "./branch-state.js";
-import { listChunkIds, deleteChunks, compactTable, getTableStats, COMPACT_THRESHOLD } from "./vector-store.js";
+import { listChunkIds, deleteChunks, compactTable, getTableStats, COMPACT_THRESHOLD, pruneIndexOrphans } from "./vector-store.js";
 import { config, VERSION } from "./config.js";
 import { checkAndMigrate } from "./schema-version.js";
 import { warnDeprecated } from "./cli-deprecation.js";
@@ -526,19 +526,20 @@ export async function runCli(): Promise<void> {
         );
         if (allSources.length > 0) {
           console.log("\nCompacting Lance tables...");
-          type Row = { projectId: string; sourceId: string; result: Awaited<ReturnType<typeof compactTable>> };
+          type Row = { projectId: string; sourceId: string; result: Awaited<ReturnType<typeof compactTable>>; orphans: { removed: number; bytesFreed: number } };
           const rows: Row[] = [];
           for (const { projectId, source } of allSources) {
             try {
               const result = await compactTable(source.table_name!);
-              rows.push({ projectId, sourceId: source.source_id, result });
+              const orphans = await pruneIndexOrphans(source.table_name!);
+              rows.push({ projectId, sourceId: source.source_id, result, orphans });
             } catch { /* ignore — table may be gone */ }
           }
 
-          const real = rows.filter((r) => r.result.hadRealWork);
-          const idle = rows.filter((r) => !r.result.hadRealWork);
+          const real = rows.filter((r) => r.result.hadRealWork || r.orphans.removed > 0);
+          const idle = rows.filter((r) => !r.result.hadRealWork && r.orphans.removed === 0);
 
-          for (const { projectId, sourceId, result } of real) {
+          for (const { projectId, sourceId, result, orphans } of real) {
             const detail: string[] = [];
             if (result.fragmentsMerged > 0) {
               detail.push(`${result.fragmentsMerged} fragment${result.fragmentsMerged === 1 ? "" : "s"} merged`);
@@ -546,8 +547,12 @@ export async function runCli(): Promise<void> {
             if (result.versionsPruned > 0) {
               detail.push(`${result.versionsPruned} version${result.versionsPruned === 1 ? "" : "s"} pruned`);
             }
+            if (orphans.removed > 0) {
+              detail.push(`${orphans.removed} FTS orphan${orphans.removed === 1 ? "" : "s"}`);
+            }
             const detailStr = detail.length > 0 ? `   (${detail.join(", ")})` : "";
-            console.log(`  ${projectId}/${sourceId}    ${fmtSize(result.bytesFreed)} reclaimed${detailStr}`);
+            const totalBytes = result.bytesFreed + orphans.bytesFreed;
+            console.log(`  ${projectId}/${sourceId}    ${fmtSize(totalBytes)} reclaimed${detailStr}`);
           }
           if (idle.length > 0) {
             const word = idle.length === 1 ? "table" : "tables";
@@ -558,7 +563,7 @@ export async function runCli(): Promise<void> {
             }
           }
 
-          const realBytes = real.reduce((sum, r) => sum + r.result.bytesFreed, 0);
+          const realBytes = real.reduce((sum, r) => sum + r.result.bytesFreed + r.orphans.bytesFreed, 0);
           const overheadBytes = idle.reduce((sum, r) => sum + r.result.bytesFreed, 0);
           const overheadStr = overheadBytes > 0 ? ` · ${fmtSize(overheadBytes)} manifest overhead` : "";
           if (real.length > 0) {
