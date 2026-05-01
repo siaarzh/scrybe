@@ -8,7 +8,7 @@
  * Master disable: SCRYBE_AUTO_GC=0
  */
 import { listProjects, getProject } from "../registry.js";
-import { listChunkIds } from "../vector-store.js";
+import { listChunkIds, countTableRows } from "../vector-store.js";
 import { getAllChunkIdsForSource } from "../branch-state.js";
 import { getLastGcTime } from "../jobs-store.js";
 import { submitToQueue, onQueueJobEvent } from "./queue.js";
@@ -85,6 +85,33 @@ export class IdleTracker {
   }
 }
 
+// ─── Orphan detection ─────────────────────────────────────────────────────
+
+/**
+ * Returns true if any code source for the project has at least one orphan chunk
+ * (LanceDB row not referenced by any branch tag). Checks live row counts vs
+ * branch-tag counts — no caching.
+ *
+ * Returns true on any read error (defensive default: better to run unnecessary
+ * gc than to silently miss orphans). Returns false for projects with no code
+ * sources (knowledge-only projects have no orphan concept).
+ */
+export async function hasOrphans(projectId: string): Promise<boolean> {
+  const project = getProject(projectId);
+  if (!project) return false;
+  for (const source of project.sources) {
+    if (!source.table_name || source.source_config.type !== "code") continue;
+    try {
+      const lance = await countTableRows(source.table_name);
+      const tagged = getAllChunkIdsForSource(projectId, source.source_id).size;
+      if (lance > tagged) return true;
+    } catch {
+      return true; // err on the side of running gc
+    }
+  }
+  return false;
+}
+
 // ─── Module state ─────────────────────────────────────────────────────────
 
 let _pushEvent: ((ev: DaemonEvent) => void) | null = null;
@@ -101,7 +128,22 @@ export function initAutoGc(opts: { pushEvent: (ev: DaemonEvent) => void }): Idle
 
   const tracker = new IdleTracker(getIdleMs(), (projectId) => {
     if (!isAutoGcEnabled()) return;
-    enqueueAutoGc(projectId, "idle");
+    hasOrphans(projectId).then((orphans) => {
+      if (orphans) {
+        enqueueAutoGc(projectId, "idle");
+      } else {
+        _pushEvent?.({
+          ts: new Date().toISOString(),
+          level: "info",
+          event: "auto-gc.skipped",
+          projectId,
+          detail: { trigger: "idle", reason: "no-orphans" },
+        });
+      }
+    }).catch(() => {
+      // If the orphan check itself throws, run gc to be safe
+      enqueueAutoGc(projectId, "idle");
+    });
   });
   _idleTracker = tracker;
 

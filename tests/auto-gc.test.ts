@@ -16,6 +16,7 @@ vi.mock("../src/registry.js", () => ({
 
 vi.mock("../src/vector-store.js", () => ({
   listChunkIds: vi.fn(),
+  countTableRows: vi.fn(),
 }));
 
 vi.mock("../src/branch-state.js", () => ({
@@ -264,6 +265,154 @@ describe("evaluateRatioTrigger", () => {
     await evaluateRatioTrigger("proj-disabled");
 
     expect(submitToQueue).not.toHaveBeenCalled();
+  });
+});
+
+// ─── hasOrphans tests ────────────────────────────────────────────────────
+
+describe("hasOrphans", () => {
+  it("returns false for project with no code sources (knowledge-only)", async () => {
+    const { getProject } = await import("../src/registry.js");
+    const { countTableRows } = await import("../src/vector-store.js");
+
+    vi.mocked(getProject).mockReturnValue({
+      id: "proj-knowledge-only",
+      description: "test",
+      sources: [{ source_id: "gitlab-issues", source_config: { type: "ticket", provider: "gitlab", base_url: "https://x.com", project_id: "1", token: "t" }, table_name: "t1" }],
+    } as any);
+
+    const { hasOrphans } = await import("../src/daemon/auto-gc.js");
+    const result = await hasOrphans("proj-knowledge-only");
+
+    expect(result).toBe(false);
+    expect(countTableRows).not.toHaveBeenCalled();
+  });
+
+  it("returns false when lance row count equals tagged count (clean state)", async () => {
+    const { getProject } = await import("../src/registry.js");
+    const { countTableRows } = await import("../src/vector-store.js");
+    const { getAllChunkIdsForSource } = await import("../src/branch-state.js");
+
+    vi.mocked(getProject).mockReturnValue({
+      id: "proj-clean",
+      description: "test",
+      sources: [{ source_id: "primary", source_config: { type: "code", root_path: "/tmp", languages: ["ts"] }, table_name: "proj_clean_primary" }],
+    } as any);
+    vi.mocked(countTableRows).mockResolvedValue(5);
+    vi.mocked(getAllChunkIdsForSource).mockReturnValue(new Set(["a", "b", "c", "d", "e"]));
+
+    const { hasOrphans } = await import("../src/daemon/auto-gc.js");
+    const result = await hasOrphans("proj-clean");
+
+    expect(result).toBe(false);
+  });
+
+  it("returns true when lance row count exceeds tagged count (dirty state)", async () => {
+    const { getProject } = await import("../src/registry.js");
+    const { countTableRows } = await import("../src/vector-store.js");
+    const { getAllChunkIdsForSource } = await import("../src/branch-state.js");
+
+    vi.mocked(getProject).mockReturnValue({
+      id: "proj-dirty",
+      description: "test",
+      sources: [{ source_id: "primary", source_config: { type: "code", root_path: "/tmp", languages: ["ts"] }, table_name: "proj_dirty_primary" }],
+    } as any);
+    vi.mocked(countTableRows).mockResolvedValue(10);
+    vi.mocked(getAllChunkIdsForSource).mockReturnValue(new Set(["a", "b", "c", "d", "e", "f", "g"])); // 7 tagged, 10 in lance → 3 orphans
+
+    const { hasOrphans } = await import("../src/daemon/auto-gc.js");
+    const result = await hasOrphans("proj-dirty");
+
+    expect(result).toBe(true);
+  });
+
+  it("returns true when LanceDB query throws (error path defaults to run-gc)", async () => {
+    const { getProject } = await import("../src/registry.js");
+    const { countTableRows } = await import("../src/vector-store.js");
+
+    vi.mocked(getProject).mockReturnValue({
+      id: "proj-error",
+      description: "test",
+      sources: [{ source_id: "primary", source_config: { type: "code", root_path: "/tmp", languages: ["ts"] }, table_name: "proj_error_primary" }],
+    } as any);
+    vi.mocked(countTableRows).mockRejectedValue(new Error("LanceDB unavailable"));
+
+    const { hasOrphans } = await import("../src/daemon/auto-gc.js");
+    const result = await hasOrphans("proj-error");
+
+    expect(result).toBe(true);
+  });
+});
+
+// ─── Idle skip integration tests ─────────────────────────────────────────
+
+describe("idle trigger skip behavior", () => {
+  it("skips enqueue and emits auto-gc.skipped when no orphans", async () => {
+    const { listProjects, getProject } = await import("../src/registry.js");
+    const { countTableRows } = await import("../src/vector-store.js");
+    const { getAllChunkIdsForSource } = await import("../src/branch-state.js");
+    const { submitToQueue } = await import("../src/daemon/queue.js");
+
+    const proj = {
+      id: "proj-skip",
+      description: "test",
+      sources: [{ source_id: "primary", source_config: { type: "code", root_path: "/tmp", languages: ["ts"] }, table_name: "proj_skip_primary" }],
+    } as any;
+    vi.mocked(listProjects).mockReturnValue([proj]);
+    vi.mocked(getProject).mockReturnValue(proj);
+    vi.mocked(countTableRows).mockResolvedValue(5);
+    vi.mocked(getAllChunkIdsForSource).mockReturnValue(new Set(["a", "b", "c", "d", "e"])); // equal counts → no orphans
+
+    const pushEvent = vi.fn();
+    process.env["SCRYBE_AUTO_GC_IDLE_MS"] = "100";
+    const { initAutoGc } = await import("../src/daemon/auto-gc.js");
+    initAutoGc({ pushEvent });
+
+    // Advance timers past the idle window and flush the full async chain
+    // (timer → hasOrphans() → countTableRows await → .then callback)
+    vi.advanceTimersByTime(200);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+
+    expect(submitToQueue).not.toHaveBeenCalled();
+    expect(pushEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "auto-gc.skipped",
+        projectId: "proj-skip",
+        detail: expect.objectContaining({ trigger: "idle", reason: "no-orphans" }),
+      })
+    );
+  });
+
+  it("fires enqueue normally when orphans exist", async () => {
+    const { listProjects, getProject } = await import("../src/registry.js");
+    const { countTableRows } = await import("../src/vector-store.js");
+    const { getAllChunkIdsForSource } = await import("../src/branch-state.js");
+    const { submitToQueue } = await import("../src/daemon/queue.js");
+
+    const proj = {
+      id: "proj-has-orphans",
+      description: "test",
+      sources: [{ source_id: "primary", source_config: { type: "code", root_path: "/tmp", languages: ["ts"] }, table_name: "proj_has_orphans_primary" }],
+    } as any;
+    vi.mocked(listProjects).mockReturnValue([proj]);
+    vi.mocked(getProject).mockReturnValue(proj);
+    vi.mocked(countTableRows).mockResolvedValue(10);
+    vi.mocked(getAllChunkIdsForSource).mockReturnValue(new Set(["a", "b", "c", "d", "e", "f", "g"])); // 7 tagged, 10 in lance → orphans
+
+    const pushEvent = vi.fn();
+    process.env["SCRYBE_AUTO_GC_IDLE_MS"] = "100";
+    const { initAutoGc } = await import("../src/daemon/auto-gc.js");
+    initAutoGc({ pushEvent });
+
+    vi.advanceTimersByTime(200);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+
+    expect(submitToQueue).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "proj-has-orphans", type: "gc" })
+    );
+    expect(pushEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "auto-gc.scheduled", projectId: "proj-has-orphans" })
+    );
   });
 });
 

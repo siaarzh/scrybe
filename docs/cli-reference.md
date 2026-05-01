@@ -652,7 +652,7 @@ scrybe branch unpin --all --project-id cmx-ionic --yes
 
 The daemon automatically schedules gc jobs to keep orphan chunks under control. Two triggers:
 
-**Idle trigger:** After `SCRYBE_AUTO_GC_IDLE_MS` (default 5 min) of no queue activity for a project, the daemon enqueues a gc job. The timer resets on any queue event (job submitted, completed, or failed) for that project. Timer state is process-memory only — a daemon restart starts a fresh idle window.
+**Idle trigger:** After `SCRYBE_AUTO_GC_IDLE_MS` (default 5 min) of no queue activity for a project, the daemon checks for orphan chunks before enqueuing. It compares live LanceDB row counts against branch-tag counts for each code source. If all sources are balanced (no orphans), the gc enqueue is skipped — observable as an `auto-gc.skipped` event on the daemon SSE stream. If any source has more LanceDB rows than tagged chunks, or if the check fails (e.g. table locked), gc is enqueued. Timer state is process-memory only — a daemon restart starts a fresh idle window.
 
 **Ratio trigger:** After each `indexSource` job completes, the daemon computes:
 ```
@@ -665,6 +665,15 @@ If `orphan_ratio > SCRYBE_AUTO_GC_RATIO` (default 15%) **and** no gc has run for
 **Master disable:** Set `SCRYBE_AUTO_GC=0` to disable both triggers. Manual `scrybe gc` and the MCP `gc` tool continue to work regardless.
 
 **Manual gc preempts auto-gc:** When `scrybe gc` or `mcp__scrybe__gc` is invoked, any pending auto-gc jobs in the same project scope are cancelled first, and idle timers are reset, to avoid redundant back-to-back runs.
+
+**Daemon SSE events emitted by auto-gc:**
+
+| Event | When |
+|-------|------|
+| `auto-gc.scheduled` | Idle or ratio trigger enqueued a gc job |
+| `auto-gc.completed` | Auto-triggered gc job finished successfully |
+| `auto-gc.failed` | Auto-triggered gc job failed |
+| `auto-gc.skipped` | Idle trigger ran orphan check, found none, skipped enqueue |
 
 ---
 

@@ -29,7 +29,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 - **Schema v3 → v4 migration (additive).** `jobs` table gains `type` column (default `"reindex"`) and `result` column (JSON gc result summary). Existing rows get `type="reindex"` via column default.
 
-- **New daemon SSE events:** `auto-gc.scheduled`, `auto-gc.completed`, `auto-gc.failed`.
+- **New daemon SSE events:** `auto-gc.scheduled`, `auto-gc.completed`, `auto-gc.failed`, `auto-gc.skipped`.
+
+### Changed
+
+- **Auto-gc now skips when there are no orphans to clean.** Idle-triggered gc previously fired every 5 min for quiet projects regardless of whether anything had changed, costing ~400 ms of CPU per project per cycle for zero reclaim. The trigger now consults live LanceDB row counts vs branch-tag counts and skips enqueue when both match. Skip is observable as `auto-gc.skipped` events on the daemon SSE stream (`{ trigger: "idle", reason: "no-orphans" }`). The ratio trigger is unchanged (it already implies orphans exist).
 
 ### Fixed
 

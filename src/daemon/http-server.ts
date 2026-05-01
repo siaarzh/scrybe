@@ -25,7 +25,7 @@ export interface DaemonEvent {
     | "job.started" | "job.completed" | "job.failed" | "job.cancelled"
     | "watcher.event" | "state.changed" | "watcher.unhealthy"
     | "pinned.changed"
-    | "auto-gc.scheduled" | "auto-gc.completed" | "auto-gc.failed";
+    | "auto-gc.scheduled" | "auto-gc.completed" | "auto-gc.failed" | "auto-gc.skipped";
   projectId?: string;
   sourceId?: string;
   branch?: string;
