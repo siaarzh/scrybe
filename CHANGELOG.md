@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.28.0] — 2026-05-01
+
 ### Added
 
 - **`scrybe ignore` — per-source private ignore rules.** Add ignore patterns without committing them to the repo. Stored in `DATA_DIR/ignores/<project>/<source>.gitignore`, applied additively on top of the committed `.scrybeignore`. Wizard-driven CLI (`scrybe ignore`) opens your `$EDITOR`; agent-driven MCP via `set_private_ignore` / `get_private_ignore` / `list_private_ignores`.
