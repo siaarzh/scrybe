@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, existsSync } from "fs";
 import { join, relative, extname, basename } from "path";
 import ignore from "ignore";
 import { config } from "./config.js";
+import { loadPrivateIgnore } from "./private-ignore.js";
 import type { CodeChunk } from "./types.js";
 
 // CJS interop: `ignore` module.exports is the factory function
@@ -119,7 +120,11 @@ export function getLanguage(filename: string): string | null {
   return EXTENSION_TO_LANGUAGE[ext] ?? null;
 }
 
-function loadIgnoreRules(rootPath: string): { ig: IgnoreManager | null; forcePatterns: string[] } {
+function loadIgnoreRules(
+  rootPath: string,
+  projectId?: string,
+  sourceId?: string
+): { ig: IgnoreManager | null; forcePatterns: string[] } {
   const ig = createIgnore();
   let hasRules = false;
   const forcePatterns: string[] = [];
@@ -143,6 +148,22 @@ function loadIgnoreRules(rootPath: string): { ig: IgnoreManager | null; forcePat
         if (trimmed.startsWith("!") && trimmed.length > 1) forcePatterns.push(trimmed.slice(1));
       }
     } catch {}
+  }
+
+  // Private ignore on top — DATA_DIR/ignores/<project>/<source>.gitignore
+  if (projectId && sourceId) {
+    const privateContent = loadPrivateIgnore(projectId, sourceId);
+    if (privateContent) {
+      try {
+        ig.add(privateContent);
+        hasRules = true;
+        // Collect negation patterns from private ignore too
+        for (const line of privateContent.split(/\r?\n/)) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("!") && trimmed.length > 1) forcePatterns.push(trimmed.slice(1));
+        }
+      } catch {}
+    }
   }
 
   return { ig: hasRules ? ig : null, forcePatterns };
@@ -173,9 +194,11 @@ export function chunkLines(
 }
 
 export function* walkRepoFiles(
-  rootPath: string
+  rootPath: string,
+  projectId?: string,
+  sourceId?: string
 ): Generator<{ relPath: string; absPath: string }> {
-  const { ig, forcePatterns } = loadIgnoreRules(rootPath);
+  const { ig, forcePatterns } = loadIgnoreRules(rootPath, projectId, sourceId);
 
   // Build force-include checker from negation patterns — overrides hardcoded skips
   let forceInclude: IgnoreManager | null = null;
@@ -238,7 +261,7 @@ export function* chunkRepo(
   rootPath: string,
   onlyFiles?: Set<string>
 ): Generator<CodeChunk> {
-  for (const { relPath, absPath } of walkRepoFiles(rootPath)) {
+  for (const { relPath, absPath } of walkRepoFiles(rootPath, projectId, sourceId)) {
     if (onlyFiles !== undefined && !onlyFiles.has(relPath)) continue;
 
     let text: string;

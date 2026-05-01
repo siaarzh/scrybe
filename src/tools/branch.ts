@@ -9,6 +9,7 @@ import {
   SourceNotFoundError,
   ProjectNotFoundError,
 } from "../pinned-branches.js";
+import { checkIgnoreCoverage } from "../private-ignore.js";
 import type { Tool } from "./types.js";
 
 type BranchEntry = { source_id: string; branches: string[] };
@@ -74,14 +75,17 @@ export const listPinnedBranchesTool: Tool<
   },
 };
 
+// Pin result type extended with ignore coverage warnings
+type PinResult = ReturnType<typeof addPinned> & { ignore_warnings?: string[] };
+
 export const pinBranchesTool: Tool<
   { project_id: string; source_id?: string; branches: string[]; mode?: "add" | "set" },
-  ReturnType<typeof addPinned>
+  PinResult
 > = {
   spec: {
     name: "pin_branches",
     cliName: "branch pin",
-    description: "Add (or replace) pinned branches on a code source. mode='add' (default) merges with the existing list; mode='set' replaces it. Returns warnings if pinned count exceeds 20.",
+    description: "Add (or replace) pinned branches on a code source. mode='add' (default) merges with the existing list; mode='set' replaces it. Returns warnings if pinned count exceeds 20 or if a branch has no ignore coverage.",
     inputSchema: {
       type: "object",
       properties: {
@@ -100,8 +104,25 @@ export const pinBranchesTool: Tool<
       .addHelpText("after", "\nExample:\n  scrybe branch pin -P myrepo feature/my-feature"),
   },
   handler: async ({ project_id, source_id, branches, mode }) => {
+    const resolvedSourceId = source_id ?? "primary";
     try {
-      return addPinned(project_id, source_id ?? "primary", branches, mode ?? "add");
+      const result = addPinned(project_id, resolvedSourceId, branches, mode ?? "add");
+
+      // Check ignore coverage for each newly-pinned branch
+      const ignore_warnings: string[] = [];
+      const project = getProject(project_id);
+      const codeSource = project?.sources.find((s) => s.source_id === resolvedSourceId && s.source_config.type === "code");
+      if (codeSource) {
+        const rootPath = (codeSource.source_config as { type: "code"; root_path: string }).root_path;
+        for (const branch of result.added) {
+          const coverage = checkIgnoreCoverage(rootPath, branch, project_id, resolvedSourceId);
+          if (!coverage.hasCoverage && coverage.message) {
+            ignore_warnings.push(coverage.message);
+          }
+        }
+      }
+
+      return { ...result, ignore_warnings: ignore_warnings.length > 0 ? ignore_warnings : undefined };
     } catch (err) {
       if (err instanceof InvalidSourceTypeError || err instanceof SourceNotFoundError || err instanceof ProjectNotFoundError) {
         throw new Error(err.message);
@@ -117,6 +138,9 @@ export const pinBranchesTool: Tool<
   formatCli: (result) => {
     const lines = [JSON.stringify(result, null, 2)];
     for (const w of result.warnings) lines.push(`warning: ${w}`);
+    if (result.ignore_warnings) {
+      for (const w of result.ignore_warnings) process.stderr.write(`\x1b[33m${w}\x1b[0m\n`);
+    }
     return lines.join("\n");
   },
 };

@@ -24,7 +24,8 @@ export interface DaemonEvent {
   event:
     | "job.started" | "job.completed" | "job.failed" | "job.cancelled"
     | "watcher.event" | "state.changed" | "watcher.unhealthy"
-    | "pinned.changed";
+    | "pinned.changed"
+    | "auto-gc.scheduled" | "auto-gc.completed" | "auto-gc.failed";
   projectId?: string;
   sourceId?: string;
   branch?: string;
@@ -84,6 +85,24 @@ export interface KickResponse {
     status?: "queued" | "running";
     queuePosition?: number;
     duplicateOfPending?: boolean;
+  }>;
+}
+
+export interface GcRequest {
+  /** Projects to gc. Empty/missing = all registered code projects. */
+  scope?: string[];
+  /** Compaction mode. Manual gc uses "purge"; auto-gc uses "grace". Default: "purge" */
+  mode?: "grace" | "purge";
+}
+
+export interface GcResponse {
+  /** Number of pending auto-gc jobs cancelled (preempted by this manual gc). */
+  cancelledPending: number;
+  /** Job IDs of newly enqueued user-gc jobs. */
+  jobs: Array<{
+    jobId: string;
+    projectId: string;
+    status?: "queued" | "running";
   }>;
 }
 
@@ -360,6 +379,51 @@ async function handle(
     const body = (await readBody(req)) as KickRequest;
     const result = _onKick ? await _onKick(body) : { jobs: [] };
     jsonRes(res, 200, result);
+    return;
+  }
+
+  // ── POST /gc ───────────────────────────────────────────────────────────
+  // Manual gc preempts pending auto-gc + resets idle timers + enqueues user-gc.
+  // All three operations happen in this process (daemon), atomically wrt HTTP.
+  if (method === "POST" && path === "/gc") {
+    const body = (await readBody(req)) as GcRequest;
+    const mode = body.mode ?? "purge";
+
+    // Resolve scope: explicit list, or all registered code-bearing projects
+    let scope: string[];
+    if (body.scope && body.scope.length > 0) {
+      scope = body.scope;
+    } else {
+      scope = listProjects()
+        .filter((p) => p.sources.some((s) => s.source_config.type === "code"))
+        .map((p) => p.id);
+    }
+
+    // Lazy-import daemon-process modules so SSR-style import issues stay contained
+    const { cancelPendingByType, submitToQueue } = await import("./queue.js");
+    const { getIdleTracker } = await import("./auto-gc.js");
+
+    // 1. Cancel pending auto-gc in scope (avoid redundancy with the user's gc)
+    const cancelledPending = cancelPendingByType("gc", scope);
+
+    // 2. Reset idle trackers so auto-gc doesn't fire immediately after manual completes
+    const tracker = getIdleTracker();
+    if (tracker) {
+      for (const id of scope) tracker.reset(id);
+    }
+
+    // 3. Enqueue user-gc jobs for each project in scope
+    const jobs = scope.map((projectId) => {
+      const submit = submitToQueue({
+        projectId,
+        type: "gc",
+        gcOptions: { mode },
+        mode: "incremental",
+      });
+      return { jobId: submit.jobId, projectId, status: submit.status };
+    });
+
+    jsonRes(res, 200, { cancelledPending, jobs } satisfies GcResponse);
     return;
   }
 

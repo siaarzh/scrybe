@@ -7,6 +7,36 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **`scrybe ignore` — per-source private ignore rules.** Add ignore patterns without committing them to the repo. Stored in `DATA_DIR/ignores/<project>/<source>.gitignore`, applied additively on top of the committed `.scrybeignore`. Wizard-driven CLI (`scrybe ignore`) opens your `$EDITOR`; agent-driven MCP via `set_private_ignore` / `get_private_ignore` / `list_private_ignores`.
+
+- **Three new MCP tools:** `set_private_ignore`, `get_private_ignore`, `list_private_ignores`. See [docs/mcp-reference.md](docs/mcp-reference.md) for details. `set_private_ignore` with empty string deletes the file; response includes a `hint` field with the exact reindex command to apply changes.
+
+- **`scrybe init` outro now mentions `scrybe ignore`** as a follow-up step.
+
+- **Auto-GC — daemon cleans orphan chunks automatically.** Two triggers: (1) **idle trigger** — after `SCRYBE_AUTO_GC_IDLE_MS` (default 5 min) of no queue activity for a project, daemon enqueues a gc job; (2) **ratio trigger** — after `indexSource` finishes, if orphan ratio exceeds `SCRYBE_AUTO_GC_RATIO` (default 15%) and debounce has elapsed (`SCRYBE_AUTO_GC_RATIO_DEBOUNCE_MS`, default 30 min), daemon enqueues gc. Both triggers use compaction-with-grace (60s grace window). Master disable: `SCRYBE_AUTO_GC=0`.
+
+- **`scrybe gc` now routes through daemon queue when daemon is running.** Prevents write races with in-flight reindex jobs. Cancels pending auto-gc jobs in scope and resets idle timers before enqueuing user-explicit gc (mode=purge, no grace window). Falls back to direct execution when daemon is down (existing behavior preserved).
+
+- **New MCP tool `gc({ project_id?, source_id? })`.** Mirrors `scrybe gc` CLI semantics including daemon routing, cancel-pending, and idle-reset behavior.
+
+- **`scrybe status` shows Auto-GC header and `LAST GC` column.** Header: `Auto-GC ● enabled · 5m idle / 15% ratio`. Projects table gains `LAST GC` column derived from the jobs table.
+
+- **`scrybe job list` shows job type (`reindex` / `gc`)** and gc result summary (orphan count, MB reclaimed).
+
+- **New env vars:** `SCRYBE_AUTO_GC`, `SCRYBE_AUTO_GC_IDLE_MS`, `SCRYBE_AUTO_GC_RATIO`, `SCRYBE_AUTO_GC_RATIO_DEBOUNCE_MS`.
+
+- **Schema v3 → v4 migration (additive).** `jobs` table gains `type` column (default `"reindex"`) and `result` column (JSON gc result summary). Existing rows get `type="reindex"` via column default.
+
+- **New daemon SSE events:** `auto-gc.scheduled`, `auto-gc.completed`, `auto-gc.failed`.
+
+### Fixed
+
+- **`scanRef` (non-HEAD branch indexing) now respects `.scrybeignore` and private ignore rules.** Previously `scanRef` only applied language filtering via `getLanguage()` and skipped both the committed `.scrybeignore` (working tree) and any private ignore rules. Now both are loaded and applied before yielding file entries from `git ls-tree`. This closes a latent gap where pinned-branch indexing would index files that HEAD indexing excluded.
+
+- **`pin_branches` now warns when a branch has no ignore coverage.** When both the committed `.scrybeignore` is absent from the branch's git tree AND the private ignore for the source is missing or empty, the CLI emits a yellow warning to stderr and the MCP tool returns an `ignore_warnings` field. Non-blocking.
+
 ---
 
 ## [0.27.4] — 2026-04-30

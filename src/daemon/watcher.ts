@@ -16,6 +16,7 @@ import { join, relative } from "node:path";
 import ignore from "ignore";
 import { getDebounceMs, touchActive } from "./idle-state.js";
 import { enqueue } from "./queue.js";
+import { loadPrivateIgnore } from "../private-ignore.js";
 import type { DaemonEvent } from "./http-server.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ const createIgnore = ignore as unknown as () => IgnoreManager;
 
 interface WatchState {
   projectId: string;
+  sourceId: string | undefined;
   rootPath: string;
   sub: parcel.AsyncSubscription | null;
   pending: Set<string>;
@@ -76,10 +78,10 @@ export function getWatcherHealth(): Map<string, boolean> {
 }
 
 /** Start watching a project's root path. No-op if already watching. */
-export async function watchProject(projectId: string, rootPath: string): Promise<void> {
+export async function watchProject(projectId: string, rootPath: string, sourceId?: string): Promise<void> {
   if (_watches.has(projectId)) return;
   const ws: WatchState = {
-    projectId, rootPath,
+    projectId, sourceId, rootPath,
     sub: null, pending: new Set(),
     timer: null, retries: 0, retryTimer: null, healthy: false,
   };
@@ -104,12 +106,19 @@ export async function stopWatcher(): Promise<void> {
 
 // ─── Internal ─────────────────────────────────────────────────────────────
 
-function buildIgnoreFilter(rootPath: string): (rel: string) => boolean {
+function buildIgnoreFilter(rootPath: string, projectId?: string, sourceId?: string): (rel: string) => boolean {
   const mgr = createIgnore();
   for (const f of [".gitignore", ".scrybeignore"]) {
     const p = join(rootPath, f);
     if (existsSync(p)) {
       try { mgr.add(readFileSync(p, "utf8")); } catch { /* non-fatal */ }
+    }
+  }
+  // Private ignore from DATA_DIR
+  if (projectId && sourceId) {
+    const privateContent = loadPrivateIgnore(projectId, sourceId);
+    if (privateContent) {
+      try { mgr.add(privateContent); } catch { /* non-fatal */ }
     }
   }
   return (rel) => {
@@ -122,7 +131,7 @@ function buildNativeIgnore(rootPath: string): string[] {
 }
 
 async function subscribe(ws: WatchState): Promise<void> {
-  const isIgnored = buildIgnoreFilter(ws.rootPath);
+  const isIgnored = buildIgnoreFilter(ws.rootPath, ws.projectId, ws.sourceId);
   try {
     ws.sub = await parcel.subscribe(
       ws.rootPath,

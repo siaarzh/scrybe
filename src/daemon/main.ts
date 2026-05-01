@@ -7,7 +7,7 @@ import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
-import { initQueue, enqueue, submitToQueue, stopQueue } from "./queue.js";
+import { initQueue, enqueue, submitToQueue, stopQueue, onQueueJobEvent } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
@@ -15,6 +15,7 @@ import { onStateChange } from "./idle-state.js";
 import { listProjects } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
+import { initAutoGc, evaluateRatioTrigger } from "./auto-gc.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
 let shutdownCalled = false;
@@ -113,6 +114,16 @@ export async function runDaemon(): Promise<void> {
   // Wire queue → SSE ring buffer (must happen after startHttpServer exports pushEvent)
   initQueue({ pushEvent });
 
+  // Wire auto-gc triggers (must happen after initQueue)
+  initAutoGc({ pushEvent });
+
+  // Wire queue job events → ratio trigger evaluation
+  onQueueJobEvent((projectId, _jobId, eventType, req) => {
+    if (eventType === "completed" && (req.type ?? "reindex") === "reindex") {
+      evaluateRatioTrigger(projectId, req.sourceId).catch(() => { /* non-fatal */ });
+    }
+  });
+
   // Wire FS + git watchers + fetch poller → SSE + queue
   initWatcher({ pushEvent });
   initGitWatcher({ pushEvent });
@@ -127,7 +138,7 @@ export async function runDaemon(): Promise<void> {
     for (const source of project.sources) {
       if (source.source_config.type === "code") {
         const rootPath = (source.source_config as { type: "code"; root_path: string }).root_path;
-        await watchProject(project.id, rootPath);
+        await watchProject(project.id, rootPath, source.source_id);
         await watchGitProject(project.id, rootPath);
         break; // one code source per project for now
       }

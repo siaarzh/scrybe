@@ -15,9 +15,10 @@ import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { submitJob, submitSourceJob, getJobStatus } from "../jobs.js";
-import { insertJob, updateJobStatus, getQueueStatus } from "../jobs-store.js";
+import { insertJob, updateJobStatus, getQueueStatus, cancelPendingGcJobs } from "../jobs-store.js";
 import type { DaemonEvent } from "./http-server.js";
 import type { IndexMode } from "../types.js";
+import type { JobType } from "../jobs-store.js";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -35,6 +36,8 @@ export interface QueueRequest {
   sourceId?: string;
   branch?: string;
   mode?: IndexMode;
+  type?: JobType;
+  gcOptions?: { mode: "grace" | "purge" };
 }
 
 interface PendingItem extends QueueRequest {
@@ -55,11 +58,52 @@ let _pushEvent: ((ev: DaemonEvent) => void) | null = null;
 let _pending: PendingItem[] = [];
 let _active = new Map<string, ActiveEntry>(); // jobId → entry
 
+/** Job lifecycle event hook — fired for any projectId on submit, complete, or fail. */
+export type QueueJobEventType = "submitted" | "completed" | "failed" | "cancelled";
+export type QueueJobEventCallback = (projectId: string, jobId: string, eventType: QueueJobEventType, req: QueueRequest) => void;
+let _jobEventCallbacks: QueueJobEventCallback[] = [];
+
 // ─── Public API ───────────────────────────────────────────────────────────
 
 /** Wire in the SSE emitter. Must be called before enqueue(). */
 export function initQueue(opts: { pushEvent: (ev: DaemonEvent) => void }): void {
   _pushEvent = opts.pushEvent;
+}
+
+/** Register a callback for job lifecycle events (submitted/completed/failed/cancelled). */
+export function onQueueJobEvent(cb: QueueJobEventCallback): void {
+  _jobEventCallbacks.push(cb);
+}
+
+/**
+ * Cancel pending (not-yet-started) jobs of a given type, optionally scoped to project IDs.
+ * Does NOT cancel active (running) jobs — they finish cleanly.
+ * Returns count of items removed from the in-memory pending queue.
+ */
+export function cancelPendingByType(type: JobType, projectIds?: string[]): number {
+  const before = _pending.length;
+  const cancelledJobIds: string[] = [];
+
+  _pending = _pending.filter((item) => {
+    const typeMatch = (item.type ?? "reindex") === type;
+    const scopeMatch = !projectIds || projectIds.includes(item.projectId);
+    if (typeMatch && scopeMatch) {
+      cancelledJobIds.push(item.jobId);
+      item.reject(new Error("Cancelled by manual gc"));
+      return false;
+    }
+    return true;
+  });
+
+  // Also mark them cancelled in SQLite
+  if (cancelledJobIds.length > 0 && projectIds) {
+    try { cancelPendingGcJobs(projectIds); } catch { /* non-fatal */ }
+  } else if (cancelledJobIds.length > 0) {
+    // No scope — cancel all pending gc in SQLite
+    try { cancelPendingGcJobs(cancelledJobIds.map(() => "*")); } catch { /* non-fatal */ }
+  }
+
+  return before - _pending.length;
 }
 
 /** Returns current queue depth and concurrency cap. Used by /status. */
@@ -105,11 +149,14 @@ export function submitToQueue(req: QueueRequest): SubmitResult {
       finished_at: null,
       error_message: null,
       origin: "daemon",
+      type: req.type ?? "reindex",
+      result: null,
     });
   } catch { /* non-fatal */ }
 
   const item: PendingItem = { ...req, jobId, resolve: () => {}, reject: () => {} };
   _pending.push(item);
+  fireJobEventCallbacks(req.projectId, jobId, "submitted", req);
   drain();
 
   if (_active.has(jobId)) {
@@ -129,6 +176,7 @@ export function enqueue(req: QueueRequest): Promise<string> {
   const jobId = randomBytes(4).toString("hex");
   return new Promise<string>((resolve, reject) => {
     _pending.push({ ...req, jobId, resolve, reject });
+    fireJobEventCallbacks(req.projectId, jobId, "submitted", req);
     drain();
   });
 }
@@ -156,6 +204,7 @@ export function stopQueue(): void {
 export function _resetForTests(): void {
   stopQueue();
   _pushEvent = null;
+  _jobEventCallbacks = [];
 }
 
 // ─── Internal ─────────────────────────────────────────────────────────────
@@ -174,7 +223,49 @@ function drain(): void {
 
     const item = _pending.splice(idx, 1)[0];
     const startedAt = new Date().toISOString();
+    const jobType = item.type ?? "reindex";
 
+    if (jobType === "gc") {
+      // GC jobs are dispatched to the gc handler asynchronously;
+      // we track them ourselves in _active.
+      const gcJobId = item.jobId;
+      item.resolve(gcJobId);
+
+      // Update SQLite row to "running"
+      try {
+        updateJobStatus(gcJobId, { status: "running", started_at: Date.now() });
+      } catch { /* non-fatal */ }
+
+      emit({
+        ts: startedAt, level: "info", event: "job.started",
+        projectId: item.projectId, sourceId: item.sourceId,
+        detail: { jobId: gcJobId, type: "gc", gcMode: item.gcOptions?.mode ?? "grace" },
+      });
+
+      const timer = setInterval(() => {
+        // GC jobs use a flag stored in _active — we resolve when the async work sets it
+        const entry = _active.get(gcJobId);
+        if (!entry || !(entry as any)._gcDone) return;
+
+        clearInterval(timer);
+        _active.delete(gcJobId);
+        drain();
+      }, 200);
+
+      const entry: ActiveEntry = {
+        ...item,
+        jobId: gcJobId,
+        startedAt,
+        timer,
+      };
+      _active.set(gcJobId, entry);
+
+      // Run the gc handler asynchronously
+      runGcJob(item, gcJobId, startedAt);
+      continue;
+    }
+
+    // Reindex job — delegate to jobs.ts
     const result = item.sourceId
       ? submitSourceJob(item.projectId, item.sourceId, item.mode ?? "incremental", item.branch, item.jobId)
       : submitJob(item.projectId, item.mode ?? "incremental", undefined, item.branch, item.jobId);
@@ -212,6 +303,13 @@ function drain(): void {
         : status.status === "cancelled" ? "job.cancelled"
         : "job.failed";
 
+      const reqCopy = item;
+      fireJobEventCallbacks(
+        item.projectId, jobId,
+        status.status === "done" ? "completed" : status.status === "failed" ? "failed" : "cancelled",
+        reqCopy
+      );
+
       emit({
         ts: new Date().toISOString(),
         level: status.status === "failed" ? "error" : "info",
@@ -233,6 +331,96 @@ function drain(): void {
       startedAt,
       timer,
     });
+  }
+}
+
+async function runGcJob(item: PendingItem, gcJobId: string, _startedAt: string): Promise<void> {
+  const { runGcJobHandler } = await import("./gc-handler.js");
+  const gcMode = item.gcOptions?.mode ?? "grace";
+  // "grace" mode = auto-triggered gc; "purge" = user-explicit
+  const isAutoTrigger = gcMode === "grace";
+
+  try {
+    const gcResult = await runGcJobHandler({
+      projectId: item.projectId,
+      sourceId: item.sourceId,
+      mode: gcMode,
+    });
+
+    try {
+      updateJobStatus(gcJobId, {
+        status: "done",
+        finished_at: Date.now(),
+        result: JSON.stringify(gcResult),
+      });
+    } catch { /* non-fatal */ }
+
+    fireJobEventCallbacks(item.projectId, gcJobId, "completed", item);
+
+    emit({
+      ts: new Date().toISOString(), level: "info", event: "job.completed",
+      projectId: item.projectId, sourceId: item.sourceId,
+      durationMs: gcResult.duration_ms,
+      detail: {
+        jobId: gcJobId,
+        type: "gc",
+        orphans_deleted: gcResult.orphans_deleted,
+        bytes_freed: gcResult.bytes_freed,
+      },
+    });
+
+    if (isAutoTrigger) {
+      emit({
+        ts: new Date().toISOString(), level: "info", event: "auto-gc.completed",
+        projectId: item.projectId,
+        durationMs: gcResult.duration_ms,
+        detail: {
+          orphans_deleted: gcResult.orphans_deleted,
+          bytes_freed: gcResult.bytes_freed,
+          duration_ms: gcResult.duration_ms,
+        },
+      });
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+
+    try {
+      updateJobStatus(gcJobId, {
+        status: "failed",
+        finished_at: Date.now(),
+        error_message: message,
+      });
+    } catch { /* non-fatal */ }
+
+    fireJobEventCallbacks(item.projectId, gcJobId, "failed", item);
+
+    emit({
+      ts: new Date().toISOString(), level: "error", event: "job.failed",
+      projectId: item.projectId, sourceId: item.sourceId,
+      error: { message },
+      detail: { jobId: gcJobId, type: "gc" },
+    });
+
+    if (isAutoTrigger) {
+      emit({
+        ts: new Date().toISOString(), level: "error", event: "auto-gc.failed",
+        projectId: item.projectId,
+        error: { message },
+        detail: { error: message },
+      });
+    }
+  }
+
+  // Signal the polling timer that gc is done
+  const entry = _active.get(gcJobId);
+  if (entry) { (entry as any)._gcDone = true; }
+}
+
+function fireJobEventCallbacks(
+  projectId: string, jobId: string, eventType: QueueJobEventType, req: QueueRequest
+): void {
+  for (const cb of _jobEventCallbacks) {
+    try { cb(projectId, jobId, eventType, req); } catch { /* non-fatal */ }
   }
 }
 

@@ -9,6 +9,7 @@ import type { IndexMode, JobState } from "./types.js";
 
 export type JobOrigin = "daemon" | "mcp" | "cli";
 export type PersistentJobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+export type JobType = "reindex" | "gc";
 
 export interface JobRow {
   job_id: string;
@@ -23,6 +24,14 @@ export interface JobRow {
   finished_at: number | null;
   error_message: string | null;
   origin: JobOrigin;
+  type: JobType;
+  result: string | null;
+}
+
+export interface GcResult {
+  orphans_deleted: number;
+  bytes_freed: number;
+  duration_ms: number;
 }
 
 type SQLVal = null | number | bigint | string | Uint8Array;
@@ -31,8 +40,8 @@ export function insertJob(row: JobRow): void {
   getDB().prepare(`
     INSERT INTO jobs
       (job_id, project_id, source_id, branch, mode, status, phase,
-       queued_at, started_at, finished_at, error_message, origin)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+       queued_at, started_at, finished_at, error_message, origin, type, result)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     row.job_id,
     row.project_id,
@@ -46,12 +55,40 @@ export function insertJob(row: JobRow): void {
     row.finished_at ?? null,
     row.error_message ?? null,
     row.origin,
+    row.type ?? "reindex",
+    row.result ?? null,
   );
+}
+
+/**
+ * Get the timestamp of the last completed gc job for a project.
+ * Returns null if no gc has completed for this project.
+ * If `ignoreFailed` is true, only looks at completed (not failed) jobs.
+ */
+export function getLastGcTime(projectId: string, opts: { ignoreDebounceForFailed?: boolean } = {}): number | null {
+  const db = getDB();
+  if (opts.ignoreDebounceForFailed) {
+    // Check if the last gc for this project FAILED
+    const lastGc = db.prepare(`
+      SELECT status, finished_at FROM jobs
+      WHERE project_id = ? AND type = 'gc'
+        AND status IN ('done', 'failed')
+      ORDER BY finished_at DESC LIMIT 1
+    `).get(projectId) as { status: string; finished_at: number } | undefined;
+    if (lastGc?.status === "failed") {
+      return null; // treat debounce as elapsed
+    }
+  }
+  const row = db.prepare(`
+    SELECT MAX(finished_at) as last_gc FROM jobs
+    WHERE project_id = ? AND type = 'gc' AND status = 'done'
+  `).get(projectId) as { last_gc: number | null } | undefined;
+  return row?.last_gc ?? null;
 }
 
 export function updateJobStatus(
   jobId: string,
-  updates: Partial<Pick<JobRow, "status" | "phase" | "started_at" | "finished_at" | "error_message">>,
+  updates: Partial<Pick<JobRow, "status" | "phase" | "started_at" | "finished_at" | "error_message" | "result">>,
 ): void {
   const db = getDB();
   const sets: string[] = [];
@@ -75,6 +112,7 @@ export function getJobRow(jobId: string): JobRow | null {
 export function listJobRows(opts: {
   status?: string;
   projectId?: string;
+  type?: JobType;
   limit?: number;
 } = {}): JobRow[] {
   const where: string[] = [];
@@ -82,6 +120,7 @@ export function listJobRows(opts: {
 
   if (opts.status) { where.push("status=?"); vals.push(opts.status); }
   if (opts.projectId) { where.push("project_id=?"); vals.push(opts.projectId); }
+  if (opts.type) { where.push("type=?"); vals.push(opts.type); }
 
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   vals.push(opts.limit ?? 200);
@@ -89,6 +128,23 @@ export function listJobRows(opts: {
   return getDB()
     .prepare(`SELECT * FROM jobs ${clause} ORDER BY queued_at DESC LIMIT ?`)
     .all(...vals) as unknown as JobRow[];
+}
+
+/**
+ * Mark pending gc jobs for given project IDs as cancelled (used by manual gc preemption).
+ * Returns count of rows cancelled.
+ */
+export function cancelPendingGcJobs(projectIds: string[]): number {
+  if (projectIds.length === 0) return 0;
+  const db = getDB();
+  const placeholders = projectIds.map(() => "?").join(",");
+  const now = Date.now();
+  const result = db.prepare(`
+    UPDATE jobs SET status='cancelled', finished_at=?
+    WHERE type='gc' AND status='queued'
+      AND project_id IN (${placeholders})
+  `).run(now, ...projectIds);
+  return (result as unknown as { changes: number }).changes;
 }
 
 export function getQueueStatus(projectId?: string): { running: JobRow[]; queued: JobRow[] } {
@@ -134,5 +190,8 @@ export function jobRowToState(row: JobRow): JobState {
     started_at: row.started_at ?? row.queued_at,
     finished_at: row.finished_at ?? null,
     error: row.error_message ?? null,
-  };
+    // Plan 27: surface type and result so the formatter can render gc jobs correctly.
+    type: row.type ?? "reindex",
+    result: row.result ?? null,
+  } as JobState & { type: string; result: string | null };
 }

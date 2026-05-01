@@ -11,7 +11,7 @@ import { config } from "./config.js";
 import { closeDB } from "./branch-state.js";
 import { runPendingMigrations } from "./migrations.js";
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 // Updated on each release so schema.json records which version last wrote it
 const SCRYBE_VERSION = "0.23.2";
@@ -98,8 +98,45 @@ export async function checkAndMigrate(): Promise<{ migrated: boolean; version: n
     return { migrated: true, version: CURRENT_SCHEMA_VERSION };
   }
 
+  if (doc.version === 3) {
+    // v3 → v4: additive — adds `type` and `result` columns to the jobs table.
+    // Existing rows default to type='reindex'. Done via ALTER TABLE (idempotent via catch).
+    try {
+      const { getDB } = await import("./branch-state.js");
+      const db = getDB();
+      db.exec("ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT 'reindex'");
+    } catch {
+      // Column may already exist (fresh DB created with v4 schema, or migration re-run)
+    }
+    try {
+      const { getDB } = await import("./branch-state.js");
+      const db = getDB();
+      db.exec("ALTER TABLE jobs ADD COLUMN result TEXT");
+    } catch {
+      // Same
+    }
+    doc.version = CURRENT_SCHEMA_VERSION;
+    const updatedApplied = await runPendingMigrations(doc.migrations_applied);
+    if (updatedApplied.length !== doc.migrations_applied.length) {
+      doc.migrations_applied = updatedApplied;
+    }
+    writeSchemaDoc(doc);
+    return { migrated: true, version: CURRENT_SCHEMA_VERSION };
+  }
+
   if (doc.version < CURRENT_SCHEMA_VERSION) {
-    // v2 → v3: additive — jobs table created by IF NOT EXISTS in getDB(). No data loss.
+    // v2 → v3/v4: additive — jobs table is created by IF NOT EXISTS in getDB().
+    // Also run the v3→v4 ALTER TABLE to add type/result columns (idempotent).
+    try {
+      const { getDB } = await import("./branch-state.js");
+      const db = getDB();
+      db.exec("ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT 'reindex'");
+    } catch { /* column already exists or table doesn't exist yet — safe to skip */ }
+    try {
+      const { getDB } = await import("./branch-state.js");
+      const db = getDB();
+      db.exec("ALTER TABLE jobs ADD COLUMN result TEXT");
+    } catch { /* same */ }
     doc.version = CURRENT_SCHEMA_VERSION;
     // Run pending registry migrations before finalizing the version bump.
     const updatedApplied = await runPendingMigrations(doc.migrations_applied);

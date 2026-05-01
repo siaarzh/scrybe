@@ -244,6 +244,8 @@ scrybe source remove --project-id myrepo --source-id gitlab-issues
 scrybe project remove --id myrepo
 ```
 
+Per-source private ignores stored in DATA_DIR via `scrybe ignore` (or `set_private_ignore` MCP tool) — never committed.
+
 See [docs/cli-reference.md](docs/cli-reference.md) for the full command reference.
 
 ## Uninstalling
@@ -292,6 +294,8 @@ scrybe branch list --pinned --project-id cmx-ionic
 ```
 
 The daemon exposes a local HTTP API on `127.0.0.1:58451` (ephemeral fallback if busy). Port is persisted in `<DATA_DIR>/daemon.pid` so all clients — CLI, MCP server, VS Code extension — discover it automatically.
+
+Daemon auto-cleans orphan chunks on idle or when bloat exceeds threshold — `scrybe gc` available for explicit manual cleanup.
 
 See [docs/daemon.md](docs/daemon.md) for the full architecture, HTTP API reference, pinned-branch details, and troubleshooting guide.
 

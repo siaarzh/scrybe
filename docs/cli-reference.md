@@ -60,6 +60,34 @@ scrybe --auto
 
 ---
 
+### `ignore`
+
+Edit per-source private ignore rules. Rules are stored in `DATA_DIR/ignores/<project_id>/<source_id>.gitignore` and are **never committed** to the repo. Applied additively on top of `.gitignore` and committed `.scrybeignore`.
+
+```bash
+scrybe ignore        # interactive wizard
+scrybe ignore edit   # same (alias)
+```
+
+**Wizard flow:**
+
+1. Auto-detects the project from the current working directory (still asks to confirm)
+2. If the project has more than one code source, asks which source to edit
+3. Opens `$VISUAL` → `$EDITOR` → `notepad.exe` (Windows) / `open -t` (macOS) / `nano` (Linux) on the file
+4. After closing the editor, prompts: *"Reindex now? [Y/n]"* — default Yes, enqueues an incremental reindex via the daemon
+
+**New file template:** when no file exists yet, a header comment block is created with syntax examples before the editor opens.
+
+**Rule layering order:**
+1. Built-in skip rules (`node_modules`, `.git`, etc.)
+2. `.gitignore` (working tree)
+3. Committed `.scrybeignore` (working tree)
+4. Private ignore (DATA_DIR)
+
+> **Note:** `$EDITOR` / `$VISUAL` not set on Windows? The wizard falls back to `notepad.exe` automatically.
+
+---
+
 ## Project commands
 
 ### `project add`
@@ -340,10 +368,14 @@ Remove orphaned chunks from the vector store. Orphans accumulate when branches a
 
 **Only operates on code sources** (since v0.14.1). Non-code sources (GitLab issues, etc.) are branch-agnostic and don't participate in `branch_tags` — a "stale" ticket chunk means its upstream issue was deleted, which can't be detected without an API fetch. That's a future `scrybe reconcile` command.
 
+**Daemon routing:** When the daemon is running, `scrybe gc` (without `--dry-run`) routes jobs through the daemon queue. This serializes gc with any in-flight reindex jobs on the same project, preventing LanceDB write conflicts. The command also cancels any pending auto-gc jobs in scope and resets idle timers so auto-gc doesn't immediately re-fire. Falls back to direct in-process execution when the daemon is down.
+
+**Auto-GC:** The daemon automatically schedules gc jobs on two triggers — see the [Auto-GC section](#auto-gc) for details.
+
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--project-id <id>` | | Limit GC to a specific project (default: all projects) |
-| `--dry-run` | | Report orphans without deleting |
+| `--dry-run` | | Report orphans without deleting (always runs in-process, never queued) |
 
 A chunk is orphaned when no `branch_tags` row references it (it was never re-tagged after its branch was dropped).
 
@@ -613,3 +645,39 @@ Remove all pinned branches for a source. Asks for confirmation unless `--yes` is
 ```bash
 scrybe branch unpin --all --project-id cmx-ionic --yes
 ```
+
+---
+
+## Auto-GC
+
+The daemon automatically schedules gc jobs to keep orphan chunks under control. Two triggers:
+
+**Idle trigger:** After `SCRYBE_AUTO_GC_IDLE_MS` (default 5 min) of no queue activity for a project, the daemon enqueues a gc job. The timer resets on any queue event (job submitted, completed, or failed) for that project. Timer state is process-memory only — a daemon restart starts a fresh idle window.
+
+**Ratio trigger:** After each `indexSource` job completes, the daemon computes:
+```
+orphan_ratio = (LanceDB chunk count − tagged chunk count) / LanceDB chunk count
+```
+If `orphan_ratio > SCRYBE_AUTO_GC_RATIO` (default 15%) **and** no gc has run for that project in the last `SCRYBE_AUTO_GC_RATIO_DEBOUNCE_MS` (default 30 min), a gc job is enqueued. If the last gc for the project **failed**, the debounce is reset immediately so the next ratio check can fire without waiting.
+
+**Auto-gc uses compaction-with-grace** (60s grace window) rather than full-purge. Manual `scrybe gc` uses full-purge compaction.
+
+**Master disable:** Set `SCRYBE_AUTO_GC=0` to disable both triggers. Manual `scrybe gc` and the MCP `gc` tool continue to work regardless.
+
+**Manual gc preempts auto-gc:** When `scrybe gc` or `mcp__scrybe__gc` is invoked, any pending auto-gc jobs in the same project scope are cancelled first, and idle timers are reset, to avoid redundant back-to-back runs.
+
+---
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_AUTO_GC` | `1` | Set `0` to disable both auto-gc triggers |
+| `SCRYBE_AUTO_GC_IDLE_MS` | `300000` | Per-project idle window (ms) before idle gc fires |
+| `SCRYBE_AUTO_GC_RATIO` | `0.15` | Orphan-ratio threshold (0–1) for ratio trigger |
+| `SCRYBE_AUTO_GC_RATIO_DEBOUNCE_MS` | `1800000` | Min time (ms) between ratio-triggered gcs per project |
+| `SCRYBE_LANCE_COMPACT_THRESHOLD` | `10` | Lance version count threshold that triggers compaction |
+| `SCRYBE_LANCE_GRACE_MS` | `60000` | Grace window (ms) before `compactTableWithGrace` runs |
+| `SCRYBE_NO_AUTO_DAEMON` | — | Set `1` to prevent auto-spawning the daemon |
+| `SCRYBE_DAEMON_MAX_CONCURRENT` | `max(1, cpus/2)` | Max simultaneous jobs in daemon queue |
+| `SCRYBE_DEBUG_INDEXER` | — | Set `1` to enable verbose indexer diagnostic logging |

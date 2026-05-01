@@ -211,6 +211,8 @@ export function submitJob(
         finished_at: null,
         error_message: null,
         origin: "cli",
+        type: "reindex",
+        result: null,
       });
     }
   } catch { /* non-fatal */ }
@@ -281,6 +283,8 @@ export function submitSourceJob(
         finished_at: null,
         error_message: null,
         origin: "cli",
+        type: "reindex",
+        result: null,
       });
     }
   } catch { /* non-fatal */ }
@@ -333,6 +337,8 @@ export function submitAllJob(): string {
       finished_at: null,
       error_message: null,
       origin: "cli",
+      type: "reindex",
+      result: null,
     });
   } catch { /* non-fatal */ }
 
@@ -421,6 +427,69 @@ export function cancelJob(jobId: string, sourceId?: string): boolean {
   // Cancel entire job
   job.controller.abort();
   return true;
+}
+
+/**
+ * Submit a gc job directly (in-process, no daemon queue).
+ * Used as the daemon-down fallback in CLI gc command.
+ */
+export function submitGcJob(
+  projectId: string,
+  mode: "grace" | "purge",
+  sourceId?: string,
+  preJobId?: string
+): string {
+  const jobId = preJobId ?? randomBytes(4).toString("hex");
+  const now = Date.now();
+
+  try {
+    if (preJobId) {
+      updateJobStatus(preJobId, { status: "running", started_at: now });
+    } else {
+      insertJob({
+        job_id: jobId,
+        project_id: projectId,
+        source_id: sourceId ?? null,
+        branch: null,
+        mode: "incremental",
+        status: "running",
+        phase: null,
+        queued_at: now,
+        started_at: now,
+        finished_at: null,
+        error_message: null,
+        origin: "cli",
+        type: "gc",
+        result: null,
+      });
+    }
+  } catch { /* non-fatal */ }
+
+  // Fire-and-forget via dynamic import to avoid circular dep
+  (async () => {
+    try {
+      const { runGcJobHandler } = await import("./daemon/gc-handler.js");
+      const gcResult = await runGcJobHandler({ projectId, sourceId, mode });
+      try {
+        updateJobStatus(jobId, {
+          status: "done",
+          finished_at: Date.now(),
+          result: JSON.stringify(gcResult),
+        });
+      } catch { /* non-fatal */ }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        updateJobStatus(jobId, {
+          status: "failed",
+          finished_at: Date.now(),
+          error_message: message,
+        });
+      } catch { /* non-fatal */ }
+    }
+  })();
+
+  return jobId;
 }
 
 /** Abort all currently running jobs. Used by SIGTERM/SIGINT handlers. */

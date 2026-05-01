@@ -12,6 +12,8 @@ import {
   queueStatusTool,
 } from "./reindex.js";
 import { listBranchesTool, listPinnedBranchesTool, pinBranchesTool, unpinBranchesTool } from "./branch.js";
+import { setPrivateIgnoreTool, getPrivateIgnoreTool, listPrivateIgnoresTool } from "./private-ignores.js";
+import { gcTool } from "./gc.js";
 
 /** All tools in the registry (MCP + CLI). */
 export const allTools: Tool<any, any>[] = [
@@ -36,11 +38,17 @@ export const allTools: Tool<any, any>[] = [
   cancelReindexTool,
   listJobsTool,
   queueStatusTool,
+  // GC
+  gcTool,
   // Branch
   listBranchesTool,
   listPinnedBranchesTool,
   pinBranchesTool,
   unpinBranchesTool,
+  // Private ignores
+  setPrivateIgnoreTool,
+  getPrivateIgnoreTool,
+  listPrivateIgnoresTool,
 ];
 
 /** MCP-registered tools only (excludes cliOnly). */

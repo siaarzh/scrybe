@@ -519,6 +519,9 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
       "",
       "Your agent will call scrybe automatically on relevant queries (no slash command needed).",
       "",
+      "Tip: customize per-source ignore rules with `scrybe ignore`",
+      "     (private to your DATA_DIR — never committed).",
+      "",
       "Troubleshoot: scrybe doctor",
     ];
   } else {
@@ -533,6 +536,9 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
       "  scrybe index -P myrepo",
       "",
       "Then restart your agent and ask it a question.",
+      "",
+      "Tip: customize per-source ignore rules with `scrybe ignore`",
+      "     (private to your DATA_DIR — never committed).",
       "",
       "Troubleshoot: scrybe doctor",
     ];

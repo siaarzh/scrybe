@@ -254,8 +254,19 @@ export const listJobsTool: Tool<
       const elapsed = job.finished_at
         ? `${((job.finished_at - job.started_at) / 1000).toFixed(1)}s`
         : `${((Date.now() - job.started_at) / 1000).toFixed(1)}s (running)`;
+      const jobType = (job as any).type ?? "reindex";
       const taskSummary = job.tasks.map((t: any) => `${t.source_id}:${t.status}`).join(", ");
-      return `[${job.job_id}] ${job.project_id} | ${job.status} | ${elapsed} | ${taskSummary || job.current_project || ""}`;
+      // For gc jobs, show result summary if available
+      let detail = taskSummary || (job as any).current_project || "";
+      if (jobType === "gc" && (job as any).result) {
+        try {
+          const r = JSON.parse((job as any).result as string) as { orphans_deleted: number; bytes_freed: number };
+          detail = r.orphans_deleted > 0
+            ? `${r.orphans_deleted} orphan${r.orphans_deleted === 1 ? "" : "s"}, ${(r.bytes_freed / 1024 / 1024).toFixed(1)} MB`
+            : "0 orphans";
+        } catch { /* ignore */ }
+      }
+      return `[${job.job_id}] ${job.project_id} | ${jobType} | ${job.status} | ${elapsed}${detail ? ` | ${detail}` : ""}`;
     }).join("\n");
   },
 };

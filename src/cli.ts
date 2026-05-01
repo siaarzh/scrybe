@@ -504,6 +504,51 @@ export async function runCli(): Promise<void> {
         projects = listProjects();
       }
       if (projects.length === 0) { console.log("No projects registered."); return; }
+
+      // When daemon is running and not dry-run, route through the queue via HTTP.
+      // The daemon handles cancel-pending + reset-idle + enqueue atomically.
+      if (!opts.dryRun) {
+        const { readPidfile } = await import("./daemon/pidfile.js");
+        const pidData = readPidfile();
+        if (pidData?.port) {
+          try {
+            const client = new DaemonClient({ port: pidData.port });
+            const signal = AbortSignal.timeout(2000);
+            await Promise.race([client.health(), new Promise<never>((_, rej) => signal.addEventListener("abort", () => rej(new Error("timeout"))))]);
+
+            const scope = projects.map((p) => p.id);
+            const result = await client.submitGc({ scope, mode: "purge" });
+
+            if (result.cancelledPending > 0) {
+              console.log(`Cancelled ${result.cancelledPending} pending auto-gc job(s) (preempted by manual gc).`);
+            }
+            console.log(`Submitted gc job(s) for ${result.jobs.length} project(s) via daemon queue:`);
+            for (const j of result.jobs) {
+              console.log(`  ${j.projectId}: job ${j.jobId} (${j.status ?? "queued"})`);
+            }
+            console.log(`Run 'scrybe job list' to monitor progress.`);
+
+            // Prune empty projects (not gc-job-able, but part of gc semantics)
+            if (!opts.projectId) {
+              const allProjects = listProjects();
+              const empty = allProjects.filter((p) => p.sources.length === 0);
+              if (empty.length > 0 && process.stdin.isTTY) {
+                process.stdout.write(`\nPrune ${empty.length} empty project(s) (${empty.map((p) => p.id).join(", ")})? [y/N] `);
+                const confirmed = await new Promise<boolean>((resolve) => { process.stdin.once("data", (d) => { process.stdin.pause(); resolve(d.toString().trim().toLowerCase() === "y"); }); });
+                if (confirmed) {
+                  for (const p of empty) { try { await removeProject(p.id); } catch { /* ignore */ } }
+                  console.log(`Pruned ${empty.length} empty project(s).`);
+                }
+              }
+            }
+            return;
+          } catch {
+            // Daemon unresponsive — fall through to direct execution
+          }
+        }
+      }
+
+      // Direct execution (daemon down, or dry-run)
       let totalOrphans = 0, totalDeleted = 0;
       for (const p of projects) {
         for (const s of p.sources) {
@@ -671,18 +716,42 @@ export async function runCli(): Promise<void> {
         } else {
           console.log(`Daemon         ○ not running`);
         }
+        // Auto-GC status line
+        const autoGcEnabled = process.env["SCRYBE_AUTO_GC"] !== "0";
+        if (autoGcEnabled) {
+          const idleMsEnv = parseFloat(process.env["SCRYBE_AUTO_GC_IDLE_MS"] ?? "");
+          const idleMs = Number.isFinite(idleMsEnv) && idleMsEnv > 0 ? idleMsEnv : 300_000;
+          const ratioEnv = parseFloat(process.env["SCRYBE_AUTO_GC_RATIO"] ?? "");
+          const ratio = Number.isFinite(ratioEnv) && ratioEnv > 0 ? ratioEnv : 0.15;
+          const idleStr = idleMs >= 60_000 ? `${Math.round(idleMs / 60_000)}m idle` : `${Math.round(idleMs / 1000)}s idle`;
+          const ratioStr = `${Math.round(ratio * 100)}% ratio`;
+          console.log(`Auto-GC        ● enabled · ${idleStr} / ${ratioStr}`);
+        } else {
+          console.log(`Auto-GC        ○ disabled (SCRYBE_AUTO_GC=0)`);
+        }
       }
+      // Fetch last gc times for all projects (from jobs table)
+      const lastGcTimes = new Map<string, number | null>();
+      try {
+        const { getLastGcTime } = await import("./jobs-store.js");
+        for (const p of projects) {
+          lastGcTimes.set(p.id, getLastGcTime(p.id));
+        }
+      } catch { /* non-fatal — jobs-store unavailable */ }
+
       const display = opts.all ? sourceSummaries : sourceSummaries.slice(0, 5);
       const hidden = sourceSummaries.length - display.length;
       console.log(`Projects       ${projects.length} registered`);
       if (display.some((p) => p.sources.length > 0)) {
-        console.log(`  ${"PROJECT".padEnd(20)}${"SOURCE".padEnd(18)}${"CHUNKS".padStart(8)}  ${"SIZE".padEnd(10)}${"HEALTH".padEnd(12)}LAST INDEXED`);
+        console.log(`  ${"PROJECT".padEnd(20)}${"SOURCE".padEnd(18)}${"CHUNKS".padStart(8)}  ${"SIZE".padEnd(10)}${"HEALTH".padEnd(12)}${"LAST INDEXED".padEnd(14)}LAST GC`);
       }
       for (const p of display) {
         for (const s of p.sources) {
           const size = s.sizeBytes > 0 ? fmtSize(s.sizeBytes) : "—";
           const health = s.flags.includes("bloat") ? "Bloated *" : "Healthy";
-          console.log(`  ${p.id.slice(0, 19).padEnd(20)}${s.sourceId.slice(0, 17).padEnd(18)}${s.chunks.toLocaleString().padStart(8)}  ${size.padEnd(10)}${health.padEnd(12)}${fmtRelative(s.lastIndexed)}`);
+          const lastGcTs = lastGcTimes.get(p.id) ?? null;
+          const lastGcStr = lastGcTs ? fmtRelative(new Date(lastGcTs).toISOString()) : "—";
+          console.log(`  ${p.id.slice(0, 19).padEnd(20)}${s.sourceId.slice(0, 17).padEnd(18)}${s.chunks.toLocaleString().padStart(8)}  ${size.padEnd(10)}${health.padEnd(12)}${fmtRelative(s.lastIndexed).padEnd(14)}${lastGcStr}`);
         }
       }
       if (hidden > 0) console.log(`  (${hidden} more — use --all)`);
@@ -893,6 +962,38 @@ export async function runCli(): Promise<void> {
       const result = uninstallHooks(opts.repo);
       if (result.removed.length > 0) { console.log(`Removed scrybe block from: ${result.removed.map((r) => r.path).join(", ")}`); console.log(`Backups: ${result.removed.map((r) => r.backupPath).join(", ")}`); }
       if (result.notFound.length > 0) console.log(`No scrybe block found in: ${result.notFound.join(", ")}`);
+    });
+
+  // ─── ignore ───────────────────────────────────────────────────────────────
+
+  const ignoreGroup = program.command("ignore")
+    .description("Edit per-source private ignore rules (stored in DATA_DIR — never committed)")
+    .addHelpText("after", [
+      "",
+      "Opens an interactive wizard to select a project and source, then opens",
+      "your $EDITOR on the private ignore file. After saving, you can choose",
+      "to reindex the source immediately to apply the new rules.",
+      "",
+      "The file uses gitignore syntax and lives in:",
+      "  <DATA_DIR>/ignores/<project_id>/<source_id>.gitignore",
+      "",
+      "It is applied additively on top of .gitignore and .scrybeignore.",
+      "",
+      "Examples:",
+      "  scrybe ignore              # interactive wizard",
+      "  scrybe ignore edit         # same (alias subcommand)",
+    ].join("\n"))
+    .action(async () => {
+      const { runIgnoreWizard } = await import("./onboarding/ignore-wizard.js");
+      await runIgnoreWizard();
+    });
+
+  // `scrybe ignore edit` as alias subcommand — same behavior
+  ignoreGroup.command("edit")
+    .description("Edit private ignore rules for a source (same as `scrybe ignore`)")
+    .action(async () => {
+      const { runIgnoreWizard } = await import("./onboarding/ignore-wizard.js");
+      await runIgnoreWizard();
     });
 
   // ─── init ─────────────────────────────────────────────────────────────────

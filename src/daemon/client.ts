@@ -6,10 +6,10 @@ import { readPidfile } from "./pidfile.js";
 import { spawnDaemonDetached } from "./spawn-detached.js";
 import { isContainer } from "./container-detect.js";
 import type {
-  DaemonStatus, DaemonEvent, KickRequest, KickResponse,
+  DaemonStatus, DaemonEvent, KickRequest, KickResponse, GcRequest, GcResponse,
 } from "./http-server.js";
 
-export type { DaemonStatus, DaemonEvent, KickRequest, KickResponse };
+export type { DaemonStatus, DaemonEvent, KickRequest, KickResponse, GcRequest, GcResponse };
 
 export type EnsureRunningResult =
   | { ok: true }
@@ -102,6 +102,17 @@ export class DaemonClient {
   /** Submit a reindex request. Returns immediately with job_id + queue status. */
   async submitReindex(req: KickRequest): Promise<KickResponse> {
     return this._post("/kick", req);
+  }
+
+  /**
+   * Submit a manual gc request. Daemon will atomically:
+   *   1. Cancel pending auto-gc jobs in scope
+   *   2. Reset per-project idle timers for scope
+   *   3. Enqueue user-gc jobs (default mode: "purge" for full reclaim)
+   * Returns the count of pending auto-gc jobs cancelled and the new user-gc job IDs.
+   */
+  async submitGc(req: GcRequest = {}): Promise<GcResponse> {
+    return this._post("/gc", req);
   }
 
   /** Get status of a specific job from the daemon's SQLite store. */

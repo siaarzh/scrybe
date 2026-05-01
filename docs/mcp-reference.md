@@ -267,6 +267,35 @@ If `source_id` is omitted, all remaining tasks in the job are cancelled.
 
 ---
 
+### `gc`
+
+Run garbage collection: remove orphan chunks and compact LanceDB tables. Routes through the daemon queue when available (prevents write races with active reindex jobs). Cancels any pending auto-gc jobs in the same scope and resets idle timers.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | | Limit gc to a specific project (omit for all projects) |
+| `source_id` | string | | Limit gc to a specific source within the project |
+
+**Returns:**
+
+```json
+{
+  "jobs": [
+    { "job_id": "a4b8c2d1", "project_id": "scrybe", "status": "queued" }
+  ],
+  "message": "1 gc job(s) queued. Poll with reindex_status or run 'scrybe job list'."
+}
+```
+
+When the daemon is down, runs synchronously and returns:
+```json
+{
+  "message": "GC complete. 12 orphan(s) deleted, 3.2 MB reclaimed across 1 project(s)."
+}
+```
+
+---
+
 ### `list_branches`
 
 List branches that have been indexed for a project's sources. Useful before calling `search_code` or `reindex_source` with an explicit `branch` parameter.
@@ -316,6 +345,70 @@ Remove one or more branch names from a code source's pinned list.
 | `project_id` | string | ✓ | Project identifier |
 | `source_id` | string | ✓ | Code source to unpin branches from |
 | `branches` | string[] | ✓ | Branch names to remove |
+
+---
+
+## Private ignore tools
+
+Per-source ignore rules stored in `DATA_DIR/ignores/<project_id>/<source_id>.gitignore`. Never committed. Applied additively on top of `.gitignore` and `.scrybeignore`.
+
+**Important:** all three tools only work on code sources. Knowledge sources have a different ignore model (on the roadmap).
+
+### `set_private_ignore`
+
+Set or clear private ignore rules for a code source. Replaces the entire file content.
+
+> To add a single pattern to existing rules: call `get_private_ignore` first, append your pattern, then call `set_private_ignore` with the concatenated content.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `source_id` | string | ✓ | Source identifier (must be a code source) |
+| `content` | string | ✓ | Full new content (gitignore syntax). Empty string = delete the file. |
+
+Returns `{ ok, path, action, hint }`:
+- `action`: `"written"` / `"deleted"` / `"unchanged"`
+- `hint`: exact reindex command to apply changes, e.g. `scrybe index -P myrepo -S primary --incremental`
+
+**Example — add a pattern:**
+```json
+// 1. Get current rules
+{ "tool": "get_private_ignore", "args": { "project_id": "myrepo", "source_id": "primary" } }
+// Response: { "content": "vendor/\n", ... }
+
+// 2. Append new pattern and save
+{ "tool": "set_private_ignore", "args": { "project_id": "myrepo", "source_id": "primary", "content": "vendor/\n*.generated.ts\n" } }
+// Response: { "ok": true, "action": "written", "hint": "scrybe index -P myrepo -S primary --incremental", ... }
+
+// 3. Delete all private rules
+{ "tool": "set_private_ignore", "args": { "project_id": "myrepo", "source_id": "primary", "content": "" } }
+// Response: { "ok": true, "action": "deleted", ... }
+```
+
+---
+
+### `get_private_ignore`
+
+Read the current private ignore content for a code source.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `source_id` | string | ✓ | Source identifier |
+
+Returns `{ project_id, source_id, content, path, rule_count }`. `content` is `null` if no file exists.
+
+---
+
+### `list_private_ignores`
+
+Enumerate all private ignore files across all registered projects. Returns metadata only — for full content, use `get_private_ignore`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | | Limit to a specific project (omit for all) |
+
+Returns an array of `{ project_id, source_id, path, rule_count, mtime }`. Sources with no effective rules (missing, empty, comment-only) are excluded.
 
 ---
 

@@ -135,12 +135,16 @@ export function getDB(): DatabaseSync {
       started_at    INTEGER,
       finished_at   INTEGER,
       error_message TEXT,
-      origin        TEXT NOT NULL
+      origin        TEXT NOT NULL,
+      type          TEXT NOT NULL DEFAULT 'reindex',
+      result        TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_jobs_project_status
       ON jobs(project_id, status);
     CREATE INDEX IF NOT EXISTS idx_jobs_queued_at
       ON jobs(queued_at);
+    CREATE INDEX IF NOT EXISTS idx_jobs_type_project
+      ON jobs(type, project_id);
   `);
   db.prepare("INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1')").run();
 
