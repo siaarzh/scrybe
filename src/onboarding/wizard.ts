@@ -54,7 +54,7 @@ const PROVIDERS: ProviderPreset[] = [
     baseUrl: "",
     model: "",
     dimensions: 0,
-    apiKeyEnvName: "EMBEDDING_API_KEY",
+    apiKeyEnvName: "SCRYBE_CODE_EMBEDDING_API_KEY",
   },
 ];
 
@@ -77,9 +77,8 @@ function writeEnvFile(dataDir: string, vars: Record<string, string>): void {
 
 function isApiProviderConfigured(): boolean {
   return !!(
-    process.env.EMBEDDING_API_KEY ||
-    process.env.OPENAI_API_KEY ||
-    process.env.EMBEDDING_BASE_URL
+    process.env.SCRYBE_CODE_EMBEDDING_API_KEY ||
+    process.env.SCRYBE_CODE_EMBEDDING_BASE_URL
   );
 }
 
@@ -138,7 +137,7 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
 
       writeEnvFile(config.dataDir, {
         SCRYBE_LOCAL_EMBEDDER: LOCAL_MODEL_ID,
-        EMBEDDING_DIMENSIONS: String(validatedDimsLocal),
+        SCRYBE_CODE_EMBEDDING_DIMENSIONS: String(validatedDimsLocal),
       });
       p.log.success(`Local embedder config saved to ${config.dataDir}/.env`);
     } else {
@@ -196,10 +195,10 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
 
       // Only Voyage supports rerank — wizard never offers rerank for other providers
       writeEnvFile(config.dataDir, {
-        EMBEDDING_BASE_URL: baseUrl,
-        EMBEDDING_MODEL: model,
-        EMBEDDING_DIMENSIONS: String(validatedDims),
-        EMBEDDING_API_KEY: apiKey,
+        SCRYBE_CODE_EMBEDDING_BASE_URL: baseUrl,
+        SCRYBE_CODE_EMBEDDING_MODEL: model,
+        SCRYBE_CODE_EMBEDDING_DIMENSIONS: String(validatedDims),
+        SCRYBE_CODE_EMBEDDING_API_KEY: apiKey,
       });
       p.log.success(`Credentials saved to ${config.dataDir}/.env`);
     }

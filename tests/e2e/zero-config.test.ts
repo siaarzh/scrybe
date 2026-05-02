@@ -63,10 +63,10 @@ describe("zero-config --auto", () => {
             ...process.env,
             SCRYBE_DATA_DIR: dataDir,
             // Provider env vars so indexer doesn't fail auth
-            EMBEDDING_BASE_URL: "http://127.0.0.1:1",   // will fail fast — that's ok for register step
-            EMBEDDING_API_KEY: "test",
-            EMBEDDING_DIMENSIONS: "384",
-            EMBEDDING_MODEL: "test",
+            SCRYBE_CODE_EMBEDDING_BASE_URL: "http://127.0.0.1:1",   // will fail fast — that's ok for register step
+            SCRYBE_CODE_EMBEDDING_API_KEY: "test",
+            SCRYBE_CODE_EMBEDDING_DIMENSIONS: "384",
+            SCRYBE_CODE_EMBEDDING_MODEL: "test",
           },
           encoding: "utf8",
           timeout: 15_000,

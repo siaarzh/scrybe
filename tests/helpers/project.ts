@@ -39,7 +39,7 @@ export async function createTempProject(opts: CreateTempProjectOptions): Promise
       base_url: sidecar.baseUrl,
       model: sidecar.model,
       dimensions: sidecar.dimensions,
-      api_key_env: "EMBEDDING_API_KEY",
+      api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
     },
   });
 

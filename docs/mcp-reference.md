@@ -419,8 +419,8 @@ When a tool call fails, the response includes an `error_type` field for programm
 | `error_type` | Cause |
 |-------------|-------|
 | `rate_limit` | Embedding API rate limit exceeded |
-| `auth` | Embedding API key missing or invalid |
+| `auth` | Embedding API key missing or invalid. Check `SCRYBE_CODE_EMBEDDING_API_KEY` |
 | `dimensions_mismatch` | Indexed data uses different embedding dimensions — run a full reindex |
-| `unknown_provider` | `EMBEDDING_BASE_URL` not recognised and `EMBEDDING_MODEL` not set |
+| `unknown_provider` | `SCRYBE_CODE_EMBEDDING_BASE_URL` not recognised and `SCRYBE_CODE_EMBEDDING_MODEL` not set |
 | `no_code_sources` | Project has no indexed code sources |
 | `no_knowledge_sources` | Project has no indexed knowledge sources |

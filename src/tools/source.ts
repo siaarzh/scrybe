@@ -55,7 +55,7 @@ function buildEmbedding(
     base_url: bu ?? "",
     model: mo ?? "",
     dimensions: di ?? 1536,
-    api_key_env: ak ?? "EMBEDDING_API_KEY",
+    api_key_env: ak ?? "SCRYBE_CODE_EMBEDDING_API_KEY",
   };
 }
 

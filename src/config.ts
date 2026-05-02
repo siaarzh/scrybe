@@ -5,31 +5,21 @@ import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { resolveProvider, LOCAL_PROVIDER_DEFAULTS } from "./providers.js";
 
-// Load .env (dev convenience; does NOT override existing env vars)
-// Checks: cwd/.env first, then the repo root (dist/../.env) as fallback
+// Load .env from DATA_DIR only. OS env always takes precedence (does NOT override existing vars).
 (function loadDotEnv() {
-  // __dirname equivalent in ESM
-  const scriptDir = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(process.cwd(), ".env"),
-    join(scriptDir, "..", ".env"), // dist/../.env → repo root
-    join(getDataDir(), ".env"),   // DATA_DIR/.env — written by `scrybe init`
-  ];
-  for (const p of candidates) {
-    if (!existsSync(p)) continue;
-    try {
-      for (const line of readFileSync(p, "utf8").split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        const eq = trimmed.indexOf("=");
-        if (eq === -1) continue;
-        const key = trimmed.slice(0, eq).trim();
-        const val = trimmed.slice(eq + 1).trim();
-        if (key && !(key in process.env)) process.env[key] = val;
-      }
-      break;
-    } catch { /* ignore */ }
-  }
+  const p = join(getDataDir(), ".env");
+  if (!existsSync(p)) return;
+  try {
+    for (const line of readFileSync(p, "utf8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      const val = trimmed.slice(eq + 1).trim();
+      if (key && !(key in process.env)) process.env[key] = val;
+    }
+  } catch { /* ignore */ }
 })();
 
 function getDataDir(): string {
@@ -53,12 +43,49 @@ function envStr(name: string): string | undefined {
   return v === undefined || v === "" ? undefined : v;
 }
 
+// Old env var names that were renamed in this release. Used at startup to warn
+// users who still have them in their OS env or MCP server config.
+const OLD_ENV_VAR_MAP: Record<string, string> = {
+  "EMBEDDING_BASE_URL":      "SCRYBE_CODE_EMBEDDING_BASE_URL",
+  "EMBEDDING_API_KEY":       "SCRYBE_CODE_EMBEDDING_API_KEY",
+  "EMBEDDING_MODEL":         "SCRYBE_CODE_EMBEDDING_MODEL",
+  "EMBEDDING_DIMENSIONS":    "SCRYBE_CODE_EMBEDDING_DIMENSIONS",
+  "EMBED_BATCH_SIZE":        "SCRYBE_EMBED_BATCH_SIZE",
+  "EMBED_BATCH_DELAY_MS":    "SCRYBE_EMBED_BATCH_DELAY_MS",
+  "SCRYBE_TEXT_EMBEDDING_BASE_URL":   "SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL",
+  "SCRYBE_TEXT_EMBEDDING_API_KEY":    "SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY",
+  "SCRYBE_TEXT_EMBEDDING_MODEL":      "SCRYBE_KNOWLEDGE_EMBEDDING_MODEL",
+  "SCRYBE_TEXT_EMBEDDING_DIMENSIONS": "SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS",
+};
+
+/**
+ * Warn about old env var names that are set in process.env but can't be rewritten
+ * by the .env migration (they came from OS env or MCP server config).
+ * Called once at startup via warnOldEnvVars().
+ */
+export function warnOldEnvVars(): void {
+  for (const [old, replacement] of Object.entries(OLD_ENV_VAR_MAP)) {
+    if (envStr(old)) {
+      process.stderr.write(
+        `[scrybe] env var ${old} is set with a pre-v0.29 name and will be ignored. ` +
+        `Update your shell exports / MCP server config to ${replacement}.\n`
+      );
+    }
+  }
+  if (envStr("OPENAI_API_KEY")) {
+    process.stderr.write(
+      `[scrybe] OPENAI_API_KEY fallback is removed. ` +
+      `Set SCRYBE_CODE_EMBEDDING_API_KEY explicitly.\n`
+    );
+  }
+}
+
 function buildEmbeddingConfig() {
-  const baseUrl = envStr("EMBEDDING_BASE_URL");
-  const apiKey = envStr("EMBEDDING_API_KEY") ?? envStr("OPENAI_API_KEY");
+  const baseUrl = envStr("SCRYBE_CODE_EMBEDDING_BASE_URL");
+  const apiKey = envStr("SCRYBE_CODE_EMBEDDING_API_KEY");
   const localModelEnv = envStr("SCRYBE_LOCAL_EMBEDDER");
-  const modelEnv = envStr("EMBEDDING_MODEL");
-  const dimsEnv = envStr("EMBEDDING_DIMENSIONS");
+  const modelEnv = envStr("SCRYBE_CODE_EMBEDDING_MODEL");
+  const dimsEnv = envStr("SCRYBE_CODE_EMBEDDING_DIMENSIONS");
 
   // Local provider: explicit SCRYBE_LOCAL_EMBEDDER, OR no URL and no API key (zero-config default)
   const isLocal = !!localModelEnv || (!baseUrl && !apiKey && !modelEnv);
@@ -77,11 +104,11 @@ function buildEmbeddingConfig() {
     const modelsUrl = baseUrl ? `${baseUrl.replace(/\/$/, "")}/models` : null;
     configError =
       `Unknown embedding provider for base URL "${baseUrl}". ` +
-      `EMBEDDING_MODEL is not set. ` +
+      `SCRYBE_CODE_EMBEDDING_MODEL is not set. ` +
       (modelsUrl
         ? `Fetch ${modelsUrl} to list available models, pick an embedding model, ` +
-          `then set EMBEDDING_MODEL and EMBEDDING_DIMENSIONS in your config.`
-        : `Set EMBEDDING_MODEL and EMBEDDING_DIMENSIONS in your config.`);
+          `then set SCRYBE_CODE_EMBEDDING_MODEL and SCRYBE_CODE_EMBEDDING_DIMENSIONS in your config.`
+        : `Set SCRYBE_CODE_EMBEDDING_MODEL and SCRYBE_CODE_EMBEDDING_DIMENSIONS in your config.`);
   }
 
   const model = modelEnv ?? provider?.model ?? "text-embedding-3-small";
@@ -94,11 +121,7 @@ function buildEmbeddingConfig() {
 
 function buildRerankConfig() {
   const enabled = process.env.SCRYBE_RERANK === "true";
-  const apiKey =
-    process.env.SCRYBE_RERANK_API_KEY ??
-    process.env.EMBEDDING_API_KEY ??
-    process.env.OPENAI_API_KEY ??
-    "";
+  const apiKey = process.env.SCRYBE_RERANK_API_KEY ?? "";
   const fetchMultiplier = parseInt(
     process.env.SCRYBE_RERANK_FETCH_MULTIPLIER ?? "5",
     10
@@ -119,15 +142,16 @@ function buildRerankConfig() {
     return { rerankEnabled: true, rerankBaseUrl: explicitUrl, rerankModel: model, rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
   }
 
-  // Auto-detect Voyage from embedding provider
-  const embeddingBaseUrl = process.env.EMBEDDING_BASE_URL ?? undefined;
+  // Auto-detect Voyage from embedding provider — keep rerank-on-Voyage convenience,
+  // but key comes from SCRYBE_RERANK_API_KEY only (no fallback to embedding key).
+  const embeddingBaseUrl = envStr("SCRYBE_CODE_EMBEDDING_BASE_URL");
   const provider = resolveProvider(embeddingBaseUrl);
   if (provider?.name === "Voyage AI") {
     return {
       rerankEnabled: true,
       rerankBaseUrl: "https://api.voyageai.com/v1/rerank",
       rerankModel: process.env.SCRYBE_RERANK_MODEL ?? "rerank-2.5",
-      rerankApiKey: apiKey,
+      rerankApiKey: apiKey,  // SCRYBE_RERANK_API_KEY only; no fallback to embedding key
       rerankFetchMultiplier: fetchMultiplier,
     };
   }
@@ -140,38 +164,34 @@ function buildRerankConfig() {
   return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
 }
 
-function buildTextEmbeddingConfig() {
+function buildKnowledgeEmbeddingConfig() {
   const baseUrl =
-    envStr("SCRYBE_TEXT_EMBEDDING_BASE_URL") ??
-    envStr("EMBEDDING_BASE_URL") ??        // inherit from code embedding provider
+    envStr("SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL") ??
+    envStr("SCRYBE_CODE_EMBEDDING_BASE_URL") ??   // inherit from code embedding provider
     undefined;
 
   const provider = resolveProvider(baseUrl);
 
   // Inherit local provider when code embedding is also local
   const codeIsLocal = !!(envStr("SCRYBE_LOCAL_EMBEDDER") ||
-    (!envStr("EMBEDDING_BASE_URL") && !envStr("EMBEDDING_API_KEY") &&
-     !envStr("OPENAI_API_KEY") && !envStr("EMBEDDING_MODEL")));
-  const textIsLocal = codeIsLocal && !envStr("SCRYBE_TEXT_EMBEDDING_BASE_URL");
+    (!envStr("SCRYBE_CODE_EMBEDDING_BASE_URL") && !envStr("SCRYBE_CODE_EMBEDDING_API_KEY") &&
+     !envStr("SCRYBE_CODE_EMBEDDING_MODEL")));
+  const knowledgeIsLocal = codeIsLocal && !envStr("SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL");
 
-  const model = textIsLocal
-    ? (envStr("SCRYBE_TEXT_EMBEDDING_MODEL") ?? envStr("SCRYBE_LOCAL_EMBEDDER") ?? LOCAL_PROVIDER_DEFAULTS.textModel)
-    : (envStr("SCRYBE_TEXT_EMBEDDING_MODEL") ?? provider?.textModel ?? "text-embedding-3-small");
+  const model = knowledgeIsLocal
+    ? (envStr("SCRYBE_KNOWLEDGE_EMBEDDING_MODEL") ?? envStr("SCRYBE_LOCAL_EMBEDDER") ?? LOCAL_PROVIDER_DEFAULTS.textModel)
+    : (envStr("SCRYBE_KNOWLEDGE_EMBEDDING_MODEL") ?? provider?.textModel ?? "text-embedding-3-small");
 
-  const dimsEnv = envStr("SCRYBE_TEXT_EMBEDDING_DIMENSIONS");
+  const dimsEnv = envStr("SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS");
   const dimensions = dimsEnv
     ? parseInt(dimsEnv, 10)
-    : textIsLocal
+    : knowledgeIsLocal
       ? LOCAL_PROVIDER_DEFAULTS.dimensions
       : (provider?.dimensions ?? 1536);
 
-  const apiKey =
-    envStr("SCRYBE_TEXT_EMBEDDING_API_KEY") ??
-    envStr("EMBEDDING_API_KEY") ??
-    envStr("OPENAI_API_KEY") ??
-    "";
+  const apiKey = envStr("SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY") ?? "";
 
-  return { baseUrl: textIsLocal ? undefined : baseUrl, model, dimensions, apiKey, providerType: textIsLocal ? "local" as const : "api" as const };
+  return { baseUrl: knowledgeIsLocal ? undefined : baseUrl, model, dimensions, apiKey, providerType: knowledgeIsLocal ? "local" as const : "api" as const };
 }
 
 function buildHybridConfig() {
@@ -181,7 +201,7 @@ function buildHybridConfig() {
 }
 
 const embedding = buildEmbeddingConfig();
-const textEmbedding = buildTextEmbeddingConfig();
+const knowledgeEmbedding = buildKnowledgeEmbeddingConfig();
 const rerank = buildRerankConfig();
 const hybrid = buildHybridConfig();
 
@@ -200,26 +220,23 @@ export const VERSION = readPackageVersion();
 export const config = {
   dataDir: getDataDir(),
 
-  // Code embedding provider — local WASM or any OpenAI-compatible endpoint (EMBEDDING_* vars)
+  // Code embedding provider — local WASM or any OpenAI-compatible endpoint
   embeddingProviderType: embedding.providerType,
-  embeddingApiKey:
-    process.env.EMBEDDING_API_KEY ??
-    process.env.OPENAI_API_KEY ??
-    "",
+  embeddingApiKey: envStr("SCRYBE_CODE_EMBEDDING_API_KEY") ?? "",
   embeddingBaseUrl: embedding.baseUrl,
   embeddingModel: embedding.model,
   embeddingDimensions: embedding.dimensions,
   embeddingConfigError: embedding.configError,
-  embedBatchSize: parseInt(process.env.EMBED_BATCH_SIZE ?? "100", 10),
-  embedBatchDelayMs: parseInt(process.env.EMBED_BATCH_DELAY_MS ?? "0", 10),
+  embedBatchSize: parseInt(process.env.SCRYBE_EMBED_BATCH_SIZE ?? "100", 10),
+  embedBatchDelayMs: parseInt(process.env.SCRYBE_EMBED_BATCH_DELAY_MS ?? "0", 10),
 
-  // Text embedding provider — for knowledge sources (SCRYBE_TEXT_EMBEDDING_* vars)
+  // Knowledge embedding provider — for knowledge/ticket sources
   // Falls back to code embedding config if not set separately.
-  textEmbeddingProviderType: textEmbedding.providerType,
-  textEmbeddingApiKey: textEmbedding.apiKey,
-  textEmbeddingBaseUrl: textEmbedding.baseUrl,
-  textEmbeddingModel: textEmbedding.model,
-  textEmbeddingDimensions: textEmbedding.dimensions,
+  textEmbeddingProviderType: knowledgeEmbedding.providerType,
+  textEmbeddingApiKey: knowledgeEmbedding.apiKey,
+  textEmbeddingBaseUrl: knowledgeEmbedding.baseUrl,
+  textEmbeddingModel: knowledgeEmbedding.model,
+  textEmbeddingDimensions: knowledgeEmbedding.dimensions,
 
   // Chunker
   chunkSize: parseInt(process.env.SCRYBE_CHUNK_SIZE ?? "60", 10),

@@ -1,10 +1,11 @@
-import { createWriteStream } from "fs";
+import { createWriteStream, existsSync } from "fs";
 import { mkdir } from "fs/promises";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { closeDB } from "../branch-state.js";
 import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
-import { VERSION, config } from "../config.js";
+import { VERSION, config, warnOldEnvVars } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
 import { initQueue, enqueue, submitToQueue, stopQueue, onQueueJobEvent } from "./queue.js";
@@ -16,6 +17,7 @@ import { listProjects } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
 import { initAutoGc, evaluateRatioTrigger } from "./auto-gc.js";
+import { warmupLocalEmbedder } from "../local-embedder.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
 let shutdownCalled = false;
@@ -80,6 +82,48 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
  */
 export async function runDaemon(): Promise<void> {
   await checkAndMigrate();
+
+  // Warn about old env var names that can't be rewritten by the .env migration
+  // (they came from OS env or MCP server config).
+  warnOldEnvVars();
+
+  // Warn if .env was previously loaded from the scrybe repo root (no longer read).
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const legacyEnvPath = join(scriptDir, "..", "..", ".env"); // dist/daemon/../.. → repo root
+  if (existsSync(legacyEnvPath)) {
+    process.stderr.write(
+      `[scrybe] found .env in scrybe repo root (${legacyEnvPath}); this path is no longer read. ` +
+      `Move keys to ${config.dataDir}/.env if you want them honoured.\n`
+    );
+  }
+
+  // Pre-load local embedder model(s) so the first index doesn't pay download/load cost.
+  // Runs in background — a failure here does not block daemon startup.
+  void (async () => {
+    const seenModels = new Set<string>();
+    if (config.embeddingProviderType === "local") {
+      const modelId = config.embeddingModel;
+      if (!seenModels.has(modelId)) {
+        seenModels.add(modelId);
+        try {
+          await warmupLocalEmbedder({ modelId, dimensions: config.embeddingDimensions });
+        } catch (e) {
+          process.stderr.write(`[scrybe] local embedder warmup failed (code embedding): ${e}\n`);
+        }
+      }
+    }
+    if (config.textEmbeddingProviderType === "local") {
+      const modelId = config.textEmbeddingModel;
+      if (!seenModels.has(modelId)) {
+        seenModels.add(modelId);
+        try {
+          await warmupLocalEmbedder({ modelId, dimensions: config.textEmbeddingDimensions });
+        } catch (e) {
+          process.stderr.write(`[scrybe] local embedder warmup failed (knowledge embedding): ${e}\n`);
+        }
+      }
+    }
+  })();
 
   // Set up log file
   const logsDir = join(config.dataDir, "logs");

@@ -21,7 +21,7 @@ scrybe init
 scrybe init --register-only
 ```
 
-Config is written to `<DATA_DIR>/.env` and picked up automatically on subsequent runs. Local embedder: writes `SCRYBE_LOCAL_EMBEDDER` + `EMBEDDING_DIMENSIONS`. External provider: writes `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_API_KEY`.
+Config is written to `<DATA_DIR>/.env` and picked up automatically on subsequent runs. Local embedder: writes `SCRYBE_LOCAL_EMBEDDER` + `SCRYBE_CODE_EMBEDDING_DIMENSIONS`. External provider: writes `SCRYBE_CODE_EMBEDDING_BASE_URL`, `SCRYBE_CODE_EMBEDDING_MODEL`, `SCRYBE_CODE_EMBEDDING_DIMENSIONS`, `SCRYBE_CODE_EMBEDDING_API_KEY`.
 
 MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.json`), **Cursor** (`~/.cursor/mcp.json`), **Codex** (`~/.codex/config.toml`), **Cline** and **Roo Code** (VS Code globalStorage paths).
 
@@ -678,6 +678,41 @@ If `orphan_ratio > SCRYBE_AUTO_GC_RATIO` (default 15%) **and** no gc has run for
 ---
 
 ## Environment variables
+
+All variables are read from `<DATA_DIR>/.env` (lower priority) or from the OS environment / MCP server config (higher priority, takes precedence). The `<DATA_DIR>/.env` file is the only `.env` path consulted — `.env` in the current working directory or the scrybe repo root are not read.
+
+### Embedding (code sources)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_CODE_EMBEDDING_BASE_URL` | — | Base URL for the OpenAI-compatible embedding API (e.g. `https://api.voyageai.com/v1`) |
+| `SCRYBE_CODE_EMBEDDING_API_KEY` | — | API key for the code embedding provider |
+| `SCRYBE_CODE_EMBEDDING_MODEL` | auto-resolved | Embedding model name. Auto-resolved from the provider when the base URL is known |
+| `SCRYBE_CODE_EMBEDDING_DIMENSIONS` | auto-resolved | Embedding output dimensions |
+| `SCRYBE_LOCAL_EMBEDDER` | — | Set to a model ID (e.g. `Xenova/multilingual-e5-small`) to use local offline inference instead of an API |
+| `SCRYBE_EMBED_BATCH_SIZE` | `100` | Number of chunks per embedding API call |
+| `SCRYBE_EMBED_BATCH_DELAY_MS` | `0` | Delay (ms) between embedding API batches |
+
+### Embedding (knowledge / ticket sources)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL` | inherits code | Base URL override for knowledge sources |
+| `SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY` | inherits code | API key override for knowledge sources |
+| `SCRYBE_KNOWLEDGE_EMBEDDING_MODEL` | inherits code | Model override for knowledge sources |
+| `SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS` | inherits code | Dimensions override for knowledge sources |
+
+### Reranking
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_RERANK` | — | Set `true` to enable reranking. Auto-enabled when Voyage AI is the embedding provider |
+| `SCRYBE_RERANK_API_KEY` | — | API key for the reranker. Required when reranking is enabled |
+| `SCRYBE_RERANK_BASE_URL` | auto | Base URL for the reranking API (default: Voyage AI when auto-detected) |
+| `SCRYBE_RERANK_MODEL` | `rerank-2.5` | Reranker model name |
+| `SCRYBE_RERANK_FETCH_MULTIPLIER` | `5` | Fetch this many extra results for reranking |
+
+### Daemon and auto-gc
 
 | Variable | Default | Description |
 |----------|---------|-------------|

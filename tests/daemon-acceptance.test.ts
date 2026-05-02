@@ -104,7 +104,7 @@ describe("daemon /status — watcher health reflected via HTTP (integration)", (
         sources: [{
           source_id: "primary",
           source_config: { type: "code", root_path: badPath },
-          embedding: { base_url: "http://127.0.0.1:12345", model: "test", dimensions: 384, api_key_env: "EMBEDDING_API_KEY" },
+          embedding: { base_url: "http://127.0.0.1:12345", model: "test", dimensions: 384, api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY" },
         }],
       }]),
       "utf8",
@@ -135,7 +135,7 @@ describe("daemon /status — watcher health reflected via HTTP (integration)", (
         sources: [{
           source_id: "primary",
           source_config: { type: "code", root_path: testRepoDir },
-          embedding: { base_url: "http://127.0.0.1:12345", model: "test", dimensions: 384, api_key_env: "EMBEDDING_API_KEY" },
+          embedding: { base_url: "http://127.0.0.1:12345", model: "test", dimensions: 384, api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY" },
         }],
       }]),
       "utf8",

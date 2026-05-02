@@ -34,7 +34,7 @@ describe("dimension mismatch detection", () => {
         base_url: sidecar.baseUrl,
         model: sidecar.model,
         dimensions: 1024, // wrong — sidecar returns 384
-        api_key_env: "EMBEDDING_API_KEY",
+        api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       },
     });
 

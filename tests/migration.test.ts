@@ -87,29 +87,32 @@ describe("migration registry (Fix 6)", () => {
       last_written_by: string;
     };
     expect(schema.migrations_applied).toContain("compact-tables-v0.23.2");
+    expect(schema.migrations_applied).toContain("rename-env-vars-v0.29.0");
     expect(typeof schema.last_written_by).toBe("string");
     expect(schema.last_written_by.length).toBeGreaterThan(0);
   });
 
   it("already-applied migrations are not run again (idempotent)", async () => {
     mkdirSync(dataDir(), { recursive: true });
+    const allApplied = ["compact-tables-v0.23.2", "rename-env-vars-v0.29.0"];
     writeFileSync(
       join(dataDir(), "schema.json"),
-      JSON.stringify({ version: 2, migrations_applied: ["compact-tables-v0.23.2"] }),
+      JSON.stringify({ version: 2, migrations_applied: allApplied }),
       "utf8"
     );
 
     const { runPendingMigrations } = await import("../src/migrations.js");
-    const result = await runPendingMigrations(["compact-tables-v0.23.2"]);
+    const result = await runPendingMigrations(allApplied);
 
     // No new IDs added — already applied
-    expect(result).toEqual(["compact-tables-v0.23.2"]);
+    expect(result).toEqual(allApplied);
   });
 
-  it("pending migration is added to applied list", async () => {
+  it("pending migrations are added to applied list", async () => {
     const { runPendingMigrations } = await import("../src/migrations.js");
-    // Start with empty applied list — migration should run (no-op on empty registry)
+    // Start with empty applied list — all migrations should run (no-op on empty registry)
     const result = await runPendingMigrations([]);
     expect(result).toContain("compact-tables-v0.23.2");
+    expect(result).toContain("rename-env-vars-v0.29.0");
   });
 });

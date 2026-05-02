@@ -12,10 +12,10 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "scrybe-doctor-test-"));
   vi.resetModules();
   process.env["SCRYBE_DATA_DIR"] = tmp;
-  process.env["EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
-  process.env["EMBEDDING_MODEL"] = "voyage-code-3";
-  process.env["EMBEDDING_DIMENSIONS"] = "1024";
-  process.env["EMBEDDING_API_KEY"] = "test-key";
+  process.env["SCRYBE_CODE_EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
+  process.env["SCRYBE_CODE_EMBEDDING_MODEL"] = "voyage-code-3";
+  process.env["SCRYBE_CODE_EMBEDDING_DIMENSIONS"] = "1024";
+  process.env["SCRYBE_CODE_EMBEDDING_API_KEY"] = "test-key";
 });
 
 afterEach(() => {
@@ -59,16 +59,12 @@ describe("runDoctor — env checks", () => {
 describe("runDoctor — provider checks", () => {
   it("skips auth checks when API key absent", async () => {
     // Set to "" so config.ts's .env loader won't refill from disk (it only sets absent keys)
-    process.env["EMBEDDING_API_KEY"] = "";
-    const savedOai = process.env["OPENAI_API_KEY"];
-    process.env["OPENAI_API_KEY"] = "";
+    process.env["SCRYBE_CODE_EMBEDDING_API_KEY"] = "";
     const report = await runFresh();
     const key = report.checks.find((c) => c.id === "provider.key_present")!;
     expect(key.status).toBe("fail");
     const auth = report.checks.find((c) => c.id === "provider.auth")!;
     expect(auth.status).toBe("skip");
-    if (savedOai !== undefined) process.env["OPENAI_API_KEY"] = savedOai;
-    else delete process.env["OPENAI_API_KEY"];
   });
 
   it("provider.auth fail when fetch returns 401", async () => {

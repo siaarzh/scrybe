@@ -44,7 +44,7 @@ describe("remove → re-add → full reindex (Fix 1 integration)", () => {
         base_url: sidecar.baseUrl,
         model: sidecar.model,
         dimensions: sidecar.dimensions,
-        api_key_env: "EMBEDDING_API_KEY",
+        api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       },
     });
     const first = await runIndex(projectId, sourceId, "full");
@@ -65,7 +65,7 @@ describe("remove → re-add → full reindex (Fix 1 integration)", () => {
         base_url: sidecar.baseUrl,
         model: sidecar.model,
         dimensions: sidecar.dimensions,
-        api_key_env: "EMBEDDING_API_KEY",
+        api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       },
     });
 
@@ -102,7 +102,7 @@ describe("remove → re-add → full reindex (Fix 1 integration)", () => {
         base_url: sidecar.baseUrl,
         model: sidecar.model,
         dimensions: sidecar.dimensions,
-        api_key_env: "EMBEDDING_API_KEY",
+        api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       },
     });
 

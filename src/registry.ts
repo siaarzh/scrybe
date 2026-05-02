@@ -220,7 +220,7 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       base_url: config.embeddingBaseUrl ?? "",
       model: config.embeddingModel,
       dimensions: config.embeddingDimensions,
-      api_key_env: "EMBEDDING_API_KEY",
+      api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       provider_type: config.embeddingProviderType,
     };
   } else {
@@ -228,7 +228,7 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       base_url: config.textEmbeddingBaseUrl ?? config.embeddingBaseUrl ?? "",
       model: config.textEmbeddingModel,
       dimensions: config.textEmbeddingDimensions,
-      api_key_env: process.env.SCRYBE_TEXT_EMBEDDING_API_KEY ? "SCRYBE_TEXT_EMBEDDING_API_KEY" : "EMBEDDING_API_KEY",
+      api_key_env: process.env.SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY ? "SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY" : "SCRYBE_CODE_EMBEDDING_API_KEY",
       provider_type: config.textEmbeddingProviderType,
     };
   }
@@ -267,10 +267,7 @@ export function isSearchable(source: Source): { ok: boolean; reason?: string } {
   }
   const emb = resolveEmbeddingConfig(source);
   if (emb.provider_type === "local") return { ok: true };
-  const key =
-    process.env[emb.api_key_env] ??
-    process.env["OPENAI_API_KEY"] ??
-    "";
+  const key = process.env[emb.api_key_env] ?? "";
   if (!key) {
     return {
       ok: false,

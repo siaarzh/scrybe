@@ -2,7 +2,7 @@ export interface EmbeddingConfig {
   base_url: string;
   model: string;
   dimensions: number;
-  api_key_env: string; // env var NAME (never the key itself), e.g. "EMBEDDING_API_KEY"
+  api_key_env: string; // env var NAME (never the key itself), e.g. "SCRYBE_CODE_EMBEDDING_API_KEY"
   // When absent or "api", uses the OpenAI-compatible HTTP client (existing behaviour).
   // When "local", uses the in-process @xenova/transformers pipeline; base_url and api_key_env are ignored.
   provider_type?: "api" | "local";

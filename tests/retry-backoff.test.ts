@@ -94,7 +94,7 @@ describe("retry/backoff — 429 injection", () => {
         base_url: injectedSidecar!.info.baseUrl,
         model: mainSidecar.model,
         dimensions: mainSidecar.dimensions,
-        api_key_env: "EMBEDDING_API_KEY",
+        api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       },
     });
 

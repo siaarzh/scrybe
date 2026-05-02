@@ -104,7 +104,7 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   if (config.embeddingConfigError) {
     checks.push(fail("provider.config", SEC_PROV, "Provider config", config.embeddingConfigError,
-      "Set EMBEDDING_BASE_URL, EMBEDDING_MODEL, and EMBEDDING_DIMENSIONS in your .env"));
+      "Set SCRYBE_CODE_EMBEDDING_BASE_URL, SCRYBE_CODE_EMBEDDING_MODEL, and SCRYBE_CODE_EMBEDDING_DIMENSIONS in your .env"));
     checks.push(skip("provider.key_present", SEC_PROV, "API key", "Skipped: provider config error"));
     checks.push(skip("provider.auth", SEC_PROV, "Auth", "Skipped: provider config error"));
     checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: provider config error"));
@@ -131,7 +131,7 @@ export async function runDoctor(): Promise<DoctorReport> {
       if (actualDims !== config.embeddingDimensions) {
         checks.push(fail("provider.dimensions_match", SEC_PROV, "Dimensions",
           `Config expects ${config.embeddingDimensions}d but local model returns ${actualDims}d`,
-          `Set EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
+          `Set SCRYBE_CODE_EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
       } else {
         checks.push(ok("provider.dimensions_match", SEC_PROV, "Dimensions", `${actualDims}d — matches config`));
       }
@@ -146,8 +146,8 @@ export async function runDoctor(): Promise<DoctorReport> {
     const keyPresent = !!config.embeddingApiKey;
     if (!keyPresent) {
       checks.push(fail("provider.key_present", SEC_PROV, "API key present",
-        "EMBEDDING_API_KEY (or OPENAI_API_KEY) not set",
-        "Set EMBEDDING_API_KEY in your .env file"));
+        "SCRYBE_CODE_EMBEDDING_API_KEY not set",
+        "Set SCRYBE_CODE_EMBEDDING_API_KEY in your .env file"));
       checks.push(skip("provider.auth", SEC_PROV, "Auth", "Skipped: no API key"));
       checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: no API key"));
     } else {
@@ -163,9 +163,9 @@ export async function runDoctor(): Promise<DoctorReport> {
         checks.push(fail("provider.auth", SEC_PROV, "Auth",
           validateResult.message ?? `Error: ${validateResult.errorType}`,
           validateResult.errorType === "auth"
-            ? "Regenerate your API key and update EMBEDDING_API_KEY in .env"
+            ? "Regenerate your API key and update SCRYBE_CODE_EMBEDDING_API_KEY in .env"
             : validateResult.errorType === "dns"
-              ? "Check network connectivity and EMBEDDING_BASE_URL"
+              ? "Check network connectivity and SCRYBE_CODE_EMBEDDING_BASE_URL"
               : validateResult.message));
         checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: auth failed"));
       } else {
@@ -176,7 +176,7 @@ export async function runDoctor(): Promise<DoctorReport> {
         if (actualDims !== config.embeddingDimensions) {
           checks.push(fail("provider.dimensions_match", SEC_PROV, "Dimensions",
             `Config expects ${config.embeddingDimensions}d but provider returns ${actualDims}d`,
-            `Set EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
+            `Set SCRYBE_CODE_EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
         } else {
           checks.push(ok("provider.dimensions_match", SEC_PROV, "Dimensions", `${actualDims}d — matches config`));
         }

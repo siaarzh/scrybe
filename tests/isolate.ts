@@ -22,11 +22,11 @@ let testDir = "";
 beforeEach(() => {
   testDir = mkdtempSync(join(tmpdir(), "scrybe-test-"));
   process.env["SCRYBE_DATA_DIR"] = testDir;
-  // EMBEDDING_BASE_URL / EMBEDDING_API_KEY are what src/config.ts actually reads
-  process.env["EMBEDDING_BASE_URL"] = sidecar.baseUrl;
-  process.env["EMBEDDING_MODEL"] = sidecar.model;
-  process.env["EMBEDDING_DIMENSIONS"] = String(sidecar.dimensions);
-  process.env["EMBEDDING_API_KEY"] = "test";
+  // SCRYBE_CODE_EMBEDDING_* are what src/config.ts reads
+  process.env["SCRYBE_CODE_EMBEDDING_BASE_URL"] = sidecar.baseUrl;
+  process.env["SCRYBE_CODE_EMBEDDING_MODEL"] = sidecar.model;
+  process.env["SCRYBE_CODE_EMBEDDING_DIMENSIONS"] = String(sidecar.dimensions);
+  process.env["SCRYBE_CODE_EMBEDDING_API_KEY"] = "test";
   process.env["SCRYBE_HYBRID"] = "true";
   // Disable reranking in tests — it requires Voyage and would fail without credentials
   process.env["SCRYBE_RERANK"] = "false";

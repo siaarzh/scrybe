@@ -14,11 +14,10 @@ import { LOCAL_PROVIDER_DEFAULTS } from "../src/providers.js";
 let savedEnv: Record<string, string | undefined> = {};
 
 const KEYS_TO_CLEAN = [
-  "EMBEDDING_BASE_URL",
-  "EMBEDDING_API_KEY",
-  "OPENAI_API_KEY",
-  "EMBEDDING_MODEL",
-  "EMBEDDING_DIMENSIONS",
+  "SCRYBE_CODE_EMBEDDING_BASE_URL",
+  "SCRYBE_CODE_EMBEDDING_API_KEY",
+  "SCRYBE_CODE_EMBEDDING_MODEL",
+  "SCRYBE_CODE_EMBEDDING_DIMENSIONS",
   "SCRYBE_LOCAL_EMBEDDER",
 ];
 
@@ -82,11 +81,10 @@ describe("envStr empty-string regression — all env vars set to empty string", 
   // isolate.ts sets real sidecar values in beforeEach; we override them to ""
   // here and restore in afterEach.
   const REGRESSION_KEYS = [
-    "EMBEDDING_MODEL",
-    "EMBEDDING_BASE_URL",
-    "EMBEDDING_API_KEY",
-    "OPENAI_API_KEY",
-    "EMBEDDING_DIMENSIONS",
+    "SCRYBE_CODE_EMBEDDING_MODEL",
+    "SCRYBE_CODE_EMBEDDING_BASE_URL",
+    "SCRYBE_CODE_EMBEDDING_API_KEY",
+    "SCRYBE_CODE_EMBEDDING_DIMENSIONS",
   ] as const;
   let saved: Record<string, string | undefined> = {};
 
@@ -112,9 +110,9 @@ describe("envStr empty-string regression — all env vars set to empty string", 
     expect(config.embeddingDimensions).toBe(384);
   });
 
-  it("resolves to Voyage defaults when BASE_URL and API_KEY are set but EMBEDDING_MODEL is empty", async () => {
-    process.env["EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
-    process.env["EMBEDDING_API_KEY"] = "key";
+  it("resolves to Voyage defaults when BASE_URL and API_KEY are set but MODEL is empty", async () => {
+    process.env["SCRYBE_CODE_EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
+    process.env["SCRYBE_CODE_EMBEDDING_API_KEY"] = "key";
     vi.resetModules();
     const { config } = await import("../src/config.js");
     expect(config.embeddingProviderType).toBe("api");
@@ -127,33 +125,31 @@ describe("config.embeddingProviderType — local auto-detect", () => {
   beforeEach(saveEnv);
   afterEach(restoreEnv);
 
-  it("resolves to local when no EMBEDDING_* or OPENAI_API_KEY env vars are set", async () => {
+  it("resolves to local when no SCRYBE_CODE_EMBEDDING_* env vars are set", async () => {
     // This test is tricky because config.ts is a cached module.
     // We verify indirectly through buildEmbeddingConfig logic by checking
     // that the conditions that trigger local are what we expect:
-    // no SCRYBE_LOCAL_EMBEDDER, no EMBEDDING_BASE_URL, no EMBEDDING_API_KEY, no OPENAI_API_KEY, no EMBEDDING_MODEL
+    // no SCRYBE_LOCAL_EMBEDDER, no SCRYBE_CODE_EMBEDDING_BASE_URL, no SCRYBE_CODE_EMBEDDING_API_KEY, no SCRYBE_CODE_EMBEDDING_MODEL
 
-    // The sidecar-based tests set EMBEDDING_BASE_URL before importing config,
-    // so the "local" branch is not triggered there — correct isolation.
     cleanEmbeddingEnv();
 
     // After cleaning, the sidecar URL is gone, so the local path should activate.
     // We can't re-import config (singleton), but we can verify the detection logic:
     // isLocal = !localModelEnv && !baseUrl && !apiKey && !modelEnv
     const localModelEnv = process.env.SCRYBE_LOCAL_EMBEDDER;
-    const baseUrl = process.env.EMBEDDING_BASE_URL;
-    const apiKey = process.env.EMBEDDING_API_KEY ?? process.env.OPENAI_API_KEY;
-    const modelEnv = process.env.EMBEDDING_MODEL;
+    const baseUrl = process.env.SCRYBE_CODE_EMBEDDING_BASE_URL;
+    const apiKey = process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
+    const modelEnv = process.env.SCRYBE_CODE_EMBEDDING_MODEL;
     const isLocal = !!localModelEnv || (!baseUrl && !apiKey && !modelEnv);
     expect(isLocal).toBe(true);
   });
 
-  it("resolves to api when EMBEDDING_API_KEY is set", async () => {
+  it("resolves to api when SCRYBE_CODE_EMBEDDING_API_KEY is set", async () => {
     cleanEmbeddingEnv();
-    process.env.EMBEDDING_API_KEY = "sk-test-key";
-    const baseUrl = process.env.EMBEDDING_BASE_URL;
-    const apiKey = process.env.EMBEDDING_API_KEY ?? process.env.OPENAI_API_KEY;
-    const modelEnv = process.env.EMBEDDING_MODEL;
+    process.env.SCRYBE_CODE_EMBEDDING_API_KEY = "sk-test-key";
+    const baseUrl = process.env.SCRYBE_CODE_EMBEDDING_BASE_URL;
+    const apiKey = process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
+    const modelEnv = process.env.SCRYBE_CODE_EMBEDDING_MODEL;
     const isLocal = !baseUrl && !apiKey && !modelEnv;
     expect(isLocal).toBe(false);
   });

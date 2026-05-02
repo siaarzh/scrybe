@@ -7,6 +7,29 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Breaking
+
+- **Env var rename.** Embedding configuration now uses prefixed names that are unlikely to collide with other tools. The previous unprefixed names are no longer read.
+  - `EMBEDDING_BASE_URL` → `SCRYBE_CODE_EMBEDDING_BASE_URL`
+  - `EMBEDDING_API_KEY` → `SCRYBE_CODE_EMBEDDING_API_KEY`
+  - `EMBEDDING_MODEL` → `SCRYBE_CODE_EMBEDDING_MODEL`
+  - `EMBEDDING_DIMENSIONS` → `SCRYBE_CODE_EMBEDDING_DIMENSIONS`
+  - `EMBED_BATCH_SIZE` → `SCRYBE_EMBED_BATCH_SIZE`
+  - `EMBED_BATCH_DELAY_MS` → `SCRYBE_EMBED_BATCH_DELAY_MS`
+  - `SCRYBE_TEXT_EMBEDDING_*` → `SCRYBE_KNOWLEDGE_EMBEDDING_*`
+
+  Values in `<DATA_DIR>/.env` are renamed automatically on first run. Values set in your shell or MCP server config must be updated manually — the daemon logs a warning if it sees old names there.
+
+- **`OPENAI_API_KEY` fallback removed.** When using OpenAI, set `SCRYBE_CODE_EMBEDDING_API_KEY` explicitly. Reusing `OPENAI_API_KEY` without an explicit scrybe variable is no longer supported.
+
+- **Rerank no longer reuses the embedding API key.** Set `SCRYBE_RERANK_API_KEY` if you have rerank enabled. Auto-enabling rerank when Voyage is detected is unchanged.
+
+- **`.env` search narrowed to one location.** Only `<DATA_DIR>/.env` is read. The previous fallbacks (`./.env` in the working directory, `.env` in the scrybe repo root) are ignored.
+
+### Fixed
+
+- **First-index latency on local-embedder setups.** The local embedder model is now loaded at daemon startup instead of on first index, so the first search is no longer blocked on a model download.
+
 ---
 
 ## [0.28.2] — 2026-05-02

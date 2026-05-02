@@ -24,13 +24,10 @@ function getClient(embConfig: EmbeddingConfig): OpenAI {
   const cached = _clients.get(cacheKey);
   if (cached) return cached;
 
-  const apiKey =
-    process.env[embConfig.api_key_env] ??
-    process.env["OPENAI_API_KEY"] ??
-    "";
+  const apiKey = process.env[embConfig.api_key_env] ?? "";
   if (!apiKey) {
     throw new Error(
-      `No API key found. Set ${embConfig.api_key_env} (or OPENAI_API_KEY) to use model "${embConfig.model}".`
+      `No API key found. Set ${embConfig.api_key_env} to use model "${embConfig.model}".`
     );
   }
 

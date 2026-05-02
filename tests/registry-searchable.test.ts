@@ -1,10 +1,9 @@
 /**
  * Unit tests for `isSearchable` (src/registry.ts).
  *
- * Regression coverage for the v0.25.2 [Unreleased] bug:
- *   `scrybe projects` falsely flagged local-embedder sources as
- *   "Not searchable — missing config: Requires env var EMBEDDING_API_KEY"
- * because `isSearchable` always demanded an API key, ignoring `provider_type === "local"`.
+ * Regression coverage: `isSearchable` must return ok=true for local-provider
+ * sources without requiring an API key, and must surface the correct env var
+ * name for api-provider sources when the key is absent.
  *
  * Construct sources in-memory and exercise `isSearchable` directly. No filesystem,
  * no embedder load, no Lance.
@@ -22,7 +21,7 @@ function localCodeSource(overrides: Partial<Source> = {}): Source {
       base_url: "",
       model: "Xenova/multilingual-e5-small",
       dimensions: 384,
-      api_key_env: "EMBEDDING_API_KEY",
+      api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       provider_type: "local",
     },
     ...overrides,
@@ -38,7 +37,7 @@ function apiCodeSource(overrides: Partial<Source> = {}): Source {
       base_url: "https://api.voyageai.com/v1",
       model: "voyage-code-3",
       dimensions: 1024,
-      api_key_env: "EMBEDDING_API_KEY",
+      api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
       provider_type: "api",
     },
     ...overrides,
@@ -46,24 +45,17 @@ function apiCodeSource(overrides: Partial<Source> = {}): Source {
 }
 
 describe("isSearchable", () => {
-  let savedKeys: { embedding?: string | undefined; openai?: string | undefined };
+  let savedKey: string | undefined;
 
   beforeEach(() => {
     // Snapshot then clear env so each test starts from a known baseline.
-    savedKeys = {
-      embedding: process.env.EMBEDDING_API_KEY,
-      openai: process.env.OPENAI_API_KEY,
-    };
-    delete process.env.EMBEDDING_API_KEY;
-    delete process.env.OPENAI_API_KEY;
+    savedKey = process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
+    delete process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
   });
 
-  // Restore after each test
   function restoreEnv(): void {
-    if (savedKeys.embedding === undefined) delete process.env.EMBEDDING_API_KEY;
-    else process.env.EMBEDDING_API_KEY = savedKeys.embedding;
-    if (savedKeys.openai === undefined) delete process.env.OPENAI_API_KEY;
-    else process.env.OPENAI_API_KEY = savedKeys.openai;
+    if (savedKey === undefined) delete process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
+    else process.env.SCRYBE_CODE_EMBEDDING_API_KEY = savedKey;
   }
 
   it("local-provider source is searchable without any API key in the environment", () => {
@@ -79,19 +71,11 @@ describe("isSearchable", () => {
     const result = isSearchable(src);
     restoreEnv();
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain("EMBEDDING_API_KEY");
+    expect(result.reason).toContain("SCRYBE_CODE_EMBEDDING_API_KEY");
   });
 
-  it("api-provider source with EMBEDDING_API_KEY set is searchable", () => {
-    process.env.EMBEDDING_API_KEY = "test-key";
-    const src = apiCodeSource();
-    const result = isSearchable(src);
-    restoreEnv();
-    expect(result.ok).toBe(true);
-  });
-
-  it("api-provider source with only OPENAI_API_KEY set is searchable (legacy fallback)", () => {
-    process.env.OPENAI_API_KEY = "test-key";
+  it("api-provider source with SCRYBE_CODE_EMBEDDING_API_KEY set is searchable", () => {
+    process.env.SCRYBE_CODE_EMBEDDING_API_KEY = "test-key";
     const src = apiCodeSource();
     const result = isSearchable(src);
     restoreEnv();

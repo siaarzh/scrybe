@@ -25,7 +25,7 @@ function makeFixtureRepo(dir: string): void {
 
 // Saved originals to restore after each test
 let savedEnv: Record<string, string | undefined> = {};
-const CLEAR_VARS = ["EMBEDDING_API_KEY", "OPENAI_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL", "EMBEDDING_DIMENSIONS"];
+const CLEAR_VARS = ["SCRYBE_CODE_EMBEDDING_API_KEY", "SCRYBE_CODE_EMBEDDING_BASE_URL", "SCRYBE_CODE_EMBEDDING_MODEL", "SCRYBE_CODE_EMBEDDING_DIMENSIONS"];
 
 beforeEach(() => {
   dataDir = mkdtempSync(join(tmpdir(), "scrybe-e2e-init-"));
@@ -143,10 +143,10 @@ async function runWizardMocked({
 }
 
 describe("wizard — provider skip when already configured", () => {
-  it("skips provider prompts when EMBEDDING_API_KEY is set", async () => {
-    process.env["EMBEDDING_API_KEY"] = "existing-key";
-    process.env["EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
-    process.env["EMBEDDING_MODEL"] = "voyage-code-3";
+  it("skips provider prompts when SCRYBE_CODE_EMBEDDING_API_KEY is set", async () => {
+    process.env["SCRYBE_CODE_EMBEDDING_API_KEY"] = "existing-key";
+    process.env["SCRYBE_CODE_EMBEDDING_BASE_URL"] = "https://api.voyageai.com/v1";
+    process.env["SCRYBE_CODE_EMBEDDING_MODEL"] = "voyage-code-3";
 
     // Root-choice select fires once (always); provider select must NOT fire
     const selectMock = vi.fn().mockResolvedValueOnce("__skip");
@@ -178,9 +178,9 @@ describe("wizard — provider skip when already configured", () => {
     // select called exactly once (root-choice only) — provider picker skipped
     expect(selectMock).toHaveBeenCalledTimes(1);
 
-    delete process.env["EMBEDDING_API_KEY"];
-    delete process.env["EMBEDDING_BASE_URL"];
-    delete process.env["EMBEDDING_MODEL"];
+    delete process.env["SCRYBE_CODE_EMBEDDING_API_KEY"];
+    delete process.env["SCRYBE_CODE_EMBEDDING_BASE_URL"];
+    delete process.env["SCRYBE_CODE_EMBEDDING_MODEL"];
   });
 });
 
@@ -292,7 +292,7 @@ describe("wizard — credentials written", () => {
     expect(existsSync(envPath)).toBe(true);
     const content = readFileSync(envPath, "utf8");
     expect(content).toContain("SCRYBE_LOCAL_EMBEDDER=");
-    expect(content).toContain("EMBEDDING_DIMENSIONS=384");
+    expect(content).toContain("SCRYBE_CODE_EMBEDDING_DIMENSIONS=384");
   });
 
   it("writes API key to DATA_DIR/.env on external provider path", async () => {
@@ -300,6 +300,6 @@ describe("wizard — credentials written", () => {
     const envPath = join(dataDir, ".env");
     expect(existsSync(envPath)).toBe(true);
     const content = readFileSync(envPath, "utf8");
-    expect(content).toContain("EMBEDDING_API_KEY=sk-test-xyz");
+    expect(content).toContain("SCRYBE_CODE_EMBEDDING_API_KEY=sk-test-xyz");
   });
 });

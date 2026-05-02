@@ -35,14 +35,14 @@ function classifyError(err: unknown): { error: string; error_type?: string } {
   }
   if (status === 401 || /401|unauthorized|api.?key/i.test(message)) {
     return {
-      error: "Embedding API authentication failed. Check that EMBEDDING_API_KEY (or OPENAI_API_KEY) is set correctly.",
+      error: "Embedding API authentication failed. Check that SCRYBE_CODE_EMBEDDING_API_KEY is set correctly.",
       error_type: "auth",
     };
   }
-  if (/EMBEDDING_DIMENSIONS=\d+/.test(message)) return { error: message, error_type: "dimensions_mismatch" };
+  if (/SCRYBE_CODE_EMBEDDING_DIMENSIONS=\d+/.test(message)) return { error: message, error_type: "dimensions_mismatch" };
   if (message.startsWith("NO_CODE_SOURCES")) return { error: message.replace(/^NO_CODE_SOURCES:\s*/, ""), error_type: "no_code_sources" };
   if (message.startsWith("NO_KNOWLEDGE_SOURCES")) return { error: message.replace(/^NO_KNOWLEDGE_SOURCES:\s*/, ""), error_type: "no_knowledge_sources" };
-  if (/Unknown embedding provider|EMBEDDING_MODEL is not set/.test(message)) return { error: message, error_type: "unknown_provider" };
+  if (/Unknown embedding provider|SCRYBE_CODE_EMBEDDING_MODEL is not set/.test(message)) return { error: message, error_type: "unknown_provider" };
   if (/ENOENT|EACCES|EPERM|EISDIR|ENOTDIR/.test(message)) return { error: message, error_type: "file_system" };
   if (/corrupt|malformed|unexpected token|invalid.*manifest/i.test(message)) return { error: message, error_type: "data_corruption" };
   return { error: message, error_type: "internal" };
