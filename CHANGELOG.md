@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.29.0] — 2026-05-02
+
 ### Breaking
 
 - **Env var rename.** Embedding configuration now uses prefixed names that are unlikely to collide with other tools. The previous unprefixed names are no longer read.
