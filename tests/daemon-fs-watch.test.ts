@@ -13,9 +13,10 @@ import { tmpdir, platform } from "os";
 // Short debounce so tests don't wait 1.5 s each
 process.env["SCRYBE_DAEMON_FS_DEBOUNCE_MS"] = "80";
 
-// FSEvents (macOS) does not fire reliably in GitHub Actions CI sandboxes.
-// Skip on macOS CI until community validation — tracked in M-D9.
-const skipOnMacCI = process.env["CI"] === "true" && platform() === "darwin";
+// FSEvents (macOS) and ReadDirectoryChangesW (Windows) do not fire reliably
+// in GitHub Actions CI sandboxes. Skip on macOS + Windows CI; Linux inotify
+// is reliable. Tracked in M-D9.
+const skipOnFsWatchCI = process.env["CI"] === "true" && (platform() === "darwin" || platform() === "win32");
 
 vi.mock("../src/daemon/queue.js", () => ({
   enqueue: vi.fn().mockResolvedValue("job-fs"),
@@ -44,7 +45,7 @@ afterEach(async () => {
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
-describe.skipIf(skipOnMacCI)("FS watcher — event detection", () => {
+describe.skipIf(skipOnFsWatchCI)("FS watcher — event detection", () => {
   it("calls enqueue after a file is written (within 5 s)", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { initWatcher, watchProject } = await import("../src/daemon/watcher.js");
@@ -106,7 +107,7 @@ describe.skipIf(skipOnMacCI)("FS watcher — event detection", () => {
   });
 });
 
-describe.skipIf(skipOnMacCI)("FS watcher — ignore rules", () => {
+describe.skipIf(skipOnFsWatchCI)("FS watcher — ignore rules", () => {
   it("ignores .git directory changes", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { initWatcher, watchProject } = await import("../src/daemon/watcher.js");
@@ -153,7 +154,7 @@ describe.skipIf(skipOnMacCI)("FS watcher — ignore rules", () => {
   });
 });
 
-describe.skipIf(skipOnMacCI)("FS watcher — lifecycle", () => {
+describe.skipIf(skipOnFsWatchCI)("FS watcher — lifecycle", () => {
   it("watchProject no-ops if project is already watched", async () => {
     const { initWatcher, watchProject, getWatcherHealth } = await import("../src/daemon/watcher.js");
 
