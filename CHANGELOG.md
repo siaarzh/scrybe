@@ -7,6 +7,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- **Incremental reindex no longer fires `optimize()` once per ~10 files.** This was the cause of multi-minute FTS rebuilds on large incrementals (e.g. ~65 min on a 359-file diff). Root cause: `flushBatch` called `upsert` once per file (N manifest versions), and `upsert` called `maybeCompact` after each write (firing `optimize()` every 10 versions = N/10 FTS rebuilds). Fix: LanceDB writes are now batched into a single `upsert` call per `flushBatch`, and `maybeCompact` is removed from the upsert hot path — compaction deferred to the existing end-of-run `compactTableWithGrace`. Single FTS rebuild per indexing run.
+
+- **`scrybe index --branch <ref>` now errors when `<ref>` cannot be resolved** instead of silently exiting 0 with no data written. Error message: `branch '<ref>' not found locally — try 'origin/<ref>' or fetch the ref first`.
+
+- **Reindex failure messages now surface in daemon-routed CLI output.** Previously every failed reindex showed `Failed: unknown error`. Root cause: `finalizeJobStatus` wrote `job.error` to SQLite, but errors were captured on `task.error` and never copied to the job. Now the first failing task's error message bubbles up.
+
+### Internal
+
+- `upsert` and `upsertKnowledge` switched from `table.add()` to `table.mergeInsert(["chunk_id"]).whenMatchedUpdateAll().whenNotMatchedInsertAll()` for content-addressed UPSERT semantics. Eliminates duplicate rows on crash retry.
+
 ---
 
 ## [0.28.0] — 2026-05-01

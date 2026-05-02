@@ -54,6 +54,8 @@ function finalizeJobStatus(job: StoredJob): void {
   const anyCancelled = tasks.some((t) => t.status === "cancelled");
   if (anyFailed) {
     job.status = "failed";
+    // Bubble first task error up to job-level so daemon-routed CLI displays it.
+    job.error ??= tasks.find((t) => t.status === "failed" && t.error)?.error ?? null;
   } else if (anyCancelled) {
     job.status = "cancelled";
   } else {

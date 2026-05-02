@@ -131,6 +131,7 @@ export async function upsert(
 ): Promise<void> {
   if (chunks.length === 0) return;
   const table = await getProjectTable(tableName, dimensions, "code");
+  const schema = await table.schema();
   const rows = chunks.map((chunk, i) => ({
     chunk_id: chunk.chunk_id,
     project_id: chunk.project_id,
@@ -140,10 +141,18 @@ export async function upsert(
     end_line: chunk.end_line,
     language: chunk.language,
     symbol_name: chunk.symbol_name,
-    vector: Float32Array.from(vectors[i]),
+    vector: Array.from(vectors[i]),
   }));
-  await table.add(rows);
-  await maybeCompact(table);
+  // Build a schema-typed Arrow Table so that mergeInsert.execute() gets correct
+  // column types (non-nullable fields, int32 for line numbers, FixedSizeList for vector).
+  // mergeInsert.execute() calls fromDataToBuffer without schema, which infers nullable=true
+  // and double for integers — passing an ArrowTable with the table schema avoids the mismatch.
+  const arrowTable = lancedb.makeArrowTable(rows, { schema });
+  await table.mergeInsert(["chunk_id"])
+    .whenMatchedUpdateAll()
+    .whenNotMatchedInsertAll()
+    .execute(arrowTable);
+  // maybeCompact removed — end-of-run compactTableWithGrace handles housekeeping.
 }
 
 export async function search(
@@ -274,6 +283,7 @@ export async function upsertKnowledge(
 ): Promise<void> {
   if (chunks.length === 0) return;
   const table = await getProjectTable(tableName, dimensions, "knowledge");
+  const schema = await table.schema();
   const rows = chunks.map((chunk, i) => ({
     chunk_id: chunk.chunk_id,
     project_id: chunk.project_id,
@@ -284,10 +294,15 @@ export async function upsertKnowledge(
     author: chunk.author,
     timestamp: chunk.timestamp,
     content: chunk.content,
-    vector: Float32Array.from(vectors[i]),
+    vector: Array.from(vectors[i]),
   }));
-  await table.add(rows);
-  await maybeCompact(table);
+  // Same schema-typing approach as upsert() — see comment there.
+  const arrowTable = lancedb.makeArrowTable(rows, { schema });
+  await table.mergeInsert(["chunk_id"])
+    .whenMatchedUpdateAll()
+    .whenNotMatchedInsertAll()
+    .execute(arrowTable);
+  // maybeCompact removed — end-of-run compactTableWithGrace handles housekeeping.
 }
 
 export async function searchKnowledge(

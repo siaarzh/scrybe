@@ -15,6 +15,7 @@ import {
   pruneIndexOrphans,
 } from "./vector-store.js";
 import { createHash } from "node:crypto";
+import { execSync } from "node:child_process";
 import { appendFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
@@ -101,6 +102,22 @@ export async function indexSource(
     async (session, branch) => {
       // For code sources: detect non-HEAD branch indexing (content from git objects).
       const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
+
+      // Validate that an explicitly supplied branch ref is resolvable before doing any work.
+      // git ls-tree silently returns nothing on an unknown ref — this catches that early.
+      if (isNonHeadBranch && options.branch !== undefined && rootPath !== "") {
+        try {
+          execSync(`git rev-parse --verify "${options.branch}"`, {
+            cwd: rootPath,
+            stdio: ["ignore", "ignore", "ignore"],
+          });
+        } catch {
+          throw new Error(
+            `branch '${options.branch}' not found locally — try 'origin/${options.branch}' or fetch the ref first`
+          );
+        }
+      }
+
       const nonHeadContentCache = new Map<string, string>();
 
       // --- Phase 1: Scan and diff ---
@@ -237,22 +254,35 @@ export async function indexSource(
           toEmbed.map((c, i) => [c.chunk_id, embedVectors[i]])
         );
 
-        for (const { key, chunks } of keyBatches) {
-          const newKeyChunks = chunks.filter((c) => vectorMap.has(c.chunk_id));
-          if (newKeyChunks.length > 0) {
-            const keyVectors = newKeyChunks.map((c) => vectorMap.get(c.chunk_id)!);
-            if (isCode) {
-              await upsert(newKeyChunks as CodeChunk[], keyVectors, tableName, embConfig.dimensions);
-            } else {
-              await upsertKnowledge(newKeyChunks as KnowledgeChunk[], keyVectors, tableName, embConfig.dimensions);
+        // One upsert call per flushBatch — keeps manifest version count to ~1
+        // per batch, so end-of-run optimize() stays cheap.
+        const allChunksToWrite: AnyChunk[] = [];
+        const allVectorsToWrite: number[][] = [];
+        for (const { chunks } of keyBatches) {
+          for (const c of chunks) {
+            if (vectorMap.has(c.chunk_id)) {
+              allChunksToWrite.push(c);
+              allVectorsToWrite.push(vectorMap.get(c.chunk_id)!);
             }
-            filesReindexed++;
           }
+        }
 
-          // Test-only: widen conflict window for two-writer race tests.
-          const writeDelayMs = parseInt(process.env["SCRYBE_TEST_WRITE_DELAY_MS"] ?? "0", 10);
-          if (writeDelayMs > 0) await new Promise((r) => setTimeout(r, writeDelayMs));
+        if (allChunksToWrite.length > 0) {
+          if (isCode) {
+            await upsert(allChunksToWrite as CodeChunk[], allVectorsToWrite, tableName, embConfig.dimensions);
+          } else {
+            await upsertKnowledge(allChunksToWrite as KnowledgeChunk[], allVectorsToWrite, tableName, embConfig.dimensions);
+          }
+          filesReindexed += keyBatches.filter((kb) => kb.chunks.some((c) => vectorMap.has(c.chunk_id))).length;
+        }
 
+        // Test-only: widen conflict window for two-writer race tests.
+        const writeDelayMs = parseInt(process.env["SCRYBE_TEST_WRITE_DELAY_MS"] ?? "0", 10);
+        if (writeDelayMs > 0) await new Promise((r) => setTimeout(r, writeDelayMs));
+
+        // Per-file checkpoint: save hash + add branch tags atomically.
+        // Runs after the single batched upsert — LanceDB write before SQLite checkpoint.
+        for (const { key, chunks } of keyBatches) {
           // Checkpoint: save hash + add branch tags atomically.
           // For non-code sources, no tags are recorded (they're branch-agnostic).
           if (isCode) {
