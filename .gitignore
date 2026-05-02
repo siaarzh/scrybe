@@ -55,6 +55,5 @@ Thumbs.db
 TODO.md
 
 # Asset-gen scratch
-scripts/*
-!scripts/pre-install.js
+scripts/
 assets/concepts/

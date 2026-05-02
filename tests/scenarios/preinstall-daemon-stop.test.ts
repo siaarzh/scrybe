@@ -1,7 +1,7 @@
 /**
  * Fix 4 (Plan 31) — preinstall script stops the running daemon.
  *
- * The `scripts/pre-install.js` script is invoked before npm unpacks new files.
+ * The `npm-hooks/pre-install.js` script is invoked before npm unpacks new files.
  * It reads daemon.pid, sends /shutdown, waits for the process to exit.
  *
  * Test cases:
@@ -17,7 +17,7 @@ import { makeScenarioEnv, ENTRY, type ScenarioEnv } from "./helpers/spawn.js";
 import { sidecar } from "../helpers/sidecar.js";
 
 const NODE = process.execPath;
-const PRE_INSTALL = join(process.cwd(), "scripts/pre-install.js");
+const PRE_INSTALL = join(process.cwd(), "npm-hooks/pre-install.js");
 
 let env: ScenarioEnv | null = null;
 let daemonProcess: ReturnType<typeof spawn> | null = null;

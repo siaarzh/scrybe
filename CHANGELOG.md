@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.2] — 2026-05-02
+
+### Changed
+
+- **Preinstall script moved from `scripts/` to `npm-hooks/`.** The npm-lifecycle preinstall hook now lives in its own dedicated directory rather than sharing a generic `scripts/` folder. No behavior change — the hook still stops a running daemon before `npm install -g` to prevent `EPERM` on Windows. This is a pure relocation: cleaner separation between published artifacts and local-only tooling, and removes the `.gitignore` exception that was masking it inside an otherwise-ignored directory.
+
+---
+
 ## [0.29.1] — 2026-05-02
 
 ### Added
