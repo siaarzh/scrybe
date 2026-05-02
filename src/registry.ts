@@ -3,7 +3,7 @@ import { join, dirname } from "path";
 import { createHash } from "crypto";
 import { config } from "./config.js";
 import { dropTable } from "./vector-store.js";
-import { wipeSource } from "./branch-state.js";
+import { wipeSource, getDB } from "./branch-state.js";
 import { getPlugin } from "./plugins/index.js";
 import type { Project, Source, EmbeddingConfig } from "./types.js";
 
@@ -112,10 +112,68 @@ export function updateProject(
   return projects[idx];
 }
 
+// ─── Project-removal hooks ─────────────────────────────────────────────────
+
+type ProjectRemovedCallback = (projectId: string, jobsCancelled: number) => void;
+const _projectRemovedCallbacks: ProjectRemovedCallback[] = [];
+
+/**
+ * Register a callback fired whenever removeProject completes.
+ * Used by the daemon to emit SSE events and cancel idle-gc timers.
+ */
+export function onProjectRemoved(cb: ProjectRemovedCallback): void {
+  _projectRemovedCallbacks.push(cb);
+}
+
+/**
+ * Cascade-cancel all queued and running jobs for a project.
+ * Called by removeProject before writing the updated projects.json.
+ * Works both in-daemon (in-memory cancelJob + SQLite) and CLI (SQLite only).
+ * Returns the count of jobs cancelled.
+ */
+async function cancelJobsForProject(projectId: string): Promise<number> {
+  let cancelled = 0;
+  try {
+    const db = getDB();
+    const orphans = db.prepare(
+      "SELECT job_id, status FROM jobs WHERE project_id = ? AND status IN ('queued', 'running')"
+    ).all(projectId) as Array<{ job_id: string; status: string }>;
+
+    if (orphans.length === 0) return 0;
+
+    const now = Date.now();
+
+    // For running jobs: attempt in-memory abort (no-op outside daemon process)
+    const runningIds = orphans.filter((j) => j.status === "running").map((j) => j.job_id);
+    if (runningIds.length > 0) {
+      try {
+        const { cancelJob } = await import("./jobs.js");
+        for (const jobId of runningIds) {
+          try { cancelJob(jobId); } catch { /* non-fatal */ }
+        }
+      } catch { /* jobs.js not available */ }
+    }
+
+    // Cancel all (queued + running) directly in SQLite
+    for (const { job_id } of orphans) {
+      try {
+        db.prepare(
+          "UPDATE jobs SET status='cancelled', error_message='project removed', finished_at=? WHERE job_id=?"
+        ).run(now, job_id);
+        cancelled++;
+      } catch { /* non-fatal */ }
+    }
+  } catch { /* SQLite unavailable — non-fatal */ }
+  return cancelled;
+}
+
 export async function removeProject(id: string): Promise<void> {
   const projects = load();
   const project = projects.find((p) => p.id === id);
   if (!project) throw new Error(`Project '${id}' not found`);
+
+  // A1: cancel pending/running jobs before wiping data
+  const jobsCancelled = await cancelJobsForProject(id);
 
   // Wipe branch_tags + hash files, then drop LanceDB table for each source
   for (const source of project.sources) {
@@ -134,6 +192,11 @@ export async function removeProject(id: string): Promise<void> {
   }
 
   save(projects.filter((p) => p.id !== id));
+
+  // Notify daemon-side hooks (SSE event, timer cleanup, etc.)
+  for (const cb of _projectRemovedCallbacks) {
+    try { cb(id, jobsCancelled); } catch { /* non-fatal */ }
+  }
 }
 
 // ─── Source CRUD ──────────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
 import { onStateChange } from "./idle-state.js";
-import { listProjects } from "../registry.js";
+import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
 import { initAutoGc, evaluateRatioTrigger } from "./auto-gc.js";
@@ -159,7 +159,19 @@ export async function runDaemon(): Promise<void> {
   initQueue({ pushEvent });
 
   // Wire auto-gc triggers (must happen after initQueue)
-  initAutoGc({ pushEvent });
+  const autoGcTracker = initAutoGc({ pushEvent });
+
+  // A1/A2: when a project is removed, emit SSE event + cancel its idle-gc timer
+  onProjectRemoved((projectId, jobsCancelled) => {
+    autoGcTracker.cancel(projectId);
+    pushEvent({
+      ts: new Date().toISOString(),
+      level: "info",
+      event: "project.removed",
+      projectId,
+      detail: { jobsCancelled },
+    });
+  });
 
   // Wire queue job events → ratio trigger evaluation
   onQueueJobEvent((projectId, _jobId, eventType, req) => {

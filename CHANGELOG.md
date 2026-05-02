@@ -9,6 +9,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.3] — 2026-05-02
+
+### Fixed
+
+- **Removed projects no longer leave zombie jobs in the queue.** `scrybe project remove <id>` now cascade-cancels any queued or running jobs for that project. The auto-gc scheduler also validates project existence before enqueueing, and the queue dispatcher fails-fast on jobs whose project no longer exists. A one-time migration (`cleanup-zombie-jobs-v0.29.3`) cleans up any pre-existing zombies on first launch.
+
+### Added
+
+- **Daemon auto-restarts after `npm install -g`.** A new postinstall script (`npm-hooks/post-install.js`) spawns the new daemon after npm finishes unpacking, so your first CLI/MCP call after upgrade hits an already-warm daemon at the new version. Skipped on container environments and when `SCRYBE_NO_AUTO_DAEMON=1`. Always exits 0 — never blocks install.
+
+---
+
 ## [0.29.2] — 2026-05-02
 
 ### Changed

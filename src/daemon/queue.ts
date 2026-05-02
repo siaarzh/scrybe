@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { config } from "../config.js";
 import { submitJob, submitSourceJob, getJobStatus } from "../jobs.js";
 import { insertJob, updateJobStatus, getQueueStatus, cancelPendingGcJobs } from "../jobs-store.js";
+import { getProject } from "../registry.js";
 import type { DaemonEvent } from "./http-server.js";
 import type { IndexMode } from "../types.js";
 import type { JobType } from "../jobs-store.js";
@@ -224,6 +225,32 @@ function drain(): void {
     const item = _pending.splice(idx, 1)[0];
     const startedAt = new Date().toISOString();
     const jobType = item.type ?? "reindex";
+
+    // A3: Fail-fast on phantom project — project may have been removed between
+    // submitToQueue and drain. Defense-in-depth for edge cases A1/A2 miss.
+    // Only check if projects.json exists (skip on fresh install / test env without registry).
+    try {
+      const registryPath = join(config.dataDir, "projects.json");
+      if (existsSync(registryPath) && !getProject(item.projectId)) {
+        try {
+          updateJobStatus(item.jobId, {
+            status: "failed",
+            finished_at: Date.now(),
+            error_message: "project no longer exists",
+          });
+        } catch { /* non-fatal */ }
+        emit({
+          ts: startedAt,
+          level: "warn",
+          event: "job.failed",
+          projectId: item.projectId,
+          detail: { jobId: item.jobId, type: jobType, skippedOrphan: true, reason: "project no longer exists" },
+        });
+        item.resolve(item.jobId); // resolve so callers don't hang
+        fireJobEventCallbacks(item.projectId, item.jobId, "failed", item);
+        continue;
+      }
+    } catch { /* registry read failure — proceed normally */ }
 
     if (jobType === "gc") {
       // GC jobs are dispatched to the gc handler asynchronously;

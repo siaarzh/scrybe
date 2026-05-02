@@ -214,10 +214,26 @@ export async function evaluateRatioTrigger(projectId: string, sourceId?: string)
 
 /**
  * Enqueue an auto-gc job for a project.
+ * A2: Validates project still exists before submitting — skips with event if removed.
  * Does nothing if SCRYBE_AUTO_GC=0.
  */
 export function enqueueAutoGc(projectId: string, trigger: "idle" | "ratio"): void {
   if (!isAutoGcEnabled()) return;
+
+  // A2: Re-read registry to confirm project still exists
+  const project = getProject(projectId);
+  if (!project) {
+    // Project was removed — cancel its timer and skip
+    _idleTracker?.cancel(projectId);
+    _pushEvent?.({
+      ts: new Date().toISOString(),
+      level: "info",
+      event: "auto-gc.skipped",
+      projectId,
+      detail: { trigger, reason: "project_not_found" },
+    });
+    return;
+  }
 
   _pushEvent?.({
     ts: new Date().toISOString(),

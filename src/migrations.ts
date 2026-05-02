@@ -84,6 +84,38 @@ function addRerankKeyIfMissing(): void {
   }
 }
 
+/**
+ * One-shot cleanup: find jobs for removed projects (zombies) and mark them cancelled.
+ * Idempotent — subsequent runs find no matching rows.
+ */
+async function cancelZombieJobs(): Promise<void> {
+  const { getDB } = await import("./branch-state.js");
+  const db = getDB();
+
+  const projects = listProjects();
+  const validIds = new Set(projects.map((p) => p.id));
+
+  const candidates = db.prepare(
+    "SELECT job_id, project_id FROM jobs WHERE status IN ('queued', 'running')"
+  ).all() as Array<{ job_id: string; project_id: string }>;
+
+  const zombies = candidates.filter((j) => !validIds.has(j.project_id));
+  if (zombies.length === 0) return;
+
+  const now = Date.now();
+  const update = db.prepare(
+    "UPDATE jobs SET status='cancelled', error_message='project no longer exists (zombie cleanup)', finished_at=? WHERE job_id=?"
+  );
+  for (const z of zombies) {
+    try { update.run(now, z.job_id); } catch { /* non-fatal */ }
+  }
+
+  const uniqueProjects = [...new Set(zombies.map((z) => z.project_id))];
+  process.stderr.write(
+    `[scrybe] migration: cleaned up ${zombies.length} zombie job(s) for removed project(s): ${uniqueProjects.join(", ")}\n`
+  );
+}
+
 const MIGRATIONS: Migration[] = [
   {
     id: "compact-tables-v0.23.2",
@@ -119,6 +151,15 @@ const MIGRATIONS: Migration[] = [
     id: "add-rerank-key-v0.29.1",
     async run() {
       addRerankKeyIfMissing();
+    },
+  },
+  {
+    // Plan 33: Clean up zombie jobs — queued/running jobs for projects that no longer
+    // exist in projects.json. These accumulate when a project is removed while jobs
+    // are pending (the old removeProject didn't cancel them). Idempotent.
+    id: "cleanup-zombie-jobs-v0.29.3",
+    async run() {
+      await cancelZombieJobs();
     },
   },
 ];
