@@ -317,7 +317,7 @@ Index or reindex a project (all sources), specific sources, or all registered pr
 | `--all` | | Incrementally reindex all registered projects |
 | `--full` | | Full reindex — clears and rebuilds from scratch. Requires `--source-ids` |
 | `--incremental` | | Only process changed files / updated issues since last run (default) |
-| `--branch <name>` | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources |
+| `--branch <name>` | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources. Errors if `<name>` is not a resolvable git ref (use `origin/<name>` for remote-only branches) |
 | `--detach` | | Submit the job to the daemon and return immediately with the job_id (no progress stream). For CI/scripted use. |
 
 When the scrybe daemon is running, `scrybe index` routes the job through the daemon queue (serialised writes, no cross-process LanceDB conflicts). Use `SCRYBE_NO_AUTO_DAEMON=1` to force in-process mode.

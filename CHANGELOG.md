@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.28.1] — 2026-05-02
+
 ### Fixed
 
 - **Incremental reindex no longer fires `optimize()` once per ~10 files.** This was the cause of multi-minute FTS rebuilds on large incrementals (e.g. ~65 min on a 359-file diff). Root cause: `flushBatch` called `upsert` once per file (N manifest versions), and `upsert` called `maybeCompact` after each write (firing `optimize()` every 10 versions = N/10 FTS rebuilds). Fix: LanceDB writes are now batched into a single `upsert` call per `flushBatch`, and `maybeCompact` is removed from the upsert hot path — compaction deferred to the existing end-of-run `compactTableWithGrace`. Single FTS rebuild per indexing run.
