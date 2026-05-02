@@ -22,7 +22,10 @@ export interface TempRepo {
 export function makeTempRepo(files: Record<string, string> = {}): TempRepo {
   const dir = mkdtempSync(join(tmpdir(), "scrybe-repo-"));
 
-  execSync("git init", { cwd: dir, stdio: "ignore" });
+  // Pin initial branch to "master" — Windows GH runner has init.defaultBranch=main,
+  // but several tests assume the repo's default branch is "master". --initial-branch
+  // is Git ≥ 2.28; safe on all current runners.
+  execSync("git init --initial-branch=master", { cwd: dir, stdio: "ignore" });
   execSync("git config user.email scenario@scrybe.local", { cwd: dir, stdio: "ignore" });
   execSync("git config user.name scrybe-scenario", { cwd: dir, stdio: "ignore" });
   execSync("git config core.autocrlf false", { cwd: dir, stdio: "ignore" });
