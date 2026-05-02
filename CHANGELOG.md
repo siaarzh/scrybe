@@ -9,6 +9,45 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.1] — 2026-05-02
+
+### Added
+
+- **Preinstall script stops running daemon before npm upgrade.** On Windows, a running daemon holds `@parcel/watcher` native binaries open, causing `EPERM` errors during `npm install -g`. A new zero-dependency `scripts/pre-install.js` sends an HTTP `/shutdown` to the daemon before npm unpacks new files, then waits up to 5 s for the process to exit. Always exits 0 — never blocks install.
+
+### Fixed
+
+- **Env rename now runs before config evaluation.** Previously, the first run after an upgrade from ≤0.28.x printed a spurious "your embedding provider does not support auto-configured reranking" warning even for Voyage users. Root cause: `buildRerankConfig()` evaluated `SCRYBE_CODE_EMBEDDING_BASE_URL` before the rename migration had a chance to move `EMBEDDING_BASE_URL` to the new name. Fix: the rename is now applied inline in `loadDotEnv()` at `config.ts` import time, before any config is evaluated. Idempotent — already-renamed files are not rewritten.
+
+- **Rerank key auto-copied for upgrading users.** Users who had `SCRYBE_RERANK=true` working before v0.29.0 lost rerank silently after upgrade because the embedding-key reuse fallback was removed. A new migration (`add-rerank-key-v0.29.1`) copies `SCRYBE_CODE_EMBEDDING_API_KEY` into `SCRYBE_RERANK_API_KEY` in `<DATA_DIR>/.env` when the rerank key is missing and rerank is enabled. Runs once; does not overwrite an explicitly set rerank key.
+
+- **Daemon version-skew warning.** When the CLI version differs from the running daemon's version (as recorded in `daemon.pid`), a one-time warning is printed to stderr: `[scrybe] daemon is running vX.Y but CLI is vA.B. / Restart to pick up new code: scrybe daemon stop`. Suppressed on `--json` output paths.
+
+---
+
+### Manual recovery (if automated fixes are blocked)
+
+If you upgraded from v0.28.2 or earlier to any v0.29.x and saw warnings or EPERM errors, upgrading to v0.29.1 auto-fixes the common cases. If you are still on v0.29.0 with a stale daemon or missing rerank key:
+
+**Quick recovery (recommended):**
+1. `scrybe daemon stop`
+2. `npm install -g scrybe-cli@latest`
+3. Next CLI/MCP call auto-respawns the new daemon and runs migrations.
+
+**Manual recovery (if quick recovery is blocked):**
+1. Stop the daemon: `scrybe daemon stop` (or kill the PID in `<DATA_DIR>/daemon.pid`).
+2. Edit `<DATA_DIR>/.env`:
+   - Add `SCRYBE_RERANK_API_KEY=<same value as SCRYBE_CODE_EMBEDDING_API_KEY>`
+     if you had `SCRYBE_RERANK=true` working before.
+3. Reinstall: `npm install -g scrybe-cli@latest`.
+
+DATA_DIR location:
+- Windows: `%LOCALAPPDATA%\scrybe\scrybe\`
+- macOS: `~/Library/Application Support/scrybe/`
+- Linux: `~/.local/share/scrybe/` (or `$XDG_DATA_HOME/scrybe/`)
+
+---
+
 ## [0.29.0] — 2026-05-02
 
 ### Breaking

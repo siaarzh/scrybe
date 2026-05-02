@@ -151,7 +151,24 @@ async function runIndexViaDaemon(
 // ─── Main CLI ─────────────────────────────────────────────────────────────────
 
 export async function runCli(): Promise<void> {
+  // Fix 3 (Plan 31): if invoked with --json, suppress the version-skew warning
+  // (and any other stderr-noise gates that read SCRYBE_JSON_OUTPUT). Set the env
+  // var BEFORE any pidfile read so suppression actually engages.
+  if (process.argv.includes("--json")) {
+    process.env["SCRYBE_JSON_OUTPUT"] = "1";
+  }
+
   await checkAndMigrate();
+  // Fix 3 (Plan 31): warn if the running daemon is on a different version than the CLI.
+  // warnVersionSkew is a no-op if no pidfile exists or versions match.
+  {
+    const { readPidfile } = await import("./daemon/pidfile.js");
+    const pid = readPidfile();
+    if (pid?.version) {
+      const { warnVersionSkewCli } = await import("./daemon/client.js");
+      warnVersionSkewCli(pid.version);
+    }
+  }
   // Start update check early (non-blocking) so result is ready by the time ps/status renders
   const updateBannerP = checkForUpdates();
   const program = new Command();

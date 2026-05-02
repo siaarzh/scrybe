@@ -5,6 +5,7 @@
 import { readPidfile } from "./pidfile.js";
 import { spawnDaemonDetached } from "./spawn-detached.js";
 import { isContainer } from "./container-detect.js";
+import { VERSION } from "../config.js";
 import type {
   DaemonStatus, DaemonEvent, KickRequest, KickResponse, GcRequest, GcResponse,
 } from "./http-server.js";
@@ -16,6 +17,27 @@ export type EnsureRunningResult =
   | { ok: false; reason: "container" | "opted-out" | "spawn-failed" | "health-timeout" };
 
 const DAEMON_OPT_OUT_ENV = "SCRYBE_NO_AUTO_DAEMON";
+
+/**
+ * Fix 3 (Plan 31): Warn once per CLI process when the running daemon's version
+ * differs from the CLI version. Printed to stderr; suppressed on --json paths
+ * via the SCRYBE_JSON_OUTPUT env var (set by CLI before calling daemon tools).
+ * Never throws.
+ *
+ * Exported as warnVersionSkewCli so cli.ts can call it once at startup for
+ * every command (not just daemon-routing ones).
+ */
+let _skewWarned = false;
+export function warnVersionSkewCli(daemonVersion: string): void {
+  if (_skewWarned) return;
+  if (process.env["SCRYBE_JSON_OUTPUT"] === "1") return;
+  if (!daemonVersion || daemonVersion === VERSION) return;
+  _skewWarned = true;
+  process.stderr.write(
+    `[scrybe] daemon is running v${daemonVersion} but CLI is v${VERSION}.\n` +
+    `[scrybe] Restart to pick up new code: scrybe daemon stop  (auto-respawns on next call)\n`
+  );
+}
 
 /**
  * Ensure the daemon is running, starting it if needed.
@@ -37,7 +59,9 @@ export async function ensureRunning(timeoutMs = 3000): Promise<EnsureRunningResu
     return { ok: false, reason: "container" };
   }
 
-  const existing = DaemonClient.fromPidfile();
+  const existingPid = readPidfile();
+  if (existingPid?.version) warnVersionSkewCli(existingPid.version);
+  const existing = existingPid?.port ? new DaemonClient({ port: existingPid.port }) : null;
   if (existing) {
     try {
       await existing.health();
@@ -84,6 +108,7 @@ export class DaemonClient {
   static fromPidfile(_dataDir?: string): DaemonClient | null {
     const data = readPidfile();
     if (!data?.port) return null;
+    if (data.version) warnVersionSkewCli(data.version);
     return new DaemonClient({ port: data.port });
   }
 

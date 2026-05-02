@@ -88,13 +88,14 @@ describe("migration registry (Fix 6)", () => {
     };
     expect(schema.migrations_applied).toContain("compact-tables-v0.23.2");
     expect(schema.migrations_applied).toContain("rename-env-vars-v0.29.0");
+    expect(schema.migrations_applied).toContain("add-rerank-key-v0.29.1");
     expect(typeof schema.last_written_by).toBe("string");
     expect(schema.last_written_by.length).toBeGreaterThan(0);
   });
 
   it("already-applied migrations are not run again (idempotent)", async () => {
     mkdirSync(dataDir(), { recursive: true });
-    const allApplied = ["compact-tables-v0.23.2", "rename-env-vars-v0.29.0"];
+    const allApplied = ["compact-tables-v0.23.2", "rename-env-vars-v0.29.0", "add-rerank-key-v0.29.1"];
     writeFileSync(
       join(dataDir(), "schema.json"),
       JSON.stringify({ version: 2, migrations_applied: allApplied }),
@@ -114,5 +115,114 @@ describe("migration registry (Fix 6)", () => {
     const result = await runPendingMigrations([]);
     expect(result).toContain("compact-tables-v0.23.2");
     expect(result).toContain("rename-env-vars-v0.29.0");
+    expect(result).toContain("add-rerank-key-v0.29.1");
+  });
+
+  it("add-rerank-key-v0.29.1 is registered after rename-env-vars-v0.29.0", async () => {
+    const { runPendingMigrations } = await import("../src/migrations.js");
+    const result = await runPendingMigrations([]);
+    const renameIdx = result.indexOf("rename-env-vars-v0.29.0");
+    const rerankIdx = result.indexOf("add-rerank-key-v0.29.1");
+    expect(renameIdx).toBeGreaterThanOrEqual(0);
+    expect(rerankIdx).toBeGreaterThan(renameIdx);
+  });
+});
+
+describe("Fix 1 — rename-env-vars-v0.29.0 is a no-op in migration registry", () => {
+  it("running rename migration twice does not error and produces no output (no-op)", async () => {
+    // The actual rename work now happens in loadDotEnv (config.ts).
+    // The migration run() itself must be a no-op — calling it directly should not throw.
+    const { runPendingMigrations } = await import("../src/migrations.js");
+
+    // First call — stamps the migration
+    const first = await runPendingMigrations([]);
+    expect(first).toContain("rename-env-vars-v0.29.0");
+
+    // Second call with all already applied — must be idempotent
+    const second = await runPendingMigrations(first);
+    expect(second).toEqual(first);
+  });
+});
+
+describe("Fix 2 — add-rerank-key-v0.29.1 migration", () => {
+  it("copies SCRYBE_CODE_EMBEDDING_API_KEY into SCRYBE_RERANK_API_KEY when rerank=true and key missing", async () => {
+    const dir = dataDir();
+    mkdirSync(dir, { recursive: true });
+    const envPath = join(dir, ".env");
+    writeFileSync(
+      envPath,
+      "SCRYBE_RERANK=true\nSCRYBE_CODE_EMBEDDING_API_KEY=voyage-key-abc\n",
+      "utf8"
+    );
+
+    // Ensure SCRYBE_RERANK_API_KEY is not set in process.env
+    const savedKey = process.env["SCRYBE_RERANK_API_KEY"];
+    delete process.env["SCRYBE_RERANK_API_KEY"];
+
+    try {
+      const { runPendingMigrations } = await import("../src/migrations.js");
+      await runPendingMigrations(["compact-tables-v0.23.2", "rename-env-vars-v0.29.0"]);
+
+      const envContent = readFileSync(envPath, "utf8");
+      expect(envContent).toContain("SCRYBE_RERANK_API_KEY=voyage-key-abc");
+    } finally {
+      if (savedKey !== undefined) process.env["SCRYBE_RERANK_API_KEY"] = savedKey;
+    }
+  });
+
+  it("does NOT overwrite an existing SCRYBE_RERANK_API_KEY", async () => {
+    const dir = dataDir();
+    mkdirSync(dir, { recursive: true });
+    const envPath = join(dir, ".env");
+    writeFileSync(
+      envPath,
+      "SCRYBE_RERANK=true\nSCRYBE_CODE_EMBEDDING_API_KEY=voyage-key-abc\nSCRYBE_RERANK_API_KEY=existing-rerank-key\n",
+      "utf8"
+    );
+
+    const savedKey = process.env["SCRYBE_RERANK_API_KEY"];
+    delete process.env["SCRYBE_RERANK_API_KEY"];
+
+    try {
+      const { runPendingMigrations } = await import("../src/migrations.js");
+      await runPendingMigrations(["compact-tables-v0.23.2", "rename-env-vars-v0.29.0"]);
+
+      const envContent = readFileSync(envPath, "utf8");
+      // Should still have the original rerank key, not the embedding key
+      expect(envContent).toContain("SCRYBE_RERANK_API_KEY=existing-rerank-key");
+      // Should NOT have duplicated it
+      const matches = envContent.match(/SCRYBE_RERANK_API_KEY=/g);
+      expect(matches?.length ?? 0).toBe(1);
+    } finally {
+      if (savedKey !== undefined) process.env["SCRYBE_RERANK_API_KEY"] = savedKey;
+    }
+  });
+
+  it("does nothing when SCRYBE_RERANK is not true", async () => {
+    const dir = dataDir();
+    mkdirSync(dir, { recursive: true });
+    const envPath = join(dir, ".env");
+    writeFileSync(
+      envPath,
+      "SCRYBE_CODE_EMBEDDING_API_KEY=voyage-key-abc\n",
+      "utf8"
+    );
+
+    const savedKey = process.env["SCRYBE_RERANK_API_KEY"];
+    const savedRerank = process.env["SCRYBE_RERANK"];
+    delete process.env["SCRYBE_RERANK_API_KEY"];
+    delete process.env["SCRYBE_RERANK"];
+
+    try {
+      const { runPendingMigrations } = await import("../src/migrations.js");
+      await runPendingMigrations(["compact-tables-v0.23.2", "rename-env-vars-v0.29.0"]);
+
+      const envContent = readFileSync(envPath, "utf8");
+      // SCRYBE_RERANK_API_KEY should not be added
+      expect(envContent).not.toContain("SCRYBE_RERANK_API_KEY");
+    } finally {
+      if (savedKey !== undefined) process.env["SCRYBE_RERANK_API_KEY"] = savedKey;
+      if (savedRerank !== undefined) process.env["SCRYBE_RERANK"] = savedRerank;
+    }
   });
 });

@@ -18,127 +18,69 @@ export interface Migration {
   run(): Promise<void>;
 }
 
-/** Map of old env var name → new env var name for .env key rewriting. */
-const ENV_RENAME_MAP: Record<string, string> = {
-  "EMBEDDING_BASE_URL":      "SCRYBE_CODE_EMBEDDING_BASE_URL",
-  "EMBEDDING_API_KEY":       "SCRYBE_CODE_EMBEDDING_API_KEY",
-  "EMBEDDING_MODEL":         "SCRYBE_CODE_EMBEDDING_MODEL",
-  "EMBEDDING_DIMENSIONS":    "SCRYBE_CODE_EMBEDDING_DIMENSIONS",
-  "EMBED_BATCH_SIZE":        "SCRYBE_EMBED_BATCH_SIZE",
-  "EMBED_BATCH_DELAY_MS":    "SCRYBE_EMBED_BATCH_DELAY_MS",
-  "SCRYBE_TEXT_EMBEDDING_BASE_URL":   "SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL",
-  "SCRYBE_TEXT_EMBEDDING_API_KEY":    "SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY",
-  "SCRYBE_TEXT_EMBEDDING_MODEL":      "SCRYBE_KNOWLEDGE_EMBEDDING_MODEL",
-  "SCRYBE_TEXT_EMBEDDING_DIMENSIONS": "SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS",
-};
-
 /**
- * Rewrite old env var names in DATA_DIR/.env to new names.
- * Removes old keys after writing new ones to avoid confusion.
- * Warns if OPENAI_API_KEY was the only auth source.
- * Warns if SCRYBE_RERANK=true was set (rerank key reuse is gone).
+ * Auto-copy SCRYBE_CODE_EMBEDDING_API_KEY into SCRYBE_RERANK_API_KEY for users
+ * who had SCRYBE_RERANK=true working before v0.29.0 (when the key was reused).
+ *
+ * Conditions: SCRYBE_RERANK=true AND SCRYBE_CODE_EMBEDDING_API_KEY is set
+ * AND SCRYBE_RERANK_API_KEY is NOT yet set → append to .env.
+ *
+ * Fix 2 (Plan 31): restores prior rerank behaviour for upgraders.
  */
-function migrateEnvFile(): void {
+function addRerankKeyIfMissing(): void {
   const envPath = join(config.dataDir, ".env");
-  if (!existsSync(envPath)) return;
 
-  let content: string;
-  try {
-    content = readFileSync(envPath, "utf8");
-  } catch {
-    return;
-  }
-
-  // Parse lines preserving comments and blanks
-  const lines = content.split("\n");
-  const parsed: Array<{ key: string; value: string; raw: string }> = [];
+  // Parse .env to check current keys
   const keysPresent = new Set<string>();
+  const keyValues = new Map<string, string>();
+  let envContent = "";
 
-  for (const raw of lines) {
-    const trimmed = raw.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      parsed.push({ key: "", value: "", raw });
-      continue;
-    }
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) {
-      parsed.push({ key: "", value: "", raw });
-      continue;
-    }
-    const key = trimmed.slice(0, eq).trim();
-    const value = trimmed.slice(eq + 1).trim();
-    parsed.push({ key, value, raw });
-    keysPresent.add(key);
-  }
-
-  // Check for OPENAI_API_KEY in .env — warn if it was the only embedding auth
-  const hadOpenAiKey = keysPresent.has("OPENAI_API_KEY");
-  const hadEmbeddingKey = keysPresent.has("EMBEDDING_API_KEY");
-  if (hadOpenAiKey && !hadEmbeddingKey) {
-    process.stderr.write(
-      "[scrybe] migration: OPENAI_API_KEY fallback is removed. " +
-      "Set SCRYBE_CODE_EMBEDDING_API_KEY explicitly in your .env.\n"
-    );
-  }
-
-  // Warn if rerank was likely working via the now-removed key reuse
-  if (keysPresent.has("SCRYBE_RERANK") || process.env["SCRYBE_RERANK"] === "true") {
-    if (!keysPresent.has("SCRYBE_RERANK_API_KEY")) {
-      process.stderr.write(
-        "[scrybe] migration: Rerank no longer reuses the embedding API key. " +
-        "Set SCRYBE_RERANK_API_KEY to keep rerank working.\n"
-      );
-    }
-  }
-
-  // Build renamed lines — skip old keys after writing new ones
-  const renamedKeys = new Set<string>(); // new names we've already written
-  const toDelete = new Set<string>();    // old names to drop
-
-  // First pass: collect what needs renaming
-  for (const entry of parsed) {
-    if (!entry.key) continue;
-    const newName = ENV_RENAME_MAP[entry.key];
-    if (newName) toDelete.add(entry.key);
-  }
-
-  const newLines: string[] = [];
-  for (const entry of parsed) {
-    if (!entry.key) {
-      newLines.push(entry.raw);
-      continue;
-    }
-    const newName = ENV_RENAME_MAP[entry.key];
-    if (newName) {
-      // Replace old key with new key (unless new key already exists in file)
-      if (!keysPresent.has(newName) && !renamedKeys.has(newName)) {
-        newLines.push(`${newName}=${entry.value}`);
-        renamedKeys.add(newName);
-        process.stderr.write(`[scrybe] migration: renamed ${entry.key} → ${newName} in .env\n`);
-      } else {
-        process.stderr.write(`[scrybe] migration: dropped duplicate ${entry.key} (${newName} already present)\n`);
-      }
-      // Don't push the old key line
-    } else {
-      newLines.push(entry.raw);
-    }
-  }
-
-  const newContent = newLines.join("\n");
-  if (newContent !== content) {
+  if (existsSync(envPath)) {
     try {
-      writeFileSync(envPath, newContent, "utf8");
-    } catch (e) {
-      process.stderr.write(`[scrybe] migration: could not rewrite .env: ${e}\n`);
+      envContent = readFileSync(envPath, "utf8");
+    } catch { return; }
+    for (const line of envContent.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      const val = trimmed.slice(eq + 1).trim();
+      if (key) { keysPresent.add(key); keyValues.set(key, val); }
     }
   }
 
-  // Also reload the renamed keys into process.env for this run
-  for (const [oldKey, newKey] of Object.entries(ENV_RENAME_MAP)) {
-    if (renamedKeys.has(newKey) && !process.env[newKey]) {
-      const oldVal = process.env[oldKey];
-      if (oldVal) process.env[newKey] = oldVal;
+  // Check condition: SCRYBE_RERANK=true AND embedding key present AND rerank key absent
+  const rerankEnabled =
+    (keysPresent.has("SCRYBE_RERANK") && keyValues.get("SCRYBE_RERANK") === "true") ||
+    process.env["SCRYBE_RERANK"] === "true";
+  const embeddingKey =
+    keyValues.get("SCRYBE_CODE_EMBEDDING_API_KEY") ??
+    process.env["SCRYBE_CODE_EMBEDDING_API_KEY"] ??
+    "";
+  const rerankKeyAlreadySet =
+    keysPresent.has("SCRYBE_RERANK_API_KEY") ||
+    !!process.env["SCRYBE_RERANK_API_KEY"];
+
+  if (!rerankEnabled || !embeddingKey || rerankKeyAlreadySet) return;
+
+  // Append the rerank key line, preserving existing file content
+  const appendLine = `SCRYBE_RERANK_API_KEY=${embeddingKey}`;
+  const newContent = envContent
+    ? (envContent.endsWith("\n") ? envContent + appendLine + "\n" : envContent + "\n" + appendLine + "\n")
+    : appendLine + "\n";
+
+  try {
+    writeFileSync(envPath, newContent, "utf8");
+    process.stderr.write(
+      "[scrybe] migration: copied SCRYBE_CODE_EMBEDDING_API_KEY into SCRYBE_RERANK_API_KEY (rerank reuse compatibility)\n"
+    );
+    // Also set it in process.env for this run
+    if (!process.env["SCRYBE_RERANK_API_KEY"]) {
+      process.env["SCRYBE_RERANK_API_KEY"] = embeddingKey;
     }
+  } catch (e) {
+    process.stderr.write(`[scrybe] migration: could not write SCRYBE_RERANK_API_KEY to .env: ${e}\n`);
   }
 }
 
@@ -161,9 +103,22 @@ const MIGRATIONS: Migration[] = [
     },
   },
   {
+    // Fix 1 (Plan 31): env rename now happens eagerly in loadDotEnv() inside config.ts,
+    // BEFORE buildRerankConfig() evaluates. This entry remains registered so the stamp
+    // is recorded in schema.json — the run() is a no-op since the work already happened.
     id: "rename-env-vars-v0.29.0",
     async run() {
-      migrateEnvFile();
+      // No-op: env rename is now performed at config.ts load time (loadDotEnv).
+    },
+  },
+  {
+    // Fix 2 (Plan 31): for users upgrading from ≤0.28.x who had SCRYBE_RERANK=true
+    // working via the now-removed embedding-key reuse fallback, auto-copy the key.
+    // Must run AFTER rename-env-vars-v0.29.0 so old EMBEDDING_API_KEY has been renamed
+    // to SCRYBE_CODE_EMBEDDING_API_KEY before we read it.
+    id: "add-rerank-key-v0.29.1",
+    async run() {
+      addRerankKeyIfMissing();
     },
   },
 ];

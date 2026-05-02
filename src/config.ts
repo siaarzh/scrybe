@@ -1,25 +1,117 @@
 import { homedir } from "os";
 import { join, dirname } from "path";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { resolveProvider, LOCAL_PROVIDER_DEFAULTS } from "./providers.js";
 
-// Load .env from DATA_DIR only. OS env always takes precedence (does NOT override existing vars).
+/** Map of old env var name → new env var name (for .env file rewriting at load time). */
+const ENV_RENAME_MAP_INTERNAL: Record<string, string> = {
+  "EMBEDDING_BASE_URL":      "SCRYBE_CODE_EMBEDDING_BASE_URL",
+  "EMBEDDING_API_KEY":       "SCRYBE_CODE_EMBEDDING_API_KEY",
+  "EMBEDDING_MODEL":         "SCRYBE_CODE_EMBEDDING_MODEL",
+  "EMBEDDING_DIMENSIONS":    "SCRYBE_CODE_EMBEDDING_DIMENSIONS",
+  "EMBED_BATCH_SIZE":        "SCRYBE_EMBED_BATCH_SIZE",
+  "EMBED_BATCH_DELAY_MS":    "SCRYBE_EMBED_BATCH_DELAY_MS",
+  "SCRYBE_TEXT_EMBEDDING_BASE_URL":   "SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL",
+  "SCRYBE_TEXT_EMBEDDING_API_KEY":    "SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY",
+  "SCRYBE_TEXT_EMBEDDING_MODEL":      "SCRYBE_KNOWLEDGE_EMBEDDING_MODEL",
+  "SCRYBE_TEXT_EMBEDDING_DIMENSIONS": "SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS",
+};
+
+/**
+ * Load DATA_DIR/.env into process.env. OS env always takes precedence.
+ *
+ * Fix 1 (Plan 31): Also applies ENV_RENAME_MAP inline so env-rename happens
+ * BEFORE buildRerankConfig() evaluates — preventing a spurious "not Voyage"
+ * warning on first run after upgrade. The rewrite is idempotent: once new keys
+ * are in the file the old names are gone and no change is written.
+ */
 (function loadDotEnv() {
   const p = join(getDataDir(), ".env");
   if (!existsSync(p)) return;
+
+  let content: string;
   try {
-    for (const line of readFileSync(p, "utf8").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const eq = trimmed.indexOf("=");
-      if (eq === -1) continue;
-      const key = trimmed.slice(0, eq).trim();
-      const val = trimmed.slice(eq + 1).trim();
-      if (key && !(key in process.env)) process.env[key] = val;
+    content = readFileSync(p, "utf8");
+  } catch { return; }
+
+  const rawLines = content.split("\n");
+  const keysPresent = new Set<string>();
+  type Parsed = { key: string; value: string; raw: string };
+  const parsed: Parsed[] = [];
+
+  for (const raw of rawLines) {
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      parsed.push({ key: "", value: "", raw });
+      continue;
     }
-  } catch { /* ignore */ }
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) { parsed.push({ key: "", value: "", raw }); continue; }
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    parsed.push({ key, value, raw });
+    if (key) keysPresent.add(key);
+  }
+
+  // Apply rename map — rewrite .env in place if anything changed.
+  const renamedKeys = new Set<string>();
+  const newLines: string[] = [];
+  let changed = false;
+
+  for (const entry of parsed) {
+    if (!entry.key) { newLines.push(entry.raw); continue; }
+    const newName = ENV_RENAME_MAP_INTERNAL[entry.key];
+    if (newName) {
+      if (!keysPresent.has(newName) && !renamedKeys.has(newName)) {
+        newLines.push(`${newName}=${entry.value}`);
+        renamedKeys.add(newName);
+        process.stderr.write(`[scrybe] migration: renamed ${entry.key} → ${newName} in .env\n`);
+      } else {
+        process.stderr.write(`[scrybe] migration: dropped duplicate ${entry.key} (${newName} already present)\n`);
+      }
+      changed = true;
+    } else {
+      newLines.push(entry.raw);
+    }
+  }
+
+  if (changed) {
+    try {
+      writeFileSync(p, newLines.join("\n"), "utf8");
+    } catch (e) {
+      process.stderr.write(`[scrybe] migration: could not rewrite .env: ${e}\n`);
+    }
+    // Set renamed keys into process.env for this run
+    for (const [oldKey, newKey] of Object.entries(ENV_RENAME_MAP_INTERNAL)) {
+      if (renamedKeys.has(newKey) && !(newKey in process.env)) {
+        if (oldKey in process.env) {
+          process.env[newKey] = process.env[oldKey];
+        }
+      }
+    }
+  }
+
+  // Warn if OPENAI_API_KEY is the only auth source in .env (not replaced by explicit key).
+  if (keysPresent.has("OPENAI_API_KEY") && !keysPresent.has("EMBEDDING_API_KEY") && !keysPresent.has("SCRYBE_CODE_EMBEDDING_API_KEY")) {
+    process.stderr.write(
+      "[scrybe] migration: OPENAI_API_KEY fallback is removed. " +
+      "Set SCRYBE_CODE_EMBEDDING_API_KEY explicitly in your .env.\n"
+    );
+  }
+
+  // Apply all (now-renamed) lines to process.env — OS env takes precedence.
+  const finalLines = changed ? newLines : rawLines;
+  for (const line of finalLines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const val = trimmed.slice(eq + 1).trim();
+    if (key && !(key in process.env)) process.env[key] = val;
+  }
 })();
 
 function getDataDir(): string {

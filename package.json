@@ -1,6 +1,6 @@
 {
   "name": "scrybe-cli",
-  "version": "0.29.0",
+  "version": "0.29.1",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",
   "license": "MIT",
@@ -28,6 +28,7 @@
     "scrybe": "./dist/index.js"
   },
   "scripts": {
+    "preinstall": "node scripts/pre-install.js",
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -36,7 +37,8 @@
     "prepublishOnly": "npm run build"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "scripts/pre-install.js"
   ],
   "dependencies": {
     "@clack/prompts": "^1.2.0",
