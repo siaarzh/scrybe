@@ -130,7 +130,7 @@ export async function indexSource(
       let currentSources: Record<string, string>;
       if (isNonHeadBranch) {
         currentSources = {};
-        for await (const entry of scanRef(rootPath, branch)) {
+        for await (const entry of scanRef(rootPath, branch, projectId, sourceId)) {
           const hash = createHash("sha256").update(entry.content).digest("hex");
           currentSources[entry.relPath] = hash;
           nonHeadContentCache.set(entry.relPath, entry.content);

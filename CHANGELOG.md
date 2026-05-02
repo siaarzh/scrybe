@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.28.2] — 2026-05-02
+
+### Fixed
+
+- **Private ignore rules now apply to non-HEAD branch indexing.** `indexer.ts` was calling `scanRef(rootPath, branch)` without passing `projectId`/`sourceId`, so `loadPrivateIgnore` inside `buildScanRefFilter` was silently skipped. Result: any user with a private ignore + a pinned non-HEAD branch was re-indexing their entire repo on every branch reindex, burning embedding tokens proportional to the full codebase. One-line fix: pass `projectId`, `sourceId` through to `scanRef`. Plan 26 oversight, surfaced during a benchmark experiment that processed 5,701 files (3.56 M Voyage tokens) when only ~30 should have been touched. New regression test: `tests/scenarios/private-ignore-nonhead.test.ts`.
+
+---
+
 ## [0.28.1] — 2026-05-02
 
 ### Fixed
