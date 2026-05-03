@@ -374,6 +374,48 @@ async function runGcJob(item: PendingItem, gcJobId: string, _startedAt: string):
       mode: gcMode,
     });
 
+    // Post-gc health probe — instrumentation only, no auto-repair.
+    // If corruption is detected here it means gc itself introduced it, which is
+    // the forensic signal Plan 40 needs. Log loudly but don't interfere.
+    void (async () => {
+      try {
+        const { getProject } = await import("../registry.js");
+        const { getTableHealth, invalidateHealthCache } = await import("../vector-store.js");
+        const { getExpectedDimensions } = await import("../health-probe.js");
+        const { resolveEmbeddingConfig, assignTableName } = await import("../registry.js");
+        const { getPlugin } = await import("../plugins/index.js");
+        const project = getProject(item.projectId);
+        if (!project) return;
+        const sourcesToCheck = item.sourceId
+          ? project.sources.filter((s) => s.source_id === item.sourceId)
+          : project.sources;
+        for (const sourceRaw of sourcesToCheck) {
+          const source = assignTableName(item.projectId, sourceRaw);
+          const tableName = source.table_name;
+          if (!tableName) continue;
+          const embConfig = resolveEmbeddingConfig(source);
+          let pluginProfile: "code" | "knowledge" = "code";
+          try { const pl = getPlugin(source.source_config.type); pluginProfile = pl.embeddingProfile === "code" ? "code" : "knowledge"; } catch { /* unknown */ }
+          const expDims = getExpectedDimensions(pluginProfile) ?? embConfig.dimensions;
+          invalidateHealthCache(tableName);
+          const health = await getTableHealth(tableName, { force: true, expectedDimensions: expDims });
+          if (health.state === "corrupt") {
+            emit({
+              ts: new Date().toISOString(), level: "error", event: "health.post-gc-corruption-detected",
+              projectId: item.projectId, sourceId: source.source_id,
+              detail: {
+                tableName,
+                reasons: health.reasons,
+                details: health.details,
+                gcJobId,
+                gcMode,
+              },
+            });
+          }
+        }
+      } catch { /* non-fatal — probe must not crash daemon */ }
+    })();
+
     try {
       updateJobStatus(gcJobId, {
         status: "done",

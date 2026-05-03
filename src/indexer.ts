@@ -13,10 +13,14 @@ import {
   deleteKnowledgeProject,
   compactTableWithGrace,
   pruneIndexOrphans,
+  getTableHealth,
+  invalidateHealthCache,
+  dropTable,
 } from "./vector-store.js";
+import { listManifestsSorted, isManifestClean, getExpectedDimensions } from "./health-probe.js";
 import { createHash } from "node:crypto";
 import { gitExecOrThrow } from "./util/git-exec.js";
-import { appendFileSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
@@ -116,6 +120,73 @@ export async function indexSource(
       }
 
       const nonHeadContentCache = new Map<string, string>();
+
+      // --- Pre-flight corruption check (full mode only) ---
+      if (mode === "full") {
+        checkAbort(signal);
+        try {
+          let pluginProfile: "code" | "knowledge" = isCode ? "code" : "knowledge";
+          const expDims = getExpectedDimensions(pluginProfile) ?? embConfig.dimensions;
+          const preHealth = await getTableHealth(tableName, { force: true, expectedDimensions: expDims });
+          if (preHealth.state === "corrupt") {
+            const tableDir = join(config.dataDir, "lancedb", `${tableName}.lance`);
+            const versionsDir = join(tableDir, "_versions");
+            let repaired = false;
+
+            // Rollback tier: only for manifest_missing_data (not for dim-mismatch or schema errors)
+            if (
+              preHealth.reasons.length === 1 &&
+              preHealth.reasons[0] === "manifest_missing_data" &&
+              existsSync(versionsDir)
+            ) {
+              // Walk manifests newest → oldest; find the first clean one
+              const manifests = listManifestsSorted(versionsDir);
+              for (const { version } of manifests) {
+                if (isManifestClean(tableDir, join(versionsDir, `${version}.manifest`))) {
+                  // Attempt Lance restoreToVersion
+                  try {
+                    const db = await (await import("@lancedb/lancedb")).connect(join(config.dataDir, "lancedb"));
+                    const names = await db.tableNames();
+                    if (names.includes(tableName)) {
+                      const tbl = await db.openTable(tableName);
+                      if (typeof (tbl as any).restoreToVersion === "function") {
+                        await (tbl as any).restoreToVersion(version);
+                        repaired = true;
+                        invalidateHealthCache(tableName);
+                        debugEmit({ event: "indexer.repaired", projectId, sourceId, method: "rollback", recovered_to_version: version });
+                        appendFileSync(
+                          process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl"),
+                          JSON.stringify({ ts: new Date().toISOString(), event: "health.repaired-via-rollback", projectId, sourceId, recovered_to_version: version }) + "\n",
+                          "utf8"
+                        );
+                      }
+                    }
+                  } catch { /* rollback API unavailable or failed — fall through to rebuild */ }
+                  break;
+                }
+              }
+            }
+
+            // Rebuild tier: drop the table entirely and let the full reindex recreate it
+            if (!repaired) {
+              try {
+                await dropTable(tableName);
+                // Also rm the physical directory if it lingers (Lance may not fully purge on drop)
+                if (existsSync(tableDir)) {
+                  rmSync(tableDir, { recursive: true, force: true });
+                }
+                invalidateHealthCache(tableName);
+                debugEmit({ event: "indexer.repaired", projectId, sourceId, method: "rebuild" });
+                appendFileSync(
+                  process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl"),
+                  JSON.stringify({ ts: new Date().toISOString(), event: "health.repaired-via-rebuild", projectId, sourceId }) + "\n",
+                  "utf8"
+                );
+              } catch { /* non-fatal — table may already be gone */ }
+            }
+          }
+        } catch { /* non-fatal — probe must not block full reindex */ }
+      }
 
       // --- Phase 1: Scan and diff ---
       checkAbort(signal);
@@ -382,6 +453,9 @@ export async function indexSource(
           }
         } catch { /* non-fatal */ }
       }
+
+      // Invalidate health cache after any successful reindex — state may have changed.
+      invalidateHealthCache(tableName);
 
       const result = {
         status: "ok" as const,

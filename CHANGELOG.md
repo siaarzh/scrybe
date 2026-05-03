@@ -9,6 +9,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.30.0] — 2026-05-03
+
+### Added
+
+- Detect and surface index corruption (manifest-vs-disk and dimensions-mismatch classes). `scrybe status` now shows `Corrupt *` in the HEALTH column with a reason badge.
+- Search now returns a structured error (`error_type: "table_corrupt"`) for corrupt indices instead of an internal stack trace.
+- `scrybe doctor --repair` rebuilds corrupt indices in batch after presenting an estimated token-cost preview and requiring confirmation.
+- `scrybe index --full` automatically rolls back to the last clean manifest version when possible (no embedding cost), or drops and rebuilds otherwise.
+
+---
+
 ## [0.29.9] — 2026-05-03
 
 ### Changed

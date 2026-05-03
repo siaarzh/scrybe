@@ -39,6 +39,33 @@ async function shutdown(signal: string): Promise<void> {
   await stopWatcher();
   await stopGitWatcher();
   stopFetchPoller();
+
+  // Bounded shutdown drain: wait up to 30s for in-flight gc jobs to finish
+  // before stopping the queue. Reduces (but doesn't eliminate) the gc-killed-mid-write class.
+  const GC_DRAIN_TIMEOUT_MS = 30_000;
+  try {
+    const { getQueueStats } = await import("./queue.js");
+    const drainStart = Date.now();
+    while (Date.now() - drainStart < GC_DRAIN_TIMEOUT_MS) {
+      const stats = getQueueStats();
+      if (stats.active === 0) break;
+      await new Promise<void>((r) => setTimeout(r, 200));
+    }
+    const stats = getQueueStats();
+    if (stats.active > 0) {
+      daemonLog(`[scrybe daemon] gc drain timeout — ${stats.active} job(s) still active, force-stopping`);
+      const { appendFileSync } = await import("fs");
+      const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl");
+      try {
+        appendFileSync(
+          logPath,
+          JSON.stringify({ ts: new Date().toISOString(), event: "gc.force-killed", detail: { activeJobs: stats.active } }) + "\n",
+          "utf8"
+        );
+      } catch { /* ignore */ }
+    }
+  } catch { /* non-fatal — drain must not block exit */ }
+
   stopQueue();
   cancelAllJobs();
   closeDB();
@@ -201,6 +228,52 @@ export async function runDaemon(): Promise<void> {
     }
   }
   startFetchPoller(projects);
+
+  // Startup health probe: runs in parallel across all sources, pre-populates the
+  // health cache, and emits a health.corrupt event for any flagged sources.
+  // Runs in background — never blocks startup.
+  void (async () => {
+    try {
+      const { getTableHealth } = await import("../vector-store.js");
+      const { getExpectedDimensions } = await import("../health-probe.js");
+      const { resolveEmbeddingConfig, assignTableName } = await import("../registry.js");
+      const { getPlugin } = await import("../plugins/index.js");
+      const allProjects = listProjects();
+      await Promise.all(
+        allProjects.flatMap((project) =>
+          project.sources.map(async (sourceRaw) => {
+            try {
+              const source = assignTableName(project.id, sourceRaw);
+              const tableName = source.table_name;
+              if (!tableName) return;
+              const embConfig = resolveEmbeddingConfig(source);
+              let pluginProfile: "code" | "knowledge" = "code";
+              try {
+                const plugin = getPlugin(source.source_config.type);
+                pluginProfile = plugin.embeddingProfile === "code" ? "code" : "knowledge";
+              } catch { /* unknown plugin — default to code */ }
+              const expectedDimensions = getExpectedDimensions(pluginProfile) ?? embConfig.dimensions;
+              const result = await getTableHealth(tableName, { force: true, expectedDimensions });
+              if (result.state === "corrupt") {
+                pushEvent({
+                  ts: new Date().toISOString(),
+                  level: "warn",
+                  event: "health.corrupt",
+                  projectId: project.id,
+                  sourceId: source.source_id,
+                  detail: {
+                    tableName,
+                    reasons: result.reasons,
+                    details: result.details,
+                  },
+                });
+              }
+            } catch { /* non-fatal — probe must not crash daemon */ }
+          })
+        )
+      );
+    } catch { /* non-fatal */ }
+  })();
 
   writePidfile({
     pid: process.pid,

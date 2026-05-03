@@ -20,9 +20,19 @@ const TOOLS = mcpTools.map((t) => ({
 
 // ─── Error classifier ─────────────────────────────────────────────────────────
 
-function classifyError(err: unknown): { error: string; error_type?: string } {
+function classifyError(err: unknown): { error: string; error_type?: string; details?: unknown } {
   const status = (err as { status?: number })?.status;
   const message = err instanceof Error ? err.message : String(err);
+
+  // Structured table_corrupt error from search tools — preserve details for agent consumption
+  const errType = (err as { error_type?: string })?.error_type;
+  if (errType === "table_corrupt") {
+    return {
+      error: message,
+      error_type: "table_corrupt",
+      details: (err as { details?: unknown })?.details,
+    };
+  }
 
   if (status === 429 || /429/.test(message)) {
     return {

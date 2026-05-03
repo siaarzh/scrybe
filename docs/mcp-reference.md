@@ -420,7 +420,8 @@ When a tool call fails, the response includes an `error_type` field for programm
 |-------------|-------|
 | `rate_limit` | Embedding API rate limit exceeded |
 | `auth` | Embedding API key missing or invalid. Check `SCRYBE_CODE_EMBEDDING_API_KEY` |
-| `dimensions_mismatch` | Indexed data uses different embedding dimensions — run a full reindex |
+| `dimensions_mismatch` | Indexed data uses different embedding dimensions than the current embedder (embedding-time error) — run a full reindex |
+| `table_corrupt` | The index for one or more sources is corrupt (manifest missing data files, dimensions mismatch after the fact, or unreadable schema). The `details` field includes `project_id`, `source_id`, `reasons[]`, and optional `expected_dimensions`/`actual_dimensions`. Run: `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair`. |
 | `unknown_provider` | `SCRYBE_CODE_EMBEDDING_BASE_URL` not recognised and `SCRYBE_CODE_EMBEDDING_MODEL` not set |
 | `no_code_sources` | Project has no indexed code sources |
 | `no_knowledge_sources` | Project has no indexed knowledge sources |

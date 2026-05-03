@@ -35,14 +35,28 @@ One-shot diagnostics. Checks: DATA_DIR, Node version, provider config and auth (
 |------|-------------|
 | `--json` | Output a stable `DoctorReport` JSON object (schemaVersion: 1) for machine consumption |
 | `--strict` | Exit code 1 on warnings as well as failures |
+| `--repair` | Scan all indexed sources for corruption and offer to rebuild them interactively. Presents an estimated token cost before asking for confirmation. |
 
 ```bash
 scrybe doctor
 scrybe doctor --json
 scrybe doctor --strict
+scrybe doctor --repair
 ```
 
 Exit codes: 0 = all ok, 1 = any failure (or any warning with `--strict`).
+
+#### HEALTH column states
+
+The `scrybe status` HEALTH column shows one of:
+
+| State | Meaning |
+|-------|---------|
+| `Healthy` | Table is intact and ready for search |
+| `Bloated *` | Table has more Lance versions than the compaction threshold — run `scrybe gc` |
+| `Corrupt * (manifest)` | Active manifest references missing data files — run `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair` |
+| `Corrupt * (dim)` | Table was indexed with a different embedding dimension than the current config — run `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair` |
+| `Corrupt * (schema)` | Table schema cannot be read — run `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair` |
 
 ---
 

@@ -707,7 +707,28 @@ export async function runCli(): Promise<void> {
       } catch { /* ignore */ }
       let projects: ReturnType<typeof listProjects> = [];
       try { projects = listProjects(); } catch { /* DATA_DIR missing */ }
-      const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => { const stats = s.table_name ? await getTableStats(s.table_name) : { sizeBytes: 0, versionCount: 0 }; const flags: string[] = stats.versionCount > 2 * COMPACT_THRESHOLD ? ["bloat"] : []; return { sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null, sizeBytes: stats.sizeBytes, versionCount: stats.versionCount, flags }; })) })));
+      const { getTableHealth: getHealth } = await import("./vector-store.js");
+      const { getExpectedDimensions } = await import("./health-probe.js");
+      const { resolveEmbeddingConfig: resolveEmb, assignTableName: assignTN } = await import("./registry.js");
+      const { getPlugin: getPlug } = await import("./plugins/index.js");
+      const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => {
+        const stats = s.table_name ? await getTableStats(s.table_name) : { sizeBytes: 0, versionCount: 0 };
+        const flags: string[] = stats.versionCount > 2 * COMPACT_THRESHOLD ? ["bloat"] : [];
+        // Health probe (reads from cache; populated by daemon startup or prior status calls)
+        let healthFlag: string | null = null;
+        if (s.table_name) {
+          try {
+            const srcWithTable = assignTN(p.id, s);
+            const embConfig = resolveEmb(srcWithTable);
+            let pluginProfile: "code" | "knowledge" = "code";
+            try { const pl = getPlug(s.source_config.type); pluginProfile = pl.embeddingProfile === "code" ? "code" : "knowledge"; } catch { /* unknown */ }
+            const expDims = getExpectedDimensions(pluginProfile) ?? embConfig.dimensions;
+            const health = await getHealth(s.table_name, { expectedDimensions: expDims });
+            if (health.state === "corrupt") { flags.push("corrupt"); healthFlag = health.reasons[0] ?? "corrupt"; }
+          } catch { /* non-fatal — probe must not break status */ }
+        }
+        return { sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null, sizeBytes: stats.sizeBytes, versionCount: stats.versionCount, flags, healthFlag };
+      })) })));
       if (opts.json) {
         const dirPath = config.dataDir;
         const { statSync: st, existsSync: ex } = await import("fs");
@@ -765,7 +786,9 @@ export async function runCli(): Promise<void> {
       for (const p of display) {
         for (const s of p.sources) {
           const size = s.sizeBytes > 0 ? fmtSize(s.sizeBytes) : "—";
-          const health = s.flags.includes("bloat") ? "Bloated *" : "Healthy";
+          const isBloated = s.flags.includes("bloat");
+          const isCorrupt = s.flags.includes("corrupt");
+          const health = isCorrupt ? "Corrupt *" : isBloated ? "Bloated *" : "Healthy";
           const lastGcTs = lastGcTimes.get(p.id) ?? null;
           const lastGcStr = lastGcTs ? fmtRelative(new Date(lastGcTs).toISOString()) : "—";
           console.log(`  ${p.id.slice(0, 19).padEnd(20)}${s.sourceId.slice(0, 17).padEnd(18)}${s.chunks.toLocaleString().padStart(8)}  ${size.padEnd(10)}${health.padEnd(12)}${fmtRelative(s.lastIndexed).padEnd(14)}${lastGcStr}`);
@@ -773,6 +796,18 @@ export async function runCli(): Promise<void> {
       }
       if (hidden > 0) console.log(`  (${hidden} more — use --all)`);
       const anyBloated = sourceSummaries.some((p) => p.sources.some((s) => s.flags.includes("bloat")));
+      const anyCorrupt = sourceSummaries.some((p) => p.sources.some((s) => s.flags.includes("corrupt")));
+      if (anyCorrupt) {
+        // Show corrupt legend with reason badges
+        const corruptReasons = sourceSummaries.flatMap((p) =>
+          p.sources.filter((s) => s.flags.includes("corrupt")).map((s) => {
+            const reasonMap: Record<string, string> = { manifest_missing_data: "manifest", dimensions_mismatch: "dim", schema_unreadable: "schema" };
+            const badge = (s as any).healthFlag ? (reasonMap[(s as any).healthFlag] ?? (s as any).healthFlag) : "corrupt";
+            return `${p.id}/${s.sourceId} (${badge})`;
+          })
+        );
+        console.log(`\n  * Corrupt: ${corruptReasons.join(", ")} — run 'scrybe doctor --repair' or 'scrybe index -P <id> -S <id> --full'`);
+      }
       if (anyBloated) {
         console.log(`\n  * run 'scrybe gc' to reclaim disk space`);
       }
@@ -1028,8 +1063,13 @@ export async function runCli(): Promise<void> {
   program.command("doctor").description("Diagnose scrybe configuration and data integrity")
     .option("--json", "Output as JSON (schema v1)")
     .option("--strict", "Exit code 1 on warnings as well as failures")
-    .addHelpText("after", "\nExample:\n  scrybe doctor")
-    .action(async (opts: { json?: boolean; strict?: boolean }) => {
+    .option("--repair", "Scan for corrupt indices and interactively rebuild them")
+    .addHelpText("after", "\nExamples:\n  scrybe doctor\n  scrybe doctor --repair")
+    .action(async (opts: { json?: boolean; strict?: boolean; repair?: boolean }) => {
+      if (opts.repair) {
+        await runDoctorRepair();
+        return;
+      }
       const { runDoctor } = await import("./onboarding/doctor.js");
       let report;
       if (!opts.json && process.stdout.isTTY) {
@@ -1237,6 +1277,98 @@ export async function runCli(): Promise<void> {
   );
 
   await program.parseAsync(process.argv);
+}
+
+/**
+ * Scan all indexed sources for corruption and offer to repair them.
+ * Called by `scrybe doctor --repair`.
+ */
+async function runDoctorRepair(): Promise<void> {
+  const { getTableHealth: gh } = await import("./vector-store.js");
+  const { getExpectedDimensions: getExpDims } = await import("./health-probe.js");
+  const { resolveEmbeddingConfig: resEmb, assignTableName: assignTN } = await import("./registry.js");
+  const { getPlugin: getPlug } = await import("./plugins/index.js");
+  let projects: ReturnType<typeof listProjects>;
+  try { projects = listProjects(); } catch { projects = []; }
+  if (projects.length === 0) { console.log("No projects registered."); return; }
+
+  console.log("Scanning for corrupt indices...");
+
+  interface CorruptEntry {
+    projectId: string;
+    sourceId: string;
+    tableName: string;
+    reasons: string[];
+    estimatedTokens: number;
+  }
+  const corrupt: CorruptEntry[] = [];
+
+  for (const p of projects) {
+    for (const sourceRaw of p.sources) {
+      const source = assignTN(p.id, sourceRaw);
+      const tableName = source.table_name;
+      if (!tableName) continue;
+      const embConfig = resEmb(source);
+      let pluginProfile: "code" | "knowledge" = "code";
+      try { const pl = getPlug(source.source_config.type); pluginProfile = pl.embeddingProfile === "code" ? "code" : "knowledge"; } catch { /* unknown */ }
+      const expDims = getExpDims(pluginProfile) ?? embConfig.dimensions;
+      try {
+        const health = await gh(tableName, { force: true, expectedDimensions: expDims });
+        if (health.state === "corrupt") {
+          const chunks = source.table_name ? await (await import("./vector-store.js")).countTableRows(tableName) : 0;
+          corrupt.push({ projectId: p.id, sourceId: source.source_id, tableName, reasons: health.reasons, estimatedTokens: chunks * 200 });
+        }
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  if (corrupt.length === 0) { console.log("No corrupt indices found."); return; }
+
+  const totalTokens = corrupt.reduce((s, e) => s + e.estimatedTokens, 0);
+  function fmtTokens(n: number): string { if (n >= 1_000_000) return `~${(n / 1_000_000).toFixed(1)}M tokens`; if (n >= 1000) return `~${Math.round(n / 1000)}K tokens`; return `~${n} tokens`; }
+  const reasonDesc: Record<string, string> = { manifest_missing_data: "manifest references missing data file", dimensions_mismatch: "dimensions mismatch", schema_unreadable: "unreadable schema" };
+
+  console.log(`\n${corrupt.length} source(s) found corrupt:`);
+  for (const e of corrupt) {
+    const desc = e.reasons.map((r) => reasonDesc[r] ?? r).join(", ");
+    console.log(`  ${e.projectId}/${e.sourceId.padEnd(20)} — ${desc}  (${fmtTokens(e.estimatedTokens)} to rebuild)`);
+  }
+  console.log(`Total estimated cost: ${fmtTokens(totalTokens)}`);
+
+  if (!process.stdin.isTTY) {
+    console.error("\n[scrybe] Non-interactive input; run 'scrybe index -P <id> -S <id> --full' for each source manually.");
+    process.exit(1);
+  }
+  process.stdout.write(`\nRepair all ${corrupt.length} source(s)? [y/N] `);
+  const confirmed = await new Promise<boolean>((resolve) => {
+    process.stdin.once("data", (d) => { process.stdin.pause(); resolve(d.toString().trim().toLowerCase() === "y"); });
+  });
+  if (!confirmed) { console.log("Aborted."); return; }
+
+  console.log("\nRepairing...");
+  let failed = 0;
+  for (const e of corrupt) {
+    console.log(`  ${e.projectId}/${e.sourceId}...`);
+    try {
+      const result = await indexSource(e.projectId, e.sourceId, "full", {
+        onScanProgress(n) { process.stdout.write(`\r    Scanning... ${n} files`); },
+        onEmbedProgress(n) { process.stdout.write(`\r    Embedding... ${n} chunks`); },
+      });
+      process.stdout.write("\n");
+      console.log(`    Done: ${formatIndexResult(result.chunks_indexed, result.files_reindexed, result.files_removed)}`);
+    } catch (err) {
+      process.stdout.write("\n");
+      console.error(`    Failed: ${err instanceof Error ? err.message : String(err)}`);
+      failed++;
+    }
+  }
+
+  if (failed > 0) {
+    console.error(`\n${failed} source(s) failed to repair.`);
+    process.exit(1);
+  } else {
+    console.log(`\nRepaired ${corrupt.length - failed} source(s).`);
+  }
 }
 
 function printDoctorReport(report: import("./onboarding/doctor.js").DoctorReport): void {

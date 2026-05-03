@@ -4,6 +4,7 @@ import { mkdirSync, statSync, readdirSync, existsSync, rmSync, readFileSync } fr
 import { join } from "path";
 import { config } from "./config.js";
 import type { CodeChunk, SearchResult, KnowledgeChunk, KnowledgeSearchResult } from "./types.js";
+import type { HealthResult } from "./health-probe.js";
 
 const DB_PATH = join(config.dataDir, "lancedb");
 
@@ -46,6 +47,44 @@ function makeKnowledgeSchema(dimensions: number): Schema {
 
 let _db: lancedb.Connection | null = null;
 const _tableCache = new Map<string, lancedb.Table>();
+
+// ─── Health cache ─────────────────────────────────────────────────────────────
+
+const HEALTH_TTL_MS = (() => {
+  const raw = parseInt(process.env["SCRYBE_HEALTH_TTL_MS"] ?? "", 10);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
+})();
+
+const _healthCache = new Map<string, HealthResult>();
+
+/** Invalidate the health cache for a table (call after writes that could affect health). */
+export function invalidateHealthCache(tableName: string): void {
+  _healthCache.delete(tableName);
+}
+
+/**
+ * Get or compute the health of a LanceDB table.
+ * Uses an in-memory cache with a 60s TTL (env: SCRYBE_HEALTH_TTL_MS).
+ * Pass `force: true` to bypass the cache for this call.
+ */
+export async function getTableHealth(
+  tableName: string,
+  opts: { force?: boolean; expectedDimensions?: number } = {}
+): Promise<HealthResult> {
+  if (!opts.force) {
+    const cached = _healthCache.get(tableName);
+    if (cached && Date.now() - cached.checked_at < HEALTH_TTL_MS) {
+      return cached;
+    }
+  }
+  const { probeTableHealth } = await import("./health-probe.js");
+  const result = await probeTableHealth(tableName, { expectedDimensions: opts.expectedDimensions });
+  // Only cache definitive results (not "unknown" — those are transient)
+  if (result.state !== "unknown") {
+    _healthCache.set(tableName, result);
+  }
+  return result;
+}
 
 function isCommitConflict(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -571,6 +610,7 @@ export async function dropTable(tableName: string): Promise<void> {
     await db.dropTable(tableName);
   }
   _tableCache.delete(tableName);
+  _healthCache.delete(tableName);
 }
 
 /**
