@@ -29,7 +29,7 @@ async function embed(inputs: string[]): Promise<number[][]> {
   const output = await model(inputs, { pooling: "mean", normalize: true });
   const results: number[][] = [];
   for (let i = 0; i < inputs.length; i++) {
-    results.push(Array.from(output[i].data as Float32Array));
+    results.push(Array.from((output as unknown as Array<{ data: Float32Array }>)[i].data));
   }
   return results;
 }

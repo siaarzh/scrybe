@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.7] — 2026-05-03
+
+### Changed
+
+- **Dependency churn from Plan 35 dependabot triage.** Bumped `actions/checkout` 4→6, `actions/cache` 4→5, `github/codeql-action` 3→4, `actions/setup-node` 4→6 (workflow actions); `ignore` 5→7, `openai` 4→6, `tree-sitter-ruby` 0.21→0.23 (runtime/grammar deps); plus a dev-deps group bump. All transitive — no API surface change. 605 tests green. `tree-sitter-go` 0.25 deferred to a coordinated tree-sitter family bump (`.plans/36-tree-sitter-family-bump.md`).
+
+---
+
 ## [0.29.6] — 2026-05-03
 
 ### Changed
