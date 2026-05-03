@@ -70,7 +70,7 @@ describe("Scenario 10 — uninstall --yes", () => {
     const claudeJson = join(homeDir, ".claude.json");
     writeFileSync(claudeJson, JSON.stringify({
       mcpServers: {
-        scrybe: { command: "npx", args: ["-y", "scrybe-cli", "mcp"] },
+        scrybe: { command: "npx", args: ["-y", "scrybe-cli@latest", "mcp"] },
       },
     }), "utf8");
 

@@ -47,7 +47,7 @@ describe("preflightUninstallPlan", () => {
       autostart: { installed: false },
       mcpRemovals: [{
         file: { type: "claude-code" as const, path: join(tmp, "nonexistent", ".claude.json"), exists: true },
-        existing: { command: "npx", args: ["-y", "scrybe-cli", "mcp"] },
+        existing: { command: "npx", args: ["-y", "scrybe-cli@latest", "mcp"] },
         action: "remove" as const,
         diff: "- scrybe",
       }],

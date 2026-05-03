@@ -128,7 +128,7 @@ async function runWizardMocked({
   // Mock MCP detection to return fake home paths
   vi.doMock("../../src/onboarding/mcp-config.js", () => ({
     detectMcpConfigs: vi.fn().mockReturnValue([]),
-    proposeScrybeEntry: vi.fn().mockReturnValue({ command: "npx", args: ["-y", "scrybe-cli", "mcp"] }),
+    proposeScrybeEntry: vi.fn().mockReturnValue({ command: "npx", args: ["-y", "scrybe-cli@latest", "mcp"] }),
     computeDiff: vi.fn().mockReturnValue({ action: "skip", diff: "", file: {}, existing: null, proposed: {} }),
     applyMcpMerge: vi.fn().mockResolvedValue(undefined),
   }));

@@ -56,7 +56,7 @@ describe("readScrybeEntry", () => {
 
   it("reads existing scrybe entry", async () => {
     const { readScrybeEntry, detectMcpConfigs } = await load(tmp);
-    const entry = { command: "npx", args: ["-y", "scrybe-cli", "mcp"] };
+    const entry = { command: "npx", args: ["-y", "scrybe-cli@latest", "mcp"] };
     writeFileSync(join(tmp, ".claude.json"), JSON.stringify({ mcpServers: { scrybe: entry } }));
     const file = detectMcpConfigs(tmp).find((r) => r.type === "claude-code")!;
     expect(readScrybeEntry(file)).toEqual(entry);
@@ -193,11 +193,11 @@ describe("codex — TOML detection and read", () => {
     mkdirSync(codexDir, { recursive: true });
     writeFileSync(
       join(codexDir, "config.toml"),
-      `[other]\nfoo = "bar"\n\n[mcp_servers.scrybe]\ncommand = "npx"\nargs = ["-y", "scrybe-cli", "mcp"]\n`
+      `[other]\nfoo = "bar"\n\n[mcp_servers.scrybe]\ncommand = "npx"\nargs = ["-y", "scrybe-cli@latest", "mcp"]\n`
     );
     const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
     const entry = readScrybeEntry(file);
-    expect(entry).toEqual({ command: "npx", args: ["-y", "scrybe-cli", "mcp"] });
+    expect(entry).toEqual({ command: "npx", args: ["-y", "scrybe-cli@latest", "mcp"] });
   });
 
   it("returns null when [mcp_servers.scrybe] absent", async () => {
@@ -223,7 +223,7 @@ describe("codex — applyMcpMerge TOML", () => {
     const written = readFileSync(tomlPath, "utf8");
     expect(written).toContain("[mcp_servers.scrybe]");
     expect(written).toContain('command = "npx"');
-    expect(written).toContain('args = ["-y", "scrybe-cli", "mcp"]');
+    expect(written).toContain('args = ["-y", "scrybe-cli@latest", "mcp"]');
   });
 
   it("preserves other TOML tables when adding scrybe", async () => {
@@ -376,7 +376,7 @@ describe("applyMcpRemove — TOML (codex)", () => {
     const codexDir = join(tmp, ".codex");
     mkdirSync(codexDir, { recursive: true });
     const tomlPath = join(codexDir, "config.toml");
-    writeFileSync(tomlPath, `[mcp_servers.other]\ncommand = "other"\nargs = []\n\n[mcp_servers.scrybe]\ncommand = "npx"\nargs = ["-y", "scrybe-cli", "mcp"]\n`);
+    writeFileSync(tomlPath, `[mcp_servers.other]\ncommand = "other"\nargs = []\n\n[mcp_servers.scrybe]\ncommand = "npx"\nargs = ["-y", "scrybe-cli@latest", "mcp"]\n`);
     const file = detectMcpConfigs(tmp).find((r) => r.type === "codex")!;
     const diff = computeRemoveDiff(file);
     expect(diff.action).toBe("remove");

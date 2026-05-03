@@ -275,6 +275,17 @@ After uninstalling:
 npm uninstall -g scrybe-cli   # removes the CLI binary
 ```
 
+## Upgrading
+
+**Global install users** (`npm install -g scrybe-cli`): before upgrading, exit Claude Code, stop the daemon, then install:
+
+```sh
+scrybe daemon stop
+npm install -g scrybe-cli
+```
+
+**npx users**: if you configured Claude Code with `npx -y scrybe-cli@latest mcp`, upgrades are automatic — npx fetches the latest version on each new session.
+
 ## Running as a background service
 
 Scrybe can run as a persistent daemon that keeps every project's index fresh automatically — no manual `scrybe index` required after the first full index.

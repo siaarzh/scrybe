@@ -7,6 +7,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Changed
+
+- MCP config snippets now use `scrybe-cli@latest` to ensure users on the npx install path receive version updates automatically.
+- README: added upgrade instructions for global install users (`scrybe daemon stop` before running `npm install -g scrybe-cli` on Windows).
+
 ---
 
 ## [0.30.1] — 2026-05-03

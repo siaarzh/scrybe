@@ -62,7 +62,7 @@ Merge this entry into the existing `mcpServers` object (create the file with thi
   "mcpServers": {
     "scrybe": {
       "command": "npx",
-      "args": ["-y", "scrybe-cli", "mcp"]
+      "args": ["-y", "scrybe-cli@latest", "mcp"]
     }
   }
 }
@@ -85,7 +85,7 @@ File: `~/.codex/config.toml` (create if absent). Add:
 ```toml
 [mcp_servers.scrybe]
 command = "npx"
-args = ["-y", "scrybe-cli", "mcp"]
+args = ["-y", "scrybe-cli@latest", "mcp"]
 ```
 
 ## Step 5 — Verify

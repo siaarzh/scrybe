@@ -82,7 +82,7 @@ export function readScrybeEntry(file: McpConfigFile): ScrybeMcpEntry | null {
 
 export function proposeScrybeEntry(opts: { binResolution: "npx" | "local"; localPath?: string }): ScrybeMcpEntry {
   if (opts.binResolution === "npx") {
-    return { command: "npx", args: ["-y", "scrybe-cli", "mcp"] };
+    return { command: "npx", args: ["-y", "scrybe-cli@latest", "mcp"] };
   }
   if (!opts.localPath) throw new Error("localPath required for binResolution='local'");
   return { command: process.execPath, args: [opts.localPath, "mcp"] };
