@@ -10,8 +10,8 @@
  * Idle interval:   SCRYBE_DAEMON_FETCH_IDLE_MS   (default 30 min)
  * Disable all fetching: SCRYBE_DAEMON_NO_FETCH=1
  */
-import { execSync } from "node:child_process";
 import { listBranches } from "../branch-state.js";
+import { gitExec, gitExecOrThrow } from "../util/git-exec.js";
 import { getSource } from "../registry.js";
 import { getState } from "./idle-state.js";
 import { enqueue } from "./queue.js";
@@ -144,10 +144,7 @@ async function pollProject(ps: PollerState): Promise<void> {
   const indexedBranches = new Set(listBranches(ps.projectId, ps.sourceId));
 
   try {
-    execSync(
-      "git fetch origin --prune --quiet",
-      { cwd: ps.rootPath, stdio: "ignore", timeout: 120_000 }
-    );
+    gitExecOrThrow(["fetch", "origin", "--prune", "--quiet"], { cwd: ps.rootPath, timeout: 120_000 });
   } catch {
     throw new Error(`git fetch failed for ${ps.projectId}`);
   }
@@ -196,14 +193,6 @@ async function pollProject(ps: PollerState): Promise<void> {
 }
 
 function resolveRemoteSha(rootPath: string, ref: string): string | null {
-  try {
-    const sha = execSync(`git rev-parse "${ref}"`, {
-      cwd: rootPath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return sha || null;
-  } catch {
-    return null;
-  }
+  const sha = gitExec(["rev-parse", ref], { cwd: rootPath });
+  return sha || null;
 }

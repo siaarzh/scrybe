@@ -1,6 +1,6 @@
 {
   "name": "scrybe-cli",
-  "version": "0.29.8",
+  "version": "0.29.9",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",
   "license": "MIT",
@@ -34,7 +34,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:scenarios": "vitest run --config vitest.scenarios.config.ts",
-    "lint": "tsc -p tsconfig.lint.json",
+    "lint": "tsc -p tsconfig.lint.json && node tools/check-no-git-exec.mjs",
+    "lint:no-git-exec": "node tools/check-no-git-exec.mjs",
     "test:all": "npm run test && npm run build && npm run test:scenarios",
     "prepublishOnly": "npm run build"
   },

@@ -1,5 +1,6 @@
 import { Command, Argument, createCommand } from "commander";
 import { join } from "path";
+import { gitExec } from "./util/git-exec.js";
 import { getProject, listProjects, addProject, addSource, removeProject } from "./registry.js";
 import { indexProject, indexSource } from "./indexer.js";
 import { listBranches, getAllChunkIdsForSource } from "./branch-state.js";
@@ -1055,11 +1056,9 @@ export async function runCli(): Promise<void> {
   // ─── Zero-config default action ───────────────────────────────────────────
 
   program.action(async () => {
-    const { execSync } = await import("child_process");
     const { basename } = await import("path");
     const cwd = process.cwd();
-    let isGit = false;
-    try { execSync("git rev-parse --git-dir", { cwd, stdio: "ignore" }); isGit = true; } catch { /* not a git repo */ }
+    const isGit = gitExec(["rev-parse", "--git-dir"], { cwd }) !== null;
     if (!isGit) { console.error("Not a git repository. Run `scrybe init` to set up scrybe."); process.exit(1); }
     const projects = listProjects();
     const alreadyRegistered = projects.some((p) => p.sources.some((s) => s.source_config.type === "code" && (s.source_config as any).root_path === cwd));

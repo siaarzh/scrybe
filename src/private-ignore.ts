@@ -6,7 +6,7 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
-import { execSync } from "child_process";
+import { gitExec } from "./util/git-exec.js";
 import { config } from "./config.js";
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
@@ -122,15 +122,7 @@ export function countRules(content: string | null): number {
  * Returns null if the file doesn't exist on that branch or git fails.
  */
 function gitShowFile(rootPath: string, branch: string, relPath: string): string | null {
-  try {
-    return execSync(`git show "${branch}:${relPath}"`, {
-      cwd: rootPath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-  } catch {
-    return null;
-  }
+  return gitExec(["show", `${branch}:${relPath}`], { cwd: rootPath, trim: false });
 }
 
 export interface IgnoreCoverageResult {

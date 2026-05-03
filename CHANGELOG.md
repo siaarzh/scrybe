@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.9] — 2026-05-03
+
+### Changed
+
+- Hardened `git` invocations to use argv form (no shell).
+- Widened Vue `<script>` block extractor to tolerate trailing whitespace in closing tag.
+
+---
+
 ## [0.29.8] — 2026-05-03
 
 ### Changed

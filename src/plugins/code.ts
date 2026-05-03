@@ -1,11 +1,11 @@
 import { createRequire } from "module";
-import { execSync } from "child_process";
 import { createReadStream, existsSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import { createHash } from "node:crypto";
 import ignore from "ignore";
 import { walkRepoFiles, chunkLines, getLanguage, makeChunkId } from "../chunker.js";
 import { loadPrivateIgnore } from "../private-ignore.js";
+import { gitExec } from "../util/git-exec.js";
 import { config } from "../config.js";
 
 function hashFile(filePath: string): Promise<string> {
@@ -115,7 +115,7 @@ const LANGUAGE_TO_KEY: Record<string, LanguageKey> = {
 
 // Vue: extract <script lang="ts"> or <script> block content, parse as TypeScript
 function extractVueScript(source: string): { code: string; lineOffset: number } | null {
-  const match = source.match(/<script(?:\s[^>]*)?>(\n?)([\s\S]*?)<\/script>/i);
+  const match = source.match(/<script(?:\s[^>]*)?>(\n?)([\s\S]*?)<\/script\s*>/i);
   if (!match) return null;
   const lineOffset = source.slice(0, match.index! + match[0].indexOf(match[2])).split("\n").length - 1;
   return { code: match[2], lineOffset };
@@ -432,17 +432,11 @@ export async function* scanRef(
   const isIgnored = buildScanRefFilter(repoPath, projectId, sourceId);
 
   // git ls-tree path — enumerate files from git ref
-  let lsOutput: string;
-  try {
-    lsOutput = execSync(`git ls-tree --full-tree -r -z "${branch}"`, {
-      cwd: repoPath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      maxBuffer: 50 * 1024 * 1024,
-    });
-  } catch {
-    return;
-  }
+  const lsOutput = gitExec(
+    ["ls-tree", "--full-tree", "-r", "-z", branch],
+    { cwd: repoPath, trim: false, maxBuffer: 50 * 1024 * 1024 },
+  );
+  if (lsOutput === null) return;
 
   const MAX_FILE_BYTES = parseInt(process.env["SCRYBE_MAX_FILE_BYTES"] ?? "0", 10) || 1 * 1024 * 1024;
 
@@ -463,17 +457,11 @@ export async function* scanRef(
     // Apply ignore filters (committed .scrybeignore + private ignore)
     if (isIgnored(relPath)) continue;
 
-    let content: string;
-    try {
-      content = execSync(`git show "${branch}:${relPath}"`, {
-        cwd: repoPath,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        maxBuffer: MAX_FILE_BYTES,
-      });
-    } catch {
-      continue;
-    }
+    const content = gitExec(
+      ["show", `${branch}:${relPath}`],
+      { cwd: repoPath, trim: false, maxBuffer: MAX_FILE_BYTES },
+    );
+    if (content === null) continue;
 
     const size = Buffer.byteLength(content, "utf8");
     if (size > MAX_FILE_BYTES) continue;

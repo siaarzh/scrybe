@@ -15,7 +15,7 @@ import {
   pruneIndexOrphans,
 } from "./vector-store.js";
 import { createHash } from "node:crypto";
-import { execSync } from "node:child_process";
+import { gitExecOrThrow } from "./util/git-exec.js";
 import { appendFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
@@ -107,10 +107,7 @@ export async function indexSource(
       // git ls-tree silently returns nothing on an unknown ref — this catches that early.
       if (isNonHeadBranch && options.branch !== undefined && rootPath !== "") {
         try {
-          execSync(`git rev-parse --verify "${options.branch}"`, {
-            cwd: rootPath,
-            stdio: ["ignore", "ignore", "ignore"],
-          });
+          gitExecOrThrow(["rev-parse", "--verify", options.branch], { cwd: rootPath });
         } catch {
           throw new Error(
             `branch '${options.branch}' not found locally — try 'origin/${options.branch}' or fetch the ref first`
