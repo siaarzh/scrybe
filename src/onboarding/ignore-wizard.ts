@@ -8,8 +8,7 @@
  *   4. Ask "Reindex now? [Y/n]" → if Yes, enqueue incremental reindex via daemon
  */
 import * as p from "@clack/prompts";
-import { resolve, basename } from "path";
-import { execSync } from "child_process";
+import { resolve } from "path";
 import {
   ensurePrivateIgnoreFile,
   buildTemplate,
@@ -24,13 +23,6 @@ interface WizardProject {
   codeSources: Array<{ sourceId: string; ruleCount: number }>;
 }
 
-function detectCwdProject(projects: WizardProject[]): string | undefined {
-  const cwd = process.cwd();
-  // Try to find a registered project whose code source root matches cwd (or cwd is under it)
-  // We import registry lazily to keep this module lightweight
-  return undefined; // Resolved in runIgnoreWizard using registry
-}
-
 function ruleHint(count: number): string {
   if (count === 0) return "no rules";
   return `${count} rule${count === 1 ? "" : "s"}`;
@@ -41,7 +33,6 @@ function buildProjectOptions(projects: WizardProject[]): Array<{ value: string; 
     const sourceSummary = proj.codeSources
       .map((s) => `${s.sourceId} (${ruleHint(s.ruleCount)})`)
       .join(", ");
-    const knowedge = ""; // knowledge sources are N/A — not shown per locked decision
     return {
       value: proj.id,
       label: proj.id,

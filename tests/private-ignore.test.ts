@@ -1,7 +1,7 @@
 /**
  * Unit tests for src/private-ignore.ts (Plan 26).
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { join } from "path";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 
@@ -88,7 +88,7 @@ describe("countRules", () => {
 
 describe("savePrivateIgnore", () => {
   it("creates the file when given content", async () => {
-    const { savePrivateIgnore, getPrivateIgnorePath, loadPrivateIgnore } = await import("../src/private-ignore.js");
+    const { savePrivateIgnore, loadPrivateIgnore } = await import("../src/private-ignore.js");
     const content = "vendor/\n*.log\n";
     savePrivateIgnore("save-test", "primary", content);
     const loaded = loadPrivateIgnore("save-test", "primary");
@@ -105,7 +105,7 @@ describe("savePrivateIgnore", () => {
   });
 
   it("deletes the file when given empty string", async () => {
-    const { savePrivateIgnore, getPrivateIgnorePath, loadPrivateIgnore } = await import("../src/private-ignore.js");
+    const { savePrivateIgnore, getPrivateIgnorePath } = await import("../src/private-ignore.js");
     savePrivateIgnore("empty-test", "primary", "vendor/\n");
     savePrivateIgnore("empty-test", "primary", "");
     const path = getPrivateIgnorePath("empty-test", "primary");

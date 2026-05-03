@@ -7,7 +7,7 @@
  *
  * Skipped in container environments (/.dockerenv / WSL2 without systemd / etc.).
  */
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { existsSync } from "fs";
 
 // Detect if we're in a container before requiring any install logic

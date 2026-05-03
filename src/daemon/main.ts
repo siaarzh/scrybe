@@ -8,7 +8,7 @@ import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config, warnOldEnvVars } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
-import { initQueue, enqueue, submitToQueue, stopQueue, onQueueJobEvent } from "./queue.js";
+import { initQueue, submitToQueue, stopQueue, onQueueJobEvent } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";

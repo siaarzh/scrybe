@@ -4,7 +4,7 @@
  * runs indexing against it, and asserts that indexing succeeds despite 429s.
  * Uses SCRYBE_EMBED_RETRY_DELAY_MS=200 to keep the test fast (vs 5s default).
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";

@@ -9,6 +9,8 @@
     "sourceMap": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   },

@@ -10,10 +10,10 @@
  * and assert the warning appears in stderr.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync } from "fs";
+import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { createRequire } from "module";
-import { makeScenarioEnv, runScrybe, ENTRY, type ScenarioEnv } from "./helpers/spawn.js";
+import { makeScenarioEnv, runScrybe, type ScenarioEnv } from "./helpers/spawn.js";
 
 const req = createRequire(import.meta.url);
 const pkg = req("../../package.json") as { version: string };

@@ -3,7 +3,7 @@
  * Rendered by `scrybe status --watch`.
  * Plain `scrybe status` (no flag) does not import this file.
  */
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { render, Box, Text, useApp, useInput } from "ink";
 import { readPidfile } from "./pidfile.js";
 import { DaemonClient } from "./client.js";

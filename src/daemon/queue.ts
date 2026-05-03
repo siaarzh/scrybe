@@ -15,7 +15,7 @@ import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { submitJob, submitSourceJob, getJobStatus } from "../jobs.js";
-import { insertJob, updateJobStatus, getQueueStatus, cancelPendingGcJobs } from "../jobs-store.js";
+import { insertJob, updateJobStatus, cancelPendingGcJobs } from "../jobs-store.js";
 import { getProject } from "../registry.js";
 import type { DaemonEvent } from "./http-server.js";
 import type { IndexMode } from "../types.js";

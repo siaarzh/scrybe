@@ -10,7 +10,7 @@ import {
   addPinned, removePinned, clearPinned, listPinned,
   InvalidSourceTypeError, ProjectNotFoundError, SourceNotFoundError,
 } from "../pinned-branches.js";
-import { getQueueStats, getPending } from "./queue.js";
+import { getQueueStats } from "./queue.js";
 import { getWatcherHealth } from "./watcher.js";
 import { getGitWatcherHealth, getCachedBranch } from "./git-watcher.js";
 import { listJobRows, getJobRow, getQueueStatus } from "../jobs-store.js";

@@ -3,7 +3,7 @@
  * Shared by CLI, MCP tools, and HTTP API (Amendment A1 / §4.5 / §10.5).
  * Persists to projects.json via registry.updateSource().
  */
-import { getProject, getSource, updateSource } from "./registry.js";
+import { getProject, updateSource } from "./registry.js";
 
 const PINNED_WARNING_THRESHOLD = 20;
 

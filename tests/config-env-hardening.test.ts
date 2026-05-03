@@ -224,7 +224,6 @@ describe("warnOldEnvVars", () => {
     vi.resetModules();
     const { warnOldEnvVars } = await import("../src/config.js");
     const stderrWrites: string[] = [];
-    const origWrite = process.stderr.write.bind(process.stderr);
     vi.spyOn(process.stderr, "write").mockImplementation((data: any) => {
       stderrWrites.push(String(data));
       return true;

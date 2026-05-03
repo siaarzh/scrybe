@@ -3,9 +3,9 @@
  * Does NOT mock @clack/prompts — uses stdin to script the confirm prompt.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { tmpdir, homedir } from "os";
+import { tmpdir } from "os";
 import { execSync } from "child_process";
 
 let dataDir = "";

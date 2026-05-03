@@ -20,10 +20,6 @@ function makeTag(overrides: Partial<BranchTag> = {}): BranchTag {
   };
 }
 
-async function openSession(branch = B, mode: "incremental" | "full" = "incremental") {
-  const { withBranchSession } = await import("../src/branch-state.js");
-  return { withBranchSession, branch };
-}
 
 describe("branch-state session CRUD", () => {
   it("embedded outcome: chunk_id appears in getChunkIdsForBranch", async () => {

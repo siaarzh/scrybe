@@ -4,7 +4,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 // Module under test — imported fresh each test via dynamic import to pick up fs changes
-async function load(home: string) {
+async function load(_home: string) {
   // Provide a home-scoped version of detectMcpConfigs
   const m = await import("../src/onboarding/mcp-config.js");
   return m;

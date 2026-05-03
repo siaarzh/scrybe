@@ -1,7 +1,6 @@
 import { existsSync, accessSync, statSync, readdirSync, constants, readFileSync } from "fs";
 import { join } from "path";
 import { platform } from "os";
-import { execSync } from "child_process";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
 

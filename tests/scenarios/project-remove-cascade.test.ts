@@ -8,7 +8,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdirSync } from "fs";
 import { spawnSync } from "child_process";
-import { join } from "path";
 import { makeScenarioEnv, runScrybe, type ScenarioEnv } from "./helpers/spawn.js";
 
 const NODE = process.execPath;

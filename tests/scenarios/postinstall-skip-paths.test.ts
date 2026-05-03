@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { spawnSync, spawn } from "child_process";
-import { existsSync, readFileSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { makeScenarioEnv, type ScenarioEnv } from "./helpers/spawn.js";
 import { sidecar } from "../helpers/sidecar.js";

@@ -1,6 +1,5 @@
 import { existsSync, writeFileSync, readFileSync, mkdirSync } from "fs";
 import { join, resolve, basename } from "path";
-import { homedir } from "os";
 import * as p from "@clack/prompts";
 import { formatProgressLine, updateThroughput } from "./progress-renderer.js";
 import type { ProgressState } from "./progress-renderer.js";
@@ -84,10 +83,6 @@ function isApiProviderConfigured(): boolean {
 
 function isLocalProviderConfigured(): boolean {
   return !!process.env.SCRYBE_LOCAL_EMBEDDER;
-}
-
-function isProviderConfigured(): boolean {
-  return isApiProviderConfigured() || isLocalProviderConfigured();
 }
 
 export async function runWizard(opts?: WizardOptions): Promise<void> {

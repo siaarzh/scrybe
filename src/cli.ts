@@ -20,7 +20,7 @@ import {
 } from "./tools/source.js";
 import { searchCodeTool } from "./tools/search.js";
 import { ensureRunning, DaemonClient } from "./daemon/client.js";
-import type { Source, SourceConfig, IndexMode } from "./types.js";
+import type { IndexMode } from "./types.js";
 
 // ─── CLI output helpers ───────────────────────────────────────────────────────
 
@@ -209,7 +209,6 @@ export async function runCli(): Promise<void> {
 
     cmd.action(async (...actionArgs: any[]) => {
       // Commander passes (pos_args..., opts, cmd_instance)
-      const cmdArg = actionArgs[actionArgs.length - 1];
       const cliActionArgs = actionArgs.slice(0, -1); // drop cmd instance
       try {
         const input = tool.cliOpts ? tool.cliOpts(cliActionArgs) : cliActionArgs[cliActionArgs.length - 1];

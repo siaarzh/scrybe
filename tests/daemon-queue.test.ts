@@ -175,7 +175,7 @@ describe("enqueue — concurrency", () => {
 
     // Enqueue 2 jobs for the same project — second must wait
     const p1 = enqueue({ projectId: "same" });
-    const _p2 = enqueue({ projectId: "same" }); // queued
+    enqueue({ projectId: "same" }); // queued
     await p1;
 
     expect(getQueueStats().active).toBe(1);

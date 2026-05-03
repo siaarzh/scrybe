@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { execSync } from "child_process";
-import { makeScenarioEnv, runScrybe, runScrybeWithStdin, type ScenarioEnv } from "./helpers/spawn.js";
+import { makeScenarioEnv, runScrybe, type ScenarioEnv } from "./helpers/spawn.js";
 import { makeTempRepo, type TempRepo } from "./helpers/repo.js";
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from "fs";
 import { join } from "path";

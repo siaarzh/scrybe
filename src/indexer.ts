@@ -20,7 +20,7 @@ import { appendFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { withBranchSession, resolveBranchForPath, type BranchSession, type BranchTag } from "./branch-state.js";
+import { withBranchSession, resolveBranchForPath, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage } from "./chunker.js";
 

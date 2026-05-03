@@ -15,7 +15,7 @@ import { getQueueStatus } from "../jobs-store.js";
 import { ensureRunning, DaemonClient } from "../daemon/client.js";
 import { config } from "../config.js";
 import type { IndexMode } from "../types.js";
-import type { Tool, JobResult } from "./types.js";
+import type { Tool } from "./types.js";
 
 function requireEmbedding(): string | null {
   return config.embeddingConfigError ?? null;

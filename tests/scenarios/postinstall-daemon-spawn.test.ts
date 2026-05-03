@@ -5,7 +5,7 @@
  * Verifies the daemon is up at the expected port within a timeout.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { spawnSync, spawn } from "child_process";
+import { spawnSync } from "child_process";
 import { existsSync, readFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { makeScenarioEnv, type ScenarioEnv } from "./helpers/spawn.js";

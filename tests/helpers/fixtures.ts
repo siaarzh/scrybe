@@ -44,7 +44,6 @@ export function ensureFixtureGit(name: string): void {
  */
 export function ensureMultiBranchFixture(name: string): void {
   const fixturePath = join(FIXTURES_ROOT, name);
-  const featRef = join(fixturePath, ".git", "refs", "heads", "feat");
   const featExampleRef = join(fixturePath, ".git", "refs", "heads", "feat", "example");
 
   // Short-circuit if already set up

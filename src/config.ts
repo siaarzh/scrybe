@@ -1,7 +1,6 @@
 import { homedir } from "os";
-import { join, dirname } from "path";
+import { join } from "path";
 import { readFileSync, writeFileSync, existsSync } from "fs";
-import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { resolveProvider, LOCAL_PROVIDER_DEFAULTS } from "./providers.js";
 

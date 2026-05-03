@@ -1,6 +1,5 @@
 import type { Command } from "commander";
 import { searchCode, searchKnowledge } from "../search.js";
-import { getProject } from "../registry.js";
 import { config } from "../config.js";
 import type { SearchResult, KnowledgeSearchResult } from "../types.js";
 import type { Tool } from "./types.js";

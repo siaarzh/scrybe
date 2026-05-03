@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.6] — 2026-05-03
+
+### Changed
+
+- **Removed dead code flagged by CodeQL.** 30 unused imports and locals across 25 files (11 src/ + 14 tests/) — all `js/unused-local-variable` notes from the first CodeQL scan. Zero behavioral change. Enabled `noUnusedLocals` and `noUnusedParameters` in `tsconfig.json` to keep src/ clean going forward.
+- **Added `npm run lint`** script. Runs `tsc -p tsconfig.lint.json` against both src/ and tests/ with strict unused-checks. Catches dead code before it lands.
+
+---
+
 ## [0.29.5] — 2026-05-03
 
 ### Security

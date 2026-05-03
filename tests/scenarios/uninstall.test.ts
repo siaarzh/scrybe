@@ -3,7 +3,7 @@
  * Direct M-D8 contract.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { makeScenarioEnv, runScrybe, type ScenarioEnv } from "./helpers/spawn.js";
