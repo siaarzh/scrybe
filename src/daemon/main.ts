@@ -255,10 +255,10 @@ export async function runDaemon(): Promise<void> {
               const expectedDimensions = getExpectedDimensions(pluginProfile) ?? embConfig.dimensions;
               const result = await getTableHealth(tableName, { force: true, expectedDimensions });
               if (result.state === "corrupt") {
-                pushEvent({
+                const ev = {
                   ts: new Date().toISOString(),
-                  level: "warn",
-                  event: "health.corrupt",
+                  level: "warn" as const,
+                  event: "health.corrupt" as const,
                   projectId: project.id,
                   sourceId: source.source_id,
                   detail: {
@@ -266,7 +266,13 @@ export async function runDaemon(): Promise<void> {
                     reasons: result.reasons,
                     details: result.details,
                   },
-                });
+                };
+                pushEvent(ev);
+                try {
+                  const { appendFileSync } = await import("fs");
+                  const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl");
+                  appendFileSync(logPath, JSON.stringify(ev) + "\n", "utf8");
+                } catch { /* non-fatal */ }
               }
             } catch { /* non-fatal — probe must not crash daemon */ }
           })

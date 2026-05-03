@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.30.1] — 2026-05-03
+
+### Fixed
+
+- Daemon startup health probe now persists `health.corrupt` events to `daemon-log.jsonl` (previously only written to the in-memory event ring; events were lost across daemon restarts).
+
+---
+
 ## [0.30.0] — 2026-05-03
 
 ### Added
