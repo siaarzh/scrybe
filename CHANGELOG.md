@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- Vue `<script>` block extractor now handles closing tags with arbitrary attributes (e.g. `</script lang="ts">`), not just trailing whitespace.
+
 ### Changed
 
 - MCP config snippets now use `scrybe-cli@latest` to ensure users on the npx install path receive version updates automatically.
