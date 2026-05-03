@@ -1,5 +1,9 @@
 # scrybe
 
+[![npm version](https://img.shields.io/npm/v/scrybe-cli)](https://www.npmjs.com/package/scrybe-cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Known Vulnerabilities](https://snyk.io/test/github/siaarzh/scrybe/badge.svg)](https://snyk.io/test/github/siaarzh/scrybe)
+
 **No API key required. Works fully offline.**
 
 Self-hosted code memory with semantic search. Index your repos and knowledge sources into a local vector database and search them by natural language — from the CLI or directly inside Claude Code via MCP.

@@ -9,6 +9,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.5] — 2026-05-03
+
+### Security
+
+- **Fixed 7 transitive hono / @hono/node-server advisories (medium).** Forced `hono` to `^4.12.16` and `@hono/node-server` to `^1.19.13` via npm `overrides` — were pulled in transitively at `4.12.9` / `1.19.11` through `@modelcontextprotocol/sdk`. Closes GHSA-458j-xx4x-4375, GHSA-r5rp-j6wh-rvv4, GHSA-xpcf-pg52-r92g, GHSA-26pp-8wgv-hjvm, GHSA-xf4j-xp2r-rqqx, GHSA-wmmm-f939-6g9c, GHSA-92pp-h63x-v22m. Practical exposure was low (the daemon binds 127.0.0.1 and never serves untrusted input), but the override removes the advisories entirely. `npm audit` now reports **0 vulnerabilities**.
+- **Added CodeQL workflow.** New `.github/workflows/codeql.yml` runs JavaScript/TypeScript SAST on push, PR, and weekly cron; uploads results to GitHub Security tab. Complements the existing Snyk Code scan.
+- **Hardened CI workflow permissions.** Added explicit `permissions: contents: read` to `test.yml` (least privilege; `publish.yml` already had it).
+
+### Added
+
+- **Community files for publication readiness.** `SECURITY.md` (vulnerability reporting policy), `CONTRIBUTING.md` (root stub linking to `docs/contributing.md`), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), and `.github/dependabot.yml` (weekly npm + GitHub Actions update PRs).
+- **Status badges on README.** npm version, MIT license, Snyk vulnerability scan.
+
+---
+
 ## [0.29.4] — 2026-05-03
 
 ### Security
