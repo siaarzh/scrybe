@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.30.2] — 2026-05-03
+
 ### Fixed
 
 - Vue `<script>` block extractor now handles closing tags with arbitrary attributes (e.g. `</script lang="ts">`), not just trailing whitespace.
