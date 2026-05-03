@@ -322,31 +322,27 @@ npm install -g scrybe-cli
 
 ## Running as a background service
 
-Scrybe can run as a persistent daemon that keeps every project's index fresh automatically — no manual `scrybe index` required after the first full index.
+The daemon **starts automatically** when Claude Code calls any scrybe MCP tool (on-demand mode) and shuts down when there are no active clients. No manual setup required for basic use.
+
+To keep the daemon running between sessions — so it can auto-index new commits in the background without Claude Code open — install it as a per-user service:
 
 ```bash
-# Start the daemon (indexes registered projects in background)
-scrybe daemon start
-
-# Watch live status in the terminal
-scrybe status --watch
-
 # Install as a per-user autostart (Windows / macOS / Linux — no admin needed)
 scrybe daemon install
 
-# Opt-in git hooks: git commit/checkout/merge → instant reindex via /kick
+# Watch live status
+scrybe status --watch
+
+# Opt-in git hooks: git commit/checkout/merge → instant reindex
 scrybe hook install -P myrepo
 
 # Pin branches for background indexing beyond current HEAD
-scrybe branch pin -P cmx-ionic main dev dev-2 dev-3 beta
-scrybe branch list -P cmx-ionic --pinned
+scrybe branch pin -P myrepo main dev staging
 ```
 
-The daemon exposes a local HTTP API on `127.0.0.1:58451` (ephemeral fallback if busy). Port is persisted in `<DATA_DIR>/daemon.pid` so all clients — CLI, MCP server, VS Code extension — discover it automatically.
+Daemon auto-cleans orphan chunks on idle — `scrybe gc` for manual cleanup.
 
-Daemon auto-cleans orphan chunks on idle or when bloat exceeds threshold — `scrybe gc` available for explicit manual cleanup.
-
-See [docs/daemon.md](docs/daemon.md) for the full architecture, HTTP API reference, pinned-branch details, and troubleshooting guide.
+See [docs/daemon.md](docs/daemon.md) for the full architecture, autostart details, and troubleshooting.
 
 ## Documentation
 
