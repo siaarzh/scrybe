@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.8] — 2026-05-03
+
+### Changed
+
+- **Tree-sitter grammar family bumped to 0.23.x in lockstep (Plan 36).** Bumped 9 grammars from 0.21 to their highest 0.23.x release with peer `tree-sitter@^0.21.x`: `tree-sitter-c` 0.23.2, `tree-sitter-c-sharp` 0.23.1, `tree-sitter-cpp` 0.23.4, `tree-sitter-go` 0.23.4, `tree-sitter-java` 0.23.5, `tree-sitter-javascript` 0.23.1, `tree-sitter-python` 0.23.4, `tree-sitter-rust` 0.23.1, `tree-sitter-typescript` 0.23.2 (`tree-sitter-ruby` was already on 0.23.1 from v0.29.7). Parent `tree-sitter` package stays on `^0.21.0` — bumping it to 0.22+ or 0.25+ isn't viable today because peer ranges across the 10 grammars don't form a coherent set above 0.21.x. All grammars deduplicate to `tree-sitter@0.21.1` in the lockfile. Pinned exact versions to keep `npm install` from re-resolving to incompatible 0.23.x patches (e.g. `tree-sitter-c@0.23.6` requires peer `^0.22.1` and would break). 605 tests green.
+
+---
+
 ## [0.29.7] — 2026-05-03
 
 ### Changed
