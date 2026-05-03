@@ -27,7 +27,7 @@ For contrast: `grep "incremental"` returns 34 hits across type declarations, CLI
 ```
 Claude Code (any project)
     ↕ MCP stdio
-src/mcp-server.ts
+scrybe mcp-server
     ↕
 LanceDB (embedded, in-process)
     ├── code_{hash}     ← per-source code tables (search_code)
@@ -58,14 +58,7 @@ Scrybe can index non-code sources (GitLab issues, and future: webpages, Telegram
 
 ### Separate text embedding profile
 
-Knowledge sources use natural language text rather than code, so a different embedding model is often better (e.g. `voyage-3` for multilingual issue text vs. `voyage-code-3` for code). Configure via:
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_BASE_URL`). |
-| `SCRYBE_KNOWLEDGE_EMBEDDING_MODEL` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_MODEL`). |
-| `SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_API_KEY`). |
-| `SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_DIMENSIONS`). |
+Knowledge sources can use a separate embedding model — configure via `SCRYBE_KNOWLEDGE_EMBEDDING_*` vars. See [docs/configuration.md](docs/configuration.md).
 
 ### GitLab issues
 
@@ -95,7 +88,6 @@ scrybe source add -P myrepo -S gitlab-issues \
 ## Requirements
 
 - Node.js 22.5+
-- No API key required — scrybe ships with a local offline embedder by default. An API key is only needed if you switch to an external provider (Voyage AI, OpenAI, etc.).
 
 ## Setup
 
@@ -105,7 +97,7 @@ scrybe source add -P myrepo -S gitlab-issues \
 npx scrybe-cli@latest init
 ```
 
-The wizard handles everything: picks an embedding provider, validates your API key, discovers repos, generates `.scrybeignore` files, and auto-registers the MCP server in `~/.claude.json` and `~/.cursor/mcp.json`. Under 90 seconds to first search hit.
+The wizard handles everything: picks an embedding provider, validates your API key, discovers repos, generates `.scrybeignore` files, and auto-registers the MCP server in `~/.claude.json` and `~/.cursor/mcp.json`.
 
 ### Manual setup
 
@@ -135,6 +127,61 @@ scrybe index -P myrepo -I
 scrybe doctor          # check config, auth, indexes, MCP
 scrybe doctor --json   # machine-readable output
 ```
+
+## MCP server (Claude Code integration)
+
+The recommended setup uses `npx` — no global install needed:
+
+```json
+"scrybe": {
+  "type": "stdio",
+  "command": "npx",
+  "args": ["-y", "scrybe-cli@latest", "mcp"]
+}
+```
+
+Add to `~/.claude.json` under `mcpServers`. Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
+
+If you installed globally (`npm install -g scrybe-cli`):
+
+```json
+"scrybe": {
+  "type": "stdio",
+  "command": "scrybe",
+  "args": ["mcp"]
+}
+```
+
+### Available tools
+
+| Tool | Description |
+| --- | --- |
+| `list_projects` | List all registered projects and their sources |
+| `add_project` | Register a new project container |
+| `update_project` | Update a project's description |
+| `remove_project` | Unregister a project and drop all its source tables |
+| `add_source` | Add an indexable source to a project (code repo, GitLab issues, etc.) |
+| `update_source` | Update an existing source's config (token rotation, root path, languages) |
+| `remove_source` | Remove a source and drop its vector table |
+| `search_code` | Semantic search over indexed code |
+| `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs) |
+| `reindex_all` | Incrementally reindex all registered projects in the background |
+| `reindex_project` | Trigger background reindex of all sources in a project |
+| `reindex_source` | Trigger background reindex of a single source |
+| `reindex_status` | Poll a background reindex job |
+| `cancel_reindex` | Cancel a running reindex job |
+| `list_jobs` | List background reindex jobs and their status |
+| `queue_status` | Check what is currently running or queued in the reindex queue |
+| `gc` | Run garbage collection: remove orphan chunks and compact LanceDB tables |
+| `list_branches` | List branches indexed for a project's sources |
+| `list_pinned_branches` | List branches pinned for background daemon indexing |
+| `pin_branches` | Add or replace pinned branches on a code source |
+| `unpin_branches` | Remove branches from the pinned list |
+| `set_private_ignore` | Set or clear private ignore rules for a code source |
+| `get_private_ignore` | Get the current private ignore rules for a source |
+| `list_private_ignores` | List all private ignore rules across projects |
+
+See [docs/mcp-reference.md](docs/mcp-reference.md) for full parameter documentation.
 
 ## Embedding providers
 
@@ -176,26 +223,15 @@ SCRYBE_CODE_EMBEDDING_DIMENSIONS=1024
 
 ## Hybrid search
 
-Scrybe runs BM25 full-text search alongside vector search and merges results with Reciprocal Rank Fusion (RRF). This improves recall for exact identifiers and keyword queries.
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SCRYBE_HYBRID` | `true` | Set to `false` to revert to vector-only search. |
-| `SCRYBE_RRF_K` | `60` | RRF rank-sensitivity constant. Higher = less sensitive to rank position. |
+Scrybe runs BM25 full-text search alongside vector search and merges results with Reciprocal Rank Fusion (RRF) — on by default. Configurable via `SCRYBE_HYBRID` and `SCRYBE_RRF_K`. See [docs/configuration.md](docs/configuration.md).
 
 ## Reranking
 
-Optional post-retrieval re-scoring that improves result relevance. Requires a reranking-capable provider (e.g. Voyage AI `rerank-2.5`).
+Optional post-retrieval re-scoring. Requires a reranking-capable provider (e.g. Voyage AI `rerank-2.5`).
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SCRYBE_RERANK` | `false` | Set to `true` to enable reranking. |
-| `SCRYBE_RERANK_MODEL` | `rerank-2.5` | Reranker model. Auto-detected when using Voyage. |
-| `SCRYBE_RERANK_BASE_URL` | — | Reranker endpoint for non-Voyage providers. |
-| `SCRYBE_RERANK_API_KEY` | — | Falls back to `SCRYBE_CODE_EMBEDDING_API_KEY` if not set. |
-| `SCRYBE_RERANK_FETCH_MULTIPLIER` | `5` | Candidate pool = `topK × multiplier` before reranking. |
+When using Voyage AI, just set `SCRYBE_RERANK=true` — endpoint and model are auto-detected from `SCRYBE_CODE_EMBEDDING_BASE_URL`.
 
-When using Voyage AI, just set `SCRYBE_RERANK=true` — the endpoint and model are auto-detected from `SCRYBE_CODE_EMBEDDING_BASE_URL`.
+See [docs/configuration.md](docs/configuration.md) for all options.
 
 ## CLI
 
@@ -293,7 +329,7 @@ Scrybe can run as a persistent daemon that keeps every project's index fresh aut
 scrybe daemon start
 
 # Watch live status in the terminal
-scrybe daemon status --watch
+scrybe status --watch
 
 # Install as a per-user autostart (Windows / macOS / Linux — no admin needed)
 scrybe daemon install
@@ -311,61 +347,6 @@ The daemon exposes a local HTTP API on `127.0.0.1:58451` (ephemeral fallback if 
 Daemon auto-cleans orphan chunks on idle or when bloat exceeds threshold — `scrybe gc` available for explicit manual cleanup.
 
 See [docs/daemon.md](docs/daemon.md) for the full architecture, HTTP API reference, pinned-branch details, and troubleshooting guide.
-
-## MCP server (Claude Code integration)
-
-The recommended setup uses `npx` — no global install needed:
-
-```json
-"scrybe": {
-  "type": "stdio",
-  "command": "npx",
-  "args": ["-y", "scrybe-cli@latest", "mcp"]
-}
-```
-
-Add to `~/.claude.json` under `mcpServers`. Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
-
-If you installed globally (`npm install -g scrybe-cli`):
-
-```json
-"scrybe": {
-  "type": "stdio",
-  "command": "scrybe",
-  "args": ["mcp"]
-}
-```
-
-### Available tools
-
-| Tool | Description |
-| --- | --- |
-| `list_projects` | List all registered projects and their sources |
-| `add_project` | Register a new project container |
-| `update_project` | Update a project's description |
-| `remove_project` | Unregister a project and drop all its source tables |
-| `add_source` | Add an indexable source to a project (code repo, GitLab issues, etc.) |
-| `update_source` | Update an existing source's config (token rotation, root path, languages) |
-| `remove_source` | Remove a source and drop its vector table |
-| `search_code` | Semantic search over indexed code |
-| `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs) |
-| `reindex_all` | Incrementally reindex all registered projects in the background |
-| `reindex_project` | Trigger background reindex of all sources in a project |
-| `reindex_source` | Trigger background reindex of a single source |
-| `reindex_status` | Poll a background reindex job |
-| `cancel_reindex` | Cancel a running reindex job |
-| `list_jobs` | List background reindex jobs and their status |
-| `queue_status` | Check what is currently running or queued in the reindex queue |
-| `gc` | Run garbage collection: remove orphan chunks and compact LanceDB tables |
-| `list_branches` | List branches indexed for a project's sources |
-| `list_pinned_branches` | List branches pinned for background daemon indexing |
-| `pin_branches` | Add or replace pinned branches on a code source |
-| `unpin_branches` | Remove branches from the pinned list |
-| `set_private_ignore` | Set or clear private ignore rules for a code source |
-| `get_private_ignore` | Get the current private ignore rules for a source |
-| `list_private_ignores` | List all private ignore rules across projects |
-
-See [docs/mcp-reference.md](docs/mcp-reference.md) for full parameter documentation.
 
 ## Documentation
 
@@ -388,12 +369,6 @@ Full indexing time depends on project size, average file length, and your embedd
 | Small | scripts, single package | < 500 | < 3k | < 5 min |
 | Medium | typical frontend | ~1,700 | ~10k | ~15 min |
 | Large | full backend | ~6,000 | ~25k | ~75 min |
-
-**Throughput** is roughly **~600 chunks/min** on Voyage AI's free tier. Paid tiers or providers with higher rate limits will index significantly faster.
-
-**Language affects chunk count** — languages with larger files (e.g. generated code, `.json`, migrations) produce more chunks per file and take longer per file scanned.
-
-**Incremental reindex** (after the initial full index) only processes changed files, so day-to-day re-syncing is fast regardless of project size.
 
 If you hit rate limits during indexing, tune `SCRYBE_EMBED_BATCH_SIZE` and `SCRYBE_EMBED_BATCH_DELAY_MS` in your `.env`.
 
