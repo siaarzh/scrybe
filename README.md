@@ -62,25 +62,23 @@ Knowledge sources use natural language text rather than code, so a different emb
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `SCRYBE_TEXT_EMBEDDING_BASE_URL` | — | Falls back to `EMBEDDING_BASE_URL`. |
-| `SCRYBE_TEXT_EMBEDDING_MODEL` | — | Falls back to `EMBEDDING_MODEL`. |
-| `SCRYBE_TEXT_EMBEDDING_API_KEY` | — | Falls back to `EMBEDDING_API_KEY`. |
-| `SCRYBE_TEXT_EMBEDDING_DIMENSIONS` | — | Falls back to `EMBEDDING_DIMENSIONS`. |
+| `SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_BASE_URL`). |
+| `SCRYBE_KNOWLEDGE_EMBEDDING_MODEL` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_MODEL`). |
+| `SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_API_KEY`). |
+| `SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS` | — | Falls back to the code embedding equivalent (`SCRYBE_CODE_EMBEDDING_DIMENSIONS`). |
 
 ### GitLab issues
 
 Add a GitLab issues source to any project:
 
 ```bash
-scrybe source add \
-  --project-id myrepo \
-  --source-id gitlab-issues \
+scrybe source add -P myrepo -S gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
   --gitlab-token glpat-...
 
-scrybe index --project-id myrepo --source-id gitlab-issues --full
+scrybe index -P myrepo -S gitlab-issues --full
 ```
 
 Indexing is cursor-based and incremental — only issues updated since the last run are fetched. Rate-limit safe (50 ms between issues).
@@ -88,23 +86,23 @@ Indexing is cursor-based and incremental — only issues updated since the last 
 To rotate a token, remove and re-add the source:
 
 ```bash
-scrybe source remove --project-id myrepo --source-id gitlab-issues
-scrybe source add --project-id myrepo --source-id gitlab-issues \
+scrybe source remove -P myrepo -S gitlab-issues
+scrybe source add -P myrepo -S gitlab-issues \
   --type ticket --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 --gitlab-token glpat-new-token
 ```
 
 ## Requirements
 
-- Node.js 20+
-- An embedding API key (OpenAI by default; see [Embedding providers](#embedding-providers) for alternatives)
+- Node.js 22.5+
+- No API key required — scrybe ships with a local offline embedder by default. An API key is only needed if you switch to an external provider (Voyage AI, OpenAI, etc.).
 
 ## Setup
 
 ### Quick start (recommended)
 
 ```bash
-npx scrybe-cli init
+npx scrybe-cli@latest init
 ```
 
 The wizard handles everything: picks an embedding provider, validates your API key, discovers repos, generates `.scrybeignore` files, and auto-registers the MCP server in `~/.claude.json` and `~/.cursor/mcp.json`. Under 90 seconds to first search hit.
@@ -117,16 +115,16 @@ npm install -g scrybe-cli
 
 # 2. Register a project
 scrybe project add --id myrepo --desc "My project"
-scrybe source add --project-id myrepo --source-id primary \
+scrybe source add -P myrepo -S primary \
   --type code --root /path/to/repo --languages ts,vue
 
 # 3. Configure credentials (one-time)
 #    Create/edit DATA_DIR/.env (printed by `scrybe doctor`)
-EMBEDDING_BASE_URL=https://api.voyageai.com/v1
-EMBEDDING_API_KEY=your-key-here
+SCRYBE_CODE_EMBEDDING_BASE_URL=https://api.voyageai.com/v1
+SCRYBE_CODE_EMBEDDING_API_KEY=your-key-here
 
 # 4. Index
-scrybe index --project-id myrepo --incremental
+scrybe index -P myrepo -I
 
 # 5. Register MCP (add to ~/.claude.json manually or use `scrybe init`)
 ```
@@ -144,45 +142,36 @@ Scrybe uses an OpenAI-compatible embeddings API. The following env vars control 
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `EMBEDDING_API_KEY` | — | Embedding API key. Falls back to `OPENAI_API_KEY` if not set. |
-| `EMBEDDING_BASE_URL` | OpenAI | Base URL for the embeddings endpoint. Set to switch providers. |
-| `EMBEDDING_MODEL` | auto | Model name. Auto-set for known providers; required for unknown ones. |
-| `EMBEDDING_DIMENSIONS` | auto | Vector dimensions. Auto-set for known providers; required for unknown ones. |
-| `EMBED_BATCH_SIZE` | `100` | Chunks per embedding request. Reduce if hitting rate limits. |
-| `EMBED_BATCH_DELAY_MS` | `0` | Delay in ms between batches. Useful for strict rate-limit tiers. |
+| `SCRYBE_CODE_EMBEDDING_API_KEY` | — | API key for code embedding. |
+| `SCRYBE_CODE_EMBEDDING_BASE_URL` | local | Base URL for the embeddings endpoint. Defaults to local in-process embedder. |
+| `SCRYBE_CODE_EMBEDDING_MODEL` | auto | Model name. Auto-set for known providers. |
+| `SCRYBE_CODE_EMBEDDING_DIMENSIONS` | auto | Vector dimensions. Auto-set for known providers. |
+| `SCRYBE_EMBED_BATCH_SIZE` | `100` | Chunks per embedding request. Reduce if hitting rate limits. |
+| `SCRYBE_EMBED_BATCH_DELAY_MS` | `0` | Delay in ms between batches. |
 
-**Known providers** (model and dimensions are set automatically when `EMBEDDING_BASE_URL` matches):
+**Known providers** (model and dimensions are set automatically when `SCRYBE_CODE_EMBEDDING_BASE_URL` matches):
 OpenAI (`api.openai.com`), Voyage AI (`api.voyageai.com`), Mistral (`api.mistral.ai`).
 
-**Unknown providers:** if `EMBEDDING_BASE_URL` points to an unlisted provider and `EMBEDDING_MODEL` is not set, scrybe returns an error pointing you to `{base_url}/models` to discover available models.
+**Unknown providers:** if `SCRYBE_CODE_EMBEDDING_BASE_URL` points to an unlisted provider and `SCRYBE_CODE_EMBEDDING_MODEL` is not set, scrybe returns an error pointing you to `{base_url}/models` to discover available models.
 
-**Precedence** (highest to lowest):
+Set `SCRYBE_CODE_EMBEDDING_API_KEY` explicitly. The old `OPENAI_API_KEY` fallback was removed in v0.29.0.
 
-1. Shell environment / MCP config `env` block
-2. `.env` file (only applied if the key is not already set)
-3. Provider defaults derived from `EMBEDDING_BASE_URL` hostname
-4. Built-in fallbacks: `OPENAI_API_KEY` for the key, `text-embedding-3-small` / `1536` if no provider matched
-
-Within explicit vars: `EMBEDDING_API_KEY` beats `OPENAI_API_KEY`; explicit `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` beat provider defaults.
-
-**Development tip:** keep all provider configs in `.env` and comment/uncomment the active block to switch providers — no MCP restart needed for CLI testing.
-
-**Switching providers:** changing the model or dimensions makes all existing indexed data incompatible. Scrybe detects this automatically — `search_code` and incremental reindexes return an error with instructions until you run `reindex_project` with `mode="full"` for every registered project.
+**Switching providers:** changing the model or dimensions makes all existing indexed data incompatible. Scrybe detects this automatically — `search_code` returns `error_type: "table_corrupt"` with repair instructions. Run `scrybe index -P <id> -S <id> --full` for each affected source, or `scrybe doctor --repair` to fix all corrupt sources in one pass.
 
 ### Example: Voyage AI (voyage-code-3)
 
 Code-optimized, free for the first 200M tokens. Requires adding a payment method to unlock standard rate limits (3 RPM without one).
 
 ```env
-EMBEDDING_API_KEY=pa-...
-EMBEDDING_BASE_URL=https://api.voyageai.com/v1
+SCRYBE_CODE_EMBEDDING_API_KEY=pa-...
+SCRYBE_CODE_EMBEDDING_BASE_URL=https://api.voyageai.com/v1
 ```
 
 Model and dimensions are set automatically. To override:
 
 ```env
-EMBEDDING_MODEL=voyage-code-3
-EMBEDDING_DIMENSIONS=1024
+SCRYBE_CODE_EMBEDDING_MODEL=voyage-code-3
+SCRYBE_CODE_EMBEDDING_DIMENSIONS=1024
 ```
 
 ## Hybrid search
@@ -203,10 +192,10 @@ Optional post-retrieval re-scoring that improves result relevance. Requires a re
 | `SCRYBE_RERANK` | `false` | Set to `true` to enable reranking. |
 | `SCRYBE_RERANK_MODEL` | `rerank-2.5` | Reranker model. Auto-detected when using Voyage. |
 | `SCRYBE_RERANK_BASE_URL` | — | Reranker endpoint for non-Voyage providers. |
-| `SCRYBE_RERANK_API_KEY` | — | Falls back to `EMBEDDING_API_KEY` if not set. |
+| `SCRYBE_RERANK_API_KEY` | — | Falls back to `SCRYBE_CODE_EMBEDDING_API_KEY` if not set. |
 | `SCRYBE_RERANK_FETCH_MULTIPLIER` | `5` | Candidate pool = `topK × multiplier` before reranking. |
 
-When using Voyage AI, just set `SCRYBE_RERANK=true` — the endpoint and model are auto-detected from `EMBEDDING_BASE_URL`.
+When using Voyage AI, just set `SCRYBE_RERANK=true` — the endpoint and model are auto-detected from `SCRYBE_CODE_EMBEDDING_BASE_URL`.
 
 ## CLI
 
@@ -217,35 +206,44 @@ Projects are containers; sources are the actual indexable units (a code repo, Gi
 scrybe project add --id myrepo --desc "My frontend"
 
 # Add a code source
-scrybe source add --project-id myrepo --source-id code \
-  --type code --root /path/to/repo --languages ts,vue
+scrybe source add -P myrepo -S primary --type code --root /path/to/repo --languages ts,vue
 
 # Add a GitLab issues source
-scrybe source add --project-id myrepo --source-id gitlab-issues \
+scrybe source add -P myrepo -S gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
   --gitlab-project-id 42 \
   --gitlab-token glpat-...
 
 # Index all sources in a project (full rebuild)
-scrybe index --project-id myrepo --full
+scrybe index -P myrepo --full
 
 # Index a specific source incrementally
-scrybe index --project-id myrepo --source-id code --incremental
+scrybe index -P myrepo -S code -I
 
 # Search code / knowledge
-scrybe search --project-id myrepo "authentication login flow"
-scrybe search knowledge --project-id myrepo "password reset broken"
+scrybe search code -P myrepo "authentication login flow"
+scrybe search knowledge -P myrepo "password reset broken"
 
 # List projects and their sources
 scrybe project list
 
-# Show project info
-scrybe status --project-id myrepo
+# Show status of all projects
+scrybe status
 
 # Remove a source or a whole project
-scrybe source remove --project-id myrepo --source-id gitlab-issues
-scrybe project remove --id myrepo
+scrybe source remove -P myrepo -S gitlab-issues
+scrybe project remove myrepo
+
+# Background job monitoring
+scrybe jobs
+
+# Manual garbage collection
+scrybe gc
+
+# Check index health and repair corrupt sources
+scrybe doctor
+scrybe doctor --repair
 ```
 
 Per-source private ignores stored in DATA_DIR via `scrybe ignore` (or `set_private_ignore` MCP tool) — never committed.
@@ -301,11 +299,11 @@ scrybe daemon status --watch
 scrybe daemon install
 
 # Opt-in git hooks: git commit/checkout/merge → instant reindex via /kick
-scrybe hook install --project-id myrepo
+scrybe hook install -P myrepo
 
 # Pin branches for background indexing beyond current HEAD
-scrybe branch pin --project-id cmx-ionic main dev dev-2 dev-3 beta
-scrybe branch list --pinned --project-id cmx-ionic
+scrybe branch pin -P cmx-ionic main dev dev-2 dev-3 beta
+scrybe branch list -P cmx-ionic --pinned
 ```
 
 The daemon exposes a local HTTP API on `127.0.0.1:58451` (ephemeral fallback if busy). Port is persisted in `<DATA_DIR>/daemon.pid` so all clients — CLI, MCP server, VS Code extension — discover it automatically.
@@ -316,20 +314,27 @@ See [docs/daemon.md](docs/daemon.md) for the full architecture, HTTP API referen
 
 ## MCP server (Claude Code integration)
 
-Add to `~/.claude.json` under `mcpServers`:
+The recommended setup uses `npx` — no global install needed:
 
 ```json
 "scrybe": {
   "type": "stdio",
-  "command": "node",
-  "args": ["/absolute/path/to/scrybe/dist/index.js", "mcp"],
-  "env": {
-    "OPENAI_API_KEY": "sk-..."
-  }
+  "command": "npx",
+  "args": ["-y", "scrybe-cli@latest", "mcp"]
 }
 ```
 
-Replace `/absolute/path/to/scrybe` with the absolute path to your clone. `OPENAI_API_KEY` can be omitted if it's already set in `.env`.
+Add to `~/.claude.json` under `mcpServers`. Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
+
+If you installed globally (`npm install -g scrybe-cli`):
+
+```json
+"scrybe": {
+  "type": "stdio",
+  "command": "scrybe",
+  "args": ["mcp"]
+}
+```
 
 ### Available tools
 
@@ -338,15 +343,27 @@ Replace `/absolute/path/to/scrybe` with the absolute path to your clone. `OPENAI
 | `list_projects` | List all registered projects and their sources |
 | `add_project` | Register a new project container |
 | `update_project` | Update a project's description |
-| `remove_project` | Remove a project and all its source tables |
-| `add_source` | Add a source to a project (code repo, GitLab issues, etc.) |
+| `remove_project` | Unregister a project and drop all its source tables |
+| `add_source` | Add an indexable source to a project (code repo, GitLab issues, etc.) |
+| `update_source` | Update an existing source's config (token rotation, root path, languages) |
 | `remove_source` | Remove a source and drop its vector table |
 | `search_code` | Semantic search over indexed code |
 | `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs) |
-| `reindex_project` | Trigger background reindex of all sources (`full` or `incremental`) |
+| `reindex_all` | Incrementally reindex all registered projects in the background |
+| `reindex_project` | Trigger background reindex of all sources in a project |
 | `reindex_source` | Trigger background reindex of a single source |
 | `reindex_status` | Poll a background reindex job |
 | `cancel_reindex` | Cancel a running reindex job |
+| `list_jobs` | List background reindex jobs and their status |
+| `queue_status` | Check what is currently running or queued in the reindex queue |
+| `gc` | Run garbage collection: remove orphan chunks and compact LanceDB tables |
+| `list_branches` | List branches indexed for a project's sources |
+| `list_pinned_branches` | List branches pinned for background daemon indexing |
+| `pin_branches` | Add or replace pinned branches on a code source |
+| `unpin_branches` | Remove branches from the pinned list |
+| `set_private_ignore` | Set or clear private ignore rules for a code source |
+| `get_private_ignore` | Get the current private ignore rules for a source |
+| `list_private_ignores` | List all private ignore rules across projects |
 
 See [docs/mcp-reference.md](docs/mcp-reference.md) for full parameter documentation.
 
@@ -378,7 +395,7 @@ Full indexing time depends on project size, average file length, and your embedd
 
 **Incremental reindex** (after the initial full index) only processes changed files, so day-to-day re-syncing is fast regardless of project size.
 
-If you hit rate limits during indexing, tune `EMBED_BATCH_SIZE` and `EMBED_BATCH_DELAY_MS` in your `.env`.
+If you hit rate limits during indexing, tune `SCRYBE_EMBED_BATCH_SIZE` and `SCRYBE_EMBED_BATCH_DELAY_MS` in your `.env`.
 
 ## Known limitations
 
