@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.29.4] — 2026-05-03
+
+### Security
+
+- **Fixed transitive protobufjs CVE-2026-41242 (Arbitrary Code Injection, critical).** Forced `protobufjs` to `^7.5.5` via npm `overrides` — was pulled in transitively at `6.11.5` through `@xenova/transformers → onnxruntime-web → onnx-proto`. Practical exposure was low (we decode pinned HuggingFace `.onnx` models, not user-supplied protobuf), but the override removes the advisory entirely.
+- **Added Snyk CI workflow.** New `.github/workflows/snyk.yml` runs Open Source (deps) + Code (SAST) scans on push, PR, and weekly cron; uploads SARIF to GitHub Security tab.
+
+---
+
 ## [0.29.3] — 2026-05-02
 
 ### Fixed

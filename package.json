@@ -1,6 +1,6 @@
 {
   "name": "scrybe-cli",
-  "version": "0.29.3",
+  "version": "0.29.4",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",
   "license": "MIT",
@@ -42,6 +42,9 @@
     "npm-hooks/pre-install.js",
     "npm-hooks/post-install.js"
   ],
+  "overrides": {
+    "protobufjs": "^7.5.5"
+  },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
     "@lancedb/lancedb": "^0.14.0",
