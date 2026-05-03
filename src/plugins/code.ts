@@ -115,7 +115,7 @@ const LANGUAGE_TO_KEY: Record<string, LanguageKey> = {
 
 // Vue: extract <script lang="ts"> or <script> block content, parse as TypeScript
 function extractVueScript(source: string): { code: string; lineOffset: number } | null {
-  const match = source.match(/<script(?:\s[^>]*)?>(\n?)([\s\S]*?)<\/script\s*>/i);
+  const match = source.match(/<script(?:\s[^>]*)?>(\n?)([\s\S]*?)<\/script[^>]*>/i);
   if (!match) return null;
   const lineOffset = source.slice(0, match.index! + match[0].indexOf(match[2])).split("\n").length - 1;
   return { code: match[2], lineOffset };
