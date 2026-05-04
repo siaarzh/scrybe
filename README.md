@@ -358,13 +358,14 @@ Detailed reference docs live in [`docs/`](docs/):
 
 ## Indexing time
 
-Full indexing time depends on project size, average file length, and your embedding provider's rate limits. Rough estimates measured with **Voyage AI `voyage-code-3`** (free tier, standard rate limits):
+Wall time on Voyage `voyage-code-3` scales with total token count — network round-trip dominates, not file count. Measured baselines on the Voyage free tier:
 
-| Project size | Example | Files | Chunks | Estimated time |
+| Project | Files | Chunks | Tokens | Wall time |
 | --- | --- | --- | --- | --- |
-| Small | scripts, single package | < 500 | < 3k | < 5 min |
-| Medium | typical frontend | ~1,700 | ~10k | ~15 min |
-| Large | full backend | ~6,000 | ~25k | ~75 min |
+| Frontend (Vue/TS) | ~1.4 k | ~8 k | ~1.6 M | **~2 min** |
+| Backend (C#) | ~5.7 k | ~24 k | ~3.5 M | **~6 min** |
+
+Sustained ~10–13 K tokens/sec on Voyage. Smaller projects (<500 files) index in under a minute. Local embedder (`Xenova/multilingual-e5-small`, default if no API key) runs ~6× slower — CPU-bound WASM inference, but free.
 
 If you hit rate limits during indexing, tune `SCRYBE_EMBED_BATCH_SIZE` and `SCRYBE_EMBED_BATCH_DELAY_MS` in your `.env`.
 
