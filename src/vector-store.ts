@@ -236,7 +236,7 @@ export async function ftsSearch(
   tableName: string,
   chunkIdIn?: string[]
 ): Promise<SearchResult[]> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return [];
   let where = `project_id = '${escapeSql(projectId)}'`;
   if (chunkIdIn && chunkIdIn.length > 0) {
@@ -377,7 +377,7 @@ export async function ftsSearchKnowledge(
   topK: number,
   tableName: string
 ): Promise<KnowledgeSearchResult[]> {
-  const table = _tableCache.get(tableName);
+  const table = await openExistingTable(tableName);
   if (!table) return [];
   const rows = await (table.search(query, "fts", "content") as lancedb.Query)
     .where(`project_id = '${escapeSql(projectId)}'`)

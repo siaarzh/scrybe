@@ -2,6 +2,7 @@
  * Scenario 1  — Fresh-install end-to-end via binary (register + index + search).
  * Scenario 6  — `search code -P <id> <query>` Commander flag collision (M-D13 Fix 3).
  * Scenario 11 — Search roundtrip from pre-seeded state.
+ * Scenario 16 — Cold-cache FTS race regression (Plan 41).
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { makeScenarioEnv, runScrybe, type ScenarioEnv } from "./helpers/spawn.js";
@@ -85,6 +86,90 @@ describe("Scenario 11 — search roundtrip from indexed state", () => {
     expect(r.exit).toBe(0);
     // CLI output is the formatted result, should include the function name
     expect(r.stdout + r.stderr).not.toContain("error");
+  });
+});
+
+describe("Scenario 16 — cold-cache FTS race (Plan 41 regression)", () => {
+  /**
+   * Each runScrybe spawns a fresh CLI process, so _tableCache starts empty
+   * (cold). Before the fix, ftsSearch() synchronously returned [] on cold
+   * cache, silently degrading hybrid search to vector-only. Synthetic tokens
+   * that have no semantic neighbours must be found via BM25.
+   */
+
+  /** Extract file paths from the first N result lines of CLI search output.
+   * Lines look like: `[0.812] src/canary.ts:1-4 (typescript)` */
+  function extractTopFilePaths(stdout: string, n: number): string[] {
+    return stdout
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith("["))
+      .slice(0, n)
+      .map((line) => {
+        // match the path segment between "] " and ":"
+        const m = line.match(/\]\s+(.+?):\d/);
+        return m ? m[1].trim() : "";
+      })
+      .filter(Boolean);
+  }
+
+  it("Test 1 — synthetic-token cold search finds canary via BM25", () => {
+    env = makeScenarioEnv();
+    repo = makeTempRepo({
+      "src/canary.ts":
+        "export function probe(input: string): string {\n" +
+        "  const tokens = 'ferret saxophone umbrella';\n" +
+        "  return tokens + input;\n" +
+        "}\n",
+    });
+
+    runScrybe(["project", "add", "--id", "s16a-proj"], env);
+    runScrybe(["source", "add", "-P", "s16a-proj", "-S", "primary",
+      "--type", "code", "--root", repo.path, "--languages", "ts"], env);
+
+    const idx = runScrybe(["index", "-P", "s16a-proj", "-S", "primary", "-f"], env);
+    expect(idx.exit).toBe(0);
+
+    // Fresh process = cold cache. Pre-fix: BM25 returned [] → canary missing.
+    const r = runScrybe(["search", "code", "-P", "s16a-proj", "ferret saxophone umbrella"], env);
+    expect(r.exit).toBe(0);
+    expect(r.stdout).toContain("src/canary.ts");
+  });
+
+  it("Test 2 — bird-family: both raptors and parrots files surface in top results", () => {
+    env = makeScenarioEnv();
+    repo = makeTempRepo({
+      "src/raptors.ts":
+        "export function patrolSky(input: string): string {\n" +
+        "  const raptors = 'falcon hawk eagle';\n" +
+        "  return `${raptors} :: ${input}`;\n" +
+        "}\n",
+      "src/parrots.ts":
+        "export function chatterCage(input: string): string {\n" +
+        "  const parrots = 'macaw cockatoo lorikeet';\n" +
+        "  return `${parrots} :: ${input}`;\n" +
+        "}\n",
+    });
+
+    runScrybe(["project", "add", "--id", "s16b-proj"], env);
+    runScrybe(["source", "add", "-P", "s16b-proj", "-S", "primary",
+      "--type", "code", "--root", repo.path, "--languages", "ts"], env);
+
+    const idx = runScrybe(["index", "-P", "s16b-proj", "-S", "primary", "-f"], env);
+    expect(idx.exit).toBe(0);
+
+    // "kestrel" is a close relative of raptors. In a two-file corpus both files
+    // should appear in the top results (any order). We check top 5 rather than
+    // top 2 to tolerate minor rerank/RRF variance across embedding model versions.
+    const r1 = runScrybe(["search", "code", "-P", "s16b-proj", "kestrel"], env);
+    expect(r1.exit).toBe(0);
+    const top5_a = extractTopFilePaths(r1.stdout, 5);
+    expect(top5_a).toEqual(expect.arrayContaining(["src/raptors.ts", "src/parrots.ts"]));
+
+    // "parakeet" is a close relative of parrots. Same acceptance criterion.
+    const r2 = runScrybe(["search", "code", "-P", "s16b-proj", "parakeet"], env);
+    expect(r2.exit).toBe(0);
+    const top5_b = extractTopFilePaths(r2.stdout, 5);
+    expect(top5_b).toEqual(expect.arrayContaining(["src/raptors.ts", "src/parrots.ts"]));
   });
 });
 

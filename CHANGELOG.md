@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.30.3] — 2026-05-04
+
+### Fixed
+
+- **Cold CLI hybrid searches were silently dropping BM25 hits.** First search per process now correctly merges full hybrid (vector + BM25 + RRF) results. Affected every `scrybe search` invocation outside an active daemon session and the first search per MCP-server lifetime.
+
+---
+
 ## [0.30.2] — 2026-05-03
 
 ### Fixed
