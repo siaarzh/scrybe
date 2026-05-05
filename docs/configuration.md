@@ -11,6 +11,34 @@ All configuration is via environment variables. Set them in `.env` or in the MCP
 
 ---
 
+## Storage location
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_DATA_DIR` | OS-specific (see below) | Override the directory where Scrybe stores all state: `projects.json`, LanceDB tables, daemon socket, `.env`, jobs DB, ignores. |
+
+**Default per platform:**
+- Windows: `%LOCALAPPDATA%\scrybe\scrybe`
+- macOS: `~/Library/Application Support/scrybe`
+- Linux: `~/.local/share/scrybe` (or `$XDG_DATA_HOME/scrybe`)
+
+Set this before running any `scrybe` command if you want to relocate state (e.g. point at a faster SSD). All processes — CLI, daemon, MCP server — must agree on the same value.
+
+---
+
+## Chunking
+
+Controls how source files are split into chunks before embedding. Defaults are tuned for code; raise for prose-heavy sources only after measuring recall.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_CHUNK_SIZE` | `60` | Maximum lines per chunk. |
+| `SCRYBE_CHUNK_OVERLAP` | `10` | Lines of overlap between adjacent chunks. Must be `<` `SCRYBE_CHUNK_SIZE` — startup fails otherwise. |
+
+Changes apply on the next reindex; existing chunks keep their original boundaries until rewritten.
+
+---
+
 ## Local embedder (default)
 
 When no `EMBEDDING_*` or `OPENAI_API_KEY` env vars are set, Scrybe uses an in-process WASM/ONNX model — no API key, no network call after first download.

@@ -173,6 +173,7 @@ export const addSourceTool: Tool<
       },
       required: ["project_id", "source_id", "source_type"],
     },
+    annotations: { openWorldHint: true },
     cliArgs: (cmd: Command) => applySourceAddOptions(cmd),
   },
   handler: async (input) => {
@@ -250,7 +251,7 @@ export const updateSourceTool: Tool<
       },
       required: ["project_id", "source_id"],
     },
-    annotations: { openWorldHint: false },
+    annotations: { idempotentHint: true, openWorldHint: false },
     cliArgs: (cmd: Command) => applySourceUpdateOptions(cmd),
   },
   handler: async (input) => {

@@ -93,6 +93,7 @@ export const addProjectTool: Tool<
       },
       required: ["project_id"],
     },
+    annotations: { openWorldHint: false },
     cliArgs: (cmd: Command) => cmd
       .requiredOption("--id <id>", "Project identifier")
       .option("--desc <text>", "Description", "")
@@ -122,7 +123,7 @@ export const updateProjectTool: Tool<
       },
       required: ["project_id"],
     },
-    annotations: { openWorldHint: false },
+    annotations: { idempotentHint: true, openWorldHint: false },
     cliArgs: (cmd: Command) => cmd
       .argument("[id]", "Project identifier (positional)")
       .option("--id <id>", "Project identifier (flag, backward-compat alias for positional)")

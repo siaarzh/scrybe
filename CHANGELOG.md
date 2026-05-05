@@ -7,6 +7,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- MCP tool annotations filled in for `add_project`, `update_project`, `add_source`, `update_source` so MCP clients can correctly reason about idempotence and external-call behavior.
+- Configuration reference now documents `SCRYBE_DATA_DIR` (with per-platform defaults) and the `SCRYBE_CHUNK_SIZE` / `SCRYBE_CHUNK_OVERLAP` chunking knobs.
+
 ---
 
 ## [0.30.3] — 2026-05-04
