@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.31.0] — 2026-05-06
+
 ### Added
 
 - MCP tool annotations filled in for `add_project`, `update_project`, `add_source`, `update_source` so MCP clients can correctly reason about idempotence and external-call behavior.
