@@ -53,10 +53,32 @@ The `scrybe status` HEALTH column shows one of:
 | State | Meaning |
 |-------|---------|
 | `Healthy` | Table is intact and ready for search |
+| `Migrate (chunk-id)` | Table was indexed by an older version with a different chunk-ID scheme — run `scrybe migrate --all` |
 | `Bloated *` | Table has more Lance versions than the compaction threshold — run `scrybe gc` |
 | `Corrupt * (manifest)` | Active manifest references missing data files — run `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair` |
 | `Corrupt * (dim)` | Table was indexed with a different embedding dimension than the current config — run `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair` |
 | `Corrupt * (schema)` | Table schema cannot be read — run `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair` |
+
+---
+
+### `migrate`
+
+Upgrade indexed sources from an old chunk-ID scheme to the current one. Required after upgrading from a version prior to v0.31.0.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | | Limit to a specific project |
+| `--source-id <id>` | | Limit to a specific source |
+| `--all` | | Migrate all sources that need migration |
+| `--yes` | | Skip the confirmation prompt |
+
+```bash
+scrybe migrate --all
+scrybe migrate --project-id myrepo --source-id gitlab-issues
+scrybe doctor --repair   # also handles pending migrations
+```
+
+When a source needs migration, `scrybe status` shows `Migrate (chunk-id)` in the HEALTH column and search returns `error_type: "needs_migration"` with the exact command to run.
 
 ---
 
@@ -446,14 +468,14 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 |------|----------|-------------|
 | `--project-id <id>` | ✓ | Project to search |
 | `--source-id <id>` | | Limit to a specific source |
-| `--source-types <types>` | | Comma-separated source type filter. Known values: `ticket` (issue bodies), `ticket_comment` (individual comments) |
+| `--item-types <types>` | | Comma-separated item type filter. Known values: `ticket` (issue bodies), `ticket_comment` (individual comments) |
 | `--top-k <n>` | | Number of results (default: 10) |
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash
 scrybe search knowledge --project-id myrepo "password reset broken"
-scrybe search knowledge --project-id myrepo --source-types ticket "login error"
-scrybe search knowledge --project-id myrepo --source-types ticket_comment "architectural decision"
+scrybe search knowledge --project-id myrepo --item-types ticket "login error"
+scrybe search knowledge --project-id myrepo --item-types ticket_comment "architectural decision"
 ```
 
 ---

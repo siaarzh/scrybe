@@ -718,6 +718,8 @@ export async function runCli(): Promise<void> {
         let healthFlag: string | null = null;
         if (s.table_name) {
           try {
+            const { needsMigration: needsMig } = await import("./vector-store.js");
+            if (needsMig(s.table_name)) { flags.push("needs_migration"); }
             const srcWithTable = assignTN(p.id, s);
             const embConfig = resolveEmb(srcWithTable);
             let pluginProfile: "code" | "knowledge" = "code";
@@ -788,7 +790,8 @@ export async function runCli(): Promise<void> {
           const size = s.sizeBytes > 0 ? fmtSize(s.sizeBytes) : "—";
           const isBloated = s.flags.includes("bloat");
           const isCorrupt = s.flags.includes("corrupt");
-          const health = isCorrupt ? "Corrupt *" : isBloated ? "Bloated *" : "Healthy";
+          const isMigNeeded = s.flags.includes("needs_migration");
+          const health = isCorrupt ? "Corrupt *" : isMigNeeded ? "Migrate (chunk-id)" : isBloated ? "Bloated *" : "Healthy";
           const lastGcTs = lastGcTimes.get(p.id) ?? null;
           const lastGcStr = lastGcTs ? fmtRelative(new Date(lastGcTs).toISOString()) : "—";
           console.log(`  ${p.id.slice(0, 19).padEnd(20)}${s.sourceId.slice(0, 17).padEnd(18)}${s.chunks.toLocaleString().padStart(8)}  ${size.padEnd(10)}${health.padEnd(12)}${fmtRelative(s.lastIndexed).padEnd(14)}${lastGcStr}`);
@@ -797,6 +800,13 @@ export async function runCli(): Promise<void> {
       if (hidden > 0) console.log(`  (${hidden} more — use --all)`);
       const anyBloated = sourceSummaries.some((p) => p.sources.some((s) => s.flags.includes("bloat")));
       const anyCorrupt = sourceSummaries.some((p) => p.sources.some((s) => s.flags.includes("corrupt")));
+      const anyMigNeeded = sourceSummaries.some((p) => p.sources.some((s) => s.flags.includes("needs_migration")));
+      if (anyMigNeeded) {
+        const migSources = sourceSummaries.flatMap((p) =>
+          p.sources.filter((s) => s.flags.includes("needs_migration")).map((s) => `${p.id}/${s.sourceId}`)
+        );
+        console.log(`\n  Migrate (chunk-id): ${migSources.join(", ")} — run 'scrybe migrate --all' to upgrade`);
+      }
       if (anyCorrupt) {
         // Show corrupt legend with reason badges
         const corruptReasons = sourceSummaries.flatMap((p) =>
@@ -1093,6 +1103,19 @@ export async function runCli(): Promise<void> {
     .addHelpText("after", "\nExamples:\n  eval \"$(scrybe completion bash)\"\n  scrybe completion zsh > ~/.zsh/completions/_scrybe\n  scrybe completion powershell | Out-String | Invoke-Expression")
     .action((shell: string) => { printCompletion(shell); });
 
+  // ─── migrate ──────────────────────────────────────────────────────────────
+
+  program.command("migrate")
+    .description("Migrate indexed sources to the current chunk-ID scheme")
+    .option("--project-id <id>", "Limit to a specific project")
+    .option("--source-id <id>", "Limit to a specific source")
+    .option("--all", "Migrate all sources that need migration")
+    .option("--yes", "Skip the confirmation prompt")
+    .addHelpText("after", "\nExamples:\n  scrybe migrate --all\n  scrybe migrate --project-id myrepo --source-id gitlab-issues")
+    .action(async (opts: { projectId?: string; sourceId?: string; all?: boolean; yes?: boolean }) => {
+      await runMigrate(opts);
+    });
+
   // ─── Zero-config default action ───────────────────────────────────────────
 
   program.action(async () => {
@@ -1206,11 +1229,11 @@ export async function runCli(): Promise<void> {
 
   program.addCommand(
     createCommand("search-knowledge").description("[deprecated] Use: scrybe search knowledge")
-      .requiredOption("--project-id <id>", "Project ID").option("--source-id <id>", "").option("--source-types <types>", "").option("--top-k <n>", "Number of results", "10").argument("<query>", "Search query")
+      .requiredOption("--project-id <id>", "Project ID").option("--source-id <id>", "").option("--item-types <types>", "").option("--top-k <n>", "Number of results", "10").argument("<query>", "Search query")
       .action(async (query: string, opts: any) => {
         warnDeprecated("search-knowledge", "search knowledge");
         const { searchKnowledgeTool } = await import("./tools/search.js");
-        const result = await searchKnowledgeTool.handler({ project_id: opts.projectId, query, top_k: parseInt(opts.topK, 10), source_id: opts.sourceId, source_types: opts.sourceTypes ? opts.sourceTypes.split(",").map((s: string) => s.trim()) : undefined });
+        const result = await searchKnowledgeTool.handler({ project_id: opts.projectId, query, top_k: parseInt(opts.topK, 10), source_id: opts.sourceId, item_types: opts.itemTypes ? opts.itemTypes.split(",").map((s: string) => s.trim()) : undefined });
         printResult(result, searchKnowledgeTool.formatCli!);
       }),
     { hidden: true }
@@ -1280,11 +1303,113 @@ export async function runCli(): Promise<void> {
 }
 
 /**
+ * Migrate indexed sources from old chunk-ID scheme to current scheme.
+ * Called by `scrybe migrate`.
+ */
+async function runMigrate(opts: { projectId?: string; sourceId?: string; all?: boolean; yes?: boolean }): Promise<void> {
+  const { needsMigration: needsMig, readTableMeta } = await import("./vector-store.js");
+  const { assignTableName: assignTN } = await import("./registry.js");
+  let projects: ReturnType<typeof listProjects>;
+  try { projects = listProjects(); } catch { projects = []; }
+
+  if (projects.length === 0) { console.log("No projects registered."); return; }
+
+  interface MigEntry {
+    projectId: string;
+    sourceId: string;
+    tableName: string;
+    schemeNote: string;
+  }
+  const toMigrate: MigEntry[] = [];
+
+  for (const p of projects) {
+    if (opts.projectId && p.id !== opts.projectId) continue;
+    for (const sourceRaw of p.sources) {
+      if (opts.sourceId && sourceRaw.source_id !== opts.sourceId) continue;
+      const source = assignTN(p.id, sourceRaw);
+      const tableName = source.table_name;
+      if (!tableName) continue;
+      if (needsMig(tableName)) {
+        const meta = readTableMeta(tableName);
+        const schemeNote = meta ? `scheme ${meta.chunk_id_scheme}` : "no scheme metadata (pre-v0.31)";
+        toMigrate.push({ projectId: p.id, sourceId: source.source_id, tableName, schemeNote });
+      }
+    }
+  }
+
+  if (toMigrate.length === 0) {
+    console.log("All sources are on the current chunk-ID scheme. Nothing to migrate.");
+    return;
+  }
+
+  if (!opts.all && !opts.sourceId && toMigrate.length > 1) {
+    console.log(`${toMigrate.length} source(s) need migration. Use --all to migrate all, or --source-id to select one:`);
+    for (const e of toMigrate) {
+      console.log(`  ${e.projectId}/${e.sourceId}  (${e.schemeNote})`);
+    }
+    console.log("\nRun `scrybe migrate --all` to migrate all, or specify --project-id and --source-id.");
+    return;
+  }
+
+  console.log(`\n${toMigrate.length} source(s) to migrate:`);
+  for (const e of toMigrate) {
+    console.log(`  ${e.projectId}/${e.sourceId}  (${e.schemeNote})`);
+  }
+
+  if (!opts.yes) {
+    if (!process.stdin.isTTY) {
+      console.error("\n[scrybe] Non-interactive input. Use --yes to confirm non-interactively.");
+      process.exit(1);
+    }
+    process.stdout.write(`\nMigrate ${toMigrate.length} source(s)? [y/N] `);
+    const confirmed = await new Promise<boolean>((resolve) => {
+      process.stdin.once("data", (d) => { process.stdin.pause(); resolve(d.toString().trim().toLowerCase() === "y"); });
+    });
+    if (!confirmed) { console.log("Aborted."); return; }
+  }
+
+  console.log("\nMigrating...");
+  const { migrateTable } = await import("./migrations/chunk-id-rehash.js");
+  let failed = 0;
+
+  for (const e of toMigrate) {
+    process.stdout.write(`  ${e.projectId}/${e.sourceId}...`);
+    try {
+      const result = await migrateTable(e.tableName, e.projectId, e.sourceId, {
+        onProgress(done, total) {
+          process.stdout.write(`\r  ${e.projectId}/${e.sourceId}... ${done}/${total} rows`);
+        },
+      });
+      process.stdout.write("\n");
+      if (result.status === "ok") {
+        console.log(`    Done: ${result.rows_rehashed} rows rehashed.`);
+      } else if (result.status === "skipped") {
+        console.log(`    Skipped: ${result.reason}`);
+      } else {
+        console.error(`    Failed: ${result.reason}`);
+        failed++;
+      }
+    } catch (err) {
+      process.stdout.write("\n");
+      console.error(`    Failed: ${err instanceof Error ? err.message : String(err)}`);
+      failed++;
+    }
+  }
+
+  if (failed > 0) {
+    console.error(`\n${failed} source(s) failed. Run 'scrybe doctor --repair' for recovery options.`);
+    process.exit(1);
+  } else {
+    console.log(`\nMigrated ${toMigrate.length - failed} source(s). Search will now use the current chunk-ID scheme.`);
+  }
+}
+
+/**
  * Scan all indexed sources for corruption and offer to repair them.
  * Called by `scrybe doctor --repair`.
  */
 async function runDoctorRepair(): Promise<void> {
-  const { getTableHealth: gh } = await import("./vector-store.js");
+  const { getTableHealth: gh, needsMigration: needsMig } = await import("./vector-store.js");
   const { getExpectedDimensions: getExpDims } = await import("./health-probe.js");
   const { resolveEmbeddingConfig: resEmb, assignTableName: assignTN } = await import("./registry.js");
   const { getPlugin: getPlug } = await import("./plugins/index.js");
@@ -1292,7 +1417,37 @@ async function runDoctorRepair(): Promise<void> {
   try { projects = listProjects(); } catch { projects = []; }
   if (projects.length === 0) { console.log("No projects registered."); return; }
 
-  console.log("Scanning for corrupt indices...");
+  // First, handle any pending migrations
+  const toMig: Array<{ projectId: string; sourceId: string; tableName: string }> = [];
+  for (const p of projects) {
+    for (const sourceRaw of p.sources) {
+      const source = assignTN(p.id, sourceRaw);
+      const tableName = source.table_name;
+      if (!tableName) continue;
+      if (needsMig(tableName)) {
+        toMig.push({ projectId: p.id, sourceId: source.source_id, tableName });
+      }
+    }
+  }
+  if (toMig.length > 0) {
+    console.log(`\n${toMig.length} source(s) need chunk-ID migration:`);
+    for (const e of toMig) console.log(`  ${e.projectId}/${e.sourceId}`);
+    process.stdout.write("Migrate now? [y/N] ");
+    const confirmMig = await new Promise<boolean>((resolve) => {
+      if (!process.stdin.isTTY) { resolve(false); return; }
+      process.stdin.once("data", (d) => { process.stdin.pause(); resolve(d.toString().trim().toLowerCase() === "y"); });
+    });
+    if (confirmMig) {
+      const { migrateTable } = await import("./migrations/chunk-id-rehash.js");
+      for (const e of toMig) {
+        console.log(`  Migrating ${e.projectId}/${e.sourceId}...`);
+        const res = await migrateTable(e.tableName, e.projectId, e.sourceId);
+        console.log(`    ${res.status}: ${res.reason ?? `${res.rows_rehashed} rows rehashed`}`);
+      }
+    }
+  }
+
+  console.log("\nScanning for corrupt indices...");
 
   interface CorruptEntry {
     projectId: string;

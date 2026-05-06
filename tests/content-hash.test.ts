@@ -1,35 +1,49 @@
 /**
  * Pins the content-addressed chunk_id formula.
- * makeChunkId(projectId, sourceId, language, content) = sha256(fields joined by NUL)
+ * stampChunkId(raw) = sha256(project_id, source_id, item_path, item_url, item_type, content joined by NUL)
  */
 import { describe, it, expect } from "vitest";
+import { stampChunkId } from "../src/chunker.js";
+import type { RawCodeChunk } from "../src/types.js";
 
-describe("makeChunkId — content-addressed formula", () => {
-  it("is deterministic: same inputs produce the same id", async () => {
-    const { makeChunkId } = await import("../src/chunker.js");
-    const id1 = makeChunkId("proj", "primary", "typescript", "const x = 1;");
-    const id2 = makeChunkId("proj", "primary", "typescript", "const x = 1;");
+function makeRaw(overrides: Partial<RawCodeChunk> = {}): RawCodeChunk {
+  return {
+    project_id: "proj",
+    source_id: "primary",
+    item_path: "src/foo.ts",
+    item_url: "",
+    item_type: "code",
+    content: "const x = 1;",
+    start_line: 1,
+    end_line: 1,
+    language: "typescript",
+    symbol_name: "",
+    ...overrides,
+  };
+}
+
+describe("stampChunkId — content-addressed formula", () => {
+  it("is deterministic: same inputs produce the same chunk_id", () => {
+    const id1 = stampChunkId(makeRaw()).chunk_id;
+    const id2 = stampChunkId(makeRaw()).chunk_id;
     expect(id1).toBe(id2);
   });
 
-  it("different projectId with same content → different id", async () => {
-    const { makeChunkId } = await import("../src/chunker.js");
-    const id1 = makeChunkId("proj-a", "primary", "typescript", "const x = 1;");
-    const id2 = makeChunkId("proj-b", "primary", "typescript", "const x = 1;");
+  it("different project_id with same content → different chunk_id", () => {
+    const id1 = stampChunkId(makeRaw({ project_id: "proj-a" })).chunk_id;
+    const id2 = stampChunkId(makeRaw({ project_id: "proj-b" })).chunk_id;
     expect(id1).not.toBe(id2);
   });
 
-  it("different language with same content → different id", async () => {
-    const { makeChunkId } = await import("../src/chunker.js");
-    const id1 = makeChunkId("proj", "primary", "typescript", "const x = 1;");
-    const id2 = makeChunkId("proj", "primary", "javascript", "const x = 1;");
+  it("different item_path with same content → different chunk_id", () => {
+    const id1 = stampChunkId(makeRaw({ item_path: "src/foo.ts" })).chunk_id;
+    const id2 = stampChunkId(makeRaw({ item_path: "src/bar.ts" })).chunk_id;
     expect(id1).not.toBe(id2);
   });
 
-  it("NUL separator prevents concat collision: projectId='a' sourceId='bc' ≠ projectId='ab' sourceId='c'", async () => {
-    const { makeChunkId } = await import("../src/chunker.js");
-    const id1 = makeChunkId("a", "bc", "typescript", "content");
-    const id2 = makeChunkId("ab", "c", "typescript", "content");
+  it("NUL separator prevents concat collision: project_id='a' source_id='bc' ≠ project_id='ab' source_id='c'", () => {
+    const id1 = stampChunkId(makeRaw({ project_id: "a", source_id: "bc" })).chunk_id;
+    const id2 = stampChunkId(makeRaw({ project_id: "ab", source_id: "c" })).chunk_id;
     expect(id1).not.toBe(id2);
   });
 });

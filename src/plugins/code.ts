@@ -2,7 +2,7 @@ import { createRequire } from "module";
 import { createReadStream, readFileSync } from "fs";
 import { basename } from "path";
 import { createHash } from "node:crypto";
-import { walkRepoFiles, chunkLines, getLanguage, makeChunkId } from "../chunker.js";
+import { walkRepoFiles, chunkLines, getLanguage, stampChunkId } from "../chunker.js";
 import { loadCanonicalIgnoreRules } from "../ignore-rules.js";
 import { normalizeContent } from "../normalize.js";
 import { gitExec } from "../util/git-exec.js";
@@ -290,31 +290,35 @@ function astChunks(
     const declLines = decl.endLine - decl.startLine + 1;
     if (declLines <= config.chunkSize) {
       const content = decl.content.trim();
-      chunks.push({
-        chunk_id: makeChunkId(projectId, sourceId, langKey, content),
+      chunks.push(stampChunkId({
         project_id: projectId,
-        file_path: relPath,
+        source_id: sourceId,
+        item_path: relPath,
+        item_url: "",
+        item_type: "code",
         content,
         start_line: decl.startLine + 1,
         end_line: decl.endLine + 1,
         language: langKey,
         symbol_name: decl.symbolName,
-      });
+      }) as CodeChunk);
     } else {
       // Too large — split with sliding window, keep symbol_name on first sub-chunk
       const declLineSlice = lines.slice(decl.startLine, decl.endLine + 1);
       let first = true;
       for (const window of chunkLines(declLineSlice, decl.startLine)) {
-        chunks.push({
-          chunk_id: makeChunkId(projectId, sourceId, langKey, window.content),
+        chunks.push(stampChunkId({
           project_id: projectId,
-          file_path: relPath,
+          source_id: sourceId,
+          item_path: relPath,
+          item_url: "",
+          item_type: "code",
           content: window.content,
           start_line: window.start,
           end_line: window.end,
           language: langKey,
           symbol_name: first ? decl.symbolName : "",
-        });
+        }) as CodeChunk);
         first = false;
       }
     }
@@ -335,16 +339,18 @@ function slidingWindowChunks(
   const lines = source.split(/^/m);
   const chunks: CodeChunk[] = [];
   for (const { start, end, content } of chunkLines(lines)) {
-    chunks.push({
-      chunk_id: makeChunkId(projectId, sourceId, language, content),
+    chunks.push(stampChunkId({
       project_id: projectId,
-      file_path: relPath,
+      source_id: sourceId,
+      item_path: relPath,
+      item_url: "",
+      item_type: "code",
       content,
       start_line: start,
       end_line: end,
       language,
       symbol_name: "",
-    });
+    }) as CodeChunk);
   }
   return chunks;
 }

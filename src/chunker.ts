@@ -4,7 +4,7 @@ import { join, relative, extname, basename } from "path";
 import { config } from "./config.js";
 import { loadCanonicalIgnoreRules } from "./ignore-rules.js";
 import { normalizeContent } from "./normalize.js";
-import type { CodeChunk } from "./types.js";
+import type { CodeChunk, RawChunk, StampedChunk } from "./types.js";
 
 
 const EXTENSION_TO_LANGUAGE: Record<string, string> = {
@@ -180,15 +180,30 @@ export function* walkRepoFiles(
   yield* walk(rootPath);
 }
 
-export function makeChunkId(
+function makeChunkId(
   projectId: string,
   sourceId: string,
-  language: string,
+  itemPath: string,
+  itemUrl: string,
+  itemType: string,
   content: string
 ): string {
   return createHash("sha256")
-    .update(projectId + "\0" + sourceId + "\0" + language + "\0" + content)
+    .update(projectId + "\0" + sourceId + "\0" + itemPath + "\0" + itemUrl + "\0" + itemType + "\0" + content)
     .digest("hex");
+}
+
+/** Central chunk-ID stamping: accepts a RawChunk, returns a StampedChunk with chunk_id set. */
+export function stampChunkId(raw: RawChunk): StampedChunk {
+  const chunk_id = makeChunkId(
+    raw.project_id,
+    raw.source_id,
+    raw.item_path,
+    raw.item_url,
+    raw.item_type,
+    raw.content,
+  );
+  return { ...raw, chunk_id } as StampedChunk;
 }
 
 export function* chunkRepo(
@@ -211,16 +226,18 @@ export function* chunkRepo(
     const lines = text.split(/^/m);
 
     for (const { start, end, content } of chunkLines(lines)) {
-      yield {
-        chunk_id: makeChunkId(projectId, sourceId, language, content),
+      yield stampChunkId({
         project_id: projectId,
-        file_path: relPath,
+        source_id: sourceId,
+        item_path: relPath,
+        item_url: "",
+        item_type: "code",
         content,
         start_line: start,
         end_line: end,
         language,
         symbol_name: "",
-      };
+      }) as CodeChunk;
     }
   }
 }

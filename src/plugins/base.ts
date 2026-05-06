@@ -1,6 +1,6 @@
-import type { CodeChunk, KnowledgeChunk, Project, Source } from "../types.js";
+import type { StampedChunk, Project, Source } from "../types.js";
 
-export type AnyChunk = CodeChunk | KnowledgeChunk;
+export type AnyChunk = StampedChunk;
 
 export interface SourcePlugin {
   /** Matches SourceConfig.type — used by the registry to route projects */

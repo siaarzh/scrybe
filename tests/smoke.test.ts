@@ -56,13 +56,13 @@ describe("smoke — full pipeline regression", () => {
     // Search for the sentinel — BM25 should find it exactly
     const hits = await search(project.projectId, token);
     expect(hits.length).toBeGreaterThan(0);
-    expect(hits[0].file_path).toContain("delta.ts");
+    expect(hits[0].item_path).toContain("delta.ts");
 
     // Verify result shape matches contract
     const hit = hits[0];
     expect(typeof hit.chunk_id).toBe("string");
     expect(hit.chunk_id.length).toBeGreaterThan(0);
-    expect(typeof hit.file_path).toBe("string");
+    expect(typeof hit.item_path).toBe("string");
     expect(typeof hit.content).toBe("string");
     expect(typeof hit.start_line).toBe("number");
     expect(typeof hit.end_line).toBe("number");
@@ -94,7 +94,7 @@ describe("smoke — full pipeline regression", () => {
 
     // Vector search may return unrelated top-K hits; verify that none are from deleted file
     const after = await search(project.projectId, token);
-    const fromDeletedFile = after.filter((r) => r.file_path.includes("temp.ts"));
+    const fromDeletedFile = after.filter((r) => r.item_path.includes("temp.ts"));
     expect(fromDeletedFile).toHaveLength(0);
   });
 
@@ -122,7 +122,7 @@ describe("smoke — full pipeline regression", () => {
     // Verify sentinel is findable via branch-scoped search before deletion
     const before = await search(project.projectId, token, { branch });
     expect(before.length).toBeGreaterThan(0);
-    expect(before.some((r) => r.file_path.includes("temp-inc.ts"))).toBe(true);
+    expect(before.some((r) => r.item_path.includes("temp-inc.ts"))).toBe(true);
 
     // Delete the file and run incremental reindex
     unlinkSync(tempFile);
@@ -133,7 +133,7 @@ describe("smoke — full pipeline regression", () => {
 
     // Branch-scoped search must not return the deleted file's content
     const after = await search(project.projectId, token, { branch });
-    const fromDeletedFile = after.filter((r) => r.file_path.includes("temp-inc.ts"));
+    const fromDeletedFile = after.filter((r) => r.item_path.includes("temp-inc.ts"));
     expect(fromDeletedFile).toHaveLength(0);
 
     // Stretch: orphan chunks still exist in Lance (not yet gc'd)

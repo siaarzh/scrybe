@@ -30,10 +30,15 @@ export interface Project {
   sources: Source[];
 }
 
-export interface CodeChunk {
-  chunk_id: string;
+// ─── Raw chunk shapes (emitted by plugins, no chunk_id yet) ──────────────────
+
+/** Emitted by code plugins. No chunk_id — stampChunkId fills it before write. */
+export interface RawCodeChunk {
   project_id: string;
-  file_path: string; // relative, forward slashes
+  source_id: string;
+  item_path: string;    // relative file path, forward slashes, e.g. "src/foo.ts"
+  item_url: string;     // "" for code (no stable host-aware deep link today); ref-less when populated
+  item_type: "code";
   content: string;
   start_line: number;
   end_line: number;
@@ -41,12 +46,37 @@ export interface CodeChunk {
   symbol_name: string;
 }
 
+/** Emitted by knowledge plugins. No chunk_id — stampChunkId fills it before write. */
+export interface RawKnowledgeChunk {
+  project_id: string;
+  source_id: string;
+  item_path: string;    // provider slug, e.g. "issues/123", "issues/123#note_456"
+  item_url: string;     // deep link back to the original (ref-less)
+  item_type: string;    // "ticket" | "ticket_comment" | "webpage" | "message"
+  author: string;
+  timestamp: string;    // ISO date string, empty string if unknown
+  content: string;
+}
+
+export type RawChunk = RawCodeChunk | RawKnowledgeChunk;
+export type StampedChunk = CodeChunk | KnowledgeChunk;
+
+// ─── Stamped chunk shapes (written to LanceDB, have chunk_id) ────────────────
+
+export interface CodeChunk extends RawCodeChunk {
+  chunk_id: string;
+}
+
+export interface KnowledgeChunk extends RawKnowledgeChunk {
+  chunk_id: string;
+}
+
 export interface SearchResult {
   chunk_id: string;
   score: number;
   project_id: string;
   source_id: string;
-  file_path: string;
+  item_path: string;
   start_line: number;
   end_line: number;
   language: string;
@@ -55,25 +85,13 @@ export interface SearchResult {
   branches: string[];  // master/main first, rest alphabetical; [] in compat mode
 }
 
-export interface KnowledgeChunk {
-  chunk_id: string;
-  project_id: string;
-  source_id: string;
-  source_path: string;   // e.g. "tickets/123", "https://docs.example.com/page"
-  source_url: string;    // deep link back to the original
-  source_type: string;   // "ticket" | "webpage" | "message"
-  author: string;
-  timestamp: string;     // ISO date string, empty string if unknown
-  content: string;
-}
-
 export interface KnowledgeSearchResult {
   score: number;
   project_id: string;
   source_id: string;
-  source_path: string;
-  source_url: string;
-  source_type: string;   // "ticket" | "webpage" | "message"
+  item_path: string;
+  item_url: string;
+  item_type: string;   // "ticket" | "ticket_comment" | "webpage" | "message"
   author: string;
   timestamp: string;
   content: string;

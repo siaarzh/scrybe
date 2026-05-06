@@ -1,6 +1,6 @@
-import { chunkLines, makeChunkId } from "../chunker.js";
+import { chunkLines, stampChunkId } from "../chunker.js";
 import { normalizeContent } from "../normalize.js";
-import type { KnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
+import type { KnowledgeChunk, RawKnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { AnyChunk, SourcePlugin } from "./base.js";
 
 interface GitLabIssue {
@@ -88,7 +88,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
     const issues = await fetchAllPages<GitLabIssue>(url, cfg.token, project.id);
     const map: Record<string, string> = {};
     for (const issue of issues) {
-      map[`tickets/${issue.iid}`] = issue.updated_at;
+      map[`issues/${issue.iid}`] = issue.updated_at;
     }
     return map;
   }
@@ -98,7 +98,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
     const encodedId = encodeURIComponent(cfg.project_id);
 
     for (const key of changed) {
-      const iid = key.replace("tickets/", "");
+      const iid = key.replace("issues/", "");
       const issueUrl = `${cfg.base_url}/api/v4/projects/${encodedId}/issues/${iid}`;
       const notesUrl = `${cfg.base_url}/api/v4/projects/${encodedId}/issues/${iid}/notes`;
 
@@ -109,32 +109,34 @@ export class GitLabIssuesPlugin implements SourcePlugin {
         ]);
 
         const emit = function* (
+          itemPath: string,
           content: string,
           author: string,
           timestamp: string,
-          sourceType: string,
-          sourceUrl: string,
+          itemType: string,
+          // Code item_url must be ref-less; see ADR-0004.
+          itemUrl: string,
         ): Generator<KnowledgeChunk> {
           const lines = content.split("\n").map((l) => l + "\n");
           const chunks = chunkLines(lines);
           for (const chunk of chunks) {
-            yield {
-              chunk_id: makeChunkId(project.id, source.source_id, "", chunk.content),
+            yield stampChunkId({
               project_id: project.id,
               source_id: source.source_id,
-              source_path: key,
-              source_url: sourceUrl,
-              source_type: sourceType,
+              item_path: itemPath,
+              item_url: itemUrl,
+              item_type: itemType,
               author,
               timestamp,
               content: chunk.content,
-            } satisfies KnowledgeChunk;
+            } satisfies RawKnowledgeChunk) as KnowledgeChunk;
           }
         };
 
-        // Issue body chunk(s)
+        // Issue body chunk(s) — item_path: "issues/N"
         const issueBody = normalizeContent(`# ${issue.title}\n\n${issue.description?.trim() || ""}`.trim());
         yield* emit(
+          `issues/${issue.iid}`,
           issueBody,
           issue.author.username,
           issue.updated_at,
@@ -142,12 +144,13 @@ export class GitLabIssuesPlugin implements SourcePlugin {
           issue.web_url,
         );
 
-        // One chunk family per non-system, non-empty comment
+        // One chunk family per non-system, non-empty comment — item_path: "issues/N#note_M"
         for (const note of notes) {
           if (note.system) continue;
           const body = normalizeContent(note.body.trim());
           if (!body) continue;
           yield* emit(
+            `issues/${issue.iid}#note_${note.id}`,
             body,
             note.author.username,
             note.created_at || issue.updated_at,

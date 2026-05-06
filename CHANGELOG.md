@@ -19,7 +19,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ### Breaking
 
-- **`chunks_indexed` renamed.** `IndexResult` and `SourceTask` no longer have a `chunks_indexed` field. Use `chunks_prepared` (same semantics as the old field — chunks that reached the embedder) and the new `chunks_persisted` (actual row delta). Run `scrybe migrate` after upgrading to v0.31.0 to rehash all stored chunk IDs against the new normalized content.
+- **`chunks_indexed` renamed.** `IndexResult` and `SourceTask` no longer have a `chunks_indexed` field. Use `chunks_prepared` (same semantics as the old field — chunks that reached the embedder) and the new `chunks_persisted` (actual row delta).
+- **Chunk fields renamed.** `CodeChunk.file_path` → `item_path`. `KnowledgeChunk.source_path` → `item_path`, `source_url` → `item_url`, `source_type` → `item_type`. `SearchResult.file_path` → `item_path`. `KnowledgeSearchResult` fields follow the same rename. Any code reading these fields directly from search results or stored chunk objects must be updated.
+- **CLI flag renamed.** `scrybe search knowledge --source-types` → `--item-types`.
+- **MCP argument renamed.** `search_knowledge` input arg `source_types` → `item_types`. Response row field names follow the rename above.
+- **GitLab ticket path schema changed.** Knowledge chunks for GitLab issues now use `issues/N` (body) and `issues/N#note_M` (comment) as `item_path`. Previously `tickets/N` was used. Existing indexed chunks need migration to match the new scheme.
+
+### Fixed
+
+- **Comment collision.** Two issues with identical comment text ("+1", "lgtm", etc.) no longer overwrite each other in the index. `item_path` (which includes the issue IID and note ID) is now part of the chunk ID hash.
+- **Code file collision.** Two files with identical content (license headers, re-export shims) no longer overwrite each other. `item_path` (the file path) is now part of the chunk ID hash.
+- **Windows CRLF re-embed.** Users with `core.autocrlf=true` no longer silently re-embed ~50% of chunks on every branch index. Content is normalized (CRLF → LF, UTF-8 BOM stripped) before hashing so the working-tree and git-tree representations produce the same chunk ID.
+- **Plugin contract.** Plugins now emit `RawChunk` (no `chunk_id`). The indexer stamps the ID centrally via `stampChunkId()`. Future plugins cannot forget or miscalculate chunk IDs.
+
+### Migration
+
+Run `scrybe migrate --all` after upgrading to v0.31.0 to rehash all stored chunk IDs against the new scheme (in-place — no re-embedding for ~97% of chunks). Or run `scrybe doctor --repair` which handles both corruption and migration in one step. Until migrated, `scrybe status` shows `Migrate (chunk-id)` and search returns `error_type: "needs_migration"` with the exact command to run.
 
 ---
 

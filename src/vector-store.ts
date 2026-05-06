@@ -1,6 +1,6 @@
 import * as lancedb from "@lancedb/lancedb";
 import { Schema, Field, Utf8, Int32, Float32, FixedSizeList } from "apache-arrow";
-import { mkdirSync, statSync, readdirSync, existsSync, rmSync, readFileSync } from "fs";
+import { mkdirSync, statSync, readdirSync, existsSync, rmSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { config } from "./config.js";
 import type { CodeChunk, SearchResult, KnowledgeChunk, KnowledgeSearchResult } from "./types.js";
@@ -8,11 +8,49 @@ import type { HealthResult } from "./health-probe.js";
 
 const DB_PATH = join(config.dataDir, "lancedb");
 
-function makeSchema(dimensions: number): Schema {
+// ─── Per-table sidecar ────────────────────────────────────────────────────────
+
+/** Current chunk-ID scheme written to new tables. Scheme 2 = item_path + item_url + item_type + normalizeContent in hash. */
+export const CURRENT_CHUNK_ID_SCHEME = 2;
+export const CURRENT_CHUNK_ID_SCHEME_VERSION = "0.31.0";
+
+interface TableMeta {
+  chunk_id_scheme: number | string;
+  chunk_id_scheme_introduced_in?: string;
+}
+
+function tableMetaPath(tableName: string): string {
+  return join(DB_PATH, `${tableName}-meta.json`);
+}
+
+export function readTableMeta(tableName: string): TableMeta | null {
+  const p = tableMetaPath(tableName);
+  if (!existsSync(p)) return null;
+  try {
+    return JSON.parse(readFileSync(p, "utf8")) as TableMeta;
+  } catch {
+    return null;
+  }
+}
+
+export function writeTableMeta(tableName: string, meta: TableMeta): void {
+  mkdirSync(DB_PATH, { recursive: true });
+  writeFileSync(tableMetaPath(tableName), JSON.stringify(meta, null, 2) + "\n", "utf8");
+}
+
+export function needsMigration(tableName: string): boolean {
+  const meta = readTableMeta(tableName);
+  if (!meta) return true; // missing sidecar = old-scheme table
+  const scheme = meta.chunk_id_scheme;
+  if (typeof scheme === "string") return true; // in-progress marker
+  return scheme < CURRENT_CHUNK_ID_SCHEME;
+}
+
+export function makeSchema(dimensions: number): Schema {
   return new Schema([
     new Field("chunk_id", new Utf8(), false),
     new Field("project_id", new Utf8(), false),
-    new Field("file_path", new Utf8(), false),
+    new Field("item_path", new Utf8(), false),
     new Field("content", new Utf8(), false),
     new Field("start_line", new Int32(), false),
     new Field("end_line", new Int32(), false),
@@ -26,14 +64,14 @@ function makeSchema(dimensions: number): Schema {
   ]);
 }
 
-function makeKnowledgeSchema(dimensions: number): Schema {
+export function makeKnowledgeSchema(dimensions: number): Schema {
   return new Schema([
     new Field("chunk_id", new Utf8(), false),
     new Field("project_id", new Utf8(), false),
     new Field("source_id", new Utf8(), false),
-    new Field("source_path", new Utf8(), false),
-    new Field("source_url", new Utf8(), false),
-    new Field("source_type", new Utf8(), false),
+    new Field("item_path", new Utf8(), false),
+    new Field("item_url", new Utf8(), false),
+    new Field("item_type", new Utf8(), false),
     new Field("author", new Utf8(), false),
     new Field("timestamp", new Utf8(), false),
     new Field("content", new Utf8(), false),
@@ -140,6 +178,11 @@ async function getProjectTable(
         ? makeSchema(dimensions)
         : makeKnowledgeSchema(dimensions);
     table = await db.createEmptyTable(tableName, schema);
+    // Stamp scheme 2 on new tables — they were created with the new hash contract.
+    writeTableMeta(tableName, {
+      chunk_id_scheme: CURRENT_CHUNK_ID_SCHEME,
+      chunk_id_scheme_introduced_in: CURRENT_CHUNK_ID_SCHEME_VERSION,
+    });
   }
   _tableCache.set(tableName, table);
   return table;
@@ -174,7 +217,7 @@ export async function upsert(
   const rows = chunks.map((chunk, i) => ({
     chunk_id: chunk.chunk_id,
     project_id: chunk.project_id,
-    file_path: chunk.file_path,
+    item_path: chunk.item_path,
     content: chunk.content,
     start_line: chunk.start_line,
     end_line: chunk.end_line,
@@ -219,7 +262,7 @@ export async function search(
     score: 1 - (Number(row._distance ?? 0) ** 2) / 2,
     project_id: String(row.project_id),
     source_id: "",   // threaded in by search.ts fan-out
-    file_path: String(row.file_path),
+    item_path: String(row.item_path),
     start_line: Number(row.start_line),
     end_line: Number(row.end_line),
     language: String(row.language),
@@ -252,7 +295,7 @@ export async function ftsSearch(
     score: 0,
     project_id: String(row.project_id),
     source_id: "",   // threaded in by search.ts fan-out
-    file_path: String(row.file_path),
+    item_path: String(row.item_path),
     start_line: Number(row.start_line),
     end_line: Number(row.end_line),
     language: String(row.language),
@@ -306,7 +349,7 @@ export async function deleteFileChunks(
   if (!existing) return;
   await writeWithRetry(tableName, async (t) => {
     await t.delete(
-      `project_id = '${escapeSql(projectId)}' AND file_path = '${escapeSql(filePath)}'`
+      `project_id = '${escapeSql(projectId)}' AND item_path = '${escapeSql(filePath)}'`
     );
     await maybeCompact(t);
   });
@@ -327,9 +370,9 @@ export async function upsertKnowledge(
     chunk_id: chunk.chunk_id,
     project_id: chunk.project_id,
     source_id: chunk.source_id,
-    source_path: chunk.source_path,
-    source_url: chunk.source_url,
-    source_type: chunk.source_type,
+    item_path: chunk.item_path,
+    item_url: chunk.item_url,
+    item_type: chunk.item_type,
     author: chunk.author,
     timestamp: chunk.timestamp,
     content: chunk.content,
@@ -362,9 +405,9 @@ export async function searchKnowledge(
     score: 1 - (Number(row._distance ?? 0) ** 2) / 2,
     project_id: String(row.project_id),
     source_id: String(row.source_id ?? ""),
-    source_path: String(row.source_path),
-    source_url: String(row.source_url),
-    source_type: String(row.source_type),
+    item_path: String(row.item_path),
+    item_url: String(row.item_url),
+    item_type: String(row.item_type),
     author: String(row.author),
     timestamp: String(row.timestamp),
     content: String(row.content),
@@ -387,9 +430,9 @@ export async function ftsSearchKnowledge(
     score: 0,
     project_id: String(row.project_id),
     source_id: String(row.source_id ?? ""),
-    source_path: String(row.source_path),
-    source_url: String(row.source_url),
-    source_type: String(row.source_type),
+    item_path: String(row.item_path),
+    item_url: String(row.item_url),
+    item_type: String(row.item_type),
     author: String(row.author),
     timestamp: String(row.timestamp),
     content: String(row.content),
@@ -421,14 +464,14 @@ export async function deleteKnowledgeProject(projectId: string, tableName: strin
 
 export async function deleteKnowledgeSource(
   projectId: string,
-  sourcePath: string,
+  itemPath: string,
   tableName: string
 ): Promise<void> {
   const existing = await openExistingTable(tableName);
   if (!existing) return;
   await writeWithRetry(tableName, async (t) => {
     await t.delete(
-      `project_id = '${escapeSql(projectId)}' AND source_path = '${escapeSql(sourcePath)}'`
+      `project_id = '${escapeSql(projectId)}' AND item_path = '${escapeSql(itemPath)}'`
     );
     await maybeCompact(t);
   });
@@ -611,6 +654,11 @@ export async function dropTable(tableName: string): Promise<void> {
   }
   _tableCache.delete(tableName);
   _healthCache.delete(tableName);
+  // Clean up per-table sidecar
+  const metaPath = tableMetaPath(tableName);
+  if (existsSync(metaPath)) {
+    try { rmSync(metaPath); } catch { /* non-fatal */ }
+  }
 }
 
 /**

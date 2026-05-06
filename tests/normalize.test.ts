@@ -1,10 +1,12 @@
 /**
  * Plan 47 — normalizeContent() unit tests.
  * T1, T2, T6 from the plan's test coverage section.
+ * makeChunkId is private; T1/T2 use stampChunkId with a RawCodeChunk.
  */
 import { describe, it, expect } from "vitest";
 import { normalizeContent } from "../src/normalize.js";
-import { makeChunkId } from "../src/chunker.js";
+import { stampChunkId } from "../src/chunker.js";
+import type { RawCodeChunk } from "../src/types.js";
 
 describe("normalizeContent", () => {
   // T6 — preserve trailing whitespace and blank lines (regression guard)
@@ -36,9 +38,10 @@ describe("normalizeContent", () => {
   it("T1: file with CRLF EOL and same file with LF → identical chunk_id after normalize", () => {
     const crlfContent = "const x = 1;\r\nconst y = 2;\r\n";
     const lfContent   = "const x = 1;\nconst y = 2;\n";
+    const base: RawCodeChunk = { project_id: "proj", source_id: "src", item_path: "src/f.ts", item_url: "", item_type: "code", content: "", start_line: 1, end_line: 1, language: "typescript", symbol_name: "" };
 
-    const id1 = makeChunkId("proj", "src", "typescript", normalizeContent(crlfContent));
-    const id2 = makeChunkId("proj", "src", "typescript", normalizeContent(lfContent));
+    const id1 = stampChunkId({ ...base, content: normalizeContent(crlfContent) }).chunk_id;
+    const id2 = stampChunkId({ ...base, content: normalizeContent(lfContent) }).chunk_id;
     expect(id1).toBe(id2);
   });
 
@@ -46,9 +49,10 @@ describe("normalizeContent", () => {
   it("T2: file with UTF-8 BOM and same file without BOM → identical chunk_id after normalize", () => {
     const withBom    = "﻿const x = 1;\nconst y = 2;\n";
     const withoutBom = "const x = 1;\nconst y = 2;\n";
+    const base: RawCodeChunk = { project_id: "proj", source_id: "src", item_path: "src/f.ts", item_url: "", item_type: "code", content: "", start_line: 1, end_line: 1, language: "typescript", symbol_name: "" };
 
-    const id1 = makeChunkId("proj", "src", "typescript", normalizeContent(withBom));
-    const id2 = makeChunkId("proj", "src", "typescript", normalizeContent(withoutBom));
+    const id1 = stampChunkId({ ...base, content: normalizeContent(withBom) }).chunk_id;
+    const id2 = stampChunkId({ ...base, content: normalizeContent(withoutBom) }).chunk_id;
     expect(id1).toBe(id2);
   });
 });

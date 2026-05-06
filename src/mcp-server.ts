@@ -24,12 +24,12 @@ function classifyError(err: unknown): { error: string; error_type?: string; deta
   const status = (err as { status?: number })?.status;
   const message = err instanceof Error ? err.message : String(err);
 
-  // Structured table_corrupt error from search tools — preserve details for agent consumption
+  // Structured errors from search tools — preserve details for agent consumption
   const errType = (err as { error_type?: string })?.error_type;
-  if (errType === "table_corrupt") {
+  if (errType === "table_corrupt" || errType === "needs_migration") {
     return {
       error: message,
-      error_type: "table_corrupt",
+      error_type: errType,
       details: (err as { details?: unknown })?.details,
     };
   }

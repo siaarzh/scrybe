@@ -3,7 +3,7 @@ import { searchCode, searchKnowledge } from "../search.js";
 import { config } from "../config.js";
 import type { SearchResult, KnowledgeSearchResult } from "../types.js";
 import type { Tool } from "./types.js";
-import { getTableHealth, invalidateHealthCache as _invalidateHealthCache } from "../vector-store.js";
+import { getTableHealth, invalidateHealthCache as _invalidateHealthCache, needsMigration } from "../vector-store.js";
 import { getExpectedDimensions } from "../health-probe.js";
 import { getProject, resolveEmbeddingConfig, assignTableName } from "../registry.js";
 import { getPlugin } from "../plugins/index.js";
@@ -13,13 +13,13 @@ export { _invalidateHealthCache };
 
 /**
  * Check the health cache for all indexed sources in a project.
- * Returns a structured error object if any source is corrupt, or null if all healthy.
+ * Returns a structured error object if any source is corrupt or needs migration, or null if all healthy.
  * Only reads from cache — never triggers a fresh probe.
  */
 async function checkProjectHealth(
   projectId: string,
   sourceFilter?: string[]
-): Promise<{ error: string; error_type: "table_corrupt"; details: Record<string, unknown> } | null> {
+): Promise<{ error: string; error_type: "table_corrupt" | "needs_migration"; details: Record<string, unknown> } | null> {
   const project = getProject(projectId);
   if (!project) return null;
 
@@ -42,6 +42,23 @@ async function checkProjectHealth(
       health = await getTableHealth(tableName, { expectedDimensions: expDims });
     } catch {
       continue; // non-fatal
+    }
+
+    // Check for pending migration before corruption (migration is recoverable; not a hard block)
+    if (tableName && needsMigration(tableName)) {
+      const msg =
+        `Source '${projectId}/${source.source_id}' uses an old chunk-ID scheme. ` +
+        `Run: scrybe migrate --source-id ${source.source_id} --project-id ${projectId}`;
+      return {
+        error: msg,
+        error_type: "needs_migration",
+        details: {
+          project_id: projectId,
+          source_id: source.source_id,
+          table_name: tableName,
+          migrate_command: `scrybe migrate --source-id ${source.source_id} --project-id ${projectId}`,
+        },
+      };
     }
 
     if (health.state === "corrupt") {
@@ -132,12 +149,12 @@ export const searchCodeTool: Tool<
     const branchLine = r.branches.length > 0
       ? `\n  Branches: ${r.branches.join(", ")}`
       : "";
-    return `\n[${r.score.toFixed(3)}] ${r.file_path}:${r.start_line}-${r.end_line} (${r.language})${sym}${branchLine}\n${r.content.slice(0, 300)}`;
+    return `\n[${r.score.toFixed(3)}] ${r.item_path}:${r.start_line}-${r.end_line} (${r.language})${sym}${branchLine}\n${r.content.slice(0, 300)}`;
   }).join(""),
 };
 
 export const searchKnowledgeTool: Tool<
-  { project_id: string; query: string; top_k?: number; source_id?: string; source_types?: string[] },
+  { project_id: string; query: string; top_k?: number; source_id?: string; item_types?: string[] },
   KnowledgeSearchResult[]
 > = {
   spec: {
@@ -146,9 +163,9 @@ export const searchKnowledgeTool: Tool<
     description:
       "Semantically search GitLab issues, webpages, or other knowledge sources indexed in a project. " +
       "Use list_projects first to confirm the project has indexed knowledge sources. " +
-      "Optionally filter by source_id (specific source) or source_types. " +
-      "Known source_types: \"ticket\" = GitLab issue bodies; \"ticket_comment\" = individual issue comments (each with its own author, timestamp, and #note_NNN deep-link). " +
-      "Omit source_types to search both. Use [\"ticket_comment\"] to find architectural decisions made in comments, or [\"ticket\"] to find/deduplicate issue bodies.",
+      "Optionally filter by source_id (specific source) or item_types. " +
+      "Known item_types: \"ticket\" = GitLab issue bodies; \"ticket_comment\" = individual issue comments (each with its own author, timestamp, and #note_NNN deep-link). " +
+      "Omit item_types to search both. Use [\"ticket_comment\"] to find architectural decisions made in comments, or [\"ticket\"] to find/deduplicate issue bodies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -156,7 +173,7 @@ export const searchKnowledgeTool: Tool<
         query: { type: "string" },
         top_k: { type: "number", default: 10 },
         source_id: { type: "string", description: "Limit search to a specific source (optional)" },
-        source_types: { type: "array", items: { type: "string" }, description: 'Filter by source_type. Known values: "ticket" (issue bodies), "ticket_comment" (individual comments). Omit to return both.' },
+        item_types: { type: "array", items: { type: "string" }, description: 'Filter by item_type. Known values: "ticket" (issue bodies), "ticket_comment" (individual comments). Omit to return both.' },
       },
       required: ["project_id", "query"],
     },
@@ -165,11 +182,11 @@ export const searchKnowledgeTool: Tool<
       .argument("<query>", "Search query")
       .requiredOption("-P, --project-id <id>", "Project ID")
       .option("-S, --source-id <id>", "Limit to a specific source")
-      .option("--source-types <types>", "Comma-separated source_type filter (e.g. ticket,ticket_comment)")
+      .option("--item-types <types>", "Comma-separated item_type filter (e.g. ticket,ticket_comment)")
       .option("--top-k <n>", "Number of results", "10")
       .addHelpText("after", "\nExample:\n  scrybe search knowledge -P myrepo \"login issue\""),
   },
-  handler: async ({ project_id, query, top_k, source_id, source_types }) => {
+  handler: async ({ project_id, query, top_k, source_id, item_types }) => {
     const embErr = requireEmbedding();
     if (embErr) throw new Error(embErr);
     const healthErr = await checkProjectHealth(project_id, source_id ? [source_id] : undefined);
@@ -179,7 +196,7 @@ export const searchKnowledgeTool: Tool<
       err.details = healthErr.details;
       throw err;
     }
-    const results = await searchKnowledge(query, project_id, top_k ?? 10, source_id, source_types);
+    const results = await searchKnowledge(query, project_id, top_k ?? 10, source_id, item_types);
     return results;
   },
   cliOpts: ([query, opts]) => ({
@@ -187,10 +204,10 @@ export const searchKnowledgeTool: Tool<
     query: String(query),
     top_k: parseInt(String(opts.topK ?? "10"), 10),
     source_id: opts.sourceId ? String(opts.sourceId) : undefined,
-    source_types: opts.sourceTypes ? String(opts.sourceTypes).split(",").map((s: string) => s.trim()) : undefined,
+    item_types: opts.itemTypes ? String(opts.itemTypes).split(",").map((s: string) => s.trim()) : undefined,
   }),
   formatCli: (results) => results.map((r) => {
     const authorLine = r.author ? `\n  Author: ${r.author}  ${r.timestamp}` : "";
-    return `\n[${r.score.toFixed(3)}] ${r.source_url || r.source_path} (${r.source_type})${authorLine}\n${r.content.slice(0, 300)}`;
+    return `\n[${r.score.toFixed(3)}] ${r.item_url || r.item_path} (${r.item_type})${authorLine}\n${r.content.slice(0, 300)}`;
   }).join(""),
 };

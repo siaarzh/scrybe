@@ -143,9 +143,10 @@ Semantic search over indexed code sources in a project.
 | `top_k` | number | | Number of results (default: 10) |
 | `branch` | string | | Branch to search (default: current HEAD of the source repo). Use `list_branches` to see indexed branches. |
 
-**Returns:** array of `{ chunk_id, score, project_id, source_id, file_path, start_line, end_line, language, symbol_name, content, branches: string[] }`
+**Returns:** array of `{ chunk_id, score, project_id, source_id, item_path, start_line, end_line, language, symbol_name, content, branches: string[] }`
 
 - `source_id` — the source the chunk came from (e.g. `"primary"`).
+- `item_path` — relative file path within the source root, forward slashes (e.g. `"src/auth/login.ts"`).
 - `branches` — all branch names the chunk is tagged on for this (project, source), sorted master/main first then alphabetical. Returns `[]` in compat mode (`SCRYBE_SKIP_MIGRATION=1`).
 
 ---
@@ -160,11 +161,17 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 | `query` | string | ✓ | Natural language search query |
 | `top_k` | number | | Number of results (default: 10) |
 | `source_id` | string | | Limit to a specific source |
-| `source_types` | string[] | | Filter by source type. Known values: `"ticket"` (GitLab issue body), `"ticket_comment"` (individual issue comment). Example: `["ticket"]` returns only issue bodies; `["ticket_comment"]` returns only comments; omit to return both. |
+| `item_types` | string[] | | Filter by item type. Known values: `"ticket"` (GitLab issue body), `"ticket_comment"` (individual issue comment). Example: `["ticket"]` returns only issue bodies; `["ticket_comment"]` returns only comments; omit to return both. |
 
-**Returns:** array of `{ project_id, source_id, source_path, source_url, source_type, author, timestamp, content, score }`
+**Returns:** array of `{ project_id, source_id, item_path, item_url, item_type, author, timestamp, content, score }`
 
-For `source_type: "ticket_comment"`, `author` is the commenter's username, `timestamp` is the comment's `created_at`, and `source_url` includes a `#note_{id}` anchor linking to the specific comment.
+- `item_path` — provider slug identifying the chunk, e.g. `"issues/123"` (issue body) or `"issues/123#note_456"` (comment).
+- `item_url` — deep link back to the original in the provider (ref-less).
+- `item_type` — `"ticket"` (issue body) or `"ticket_comment"` (individual comment).
+
+For `item_type: "ticket_comment"`, `author` is the commenter's username, `timestamp` is the comment's `created_at`, and `item_url` includes a `#note_{id}` anchor linking to the specific comment.
+
+**Structured errors:** When a source needs migration, search returns `{ error_type: "needs_migration", error: "...", details: { migrate_command: "scrybe migrate ..." } }` instead of results. Run the indicated command to upgrade the source.
 
 ---
 

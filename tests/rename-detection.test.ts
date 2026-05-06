@@ -1,7 +1,7 @@
 /**
- * Rename detection — renaming a file must not trigger re-embedding.
- * Content-addressed chunk IDs are identical for same-content files regardless of path.
- * The `preservedFromRemovals` fix in indexer.ts makes this work on a single branch.
+ * Rename detection — renaming a file triggers re-embedding because chunk IDs
+ * include item_path (the file path) in the hash. Same-content, different-path
+ * files get different chunk IDs (this is the Plan 43 collision fix).
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { cloneFixture, type FixtureHandle } from "./helpers/fixtures.js";
@@ -28,7 +28,7 @@ describe("rename detection", () => {
     fixture = null;
   });
 
-  it("renaming a file does not trigger re-embedding on incremental reindex", async () => {
+  it("renaming a file triggers re-embedding (item_path is part of chunk_id)", async () => {
     fixture = await cloneFixture("sample-repo");
     project = await createTempProject({ rootPath: fixture.path });
 
@@ -41,13 +41,13 @@ describe("rename detection", () => {
     // Rename src/alpha.ts → src/renamed.ts (same content, different path)
     renameFile(fixture, "src/alpha.ts", "src/renamed.ts");
 
-    // Incremental reindex — should detect rename via content-addressed IDs
-    // and skip embedding (chunks already in LanceDB)
+    // Incremental reindex — renamed file gets new chunk IDs (item_path changed)
+    // so its chunks are not found in LanceDB → re-embedding is expected.
     await runIndex(project.projectId, project.sourceId, "incremental");
 
     const requestsAfter = await getTotalRequests();
 
-    // Zero new embedding requests — all chunks reused from LanceDB
-    expect(requestsAfter).toBe(requestsBefore);
+    // At least one embedding request was made for the renamed file's chunks
+    expect(requestsAfter).toBeGreaterThan(requestsBefore);
   });
 });

@@ -25,7 +25,7 @@ function mergeRrfKnowledge(lists: KnowledgeSearchResult[][], k: number): Knowled
   for (const list of lists) {
     for (let rank = 0; rank < list.length; rank++) {
       const r = list[rank];
-      const key = `${r.project_id}:${r.source_id}:${r.source_path}:${r.content.slice(0, 40)}`;
+      const key = `${r.project_id}:${r.source_id}:${r.item_path}:${r.content.slice(0, 40)}`;
       scores.set(key, (scores.get(key) ?? 0) + 1 / (k + rank + 1));
       if (!byKey.has(key)) byKey.set(key, r);
     }
@@ -183,7 +183,7 @@ export async function searchKnowledge(
   projectId: string,
   topK: number,
   sourceId?: string,
-  sourceTypes?: string[]
+  itemTypes?: string[]
 ): Promise<KnowledgeSearchResult[]> {
   const project = getProject(projectId);
   if (!project) throw new Error(`Project '${projectId}' not found`);
@@ -229,9 +229,9 @@ export async function searchKnowledge(
             : mergeRrfKnowledge([vectorResults, ftsResults], config.rrfK);
         }
 
-        // Filter by source_types if specified
-        if (sourceTypes && sourceTypes.length > 0) {
-          results = results.filter((r) => sourceTypes.includes(r.source_type));
+        // Filter by item_types if specified
+        if (itemTypes && itemTypes.length > 0) {
+          results = results.filter((r) => itemTypes.includes(r.item_type));
         }
 
         return results;

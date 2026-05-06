@@ -105,7 +105,7 @@ export async function indexSource(
   return withBranchSession(
     { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode },
     async (session, branch) => {
-      const _diagJobStart = Date.now();
+      const jobStart = Date.now();
 
       // For code sources: detect non-HEAD branch indexing (content from git objects).
       const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
@@ -305,8 +305,8 @@ export async function indexSource(
       let filesReindexed = 0;
       let bytesEmbedded = 0;
       const filesSeenSoFar = new Set<string>();
-      let _diagChunksPersisted = 0;
-      let _diagCumulativeEmbedded = 0;
+      let chunksPersisted = 0;
+      let cumulativeEmbedded = 0;
       const batchDelayMs = config.embedBatchDelayMs;
 
       const stateKey = `${projectId}:${sourceId}:${embConfig.base_url ?? "local"}:${embConfig.model}`;
@@ -352,23 +352,23 @@ export async function indexSource(
         }
 
         if (allChunksToWrite.length > 0) {
-          const _diagRowsBefore = await countTableRows(tableName).catch(() => 0);
+          const rowsBefore = await countTableRows(tableName).catch(() => 0);
           if (isCode) {
             await upsert(allChunksToWrite as CodeChunk[], allVectorsToWrite, tableName, embConfig.dimensions);
           } else {
             await upsertKnowledge(allChunksToWrite as KnowledgeChunk[], allVectorsToWrite, tableName, embConfig.dimensions);
           }
-          const _diagRowsAfter = await countTableRows(tableName).catch(() => 0);
-          const _diagActuallyAdded = Math.max(0, _diagRowsAfter - _diagRowsBefore);
-          _diagChunksPersisted += _diagActuallyAdded;
+          const rowsAfter = await countTableRows(tableName).catch(() => 0);
+          const actuallyAdded = Math.max(0, rowsAfter - rowsBefore);
+          chunksPersisted += actuallyAdded;
           diagEmit({
             event: "indexer.write.completed",
             projectId,
             sourceId,
             branch,
             chunks_in_batch: allChunksToWrite.length,
-            chunks_actually_added: _diagActuallyAdded,
-            cumulative_chunks_persisted: _diagChunksPersisted,
+            chunks_actually_added: actuallyAdded,
+            cumulative_chunks_persisted: chunksPersisted,
           });
           filesReindexed += keyBatches.filter((kb) => kb.chunks.some((c) => vectorMap.has(c.chunk_id))).length;
         }
@@ -385,7 +385,7 @@ export async function indexSource(
           if (isCode) {
             const tags: BranchTag[] = chunks.map((c) => ({
               chunkId: c.chunk_id,
-              filePath: (c as CodeChunk).file_path,
+              filePath: (c as CodeChunk).item_path,
               startLine: (c as CodeChunk).start_line,
               endLine: (c as CodeChunk).end_line,
             }));
@@ -403,7 +403,7 @@ export async function indexSource(
         for (const { key } of keyBatches) filesSeenSoFar.add(key);
         const batchBytes = toEmbed.reduce((sum, c) => sum + Buffer.byteLength(c.content, "utf8"), 0);
         bytesEmbedded += batchBytes;
-        const _diagBatchMs = Date.now() - batchStart;
+        const batchMs = Date.now() - batchStart;
         onProgress?.({
           phase: "embed_batch",
           projectId,
@@ -412,18 +412,18 @@ export async function indexSource(
           bytesEmbedded,
           filesEmbedded: filesSeenSoFar.size,
           batchBytes,
-          batchDurationMs: _diagBatchMs,
+          batchDurationMs: batchMs,
         });
 
-        _diagCumulativeEmbedded += allChunks.length;
+        cumulativeEmbedded += allChunks.length;
         diagEmit({
           event: "indexer.embed.batch",
           projectId,
           sourceId,
           branch,
           batch_size: allChunks.length,
-          batch_ms: _diagBatchMs,
-          cumulative_chunks_embedded: _diagCumulativeEmbedded,
+          batch_ms: batchMs,
+          cumulative_chunks_embedded: cumulativeEmbedded,
         });
 
         keyBatches.length = 0;
@@ -439,8 +439,8 @@ export async function indexSource(
       for await (const chunk of chunkIter) {
         checkAbort(signal);
         const key = isCode
-          ? (chunk as CodeChunk).file_path
-          : (chunk as KnowledgeChunk).source_path;
+          ? (chunk as CodeChunk).item_path
+          : (chunk as KnowledgeChunk).item_path;
 
         if (key !== currentKey) {
           keyBatches.push({ key, chunks: [] });
@@ -503,7 +503,7 @@ export async function indexSource(
         project_id: projectId,
         source_id: sourceId,
         chunks_prepared: chunksIndexed,
-        chunks_persisted: _diagChunksPersisted,
+        chunks_persisted: chunksPersisted,
         files_scanned: filesScanned,
         files_reindexed: filesReindexed,
         files_removed: toRemove.size,
@@ -530,8 +530,8 @@ export async function indexSource(
         files_scanned: filesScanned,
         files_reindexed: filesReindexed,
         chunks_prepared: chunksIndexed,
-        chunks_persisted: _diagChunksPersisted,
-        total_ms: Date.now() - _diagJobStart,
+        chunks_persisted: chunksPersisted,
+        total_ms: Date.now() - jobStart,
       });
 
       return result;
