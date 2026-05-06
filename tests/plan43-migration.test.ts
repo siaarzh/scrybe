@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { DatabaseSync } from "node:sqlite";
 import * as lancedb from "@lancedb/lancedb";
 import { Schema, Field, Utf8, Int32, Float32, FixedSizeList } from "apache-arrow";
 import { normalizeContent } from "../src/normalize.js";
@@ -18,6 +19,7 @@ import {
   migrateTable,
   makeOldChunkIdV1,
   makeNewChunkIdV2,
+  repairBranchTagsForMigratedTable,
 } from "../src/migrations/chunk-id-rehash.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -364,5 +366,145 @@ describe("C5d — validation_failed marker prevents retry from blowing past vali
     const colNames = (await table.schema()).fields.map((f) => f.name);
     expect(colNames).toContain("source_path");
     expect(colNames).not.toContain("item_path");
+  });
+});
+
+// ─── C5e — branch_tags chunk_ids are rewritten during migration ──────────────
+
+describe("C5e — branch_tags rewrite", () => {
+  function initBranchTagsDb(path: string): DatabaseSync {
+    const db = new DatabaseSync(path);
+    db.exec("PRAGMA journal_mode=WAL");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS branch_tags (
+        project_id  TEXT NOT NULL,
+        source_id   TEXT NOT NULL,
+        branch      TEXT NOT NULL,
+        file_path   TEXT NOT NULL,
+        chunk_id    TEXT NOT NULL,
+        start_line  INTEGER NOT NULL,
+        end_line    INTEGER NOT NULL,
+        PRIMARY KEY (project_id, source_id, branch, file_path, chunk_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_branch_tags_chunk ON branch_tags(chunk_id);
+    `);
+    return db;
+  }
+
+  it("migrateTable updates branch_tags from old chunk_ids to new", async () => {
+    const tableName = "c5e-knowledge";
+    const rows = makeKnowledgeRows(3);
+
+    // Build the lance table with old schema
+    const db = await lancedb.connect(dbPath);
+    const schema = makeOldKnowledgeSchema(FAKE_DIMS);
+    await db.createTable(tableName, rows as any, { schema });
+
+    // Pre-populate branch_tags with the OLD chunk_ids on the "main" branch
+    const branchTagsDbPath = join(dataDir, "branch-tags.db");
+    const btDb = initBranchTagsDb(branchTagsDbPath);
+    const insert = btDb.prepare(
+      "INSERT INTO branch_tags (project_id, source_id, branch, file_path, chunk_id, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    );
+    for (const row of rows) {
+      insert.run(PROJECT_ID, SOURCE_ID, "main", String(row["source_path"]), String(row["chunk_id"]), 0, 1);
+    }
+    btDb.close();
+
+    // Run migration
+    const result = await migrateTable(tableName, PROJECT_ID, SOURCE_ID, {
+      validationSampleSize: 10,
+      _dbPath: dbPath,
+      _branchTagsDbPath: branchTagsDbPath,
+    });
+    expect(result.status).toBe("ok");
+
+    // Read migrated table → collect new chunk_ids
+    const db2 = await lancedb.connect(dbPath);
+    const table = await db2.openTable(tableName);
+    const migratedRows = await table.query().limit(100).toArray() as unknown as Array<Record<string, unknown>>;
+    const newIds = new Set(migratedRows.map((r) => String(r["chunk_id"])));
+    const oldIds = new Set(rows.map((r) => String(r["chunk_id"])));
+
+    // Open branch_tags and verify it now contains the new ids, not the old
+    const btDb2 = new DatabaseSync(branchTagsDbPath);
+    const tagged = btDb2.prepare(
+      "SELECT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?"
+    ).all(PROJECT_ID, SOURCE_ID) as Array<{ chunk_id: string }>;
+    btDb2.close();
+
+    const taggedIds = new Set(tagged.map((r) => r.chunk_id));
+    expect(taggedIds.size).toBe(3);
+    for (const id of taggedIds) {
+      expect(newIds.has(id)).toBe(true);
+      expect(oldIds.has(id)).toBe(false);
+    }
+  });
+
+  it("repairBranchTagsForMigratedTable fixes already-migrated table whose branch_tags still hold old ids", async () => {
+    const tableName = "c5e-recovery";
+    const rows = makeKnowledgeRows(3);
+
+    // Simulate: migration already happened (table is on new schema).
+    const db = await lancedb.connect(dbPath);
+    // Skip the old schema; build directly with new column names but use OLD-derived chunk_ids
+    // first, then "migrate" via the production code so the table ends up in new shape.
+    const oldSchema = makeOldKnowledgeSchema(FAKE_DIMS);
+    await db.createTable(tableName, rows as any, { schema: oldSchema });
+
+    const branchTagsDbPath = join(dataDir, "branch-tags.db");
+    const btDb = initBranchTagsDb(branchTagsDbPath);
+    const insert = btDb.prepare(
+      "INSERT INTO branch_tags (project_id, source_id, branch, file_path, chunk_id, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    );
+    for (const row of rows) {
+      insert.run(PROJECT_ID, SOURCE_ID, "main", String(row["source_path"]), String(row["chunk_id"]), 0, 1);
+    }
+    btDb.close();
+
+    // Migrate the TABLE but skip the branch_tags step — simulate a buggy older migration.
+    // We do this by passing a non-existent branch-tags path so rewriteBranchTags is a no-op.
+    const fakeBtPath = join(dataDir, "nonexistent-branch-tags.db");
+    const migrateResult = await migrateTable(tableName, PROJECT_ID, SOURCE_ID, {
+      validationSampleSize: 10,
+      _dbPath: dbPath,
+      _branchTagsDbPath: fakeBtPath,
+    });
+    expect(migrateResult.status).toBe("ok");
+
+    // At this point: table has new ids, real branch_tags still has old ids.
+    const btDbCheck = new DatabaseSync(branchTagsDbPath);
+    const beforeRepair = btDbCheck.prepare(
+      "SELECT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?"
+    ).all(PROJECT_ID, SOURCE_ID) as Array<{ chunk_id: string }>;
+    btDbCheck.close();
+    const oldIds = new Set(rows.map((r) => String(r["chunk_id"])));
+    expect(beforeRepair.length).toBe(3);
+    for (const r of beforeRepair) expect(oldIds.has(r.chunk_id)).toBe(true);
+
+    // Run the standalone repair
+    const repaired = await repairBranchTagsForMigratedTable(tableName, PROJECT_ID, SOURCE_ID, {
+      _dbPath: dbPath,
+      _branchTagsDbPath: branchTagsDbPath,
+    });
+    expect(repaired.branch_tags_updated).toBe(3);
+
+    // Verify: branch_tags now has the new ids
+    const db2 = await lancedb.connect(dbPath);
+    const table = await db2.openTable(tableName);
+    const migratedRows = await table.query().limit(100).toArray() as unknown as Array<Record<string, unknown>>;
+    const newIds = new Set(migratedRows.map((r) => String(r["chunk_id"])));
+
+    const btDbAfter = new DatabaseSync(branchTagsDbPath);
+    const afterRepair = btDbAfter.prepare(
+      "SELECT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?"
+    ).all(PROJECT_ID, SOURCE_ID) as Array<{ chunk_id: string }>;
+    btDbAfter.close();
+
+    expect(afterRepair.length).toBe(3);
+    for (const r of afterRepair) {
+      expect(newIds.has(r.chunk_id)).toBe(true);
+      expect(oldIds.has(r.chunk_id)).toBe(false);
+    }
   });
 });

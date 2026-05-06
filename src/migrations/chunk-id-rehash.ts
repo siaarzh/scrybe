@@ -19,6 +19,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import * as lancedb from "@lancedb/lancedb";
 import { normalizeContent } from "../normalize.js";
 import { config } from "../config.js";
@@ -197,6 +198,59 @@ async function validatePreMigration(
   return { ok: true, sampled };
 }
 
+// ─── Branch-tags rewriter ─────────────────────────────────────────────────────
+
+/**
+ * After a chunk-ID rehash, branch_tags rows still reference the OLD chunk_ids.
+ * Search applies a branch-id filter — without this rewrite, every search returns
+ * empty for migrated tables (vectors are intact but the filter set is empty).
+ *
+ * Updates branch_tags.chunk_id from old → new for every (project_id, source_id)
+ * row whose chunk_id changed. Runs in a single transaction.
+ *
+ * Note on collisions: pre-migration, two distinct chunks could share an oldId
+ * (the bug being fixed). The branch_tags table stored only one row per
+ * (project, source, branch, file_path, chunk_id) — so collided chunks already
+ * lost branch info before the migration. This rewrite preserves whatever
+ * survived; the casualty chunks get re-tagged on the next incremental scan.
+ */
+function rewriteBranchTags(
+  projectId: string,
+  sourceId: string,
+  idMap: Map<string, string>,
+  branchTagsDbPath: string,
+): { updated: number } {
+  if (idMap.size === 0) return { updated: 0 };
+  if (!existsSync(branchTagsDbPath)) return { updated: 0 };
+
+  const db = new DatabaseSync(branchTagsDbPath);
+  try {
+    db.exec("PRAGMA journal_mode=WAL");
+    db.exec("PRAGMA busy_timeout=5000");
+
+    const stmt = db.prepare(
+      "UPDATE branch_tags SET chunk_id = ? WHERE project_id = ? AND source_id = ? AND chunk_id = ?"
+    );
+
+    let updated = 0;
+    db.exec("BEGIN");
+    try {
+      for (const [oldId, newId] of idMap) {
+        if (oldId === newId) continue;
+        const r = stmt.run(newId, projectId, sourceId, oldId);
+        updated += Number(r.changes ?? 0);
+      }
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+    return { updated };
+  } finally {
+    db.close();
+  }
+}
+
 // ─── Main migration ───────────────────────────────────────────────────────────
 
 export async function migrateTable(
@@ -208,6 +262,8 @@ export async function migrateTable(
     onProgress?: (done: number, total: number) => void;
     /** @internal — override the LanceDB directory path (used in tests only). */
     _dbPath?: string;
+    /** @internal — override the branch-tags.db path (used in tests only). */
+    _branchTagsDbPath?: string;
   } = {}
 ): Promise<MigrationResult> {
   const sampleSize = opts.validationSampleSize ?? DEFAULT_VALIDATION_SAMPLE;
@@ -338,7 +394,11 @@ export async function migrateTable(
   // Build new-schema rows: rename old column names to new ones and recompute chunk_id.
   // Old knowledge columns: source_path → item_path, source_url → item_url, source_type → item_type.
   // Old code columns: file_path → item_path; item_url = "", item_type = "code".
+  // idMap captures oldId → newId so branch_tags can be rewritten in lock-step (vectors
+  // are intact but search filters by chunk_id-on-branch — without this rewrite, every
+  // search returns empty for migrated sources).
   const newRows: Array<Record<string, unknown>> = [];
+  const idMap = new Map<string, string>();
   let rowsRehashed = 0;
 
   for (let i = 0; i < allRows.length; i++) {
@@ -361,7 +421,11 @@ export async function migrateTable(
       itemType = "code";
     }
 
+    const oldChunkId = String(row["chunk_id"] ?? "");
     const newChunkId = makeNewChunkIdV2(projectId, sourceId, itemPath, itemUrl, itemType, normalizedContent);
+    if (oldChunkId && oldChunkId !== newChunkId) {
+      idMap.set(oldChunkId, newChunkId);
+    }
 
     // Build the new-schema row. Preserve fields common to both schemas.
     // Materialise the vector to a concrete Float32Array — Apache Arrow Vector objects
@@ -435,13 +499,92 @@ export async function migrateTable(
     };
   }
 
-  // Step 7: Stamp scheme 2
+  // Step 7: Rewrite branch_tags from old chunk_ids to new ones. Without this, search
+  // (which filters hits by branch via chunk_id) returns empty for every migrated source.
+  const branchTagsDbPath = opts._branchTagsDbPath ?? join(config.dataDir, "branch-tags.db");
+  let branchTagsUpdated = 0;
+  try {
+    branchTagsUpdated = rewriteBranchTags(projectId, sourceId, idMap, branchTagsDbPath).updated;
+  } catch (err) {
+    // Don't roll back the table rewrite — branch_tags can be repaired separately.
+    // Surface a clear failure so the caller can flag the source for `scrybe doctor --repair`.
+    daemonLog({
+      event: "migration.branch_tags_failed",
+      tableName, projectId, sourceId,
+      reason: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      status: "failed",
+      rows_rehashed: rowsRehashed,
+      reason: `Table rehash succeeded but branch_tags rewrite failed: ${err instanceof Error ? err.message : String(err)}. Run \`scrybe reindex --full\` to retag.`,
+    };
+  }
+
+  // Step 8: Stamp scheme 2
   writeTableMetaAt(dbPath, tableName, {
     chunk_id_scheme: CURRENT_CHUNK_ID_SCHEME,
     chunk_id_scheme_introduced_in: CURRENT_CHUNK_ID_SCHEME_VERSION,
   });
 
-  daemonLog({ event: "migration.completed", tableName, projectId, sourceId, rows_rehashed: rowsRehashed });
+  daemonLog({
+    event: "migration.completed",
+    tableName, projectId, sourceId,
+    rows_rehashed: rowsRehashed,
+    branch_tags_updated: branchTagsUpdated,
+  });
 
   return { status: "ok", rows_rehashed: rowsRehashed };
+}
+
+// ─── Standalone branch-tags repair ────────────────────────────────────────────
+//
+// For tables that were already rehashed by an earlier (broken) migration run that
+// did NOT update branch_tags. Rebuilds the (oldId → newId) map by re-reading each
+// row's stored content and recomputing both hashes — works because stored content
+// is unchanged across migration (the rehash only updates chunk_id cells).
+
+/**
+ * Repair branch_tags for a single already-migrated table.
+ * Returns the count of branch_tags rows updated.
+ *
+ * @internal — exposed for `scrybe doctor --repair` / one-shot recovery scripts.
+ */
+export async function repairBranchTagsForMigratedTable(
+  tableName: string,
+  projectId: string,
+  sourceId: string,
+  opts: { _dbPath?: string; _branchTagsDbPath?: string } = {},
+): Promise<{ rows_scanned: number; branch_tags_updated: number }> {
+  const dbPath = opts._dbPath ?? defaultDbPath();
+  const branchTagsDbPath = opts._branchTagsDbPath ?? join(config.dataDir, "branch-tags.db");
+
+  const db = await lancedb.connect(dbPath);
+  const names = await db.tableNames();
+  if (!names.includes(tableName)) {
+    return { rows_scanned: 0, branch_tags_updated: 0 };
+  }
+  const table = await db.openTable(tableName);
+  const profile = await detectProfile(table);
+
+  const allRows = await table.query().limit(Number.MAX_SAFE_INTEGER).toArray() as unknown as Array<Record<string, unknown>>;
+  const idMap = new Map<string, string>();
+
+  for (const row of allRows) {
+    const content = String(row["content"] ?? "");
+    const language = profile === "code" ? String(row["language"] ?? "") : "";
+    const oldId = makeOldChunkIdV1(projectId, sourceId, language, content);
+    const newId = String(row["chunk_id"] ?? "");
+    if (oldId && newId && oldId !== newId) {
+      idMap.set(oldId, newId);
+    }
+  }
+
+  const result = rewriteBranchTags(projectId, sourceId, idMap, branchTagsDbPath);
+  daemonLog({
+    event: "migration.branch_tags_repaired",
+    tableName, projectId, sourceId,
+    rows_scanned: allRows.length,
+    branch_tags_updated: result.updated,
+  });
+  return { rows_scanned: allRows.length, branch_tags_updated: result.updated };
 }
