@@ -76,7 +76,7 @@ export function ensureMultiBranchFixture(name: string): void {
 export function cloneLocal(sourcePath: string): FixtureHandle {
   const cloneDir = mkdtempSync(join(tmpdir(), "scrybe-local-"));
   execSync(
-    `git clone --local --no-hardlinks "${sourcePath}" "${cloneDir}"`,
+    `git -c core.autocrlf=false clone --local --no-hardlinks "${sourcePath}" "${cloneDir}"`,
     { stdio: "ignore" }
   );
   execSync("git config core.autocrlf false", { cwd: cloneDir, stdio: "ignore" });
@@ -115,7 +115,7 @@ export async function cloneFixture(name: string): Promise<FixtureHandle> {
 
   const cloneDir = mkdtempSync(join(tmpdir(), `scrybe-fixture-${name}-`));
   execSync(
-    `git clone --local --no-hardlinks "${fixturePath}" "${cloneDir}"`,
+    `git -c core.autocrlf=false clone --local --no-hardlinks "${fixturePath}" "${cloneDir}"`,
     { stdio: "ignore" }
   );
   execSync("git config core.autocrlf false", { cwd: cloneDir, stdio: "ignore" });
