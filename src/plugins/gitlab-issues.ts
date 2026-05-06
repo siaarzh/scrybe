@@ -1,4 +1,5 @@
 import { chunkLines, makeChunkId } from "../chunker.js";
+import { normalizeContent } from "../normalize.js";
 import type { KnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { AnyChunk, SourcePlugin } from "./base.js";
 
@@ -132,7 +133,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
         };
 
         // Issue body chunk(s)
-        const issueBody = `# ${issue.title}\n\n${issue.description?.trim() || ""}`.trim();
+        const issueBody = normalizeContent(`# ${issue.title}\n\n${issue.description?.trim() || ""}`.trim());
         yield* emit(
           issueBody,
           issue.author.username,
@@ -144,7 +145,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
         // One chunk family per non-system, non-empty comment
         for (const note of notes) {
           if (note.system) continue;
-          const body = note.body.trim();
+          const body = normalizeContent(note.body.trim());
           if (!body) continue;
           yield* emit(
             body,

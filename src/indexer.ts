@@ -16,6 +16,7 @@ import {
   getTableHealth,
   invalidateHealthCache,
   dropTable,
+  countTableRows,
 } from "./vector-store.js";
 import { listManifestsSorted, isManifestClean, getExpectedDimensions } from "./health-probe.js";
 import { createHash } from "node:crypto";
@@ -27,10 +28,10 @@ import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.
 import { withBranchSession, resolveBranchForPath, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage } from "./chunker.js";
+import { diagEmit } from "./daemon/events.js";
 
 // ─── Indexer debug mode ───────────────────────────────────────────────────────
-// Set SCRYBE_DEBUG_INDEXER=1 to emit structured JSONL to daemon-log.jsonl.
-// Useful for diagnosing "deleted file still shows up in search" reports.
+// Set SCRYBE_DEBUG_INDEXER=1 to emit high-volume per-batch events to daemon-log.jsonl.
 
 function debugEnabled(): boolean {
   return process.env["SCRYBE_DEBUG_INDEXER"] === "1";
@@ -104,6 +105,8 @@ export async function indexSource(
   return withBranchSession(
     { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode },
     async (session, branch) => {
+      const _diagJobStart = Date.now();
+
       // For code sources: detect non-HEAD branch indexing (content from git objects).
       const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
 
@@ -239,6 +242,17 @@ export async function indexSource(
         toReindexCount: toReindex.size,
       });
 
+      diagEmit({
+        event: "indexer.scan.completed",
+        projectId,
+        sourceId,
+        branch,
+        mode,
+        files_total: Object.keys(merged).length,
+        files_to_reindex: toReindex.size,
+        files_to_remove: toRemove.size,
+      });
+
       if (mode === "full") {
         if (isCode) {
           await deleteProject(projectId, tableName);
@@ -291,6 +305,8 @@ export async function indexSource(
       let filesReindexed = 0;
       let bytesEmbedded = 0;
       const filesSeenSoFar = new Set<string>();
+      let _diagChunksPersisted = 0;
+      let _diagCumulativeEmbedded = 0;
       const batchDelayMs = config.embedBatchDelayMs;
 
       const stateKey = `${projectId}:${sourceId}:${embConfig.base_url ?? "local"}:${embConfig.model}`;
@@ -336,11 +352,24 @@ export async function indexSource(
         }
 
         if (allChunksToWrite.length > 0) {
+          const _diagRowsBefore = await countTableRows(tableName).catch(() => 0);
           if (isCode) {
             await upsert(allChunksToWrite as CodeChunk[], allVectorsToWrite, tableName, embConfig.dimensions);
           } else {
             await upsertKnowledge(allChunksToWrite as KnowledgeChunk[], allVectorsToWrite, tableName, embConfig.dimensions);
           }
+          const _diagRowsAfter = await countTableRows(tableName).catch(() => 0);
+          const _diagActuallyAdded = Math.max(0, _diagRowsAfter - _diagRowsBefore);
+          _diagChunksPersisted += _diagActuallyAdded;
+          diagEmit({
+            event: "indexer.write.completed",
+            projectId,
+            sourceId,
+            branch,
+            chunks_in_batch: allChunksToWrite.length,
+            chunks_actually_added: _diagActuallyAdded,
+            cumulative_chunks_persisted: _diagChunksPersisted,
+          });
           filesReindexed += keyBatches.filter((kb) => kb.chunks.some((c) => vectorMap.has(c.chunk_id))).length;
         }
 
@@ -374,6 +403,7 @@ export async function indexSource(
         for (const { key } of keyBatches) filesSeenSoFar.add(key);
         const batchBytes = toEmbed.reduce((sum, c) => sum + Buffer.byteLength(c.content, "utf8"), 0);
         bytesEmbedded += batchBytes;
+        const _diagBatchMs = Date.now() - batchStart;
         onProgress?.({
           phase: "embed_batch",
           projectId,
@@ -382,7 +412,18 @@ export async function indexSource(
           bytesEmbedded,
           filesEmbedded: filesSeenSoFar.size,
           batchBytes,
-          batchDurationMs: Date.now() - batchStart,
+          batchDurationMs: _diagBatchMs,
+        });
+
+        _diagCumulativeEmbedded += allChunks.length;
+        diagEmit({
+          event: "indexer.embed.batch",
+          projectId,
+          sourceId,
+          branch,
+          batch_size: allChunks.length,
+          batch_ms: _diagBatchMs,
+          cumulative_chunks_embedded: _diagCumulativeEmbedded,
         });
 
         keyBatches.length = 0;
@@ -461,7 +502,8 @@ export async function indexSource(
         status: "ok" as const,
         project_id: projectId,
         source_id: sourceId,
-        chunks_indexed: chunksIndexed,
+        chunks_prepared: chunksIndexed,
+        chunks_persisted: _diagChunksPersisted,
         files_scanned: filesScanned,
         files_reindexed: filesReindexed,
         files_removed: toRemove.size,
@@ -477,6 +519,19 @@ export async function indexSource(
         filesScanned,
         filesReindexed,
         filesRemoved: toRemove.size,
+      });
+
+      diagEmit({
+        event: "indexer.job.summary",
+        projectId,
+        sourceId,
+        branch,
+        mode,
+        files_scanned: filesScanned,
+        files_reindexed: filesReindexed,
+        chunks_prepared: chunksIndexed,
+        chunks_persisted: _diagChunksPersisted,
+        total_ms: Date.now() - _diagJobStart,
       });
 
       return result;

@@ -220,7 +220,7 @@ Get the status of a background reindex job. Checks the in-process job map first,
 
 **Returns:** `{ job_id, status, tasks[], current_project?, error? }`
 
-Each entry in `tasks` has: `{ source_id, mode, status, phase, files_scanned, chunks_indexed, started_at, finished_at, error }`
+Each entry in `tasks` has: `{ source_id, mode, status, phase, files_scanned, chunks_prepared, started_at, finished_at, error }`
 
 `status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`
 

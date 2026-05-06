@@ -1,10 +1,10 @@
 import { createRequire } from "module";
-import { createReadStream, existsSync, readFileSync } from "fs";
-import { basename, join } from "path";
+import { createReadStream, readFileSync } from "fs";
+import { basename } from "path";
 import { createHash } from "node:crypto";
-import ignore from "ignore";
 import { walkRepoFiles, chunkLines, getLanguage, makeChunkId } from "../chunker.js";
-import { loadPrivateIgnore } from "../private-ignore.js";
+import { loadCanonicalIgnoreRules } from "../ignore-rules.js";
+import { normalizeContent } from "../normalize.js";
 import { gitExec } from "../util/git-exec.js";
 import { config } from "../config.js";
 
@@ -358,45 +358,7 @@ export interface ScanEntry {
   mode: number;  // git object mode; 120000=symlink, 160000=submodule (skipped in impl)
 }
 
-// CJS interop for ignore (mirrors chunker.ts pattern)
-type IgnoreManager = { add(patterns: string): void; ignores(path: string): boolean };
-const createIgnore = ignore as unknown as () => IgnoreManager;
 
-/**
- * Build a combined ignore filter for non-HEAD (scanRef) path.
- * Reads committed .gitignore + .scrybeignore from the working tree (consistent
- * with watcher.ts) and the private ignore from DATA_DIR.
- *
- * This fixes the latent scanRef gap: previously committed .scrybeignore was
- * never consulted for non-HEAD branch indexing.
- */
-function buildScanRefFilter(
-  repoPath: string,
-  projectId: string | undefined,
-  sourceId: string | undefined
-): (rel: string) => boolean {
-  const mgr = createIgnore();
-  let hasRules = false;
-
-  // .gitignore + .scrybeignore from working tree (filesystem read — mirrors watcher.ts)
-  for (const f of [".gitignore", ".scrybeignore"]) {
-    const fp = join(repoPath, f);
-    if (existsSync(fp)) {
-      try { mgr.add(readFileSync(fp, "utf8")); hasRules = true; } catch { /* non-fatal */ }
-    }
-  }
-
-  // Private ignore from DATA_DIR
-  if (projectId && sourceId) {
-    const privateContent = loadPrivateIgnore(projectId, sourceId);
-    if (privateContent) {
-      try { mgr.add(privateContent); hasRules = true; } catch { /* non-fatal */ }
-    }
-  }
-
-  if (!hasRules) return (_rel: string) => false;
-  return (rel: string) => { try { return mgr.ignores(rel); } catch { return false; } };
-}
 
 /**
  * Yields file entries for a repo path, either from the working tree or a git ref.
@@ -419,7 +381,7 @@ export async function* scanRef(
     for (const { relPath, absPath } of walkRepoFiles(repoPath, projectId, sourceId)) {
       let content: string;
       try {
-        content = readFileSync(absPath, "utf8");
+        content = normalizeContent(readFileSync(absPath, "utf8"));
       } catch {
         continue;
       }
@@ -428,8 +390,7 @@ export async function* scanRef(
     return;
   }
 
-  // Non-HEAD path: build ignore filter from working tree .scrybeignore + private ignore
-  const isIgnored = buildScanRefFilter(repoPath, projectId, sourceId);
+  const ignoreRules = loadCanonicalIgnoreRules(repoPath, projectId, sourceId);
 
   // git ls-tree path — enumerate files from git ref
   const lsOutput = gitExec(
@@ -454,15 +415,15 @@ export async function* scanRef(
     // Skip files with no known language (mirrors walkRepoFiles filtering)
     if (!getLanguage(basename(relPath))) continue;
 
-    // Apply ignore filters (committed .scrybeignore + private ignore)
-    if (isIgnored(relPath)) continue;
+    if (ignoreRules.shouldIgnore(relPath)) continue;
 
-    const content = gitExec(
+    const raw = gitExec(
       ["show", `${branch}:${relPath}`],
       { cwd: repoPath, trim: false, maxBuffer: MAX_FILE_BYTES },
     );
-    if (content === null) continue;
+    if (raw === null) continue;
 
+    const content = normalizeContent(raw);
     const size = Buffer.byteLength(content, "utf8");
     if (size > MAX_FILE_BYTES) continue;
 
@@ -509,7 +470,7 @@ export class CodePlugin implements SourcePlugin {
 
       let fileSource: string;
       try {
-        fileSource = readFileSync(absPath, "utf8");
+        fileSource = normalizeContent(readFileSync(absPath, "utf8"));
       } catch {
         continue;
       }

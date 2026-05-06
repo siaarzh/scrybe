@@ -125,7 +125,7 @@ describe("Scenario 13 — --full reindex on existing project", () => {
     runScrybe(["source", "add", "-P", "s13e-proj", "-S", "primary",
       "--type", "code", "--root", repo.path, "--languages", "ts"], env);
 
-    // Index with no matching files — files_reindexed=0, chunks_indexed=0 → exit 0 (nothing to do)
+    // Index with no matching files — files_reindexed=0, chunks_prepared=0 → exit 0 (nothing to do)
     const r = runScrybe(["index", "-P", "s13e-proj", "-S", "primary", "-f"], env);
     // Both 0: nothing to do → exit 0
     expect(r.exit).toBe(0);

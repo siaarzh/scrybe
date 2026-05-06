@@ -1,14 +1,11 @@
 import { createHash } from "crypto";
-import { readFileSync, readdirSync, existsSync } from "fs";
+import { readFileSync, readdirSync } from "fs";
 import { join, relative, extname, basename } from "path";
-import ignore from "ignore";
 import { config } from "./config.js";
-import { loadPrivateIgnore } from "./private-ignore.js";
+import { loadCanonicalIgnoreRules } from "./ignore-rules.js";
+import { normalizeContent } from "./normalize.js";
 import type { CodeChunk } from "./types.js";
 
-// CJS interop: `ignore` module.exports is the factory function
-type IgnoreManager = { add(patterns: string): void; ignores(path: string): boolean };
-const createIgnore = ignore as unknown as () => IgnoreManager;
 
 const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   ".py": "python",
@@ -120,55 +117,6 @@ export function getLanguage(filename: string): string | null {
   return EXTENSION_TO_LANGUAGE[ext] ?? null;
 }
 
-function loadIgnoreRules(
-  rootPath: string,
-  projectId?: string,
-  sourceId?: string
-): { ig: IgnoreManager | null; forcePatterns: string[] } {
-  const ig = createIgnore();
-  let hasRules = false;
-  const forcePatterns: string[] = [];
-
-  // .gitignore first (base rules)
-  const gitignorePath = join(rootPath, ".gitignore");
-  if (existsSync(gitignorePath)) {
-    try { ig.add(readFileSync(gitignorePath, "utf8")); hasRules = true; } catch {}
-  }
-
-  // .scrybeignore on top — can add excludes or negate .gitignore rules via !pattern
-  const scrybeignorePath = join(rootPath, ".scrybeignore");
-  if (existsSync(scrybeignorePath)) {
-    try {
-      const content = readFileSync(scrybeignorePath, "utf8");
-      ig.add(content);
-      hasRules = true;
-      // Collect negation patterns (stripped of !) — used to override hardcoded SKIP_DIRS etc.
-      for (const line of content.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("!") && trimmed.length > 1) forcePatterns.push(trimmed.slice(1));
-      }
-    } catch {}
-  }
-
-  // Private ignore on top — DATA_DIR/ignores/<project>/<source>.gitignore
-  if (projectId && sourceId) {
-    const privateContent = loadPrivateIgnore(projectId, sourceId);
-    if (privateContent) {
-      try {
-        ig.add(privateContent);
-        hasRules = true;
-        // Collect negation patterns from private ignore too
-        for (const line of privateContent.split(/\r?\n/)) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("!") && trimmed.length > 1) forcePatterns.push(trimmed.slice(1));
-        }
-      } catch {}
-    }
-  }
-
-  return { ig: hasRules ? ig : null, forcePatterns };
-}
-
 export function chunkLines(
   lines: string[],
   startOffset = 0
@@ -198,21 +146,9 @@ export function* walkRepoFiles(
   projectId?: string,
   sourceId?: string
 ): Generator<{ relPath: string; absPath: string }> {
-  const { ig, forcePatterns } = loadIgnoreRules(rootPath, projectId, sourceId);
+  const rules = loadCanonicalIgnoreRules(rootPath, projectId, sourceId);
+  const { forcePatterns } = rules;
 
-  // Build force-include checker from negation patterns — overrides hardcoded skips
-  let forceInclude: IgnoreManager | null = null;
-  if (forcePatterns.length > 0) {
-    forceInclude = createIgnore();
-    forceInclude.add(forcePatterns.join("\n"));
-  }
-
-  // Returns true if relPath matches a !pattern in .scrybeignore
-  function isForceIncluded(relPath: string): boolean {
-    return forceInclude?.ignores(relPath) === true;
-  }
-
-  // Returns true if any force-include pattern targets something inside this dir
   function dirMightContainForceIncludes(dirRelPath: string): boolean {
     const prefix = dirRelPath + "/";
     return forcePatterns.some(p => p === dirRelPath || p === prefix || p.startsWith(prefix));
@@ -229,10 +165,10 @@ export function* walkRepoFiles(
           if (shouldSkipDir(name) && !dirMightContainForceIncludes(relPath)) continue;
           yield* walk(absPath);
         } else if (entry.isFile()) {
-          const forceIn = isForceIncluded(relPath);
+          const forceIn = rules.isForceIncluded(relPath);
           if (!forceIn && SKIP_FILENAMES.has(name)) continue;
           if (!forceIn && getLanguage(name) === null) continue;
-          if (ig?.ignores(relPath)) continue;
+          if (rules.shouldIgnore(relPath)) continue;
           yield { relPath, absPath };
         }
       }
@@ -266,7 +202,7 @@ export function* chunkRepo(
 
     let text: string;
     try {
-      text = readFileSync(absPath, "utf8");
+      text = normalizeContent(readFileSync(absPath, "utf8"));
     } catch {
       continue;
     }

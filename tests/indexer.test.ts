@@ -22,14 +22,14 @@ describe("files_reindexed accounting (Fix 2)", () => {
     fixture = null;
   });
 
-  it("files_reindexed > 0 and chunks_indexed > 0 on fresh full index", async () => {
+  it("files_reindexed > 0 and chunks_prepared > 0 on fresh full index", async () => {
     fixture = await cloneFixture("sample-multi-branch-repo");
     project = await createTempProject({ rootPath: fixture.path });
 
     const result = await runIndex(project.projectId, project.sourceId, "full");
 
     expect(result.files_reindexed).toBeGreaterThan(0);
-    expect(result.chunks_indexed).toBeGreaterThan(0);
+    expect(result.chunks_prepared).toBeGreaterThan(0);
   });
 
   it("files_reindexed === 0 when nothing changed (incremental re-run)", async () => {
@@ -41,7 +41,7 @@ describe("files_reindexed accounting (Fix 2)", () => {
     const result = await runIndex(project.projectId, project.sourceId, "incremental");
 
     expect(result.files_reindexed).toBe(0);
-    expect(result.chunks_indexed).toBe(0);
+    expect(result.chunks_prepared).toBe(0);
   });
 
   it("files_reindexed counts only files with chunks written, not all files scheduled", async () => {
@@ -55,6 +55,6 @@ describe("files_reindexed accounting (Fix 2)", () => {
     // (files_reindexed ≤ files_scanned, and both > 0 for a non-empty repo)
     expect(result.files_reindexed).toBeGreaterThan(0);
     expect(result.files_reindexed).toBeLessThanOrEqual(result.files_scanned);
-    expect(result.chunks_indexed).toBeGreaterThanOrEqual(result.files_reindexed);
+    expect(result.chunks_prepared).toBeGreaterThanOrEqual(result.files_reindexed);
   });
 });

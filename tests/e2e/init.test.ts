@@ -135,7 +135,7 @@ async function runWizardMocked({
 
   // Mock indexProject to avoid real embedding calls
   vi.doMock("../../src/indexer.js", () => ({
-    indexProject: vi.fn().mockResolvedValue([{ chunks_indexed: 0, files_scanned: 0, files_reindexed: 0, files_removed: 0 }]),
+    indexProject: vi.fn().mockResolvedValue([{ chunks_prepared: 0, chunks_persisted: 0, files_scanned: 0, files_reindexed: 0, files_removed: 0 }]),
   }));
 
   const { runWizard } = await import("../../src/onboarding/wizard.js");

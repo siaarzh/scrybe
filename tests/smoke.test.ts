@@ -30,7 +30,7 @@ describe("smoke — full pipeline regression", () => {
 
     expect(result.status).toBe("ok");
     expect(result.files_scanned).toBeGreaterThanOrEqual(3); // at least alpha.ts, beta.ts, gamma.ts
-    expect(result.chunks_indexed).toBeGreaterThan(0);
+    expect(result.chunks_prepared).toBeGreaterThan(0);
   });
 
   it("incremental reindex finds new file with sentinel and search returns a hit", async () => {

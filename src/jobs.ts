@@ -32,7 +32,7 @@ function makePendingTask(sourceId: string, mode: IndexMode): SourceTask {
     status: "pending",
     phase: null,
     files_scanned: 0,
-    chunks_indexed: 0,
+    chunks_prepared: 0,
     started_at: null,
     finished_at: null,
     error: null,
@@ -109,7 +109,7 @@ async function runTasks(jobId: string): Promise<void> {
           task.phase = "scanning";
         },
         onEmbedProgress(n) {
-          task.chunks_indexed = n;
+          task.chunks_prepared = n;
           if (task.phase !== "embedding") {
             task.phase = "embedding";
             try { updateJobStatus(jobId, { phase: "embedding" }); } catch { /* non-fatal */ }
@@ -119,7 +119,7 @@ async function runTasks(jobId: string): Promise<void> {
       task.status = "done";
       task.phase = "done";
       task.files_scanned = result.files_scanned;
-      task.chunks_indexed = result.chunks_indexed;
+      task.chunks_prepared = result.chunks_prepared;
       task.finished_at = Date.now();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);

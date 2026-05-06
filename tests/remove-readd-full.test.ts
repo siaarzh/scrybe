@@ -48,7 +48,7 @@ describe("remove → re-add → full reindex (Fix 1 integration)", () => {
       },
     });
     const first = await runIndex(projectId, sourceId, "full");
-    expect(first.chunks_indexed).toBeGreaterThan(0);
+    expect(first.chunks_prepared).toBeGreaterThan(0);
 
     const hitsBefore = await search(projectId, "alphaGreeting");
     expect(hitsBefore.length).toBeGreaterThan(0);
@@ -71,7 +71,7 @@ describe("remove → re-add → full reindex (Fix 1 integration)", () => {
 
     // ── Step 4: full reindex must write chunks ────────────────────────────────
     const second = await runIndex(projectId, sourceId, "full");
-    expect(second.chunks_indexed).toBeGreaterThan(0);
+    expect(second.chunks_prepared).toBeGreaterThan(0);
     expect(second.files_reindexed).toBeGreaterThan(0);
 
     // ── Step 5: search must return hits ──────────────────────────────────────

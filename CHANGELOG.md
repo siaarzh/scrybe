@@ -11,6 +11,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 - MCP tool annotations filled in for `add_project`, `update_project`, `add_source`, `update_source` so MCP clients can correctly reason about idempotence and external-call behavior.
 - Configuration reference now documents `SCRYBE_DATA_DIR` (with per-platform defaults) and the `SCRYBE_CHUNK_SIZE` / `SCRYBE_CHUNK_OVERLAP` chunking knobs.
+- **Content normalization at read time.** Both walkers (working-tree and git-tree) now pass file content through `normalizeContent()` before chunking and hashing: strips leading UTF-8 BOM, collapses `\r\n`/lone `\r` to `\n`. Eliminates the 48.5% silent re-embed rate observed on Windows repos with `core.autocrlf=true` where working-tree and git-tree bytes differed for every file with CRLF line endings.
+- **Unified ignore-rules helper.** Both walkers now apply the same `.gitignore` + `.scrybeignore` + private-ignore filter, fixing a file-set divergence where non-HEAD branches included files excluded by working-tree `.gitignore` (build outputs, generated code).
+- **`chunks_persisted` metric.** Job results now report `chunks_persisted` (actual LanceDB row delta) alongside `chunks_prepared` (chunks reaching the embedder). Previously `chunks_indexed` reported the prepared count, making dedup silently invisible.
+- **Phase logging in daemon log.** `indexer.scan.completed` and `indexer.job.summary` events are now always written to `daemon-log.jsonl`. Per-batch events (`indexer.embed.batch`, `indexer.write.completed`) are gated behind `SCRYBE_DEBUG_INDEXER=1`.
+- Set `SCRYBE_DEBUG_INDEXER=1` to emit per-batch embedding and write events to `daemon-log.jsonl` for diagnosing chunk dedup issues.
+
+### Breaking
+
+- **`chunks_indexed` renamed.** `IndexResult` and `SourceTask` no longer have a `chunks_indexed` field. Use `chunks_prepared` (same semantics as the old field — chunks that reached the embedder) and the new `chunks_persisted` (actual row delta). Run `scrybe migrate` after upgrading to v0.31.0 to rehash all stored chunk IDs against the new normalized content.
 
 ---
 

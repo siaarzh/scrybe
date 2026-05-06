@@ -100,7 +100,7 @@ describe("retry/backoff — 429 injection", () => {
 
     const result = await runIndex(projectId, "primary", "full");
     expect(result.status).toBe("ok");
-    expect(result.chunks_indexed).toBeGreaterThan(0);
+    expect(result.chunks_prepared).toBeGreaterThan(0);
 
     // Confirm the sidecar logged successful requests (after the 429s)
     const healthResp = await fetch(injectedSidecar!.healthUrl);

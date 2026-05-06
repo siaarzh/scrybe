@@ -141,6 +141,7 @@ When using Voyage AI, set only `SCRYBE_RERANK=true` — endpoint and model are a
 |----------|---------|-------------|
 | `SCRYBE_NO_AUTO_DAEMON` | unset | Set to `1` to disable the MCP server's automatic daemon spawn. Useful if you manage the daemon manually or via a process supervisor. When set, run `scrybe daemon start` yourself. |
 | `SCRYBE_DAEMON_KEEP_ALIVE` | unset | Set to `1` to disable the grace and no-client-ever shutdown timers. The daemon stays running until manually stopped or the system shuts down. This is set automatically by OS-level autostart entries (always-on mode). |
+| `SCRYBE_DEBUG_INDEXER` | unset | Set to `1` to emit per-batch embedding and write events (`indexer.embed.batch`, `indexer.write.completed`) to `daemon-log.jsonl`. Use when diagnosing chunk dedup or silent re-embed issues. Scan and job-summary events are always logged regardless of this flag. |
 
 ---
 

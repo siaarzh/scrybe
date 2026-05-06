@@ -1,4 +1,4 @@
-import { createWriteStream, existsSync } from "fs";
+import { createWriteStream, existsSync, writeSync } from "fs";
 import { mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -13,6 +13,7 @@ import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
 import { onStateChange } from "./idle-state.js";
+import { diagEmit } from "./events.js";
 import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
@@ -108,6 +109,28 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
  * Phase 5+: Git ref watcher, fetch poller.
  */
 export async function runDaemon(): Promise<void> {
+  const writeCrashEv = (event: string, err: unknown): void => {
+    try {
+      diagEmit({
+        level: "error",
+        event,
+        error: {
+          message: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack ?? null : null,
+          name: err instanceof Error ? err.name : null,
+        },
+      });
+    } catch { /* non-fatal */ }
+    try { writeSync(2, `[scrybe daemon] ${event}: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`); } catch { /* ignore */ }
+  };
+  process.on("uncaughtException", (err) => {
+    writeCrashEv("process.uncaughtException", err);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    writeCrashEv("process.unhandledRejection", reason);
+  });
+
   await checkAndMigrate();
 
   // Warn about old env var names that can't be rewritten by the .env migration

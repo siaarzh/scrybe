@@ -85,7 +85,10 @@ export interface IndexResult {
   status: "ok";
   project_id: string;
   source_id: string;
-  chunks_indexed: number;
+  /** Chunks that reached the embedder (prepared ≥ persisted). */
+  chunks_prepared: number;
+  /** Actual lance row delta: countTableRows(after) − countTableRows(before). */
+  chunks_persisted: number;
   files_scanned: number;
   files_reindexed: number;
   files_removed: number;
@@ -97,7 +100,7 @@ export interface SourceTask {
   status: "pending" | "running" | "done" | "failed" | "cancelled";
   phase: "scanning" | "embedding" | "done" | null;
   files_scanned: number;
-  chunks_indexed: number;
+  chunks_prepared: number;
   started_at: number | null;
   finished_at: number | null;
   error: string | null;
