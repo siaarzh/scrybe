@@ -320,6 +320,14 @@ npm install -g scrybe-cli
 
 **npx users**: if you configured Claude Code with `npx -y scrybe-cli@latest mcp`, upgrades are automatic — npx fetches the latest version on each new session.
 
+> **Upgrading from any version before 0.31.0:** v0.31.0 changes the chunk-ID hash contract and renames public chunk fields (`source_path`/`source_url`/`source_type`/`file_path` → `item_*`). Existing indexes need a one-time migration. After upgrading, run:
+>
+> ```sh
+> scrybe migrate --all
+> ```
+>
+> The migration rehashes chunk IDs and renames LanceDB columns in place — vectors are preserved, no re-embedding required (~97% of chunks). Until you migrate, `scrybe status` shows `Migrate (chunk-id)` per affected source and search returns `error_type: "needs_migration"` with the exact command to run. See the [v0.31.0 CHANGELOG entry](CHANGELOG.md#0310--2026-05-06) for the full breaking-change list (CLI flag `--source-types` → `--item-types`, MCP arg `source_types` → `item_types`, job-result field `chunks_indexed` → `chunks_prepared` + `chunks_persisted`).
+
 ## Running as a background service
 
 The daemon **starts automatically** when Claude Code calls any scrybe MCP tool (on-demand mode) and shuts down when there are no active clients. No manual setup required for basic use.
