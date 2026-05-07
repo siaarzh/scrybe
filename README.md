@@ -328,6 +328,8 @@ npm install -g scrybe-cli
 >
 > The migration rehashes chunk IDs and renames LanceDB columns in place — vectors are preserved, no re-embedding required (~97% of chunks). Until you migrate, `scrybe status` shows `Migrate (chunk-id)` per affected source and search returns `error_type: "needs_migration"` with the exact command to run. See the [v0.31.0 CHANGELOG entry](CHANGELOG.md#0310--2026-05-06) for the full breaking-change list (CLI flag `--source-types` → `--item-types`, MCP arg `source_types` → `item_types`, job-result field `chunks_indexed` → `chunks_prepared` + `chunks_persisted`).
 
+> **After running `scrybe migrate`: restart your MCP server / Claude Code session.** The migration drops and recreates each affected LanceDB table; long-running MCP servers cache table handles in memory and can hit `Not found: ...lance` errors on the next search until restarted. CLI search is unaffected (each invocation is a fresh process).
+
 ## Running as a background service
 
 The daemon **starts automatically** when Claude Code calls any scrybe MCP tool (on-demand mode) and shuts down when there are no active clients. No manual setup required for basic use.
