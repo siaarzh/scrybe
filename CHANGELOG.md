@@ -9,6 +9,25 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.31.3] — 2026-05-07
+
+### Fixed
+
+- **Pinned-branch reindex no longer misses updates when other tools fetch first.** The daemon's fetch-poller compared a pre-fetch SHA snapshot to the post-fetch SHA inside its own poll cycle. If any other tool (an IDE auto-fetch, manual `git fetch`, a git GUI client) fetched the repo between two daemon poll cycles, the local `origin/<branch>` ref was already current at the next poll start, the snapshot delta was zero, and the reindex was silently skipped. Pinned branches could go arbitrarily stale. The poller now compares `shaAfter` against the SHA recorded by the indexer on its last successful run, so any advance is detected regardless of who ran the fetch.
+- **Files that index to zero chunks no longer loop indefinitely.** When the walker marked a file as needing reindex but the chunker produced zero chunks (typical case: a `.cs` file containing only a UTF-8 BOM, after content normalization stripped it to empty), the per-file checkpoint never fired and the file's hash was never recorded. The next scan re-marked the same file again, every cycle, forever — wasting log space and masking other signals. The indexer now persists the file's hash on the success path even when zero chunks were produced.
+
+### Added
+
+- **`scrybe doctor` shows per-pinned-branch sync state.** New rows `daemon.fetch-poller.<project>.<source>.<branch>` report `OK` / `BEHIND` / `NO_SHA` / `NEVER_INDEXED` / `MISSING_REMOTE` per pinned branch. Run `scrybe doctor --json` to see whether each pinned branch is in sync with `origin/<branch>` without digging through the daemon log.
+- **`SCRYBE_DEBUG_FETCH_POLLER=1` emits per-cycle heartbeat events.** Set this env var on the daemon to receive a `fetch-poller.tick` event in `daemon-log.jsonl` for every poll cycle, with `branchesPolled` / `deltasFound` / `outOfBandDetected` counters. Useful for verifying the poller is alive when no SHA deltas are detected (the poller is otherwise silent on healthy quiet runs).
+
+### Internal
+
+- New `branch_state` SQLite table (additive — co-located with `branch_tags` in `branch-tags.db`) records the last-indexed SHA per `(project, source, branch)`. Indexer writes on successful completion only. Cascade-deleted by `wipeBranch` / `deleteBranch` / `wipeSource`.
+- On first poll after upgrade, the daemon silently backfills `branch_state` rows for branches that already have chunks indexed — no spurious mass reindex.
+
+---
+
 ## [0.31.2] — 2026-05-07
 
 ### Fixed

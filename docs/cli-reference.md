@@ -761,3 +761,4 @@ All variables are read from `<DATA_DIR>/.env` (lower priority) or from the OS en
 | `SCRYBE_NO_AUTO_DAEMON` | — | Set `1` to prevent auto-spawning the daemon |
 | `SCRYBE_DAEMON_MAX_CONCURRENT` | `max(1, cpus/2)` | Max simultaneous jobs in daemon queue |
 | `SCRYBE_DEBUG_INDEXER` | — | Set `1` to enable verbose indexer diagnostic logging |
+| `SCRYBE_DEBUG_FETCH_POLLER` | — | Set `1` to emit a per-cycle `fetch-poller.tick` event (with `branchesPolled` / `deltasFound` / `outOfBandDetected` counters) for daemon fetch-poller observability |
