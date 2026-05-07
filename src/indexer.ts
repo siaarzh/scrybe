@@ -340,14 +340,35 @@ export async function indexSource(
 
         // One upsert call per flushBatch — keeps manifest version count to ~1
         // per batch, so end-of-run optimize() stays cheap.
-        const allChunksToWrite: AnyChunk[] = [];
-        const allVectorsToWrite: number[][] = [];
+        let allChunksToWrite: AnyChunk[] = [];
+        let allVectorsToWrite: number[][] = [];
         for (const { chunks } of keyBatches) {
           for (const c of chunks) {
             if (vectorMap.has(c.chunk_id)) {
               allChunksToWrite.push(c);
               allVectorsToWrite.push(vectorMap.get(c.chunk_id)!);
             }
+          }
+        }
+
+        // Defence-in-depth: collapse intra-batch chunk_id duplicates.
+        // Pre-v0.31.0 scheme-1 hash collisions could produce N chunks with the same
+        // chunk_id from one keyBatch flush; mergeInsert's source-side dedup gap then
+        // inserted all N. Scheme-2 makes collisions extremely unlikely (chunk_id is
+        // content+path-deterministic), but a future plugin emitting near-identical
+        // chunks could reintroduce the snowball. This Set-based filter closes the gate.
+        {
+          const deduped = dedupeChunkBatch(allChunksToWrite, allVectorsToWrite);
+          allChunksToWrite = deduped.chunks;
+          allVectorsToWrite = deduped.vectors;
+          if (deduped.dupesRemoved > 0) {
+            diagEmit({
+              event: "indexer.flush.intra_batch_dedup",
+              projectId,
+              sourceId,
+              branch,
+              intra_batch_dupes: deduped.dupesRemoved,
+            });
           }
         }
 
@@ -537,6 +558,38 @@ export async function indexSource(
       return result;
     }
   );
+}
+
+// ─── Exported dedup helper (also used in flushBatch above) ───────────────────
+
+/**
+ * Collapse intra-batch chunk_id duplicates from two parallel arrays.
+ *
+ * Walks `chunks` and `vectors` in lock-step. First-seen chunk_id wins;
+ * subsequent rows sharing the same id are dropped. Returns the deduped
+ * arrays and the count of rows removed.
+ *
+ * Extracted for testability — flushBatch calls this before every upsert.
+ */
+export function dedupeChunkBatch<C extends { chunk_id: string }>(
+  chunks: C[],
+  vectors: number[][],
+): { chunks: C[]; vectors: number[][]; dupesRemoved: number } {
+  const seen = new Set<string>();
+  const dedupedChunks: C[] = [];
+  const dedupedVectors: number[][] = [];
+  let dupesRemoved = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i]!;
+    if (seen.has(c.chunk_id)) {
+      dupesRemoved++;
+      continue;
+    }
+    seen.add(c.chunk_id);
+    dedupedChunks.push(c);
+    dedupedVectors.push(vectors[i]!);
+  }
+  return { chunks: dedupedChunks, vectors: dedupedVectors, dupesRemoved };
 }
 
 async function* fetchChunksFromRef(
