@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.31.2] — 2026-05-07
+
+### Fixed
+
+- **No more console-window flash during `npm install -g scrybe-cli` on Windows.** The post-install hook spawns the daemon via `wscript.exe` (GUI-subsystem launcher) instead of `node.exe` directly. `windowsHide: true` on a console-subsystem binary cannot fully prevent a brief window flash during process init on Windows 11; routing through a tiny VBS launcher under wscript.exe sidesteps this entirely. macOS and Linux are unchanged.
+
+---
+
 ## [0.31.1] — 2026-05-07
 
 ### Fixed
