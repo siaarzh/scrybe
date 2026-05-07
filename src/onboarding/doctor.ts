@@ -416,6 +416,63 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
+  // Fetch-poller branch sync — one check per pinned branch per code source
+  {
+    const { getLastIndexedSha, listBranches } = await import("../branch-state.js");
+    const { gitExec } = await import("../util/git-exec.js");
+
+    for (const project of projects) {
+      for (const source of project.sources) {
+        if (source.source_config.type !== "code") continue;
+        const pinnedBranches: string[] = source.pinned_branches ?? [];
+        if (pinnedBranches.length === 0) continue;
+
+        const rootPath = (source.source_config as any).root_path as string;
+        const indexedBranches = listBranches(project.id, source.source_id);
+
+        for (const branch of pinnedBranches) {
+          const qualifiedRef = `origin/${branch}`;
+          const safeBranch = branch.replace(/\//g, "__");
+          const checkId = `daemon.fetch-poller.${project.id}.${source.source_id}.${safeBranch}`;
+          const title = `Fetch-poller sync (${project.id}/${source.source_id}/${branch})`;
+
+          try {
+            const currentRemoteSha = gitExec(["rev-parse", qualifiedRef], { cwd: rootPath }) ?? null;
+            const lastIndexedSha = getLastIndexedSha(project.id, source.source_id, qualifiedRef);
+            const inBranchTags = indexedBranches.includes(qualifiedRef);
+
+            if (currentRemoteSha === null) {
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `Remote no longer has branch "${branch}"`,
+                `Remove this pinned branch if the remote branch has been deleted`));
+            } else if (lastIndexedSha === currentRemoteSha) {
+              checks.push(ok(checkId, SEC_DAEMON, title,
+                `In sync (SHA ${currentRemoteSha.slice(0, 8)})`,
+                { sha: currentRemoteSha, branch: qualifiedRef }));
+            } else if (lastIndexedSha !== null) {
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `indexed at SHA ${lastIndexedSha.slice(0, 8)}, remote at ${currentRemoteSha.slice(0, 8)} — daemon will reindex on next poll`,
+                undefined,
+                { lastIndexedSha, currentRemoteSha, branch: qualifiedRef }));
+            } else if (inBranchTags) {
+              checks.push(ok(checkId, SEC_DAEMON, title,
+                `Branch indexed but pre-Plan-50 (or wiped) — daemon will silently backfill on next poll`,
+                { branch: qualifiedRef }));
+            } else {
+              checks.push(ok(checkId, SEC_DAEMON, title,
+                `Pinned but not yet indexed — daemon will queue first reindex on next poll`,
+                { branch: qualifiedRef }));
+            }
+          } catch (e: any) {
+            checks.push(warn(checkId, SEC_DAEMON, title,
+              `Check failed: ${e?.message ?? String(e)}`,
+              undefined));
+          }
+        }
+      }
+    }
+  }
+
   // ── 6. MCP configuration ────────────────────────────────────────────────────
   const SEC_MCP = "MCP Configuration";
 

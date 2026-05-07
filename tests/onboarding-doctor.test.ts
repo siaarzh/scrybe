@@ -157,6 +157,248 @@ describe("runDoctor — report structure", () => {
   });
 });
 
+describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
+  it("#11 — reports OK for in-sync branch and BEHIND for out-of-date branch", async () => {
+    const fixtureProject = {
+      id: "test-fp-proj",
+      description: "fetch-poller sync test",
+      sources: [
+        {
+          source_id: "primary",
+          source_config: { type: "code", root_path: tmp, languages: [] },
+          last_indexed: new Date().toISOString(),
+          pinned_branches: ["main", "feature/x"],
+        },
+      ],
+    };
+    writeFileSync(join(tmp, "projects.json"), JSON.stringify([fixtureProject]), "utf8");
+
+    // branch-state mock: getLastIndexedSha returns per-branch SHAs
+    vi.doMock("../src/branch-state.js", () => ({
+      getLastIndexedSha: vi.fn((projectId: string, sourceId: string, branch: string) => {
+        if (branch === "origin/main") return "abc123abc123abc123abc123abc123abc123abc1";
+        if (branch === "origin/feature/x") return "old456old456old456old456old456old456old4";
+        return null;
+      }),
+      listBranches: vi.fn(() => ["origin/main", "origin/feature/x"]),
+    }));
+
+    // git-exec mock: rev-parse returns per-branch remote SHAs
+    vi.doMock("../src/util/git-exec.js", () => ({
+      gitExec: vi.fn((args: string[]) => {
+        if (args[0] === "rev-parse" && args[1] === "origin/main") {
+          return "abc123abc123abc123abc123abc123abc123abc1";
+        }
+        if (args[0] === "rev-parse" && args[1] === "origin/feature/x") {
+          return "new789new789new789new789new789new789new7";
+        }
+        return null;
+      }),
+    }));
+
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 1024, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+    vi.doMock("../src/daemon/container-detect.js", () => ({
+      isContainer: () => false,
+    }));
+    vi.doMock("../src/daemon/install/index.js", () => ({
+      getInstallStatus: async () => ({ installed: false }),
+    }));
+    vi.doMock("../src/vector-store.js", () => ({
+      countTableRows: async () => 0,
+    }));
+
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+
+    // main branch: in sync → OK
+    const mainCheck = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-proj.primary.main");
+    expect(mainCheck).toBeDefined();
+    expect(mainCheck!.status).toBe("ok");
+    expect(mainCheck!.message).toContain("sync");
+
+    // feature/x branch: behind → warn
+    const featureCheck = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-proj.primary.feature__x");
+    expect(featureCheck).toBeDefined();
+    expect(featureCheck!.status).toBe("warn");
+    expect(featureCheck!.message).toContain("old456");
+    expect(featureCheck!.message).toContain("new789");
+  });
+
+  it("#11b — MISSING_REMOTE warns when gitExec returns null", async () => {
+    const fixtureProject = {
+      id: "test-fp-del",
+      description: "deleted remote branch",
+      sources: [
+        {
+          source_id: "primary",
+          source_config: { type: "code", root_path: tmp, languages: [] },
+          last_indexed: new Date().toISOString(),
+          pinned_branches: ["gone/branch"],
+        },
+      ],
+    };
+    writeFileSync(join(tmp, "projects.json"), JSON.stringify([fixtureProject]), "utf8");
+
+    vi.doMock("../src/branch-state.js", () => ({
+      getLastIndexedSha: vi.fn(() => "someshasomeshasomeshasomeshasomeshasomes"),
+      listBranches: vi.fn(() => ["origin/gone/branch"]),
+    }));
+    vi.doMock("../src/util/git-exec.js", () => ({
+      gitExec: vi.fn(() => null), // remote branch deleted
+    }));
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 1024, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+    vi.doMock("../src/daemon/container-detect.js", () => ({
+      isContainer: () => false,
+    }));
+    vi.doMock("../src/daemon/install/index.js", () => ({
+      getInstallStatus: async () => ({ installed: false }),
+    }));
+    vi.doMock("../src/vector-store.js", () => ({
+      countTableRows: async () => 0,
+    }));
+
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+
+    const check = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-del.primary.gone__branch");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("warn");
+    expect(check!.message).toContain("no longer has");
+  });
+
+  it("#11c — NO_SHA: indexed in branch_tags but no branch_state row → ok with backfill note", async () => {
+    const fixtureProject = {
+      id: "test-fp-nosha",
+      description: "no sha in branch_state",
+      sources: [
+        {
+          source_id: "primary",
+          source_config: { type: "code", root_path: tmp, languages: [] },
+          last_indexed: new Date().toISOString(),
+          pinned_branches: ["legacy"],
+        },
+      ],
+    };
+    writeFileSync(join(tmp, "projects.json"), JSON.stringify([fixtureProject]), "utf8");
+
+    vi.doMock("../src/branch-state.js", () => ({
+      getLastIndexedSha: vi.fn(() => null),
+      listBranches: vi.fn(() => ["origin/legacy"]), // in branch_tags
+    }));
+    vi.doMock("../src/util/git-exec.js", () => ({
+      gitExec: vi.fn(() => "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+    }));
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 1024, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+    vi.doMock("../src/daemon/container-detect.js", () => ({
+      isContainer: () => false,
+    }));
+    vi.doMock("../src/daemon/install/index.js", () => ({
+      getInstallStatus: async () => ({ installed: false }),
+    }));
+    vi.doMock("../src/vector-store.js", () => ({
+      countTableRows: async () => 0,
+    }));
+
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+
+    const check = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-nosha.primary.legacy");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("ok");
+    expect(check!.message).toContain("backfill");
+  });
+
+  it("#11d — NEVER_INDEXED: no branch_state AND no branch_tags → ok with first-index note", async () => {
+    const fixtureProject = {
+      id: "test-fp-never",
+      description: "never indexed",
+      sources: [
+        {
+          source_id: "primary",
+          source_config: { type: "code", root_path: tmp, languages: [] },
+          last_indexed: null,
+          pinned_branches: ["new-feature"],
+        },
+      ],
+    };
+    writeFileSync(join(tmp, "projects.json"), JSON.stringify([fixtureProject]), "utf8");
+
+    vi.doMock("../src/branch-state.js", () => ({
+      getLastIndexedSha: vi.fn(() => null),
+      listBranches: vi.fn(() => []), // NOT in branch_tags
+    }));
+    vi.doMock("../src/util/git-exec.js", () => ({
+      gitExec: vi.fn(() => "cafecafecafecafecafecafecafecafecafecafe"),
+    }));
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 1024, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+    vi.doMock("../src/daemon/container-detect.js", () => ({
+      isContainer: () => false,
+    }));
+    vi.doMock("../src/daemon/install/index.js", () => ({
+      getInstallStatus: async () => ({ installed: false }),
+    }));
+    vi.doMock("../src/vector-store.js", () => ({
+      countTableRows: async () => 0,
+    }));
+
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+
+    const check = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-never.primary.new-feature");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("ok");
+    expect(check!.message).toContain("first reindex");
+  });
+});
+
 describe("runDoctor — fresh install profile", () => {
   it("reclassifies 4 data checks as ok when projects.json exists but schema.json absent", async () => {
     // Simulate post-init state: one project with one source, no index yet

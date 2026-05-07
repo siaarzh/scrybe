@@ -145,6 +145,16 @@ export function getDB(): DatabaseSync {
       ON jobs(queued_at);
     CREATE INDEX IF NOT EXISTS idx_jobs_type_project
       ON jobs(type, project_id);
+    CREATE TABLE IF NOT EXISTS branch_state (
+      project_id        TEXT NOT NULL,
+      source_id         TEXT NOT NULL,
+      branch            TEXT NOT NULL,
+      last_indexed_sha  TEXT NOT NULL,
+      last_indexed_at   INTEGER,
+      PRIMARY KEY (project_id, source_id, branch)
+    );
+    CREATE INDEX IF NOT EXISTS idx_branch_state_lookup
+      ON branch_state(project_id, source_id);
   `);
   db.prepare("INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1')").run();
 
@@ -214,6 +224,30 @@ export function listBranches(projectId: string, sourceId: string): string[] {
   return rows.map((r) => r.branch);
 }
 
+/** Returns the last-indexed SHA for a (project, source, branch), or null if none. */
+export function getLastIndexedSha(projectId: string, sourceId: string, branch: string): string | null {
+  const row = getDB().prepare(
+    "SELECT last_indexed_sha FROM branch_state WHERE project_id=? AND source_id=? AND branch=?"
+  ).get(projectId, sourceId, branch) as { last_indexed_sha: string } | undefined;
+  return row?.last_indexed_sha ?? null;
+}
+
+/** Records the last-indexed SHA for a (project, source, branch). Upsert. */
+export function setLastIndexedSha(
+  projectId: string,
+  sourceId: string,
+  branch: string,
+  sha: string,
+  at: number | null = Date.now()
+): void {
+  getDB().prepare(
+    `INSERT INTO branch_state (project_id, source_id, branch, last_indexed_sha, last_indexed_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(project_id, source_id, branch)
+     DO UPDATE SET last_indexed_sha=excluded.last_indexed_sha, last_indexed_at=excluded.last_indexed_at`
+  ).run(projectId, sourceId, branch, sha, at);
+}
+
 /** Return the set of chunk IDs tagged for a specific branch. */
 export function getChunkIdsForBranch(projectId: string, sourceId: string, branch: string): Set<string> {
   const rows = getDB().prepare(
@@ -235,6 +269,9 @@ export function deleteBranch(projectId: string, sourceId: string, branch: string
   getDB().prepare(
     "DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=?"
   ).run(projectId, sourceId, branch);
+  getDB().prepare(
+    "DELETE FROM branch_state WHERE project_id=? AND source_id=? AND branch=?"
+  ).run(projectId, sourceId, branch);
   deleteBranchHashesFile(projectId, sourceId, branch);
 }
 
@@ -247,6 +284,9 @@ export function deleteBranch(projectId: string, sourceId: string, branch: string
 export function wipeSource(projectId: string, sourceId: string): void {
   getDB().prepare(
     "DELETE FROM branch_tags WHERE project_id=? AND source_id=?"
+  ).run(projectId, sourceId);
+  getDB().prepare(
+    "DELETE FROM branch_state WHERE project_id=? AND source_id=?"
   ).run(projectId, sourceId);
 
   const dir = hashesDir();
@@ -387,6 +427,9 @@ class BranchSessionImpl implements BranchSession {
   wipeBranch(): void {
     getDB().prepare(
       "DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=?"
+    ).run(this._projectId, this._sourceId, this._branch);
+    getDB().prepare(
+      "DELETE FROM branch_state WHERE project_id=? AND source_id=? AND branch=?"
     ).run(this._projectId, this._sourceId, this._branch);
     this._hashes = {};
     saveBranchHashesAtomic(this._projectId, this._sourceId, this._branch, this._hashes);

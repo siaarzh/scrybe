@@ -20,12 +20,12 @@ import {
 } from "./vector-store.js";
 import { listManifestsSorted, isManifestClean, getExpectedDimensions } from "./health-probe.js";
 import { createHash } from "node:crypto";
-import { gitExecOrThrow } from "./util/git-exec.js";
+import { gitExec, gitExecOrThrow } from "./util/git-exec.js";
 import { appendFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { withBranchSession, resolveBranchForPath, type BranchTag } from "./branch-state.js";
+import { withBranchSession, resolveBranchForPath, setLastIndexedSha, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage } from "./chunker.js";
 import { diagEmit } from "./daemon/events.js";
@@ -106,6 +106,12 @@ export async function indexSource(
     { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode },
     async (session, branch) => {
       const jobStart = Date.now();
+
+      // Capture the SHA at indexer start (code sources only). Used to record the
+      // last-indexed SHA in branch_state on successful completion.
+      const indexedShaAtStart: string | null = (isCode && rootPath !== "")
+        ? (gitExec(["rev-parse", branch], { cwd: rootPath }) ?? null)
+        : null;
 
       // For code sources: detect non-HEAD branch indexing (content from git objects).
       const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
@@ -554,6 +560,22 @@ export async function indexSource(
         chunks_persisted: chunksPersisted,
         total_ms: Date.now() - jobStart,
       });
+
+      // Record the last-indexed SHA in branch_state for code sources on success.
+      // Non-fatal: a write failure logs a warning but does not propagate.
+      if (isCode && indexedShaAtStart !== null) {
+        try {
+          setLastIndexedSha(projectId, sourceId, branch, indexedShaAtStart, Date.now());
+        } catch (shaWriteErr) {
+          diagEmit({
+            event: "indexer.branch_state.write_failed",
+            projectId,
+            sourceId,
+            branch,
+            error: String(shaWriteErr),
+          });
+        }
+      }
 
       return result;
     }
