@@ -9,6 +9,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.31.1] — 2026-05-07
+
+### Fixed
+
+- **Knowledge indexes bloated by pre-v0.31.0 chunk-ID collisions are now collapsed during migrate.** GitLab-issue indexes where short comments ("+1", "lgtm", etc.) appeared thousands of times each now deduplicate in a single migration pass. Vectors are preserved; only the duplicate rows are removed.
+- **GitLab issue paths in knowledge indexes are now consistent.** Rows indexed before v0.31.0 stored `tickets/N` as the item path; v0.31.0's migration renamed the column but kept the stale values. Migration now rewrites these to `issues/N` (issue body) and `issues/N#note_M` (comment) in the same pass.
+- **Restart MCP servers or Claude Code after `scrybe migrate`.** Long-running MCP server processes cache internal Lance table handles. After a table is recreated (which migrate does), those handles can go stale and produce fragment-not-found errors. Restart the MCP server after running `scrybe migrate` to pick up the fresh handles.
+
+### Internal
+
+- Indexer flush path now deduplicates chunks by `chunk_id` before writing to LanceDB as a defence against future intra-batch duplicates. Emits `indexer.flush.intra_batch_dedup` to `daemon-log.jsonl` if triggered — this event should never appear in steady state and serves as a regression signal.
+
+---
+
 ## [0.31.0] — 2026-05-06
 
 ### Added
