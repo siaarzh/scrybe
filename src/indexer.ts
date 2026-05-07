@@ -484,6 +484,29 @@ export async function indexSource(
       await flushBatch();
       onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
 
+      // Sweep "attempted but produced 0 chunks" files — give them a hash so the scanner
+      // stops re-marking them next cycle. Uses the existing "embedded" outcome with empty
+      // tags (knowledge sources already use this path at line 423 / similar).
+      if (isCode) {
+        const noChunkFiles = [...toReindex].filter((p) => !filesSeenSoFar.has(p));
+        for (const p of noChunkFiles) {
+          if (merged[p] === undefined) continue; // defensive
+          try {
+            session.applyFile(p, { kind: "embedded", hash: merged[p], tags: [] });
+          } catch (err) {
+            // non-fatal — log warn, continue
+            debugEmit({
+              event: "indexer.zero-chunk-hash-save-failed",
+              projectId,
+              sourceId,
+              branch,
+              path: p,
+              error: String(err),
+            });
+          }
+        }
+      }
+
       if (halvingSession) {
         const existingMaxFailed = stateEntry?.maxFailed ?? 0;
         writeEntry(stateKey, {
