@@ -101,9 +101,16 @@ scrybe --auto
 Edit per-source private ignore rules. Rules are stored in `DATA_DIR/ignores/<project_id>/<source_id>.gitignore` and are **never committed** to the repo. Applied additively on top of `.gitignore` and committed `.scrybeignore`.
 
 ```bash
-scrybe ignore        # interactive wizard
-scrybe ignore edit   # same (alias)
+scrybe ignore                            # interactive wizard
+scrybe ignore edit                       # same (alias)
+scrybe ignore list [-P <id>] [--json]    # non-interactive — list all private ignore files (stdout)
+scrybe ignore get -P <id> -S <id> [--json]  # non-interactive — print one file's content (stdout)
 ```
+
+**Non-interactive subcommands** (added v0.31.4):
+
+- `ignore list` — enumerates per-source private ignore files across registered projects. Skips sources with no rules. Use `-P, --project-id <id>` to limit to a single project. `--json` returns `[{ project_id, source_id, path, rule_count, mtime }]`. Default human format prints one entry per project/source with rule count and mtime.
+- `ignore get` — prints the file content to stdout. `--json` returns `{ project_id, source_id, content, path, rule_count }` with `content: null` if the file doesn't exist. Default human format writes the raw file content to stdout (or `# No private ignore file …` if missing). Useful for scripts and LLM agents that need read-only access without invoking the editor.
 
 **Wizard flow:**
 

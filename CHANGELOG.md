@@ -9,6 +9,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.31.4] — 2026-05-08
+
+### Added
+
+- **`scrybe ignore list` and `scrybe ignore get` print to stdout.** The parent `scrybe ignore` command (interactive editor wizard) is unchanged. Two new non-interactive subcommands — `scrybe ignore list [-P <project>] [--json]` enumerates all per-source private ignore files, and `scrybe ignore get -P <project> -S <source> [--json]` prints a single file's content. Useful for scripts and LLM agents that need read-only access without invoking the editor.
+
+### Changed
+
+- **`scrybe doctor` now flags pending pinned-branch reindex state as `warn` instead of `ok`.** Branches that are pinned but not yet indexed (`NEVER_INDEXED`), or indexed but with no last-SHA recorded (`NO_SHA`, transient post-upgrade state), now appear under the `warn` count in the doctor summary so the transient state is visible. The daemon still backfills these automatically on the next poll cycle — no user action required.
+
+---
+
 ## [0.31.3] — 2026-05-07
 
 ### Fixed
@@ -1125,7 +1137,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.31.4...HEAD
+[0.31.4]: https://github.com/siaarzh/scrybe/compare/v0.31.3...v0.31.4
 [0.18.0]: https://github.com/siaarzh/scrybe/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/siaarzh/scrybe/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/siaarzh/scrybe/compare/v0.16.0...v0.17.0
