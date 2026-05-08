@@ -46,6 +46,21 @@ scrybe doctor --repair
 
 Exit codes: 0 = all ok, 1 = any failure (or any warning with `--strict`).
 
+#### Windows AV check rows (Windows only)
+
+On Windows, `scrybe doctor` also queries registered AV products and Defender state. These rows appear in `checks[]` only on Windows (zero rows on macOS / Linux):
+
+| Row ID | Typical status | Meaning |
+|--------|---------------|---------|
+| `env.windows_av.defender` | `ok` / `warn` / `skip` | Defender active and DATA_DIR exclusion state. `warn` = Defender scanning DATA_DIR (exclusion missing). `skip` = Defender disabled or not primary. |
+| `env.windows_av.mbam` | `warn` / `ok` / `skip` | Malwarebytes detected. `warn` = present but allow-list unverifiable (no MBAM API). Downgrade to `ok` by setting `SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1`. |
+| `env.windows_av.no_active_av` | `ok` | Defender disabled and no other AV active — informational only. |
+| `env.windows_av.repos_tip` | `ok` | Informational tip about AV scanning indexed repo paths. Only emitted when at least one of the above rows is `warn`. |
+
+See [README #windows-av](../README.md#windows-av) for remediation steps (Defender exclusion snippet, MBAM allow-list walkthrough).
+
+---
+
 #### HEALTH column states
 
 The `scrybe status` HEALTH column shows one of:

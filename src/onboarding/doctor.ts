@@ -98,6 +98,107 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   checks.push(ok("env.scrybe_version", SEC_ENV, "Scrybe version", `v${VERSION}`));
 
+  // ── 1b. Windows AV check ─────────────────────────────────────────────────────
+  if (process.platform === "win32") {
+    const { detectWindowsAv, AV_README_ANCHOR } = await import("./windows-av.js");
+    const avReport = await detectWindowsAv(dataDir);
+
+    if (avReport.skip) {
+      // Single skip row when Defender service is not installed or PS timed out
+      if (avReport.skipReason !== "non-windows") {
+        checks.push(skip("env.windows_av.defender", SEC_ENV, "Windows AV",
+          avReport.skipReason === "defender-not-installed"
+            ? "Defender service not installed — AV check skipped"
+            : "PowerShell timed out — AV check skipped"));
+      }
+    } else {
+      const d = avReport.defender!;
+      let hasAvWarn = false;
+
+      // ── Defender row ────────────────────────────────────────────────────────
+      if (d.active) {
+        if (d.dataDirExcluded) {
+          checks.push({
+            id: "env.windows_av.defender",
+            section: SEC_ENV,
+            title: "Windows Defender",
+            status: "ok",
+            message: `Active (${d.runningMode}), real-time on, exclusions: ${d.exclusions.length}`,
+            data: { running_mode: d.runningMode, real_time_enabled: d.realTimeEnabled, exclusion_count: d.exclusions.length, data_dir_excluded: true },
+          });
+        } else {
+          hasAvWarn = true;
+          checks.push({
+            id: "env.windows_av.defender",
+            section: SEC_ENV,
+            title: "Windows Defender",
+            status: "warn",
+            message: `Active (${d.runningMode}), DATA_DIR not in exclusion list — real-time scanning may slow indexing`,
+            remedy: `Run in elevated PowerShell to exclude DATA_DIR:\n  Add-MpPreference -ExclusionPath "${dataDir}"\nTo rollback:\n  Remove-MpPreference -ExclusionPath "${dataDir}"\nSee README ${AV_README_ANCHOR} for details.`,
+            data: { running_mode: d.runningMode, real_time_enabled: d.realTimeEnabled, exclusion_count: d.exclusions.length, data_dir_excluded: false },
+          });
+        }
+      } else {
+        // Defender is not running (e.g. stepped down by MBAM)
+        checks.push(skip("env.windows_av.defender", SEC_ENV, "Windows Defender",
+          `Defender in mode "${d.runningMode}" — not actively scanning`));
+      }
+
+      // ── MBAM row ────────────────────────────────────────────────────────────
+      if (avReport.mbamDetected) {
+        const mbamVerified = process.env["SCRYBE_DOCTOR_AV_MBAM_VERIFIED"] === "1";
+        if (mbamVerified) {
+          checks.push({
+            id: "env.windows_av.mbam",
+            section: SEC_ENV,
+            title: "Malwarebytes",
+            status: "ok",
+            message: "Detected — SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1 (user confirmed allow-list configured)",
+            data: { mbam_verified: true },
+          });
+        } else {
+          hasAvWarn = true;
+          checks.push({
+            id: "env.windows_av.mbam",
+            section: SEC_ENV,
+            title: "Malwarebytes",
+            status: "warn",
+            message: "Malwarebytes detected — DATA_DIR may be scanned in real time (no API to verify allow-list)",
+            remedy: `Add DATA_DIR to Malwarebytes allow list:\n  Open Malwarebytes → Settings → Allow List → Add → Allow a Folder → ${dataDir}\nOnce configured, set SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1 to suppress this warning.\nSee README ${AV_README_ANCHOR} for details.`,
+            data: { mbam_verified: false },
+          });
+        }
+      } else {
+        checks.push(skip("env.windows_av.mbam", SEC_ENV, "Malwarebytes", "Not detected"));
+      }
+
+      // ── No active AV row (info) ─────────────────────────────────────────────
+      if (avReport.noActiveAv) {
+        const noAvRow: CheckResult = {
+          id: "env.windows_av.no_active_av",
+          section: SEC_ENV,
+          title: "Windows AV",
+          status: "ok",
+          message: "No real-time AV detected — DATA_DIR scanning not a concern",
+          data: { defender_mode: d.runningMode },
+        };
+        checks.push(noAvRow);
+      }
+
+      // ── repos_tip row (info, only when a warn was emitted) ──────────────────
+      if (hasAvWarn) {
+        const tipRow: CheckResult = {
+          id: "env.windows_av.repos_tip",
+          section: SEC_ENV,
+          title: "AV tip — indexed repos",
+          status: "ok",
+          message: `Indexed repo paths can also be slowed by AV on \`git status\`. See README ${AV_README_ANCHOR} for the trade-off if shell-open feels slow.`,
+        };
+        checks.push(tipRow);
+      }
+    }
+  }
+
   // ── 2. Embedding Provider ───────────────────────────────────────────────────
   const SEC_PROV = "Embedding Provider";
 

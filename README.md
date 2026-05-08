@@ -379,6 +379,71 @@ Sustained ~10–13 K tokens/sec on Voyage. Smaller projects (<500 files) index i
 
 If you hit rate limits during indexing, tune `SCRYBE_EMBED_BATCH_SIZE` and `SCRYBE_EMBED_BATCH_DELAY_MS` in your `.env`.
 
+<a id="windows-av"></a>
+## Windows + AV
+
+Windows real-time AV scanning (Defender, Malwarebytes, others) can significantly slow scrybe because its I/O profile — many small `.lance` fragment writes, frequent `git status` calls over indexed repos — is worst-case for on-access scanning.
+
+`scrybe doctor` detects AV products and their state, and emits actionable warnings with remediation steps.
+
+### Windows Defender — add DATA_DIR to the exclusion list
+
+Run the following in an **elevated** PowerShell window (right-click → "Run as administrator"):
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\scrybe"
+```
+
+To verify the exclusion was added:
+
+```powershell
+(Get-MpPreference).ExclusionPath
+```
+
+To roll back:
+
+```powershell
+Remove-MpPreference -ExclusionPath "$env:LOCALAPPDATA\scrybe"
+```
+
+> **Note:** If you installed scrybe with a custom `SCRYBE_DATA_DIR`, substitute that path for `$env:LOCALAPPDATA\scrybe` in the commands above.
+
+### Malwarebytes — add DATA_DIR to the allow list
+
+Malwarebytes has no command-line API for allow-list management. Add the folder manually:
+
+1. Open **Malwarebytes**
+2. Go to **Settings** → **Allow List**
+3. Click **Add** → **Allow a Folder**
+4. Browse to your DATA_DIR (`%LOCALAPPDATA%\scrybe` by default) and confirm
+
+Once the allow list is configured, set the following env var to suppress the `scrybe doctor` warning:
+
+```
+SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1
+```
+
+Add this to your `.env` file in the scrybe DATA_DIR, or set it as a system/user environment variable.
+
+### Indexed repo folders — trade-off
+
+AV scanning also applies to your indexed repo directories. Excluding them from AV scanning can speed up `git status` and shell-open times, but it is a **security trade-off** — excluded paths are not scanned by real-time protection.
+
+This is your decision to make. `scrybe doctor` only surfaces an informational tip when AV warnings are present; it does not prescribe what to do. If you choose to exclude repo paths from Defender:
+
+```powershell
+# Replace <path-to-repo> with your actual repo path
+Add-MpPreference -ExclusionPath "C:\path\to\your\repo"
+```
+
+### Known limitations
+
+- **Malwarebytes allow-list**: there is no public API to read the MBAM allow list, so `scrybe doctor` cannot verify that the exclusion is in place. Use `SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1` to acknowledge this manually.
+- **Other AV products** (Norton, Bitdefender, Kaspersky, etc.): not detected. Consult your AV product's documentation for exclusion management.
+- **Corporate EDR / managed endpoints**: detection and exclusion may require IT admin involvement; scrybe cannot automate this.
+
+---
+
 ## Known limitations
 
 - **HTML / CSS / SCSS** use sliding-window chunking. Tree-sitter grammars exist for them but these languages have no function/class declarations, so chunk boundaries are arbitrary rather than semantic. Particularly noticeable for large single-page static sites.
