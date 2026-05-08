@@ -455,12 +455,14 @@ export async function runDoctor(): Promise<DoctorReport> {
                 undefined,
                 { lastIndexedSha, currentRemoteSha, branch: qualifiedRef }));
             } else if (inBranchTags) {
-              checks.push(ok(checkId, SEC_DAEMON, title,
-                `Branch indexed but pre-Plan-50 (or wiped) — daemon will silently backfill on next poll`,
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `Transient: indexed but no last-SHA recorded yet — daemon will silently backfill on next poll`,
+                undefined,
                 { branch: qualifiedRef }));
             } else {
-              checks.push(ok(checkId, SEC_DAEMON, title,
-                `Pinned but not yet indexed — daemon will queue first reindex on next poll`,
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `Transient: pinned but not yet indexed — daemon will queue first reindex on next poll`,
+                undefined,
                 { branch: qualifiedRef }));
             }
           } catch (e: any) {

@@ -1042,8 +1042,10 @@ export async function runCli(): Promise<void> {
       "It is applied additively on top of .gitignore and .scrybeignore.",
       "",
       "Examples:",
-      "  scrybe ignore              # interactive wizard",
-      "  scrybe ignore edit         # same (alias subcommand)",
+      "  scrybe ignore                            # interactive wizard",
+      "  scrybe ignore edit                       # same (alias subcommand)",
+      "  scrybe ignore list                       # list all private ignore files (stdout)",
+      "  scrybe ignore get -P myrepo -S primary   # print one file's content (stdout)",
     ].join("\n"))
     .action(async () => {
       const { runIgnoreWizard } = await import("./onboarding/ignore-wizard.js");
@@ -1056,6 +1058,92 @@ export async function runCli(): Promise<void> {
     .action(async () => {
       const { runIgnoreWizard } = await import("./onboarding/ignore-wizard.js");
       await runIgnoreWizard();
+    });
+
+  ignoreGroup.command("list")
+    .description("List private ignore files across registered projects (stdout, non-interactive)")
+    .option("-P, --project-id <id>", "Limit to a specific project")
+    .option("--json", "Machine-readable output")
+    .addHelpText("after", "\nExamples:\n  scrybe ignore list\n  scrybe ignore list -P myrepo\n  scrybe ignore list --json")
+    .action(async (opts: { projectId?: string; json?: boolean }) => {
+      try {
+        const { loadPrivateIgnore, getPrivateIgnorePath, isMissingOrEmpty, countRules } =
+          await import("./private-ignore.js");
+        const { getProject, listProjects } = await import("./registry.js");
+        const { existsSync, statSync } = await import("fs");
+        const projects = opts.projectId
+          ? (() => {
+            const p = getProject(opts.projectId!);
+            if (!p) throw new Error(`Project '${opts.projectId}' not found`);
+            return [p];
+          })()
+          : listProjects();
+        type Entry = { project_id: string; source_id: string; path: string; rule_count: number; mtime: string | null };
+        const entries: Entry[] = [];
+        for (const project of projects) {
+          for (const source of project.sources) {
+            if (source.source_config.type !== "code") continue;
+            const content = loadPrivateIgnore(project.id, source.source_id);
+            if (isMissingOrEmpty(content)) continue;
+            const path = getPrivateIgnorePath(project.id, source.source_id);
+            let mtime: string | null = null;
+            if (existsSync(path)) {
+              try { mtime = statSync(path).mtime.toISOString(); } catch { /* */ }
+            }
+            entries.push({
+              project_id: project.id,
+              source_id: source.source_id,
+              path,
+              rule_count: countRules(content),
+              mtime,
+            });
+          }
+        }
+        if (opts.json) { console.log(JSON.stringify(entries, null, 2)); return; }
+        if (entries.length === 0) { console.log("No private ignore files."); return; }
+        for (const e of entries) {
+          const mt = e.mtime ? ` (modified ${e.mtime})` : "";
+          console.log(`${e.project_id}/${e.source_id} — ${e.rule_count} rule(s)${mt}`);
+          console.log(`  ${e.path}`);
+        }
+      } catch (err: any) { console.error(`[scrybe] ${err.message}`); process.exit(1); }
+    });
+
+  ignoreGroup.command("get")
+    .description("Print the private ignore file content for a source (stdout, non-interactive)")
+    .requiredOption("-P, --project-id <id>", "Project identifier")
+    .requiredOption("-S, --source-id <id>", "Source identifier")
+    .option("--json", "Machine-readable output (includes path + rule_count)")
+    .addHelpText("after", "\nExamples:\n  scrybe ignore get -P myrepo -S primary\n  scrybe ignore get -P myrepo -S primary --json")
+    .action(async (opts: { projectId: string; sourceId: string; json?: boolean }) => {
+      try {
+        const { loadPrivateIgnore, getPrivateIgnorePath, countRules } =
+          await import("./private-ignore.js");
+        const { getProject } = await import("./registry.js");
+        const project = getProject(opts.projectId);
+        if (!project) throw new Error(`Project '${opts.projectId}' not found`);
+        const source = project.sources.find((s) => s.source_id === opts.sourceId);
+        if (!source) throw new Error(`Source '${opts.sourceId}' not found in project '${opts.projectId}'`);
+        const content = loadPrivateIgnore(opts.projectId, opts.sourceId);
+        const path = getPrivateIgnorePath(opts.projectId, opts.sourceId);
+        if (opts.json) {
+          console.log(JSON.stringify({
+            project_id: opts.projectId,
+            source_id: opts.sourceId,
+            content,
+            path,
+            rule_count: countRules(content),
+          }, null, 2));
+          return;
+        }
+        if (content === null) {
+          console.log(`# No private ignore file for ${opts.projectId}/${opts.sourceId}`);
+          console.log(`# Expected at: ${path}`);
+          return;
+        }
+        process.stdout.write(content);
+        if (!content.endsWith("\n")) process.stdout.write("\n");
+      } catch (err: any) { console.error(`[scrybe] ${err.message}`); process.exit(1); }
     });
 
   // ─── init ─────────────────────────────────────────────────────────────────

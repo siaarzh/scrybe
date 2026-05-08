@@ -290,7 +290,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
     expect(check!.message).toContain("no longer has");
   });
 
-  it("#11c — NO_SHA: indexed in branch_tags but no branch_state row → ok with backfill note", async () => {
+  it("#11c — NO_SHA: indexed in branch_tags but no branch_state row → warn (transient, backfill on next poll)", async () => {
     const fixtureProject = {
       id: "test-fp-nosha",
       description: "no sha in branch_state",
@@ -340,11 +340,11 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
 
     const check = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-nosha.primary.legacy");
     expect(check).toBeDefined();
-    expect(check!.status).toBe("ok");
+    expect(check!.status).toBe("warn");
     expect(check!.message).toContain("backfill");
   });
 
-  it("#11d — NEVER_INDEXED: no branch_state AND no branch_tags → ok with first-index note", async () => {
+  it("#11d — NEVER_INDEXED: no branch_state AND no branch_tags → warn (transient, first reindex on next poll)", async () => {
     const fixtureProject = {
       id: "test-fp-never",
       description: "never indexed",
@@ -394,7 +394,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
 
     const check = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-never.primary.new-feature");
     expect(check).toBeDefined();
-    expect(check!.status).toBe("ok");
+    expect(check!.status).toBe("warn");
     expect(check!.message).toContain("first reindex");
   });
 });
