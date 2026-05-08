@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.31.5] — 2026-05-08
+
+### Added
+
+- **`scrybe doctor` Windows AV exclusion check.** New rows under `Environment` — `env.windows_av.defender`, `env.windows_av.mbam`, `env.windows_av.no_active_av`, `env.windows_av.repos_tip` — detect active Windows AV via WMI `SecurityCenter2` + `Get-MpPreference` + `Get-MpComputerStatus`. Flags missing Defender exclusion on `<DATA_DIR>` with a copy-paste PowerShell snippet (`Add-MpPreference -ExclusionPath ...`); warns on Malwarebytes presence with manual GUI walkthrough (no public allow-list API for MBAM). Honors `AMRunningMode` so a passive or disabled Defender stops emitting noisy warnings. The `repos_tip` row only appears when another AV row is `warn`. Windows-only — the entire AV section is silent on macOS / Linux. New README "Windows + AV" section anchored at `#windows-av` covers the rationale and the Defender / Malwarebytes setup steps.
+- **`SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1` env var.** Suppresses the Malwarebytes presence-warn for users who have already added `<DATA_DIR>` to MBAM's allow list. MBAM has no public allow-list API, so scrybe can't verify it — this env var is the user attestation. Documented in the README "Windows + AV" section.
+
+---
+
 ## [0.31.4] — 2026-05-08
 
 ### Added
@@ -1137,7 +1146,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.31.4...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.31.5...HEAD
+[0.31.5]: https://github.com/siaarzh/scrybe/compare/v0.31.4...v0.31.5
 [0.31.4]: https://github.com/siaarzh/scrybe/compare/v0.31.3...v0.31.4
 [0.18.0]: https://github.com/siaarzh/scrybe/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/siaarzh/scrybe/compare/v0.17.0...v0.17.1
