@@ -232,8 +232,14 @@ export function synthesizeMigrationConfig(
       model: "Xenova/multilingual-e5-small",
     };
   } else {
-    // Code is set but knowledge is not — reuse the code preset for text
-    textPresetName = codePresetName;
+    // Code is set but knowledge is not — fall back to local default for text.
+    // Reusing the code preset is wrong: code-profile models (e.g. voyage-code-3)
+    // are rejected when assigned to the text_preset slot.
+    textPresetName = "local-default-text";
+    embeddingPresets[textPresetName] = {
+      provider: "local",
+      model: "Xenova/multilingual-e5-small",
+    };
   }
 
   const assignments: ScrybeConfig["assignments"] = {

@@ -634,16 +634,19 @@ export async function runDoctor(): Promise<DoctorReport> {
             "config.json exists but returned null unexpectedly",
             "Delete config.json and re-run `scrybe init`"));
         } else {
-          // Verify all preset references in assignments resolve to existing presets
+          // Verify all preset references in assignments resolve to existing presets.
+          // Embedding slots resolve against embedding_presets; rerank_preset against reranker_presets.
           const presetNames = new Set(Object.keys(parsedCfg.embedding_presets));
           const badRefs: string[] = [];
           for (const [slot, ref] of Object.entries(parsedCfg.assignments)) {
             if (!ref) continue;
+            if (slot === "rerank_preset") continue;
             if (!presetNames.has(ref as string)) badRefs.push(`${slot}: "${ref}"`);
           }
-          if (parsedCfg.reranker_presets) {
-            const reranker = parsedCfg.assignments.rerank_preset;
-            if (reranker && !parsedCfg.reranker_presets[reranker]) {
+          const reranker = parsedCfg.assignments.rerank_preset;
+          if (reranker) {
+            const rerankerPool = parsedCfg.reranker_presets ?? {};
+            if (!rerankerPool[reranker]) {
               badRefs.push(`rerank_preset: "${reranker}"`);
             }
           }

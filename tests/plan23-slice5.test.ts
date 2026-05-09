@@ -324,6 +324,31 @@ describe("doctor — config.well_formed: malformed config.json", () => {
     expect(check!.status).toBe("fail");
     expect(check!.message).toMatch(/nonexistent-preset/);
   });
+
+  it("passes config.well_formed when rerank_preset resolves via reranker_presets (regression: v0.32.1 doctor false-positive)", async () => {
+    writeConfig(dir, {
+      schema_version: 1,
+      embedding_presets: {
+        "voyage-code": { provider: "voyage", model: "voyage-code-3" },
+      },
+      reranker_presets: {
+        "voyage-rerank": { provider: "voyage", model: "rerank-2.5", credentials_from: "voyage-code" },
+      },
+      assignments: {
+        code_preset: "voyage-code",
+        text_preset: "voyage-code",
+        rerank_preset: "voyage-rerank",
+      },
+    });
+
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+
+    const check = report.checks.find((c) => c.id === "config.well_formed");
+    expect(check).toBeTruthy();
+    // Must NOT fail — rerank_preset lives in reranker_presets, not embedding_presets
+    expect(check!.status).toBe("ok");
+  });
 });
 
 describe("doctor — config.refs_resolve: missing env var", () => {

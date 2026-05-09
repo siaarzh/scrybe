@@ -114,6 +114,28 @@ describe("synthesizeMigrationConfig — code env vars set → migrated-code pres
     expect(textPreset?.credentials).toBe("${SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY}");
     expect(textPreset?.provider).toBe("openai");
   });
+
+  it("falls back to local-default-text when only code env vars are set (regression: v0.32.1 cross-profile bug)", async () => {
+    const { synthesizeMigrationConfig } = await import("../src/migrations.js");
+
+    const envVars = new Map([
+      ["SCRYBE_CODE_EMBEDDING_API_KEY", "code-key"],
+      ["SCRYBE_CODE_EMBEDDING_BASE_URL", "https://api.voyageai.com/v1"],
+      ["SCRYBE_CODE_EMBEDDING_MODEL", "voyage-code-3"],
+      // No SCRYBE_KNOWLEDGE_EMBEDDING_* vars
+    ]);
+
+    const cfg = synthesizeMigrationConfig(envVars, false);
+
+    expect(cfg.assignments.code_preset).toBe("migrated-code");
+    // Must NOT reuse migrated-code (profile=code) for text_preset slot
+    expect(cfg.assignments.text_preset).toBe("local-default-text");
+
+    const textPreset = cfg.embedding_presets["local-default-text"];
+    expect(textPreset).toBeDefined();
+    expect(textPreset?.provider).toBe("local");
+    expect(textPreset?.credentials).toBeUndefined();
+  });
 });
 
 // ─── Test 2 — synthesizeMigrationConfig: no env vars → local-default-* ────────

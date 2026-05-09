@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.32.2] — 2026-05-09
+
+### Fixed
+
+- **Migration no longer assigns the code preset to the text slot when only `SCRYBE_CODE_EMBEDDING_*` env vars are set.** When the migration ran on installs that only had code-embedding env vars configured (no `SCRYBE_KNOWLEDGE_EMBEDDING_*`), the synthesized config wrote `text_preset = "migrated-code"`. That's a profile mismatch: code-profile models like `voyage-code-3` are rejected when assigned to a text slot, so any subsequent `scrybe index` against ticket / knowledge sources failed with `preset uses model X with profile "code", but it is assigned to slot "text_preset" which requires profile "text"`. The asymmetric branch now falls back to a `local-default-text` preset (in-process embedder, no network), matching the no-env case. Existing installs hit by this in v0.32.1 can fix manually with `scrybe model preset add` + `scrybe model assign --text <new-preset>`, or delete `config.json` and re-run `scrybe init`.
+- **`scrybe doctor`'s `config.well_formed` no longer false-positives on a correctly-configured rerank slot.** The check looked up every assignment slot in `embedding_presets`, including `rerank_preset` — but rerank presets live in `reranker_presets`. A valid migrated config with `rerank_preset = "migrated-rerank"` produced `Unresolved preset references: rerank_preset: "migrated-rerank"` even though the preset existed. The check now routes `rerank_preset` to `reranker_presets` and only the embedding slots to `embedding_presets`.
+
+---
+
 ## [0.32.1] — 2026-05-09
 
 ### Fixed
@@ -1187,7 +1196,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.2...HEAD
+[0.32.2]: https://github.com/siaarzh/scrybe/compare/v0.32.1...v0.32.2
 [0.32.1]: https://github.com/siaarzh/scrybe/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/siaarzh/scrybe/compare/v0.31.6...v0.32.0
 [0.31.6]: https://github.com/siaarzh/scrybe/compare/v0.31.5...v0.31.6
