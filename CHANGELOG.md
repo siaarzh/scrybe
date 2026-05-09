@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.32.1] — 2026-05-09
+
+### Fixed
+
+- **`assign_preset` MCP tool now correctly reports `requires_reindex: true` when the new preset's `(model, dim, provider)` differs from the previously assigned preset, even when no sources are indexed yet.** The triple-comparison check was nested inside a per-source loop; with no projects registered the loop body never executed and the flag stayed `false`. The preset-level triple comparison now runs unconditionally, with the per-source sidecar scan only kicking in to detect drift between the saved config and indexed table stamps. (v0.32.0 was tagged but not published due to this CI test failure.)
+
+---
+
 ## [0.32.0] — 2026-05-09
 
 ### Added
@@ -1179,7 +1187,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.1...HEAD
+[0.32.1]: https://github.com/siaarzh/scrybe/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/siaarzh/scrybe/compare/v0.31.6...v0.32.0
 [0.31.6]: https://github.com/siaarzh/scrybe/compare/v0.31.5...v0.31.6
 [0.31.5]: https://github.com/siaarzh/scrybe/compare/v0.31.4...v0.31.5

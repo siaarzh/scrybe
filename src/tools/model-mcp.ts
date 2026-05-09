@@ -246,40 +246,38 @@ export const assignPresetTool: Tool<
           };
         }
 
-        // Check if triples differ across any affected source
-        // For code sources, check if the stamped triple differs from the new triple
-        // Only set requires_reindex if there's an existing index with a different triple
-        const projects = listProjects();
-        for (const project of projects) {
-          for (const source of project.sources) {
-            // Only code sources use code preset, text sources use text preset
-            const sourceProfile =
-              source.source_config.type === "code" ? "code" : "text";
-            if ((slot === "code" && sourceProfile !== "code") ||
-                (slot === "text" && sourceProfile !== "text")) {
-              continue;
-            }
+        // Preset-level triple change is sufficient on its own — it's a config-level
+        // signal that doesn't depend on any source being indexed yet.
+        if (currentTriple && !triples_equal(currentTriple, newTriple)) {
+          requires_reindex = true;
+        }
 
-            if (!source.table_name) continue;
+        // Sidecar-level check still scans for any indexed source whose stamp
+        // disagrees with the new triple — covers cases where the config got
+        // edited out-of-band but tables still carry the old stamp.
+        if (!requires_reindex) {
+          const projects = listProjects();
+          for (const project of projects) {
+            for (const source of project.sources) {
+              const sourceProfile =
+                source.source_config.type === "code" ? "code" : "text";
+              if ((slot === "code" && sourceProfile !== "code") ||
+                  (slot === "text" && sourceProfile !== "text")) {
+                continue;
+              }
 
-            // Read the source's stamped triple from table metadata
-            const tableMeta = readTableMeta(source.table_name);
-            const stampedTriple = getTripleFromStamp(tableMeta);
+              if (!source.table_name) continue;
 
-            // Require reindex only if:
-            // 1. There's an existing stamp with a different triple, OR
-            // 2. The current config assignment differs from the new triple
-            // But NOT if this is a first-time assignment (no current triple and no stamped triple)
-            if (stampedTriple && !triples_equal(stampedTriple, newTriple)) {
-              requires_reindex = true;
-              break;
+              const tableMeta = readTableMeta(source.table_name);
+              const stampedTriple = getTripleFromStamp(tableMeta);
+
+              if (stampedTriple && !triples_equal(stampedTriple, newTriple)) {
+                requires_reindex = true;
+                break;
+              }
             }
-            if (currentTriple && !triples_equal(currentTriple, newTriple)) {
-              requires_reindex = true;
-              break;
-            }
+            if (requires_reindex) break;
           }
-          if (requires_reindex) break;
         }
       }
 
