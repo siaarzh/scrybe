@@ -165,6 +165,7 @@ If you installed globally (`npm install -g scrybe-cli`):
 | `remove_source` | Remove a source and drop its vector table |
 | `search_code` | Semantic search over indexed code |
 | `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs) |
+| `lookup_symbol` | Exact-symbol lookup by name — deterministic, no embedding cost, no `score` field |
 | `reindex_all` | Incrementally reindex all registered projects in the background |
 | `reindex_project` | Trigger background reindex of all sources in a project |
 | `reindex_source` | Trigger background reindex of a single source |

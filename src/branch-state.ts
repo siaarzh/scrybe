@@ -256,6 +256,47 @@ export function getChunkIdsForBranch(projectId: string, sourceId: string, branch
   return new Set(rows.map((r) => r.chunk_id));
 }
 
+/**
+ * Resolve a caller-supplied branch value to the form actually stored in branch_tags.
+ *
+ * Storage is mixed format today:
+ *   - HEAD branches are indexed as short names  (`master`, `feat/example`)
+ *   - Pinned branches are indexed as qualified refs (`origin/dev`, `origin/beta`)
+ *
+ * This resolver bridges the gap so callers can pass either form and get hits.
+ *
+ * Algorithm (two-call cap):
+ *   1. Try supplied form as-is. Non-empty → return supplied.
+ *   2. If empty AND no `origin/` prefix → retry with `origin/<supplied>`. Non-empty → return prefixed.
+ *   3. If empty AND has `origin/` prefix → retry with prefix stripped. Non-empty → return stripped.
+ *   4. Still empty → return null (caller should propagate as empty results).
+ *
+ * Does NOT modify storage. Resolution is query-time only.
+ */
+export function resolveBranchForSearch(
+  projectId: string,
+  sourceId: string,
+  suppliedBranch: string
+): string | null {
+  // Step 1: try as-is
+  const ids = getChunkIdsForBranch(projectId, sourceId, suppliedBranch);
+  if (ids.size > 0) return suppliedBranch;
+
+  // Step 2/3: flip the origin/ prefix
+  if (!suppliedBranch.startsWith("origin/")) {
+    const qualified = `origin/${suppliedBranch}`;
+    const qualIds = getChunkIdsForBranch(projectId, sourceId, qualified);
+    if (qualIds.size > 0) return qualified;
+  } else {
+    const stripped = suppliedBranch.slice("origin/".length);
+    const stripIds = getChunkIdsForBranch(projectId, sourceId, stripped);
+    if (stripIds.size > 0) return stripped;
+  }
+
+  // Step 4: no form found
+  return null;
+}
+
 /** Return the set of all chunk IDs tagged for any branch of this (project, source). */
 export function getAllChunkIdsForSource(projectId: string, sourceId: string): Set<string> {
   const rows = getDB().prepare(

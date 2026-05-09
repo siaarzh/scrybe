@@ -188,11 +188,11 @@ async function getProjectTable(
   return table;
 }
 
-function escapeSql(value: string): string {
+export function escapeSql(value: string): string {
   return value.replace(/'/g, "''");
 }
 
-async function openExistingTable(tableName: string): Promise<lancedb.Table | null> {
+export async function openExistingTable(tableName: string): Promise<lancedb.Table | null> {
   const cached = _tableCache.get(tableName);
   if (cached) return cached;
   const db = await getDb();

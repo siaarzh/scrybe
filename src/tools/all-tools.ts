@@ -2,6 +2,7 @@ import type { Tool } from "./types.js";
 import { listProjectsTool, addProjectTool, updateProjectTool, removeProjectTool } from "./project.js";
 import { listSourcesTool, addSourceTool, updateSourceTool, removeSourceTool } from "./source.js";
 import { searchCodeTool, searchKnowledgeTool } from "./search.js";
+import { lookupSymbolTool } from "./lookup.js";
 import {
   reindexAllTool,
   reindexProjectTool,
@@ -30,6 +31,7 @@ export const allTools: Tool<any, any>[] = [
   // Search
   searchCodeTool,
   searchKnowledgeTool,
+  lookupSymbolTool,
   // Reindex
   reindexAllTool,
   reindexProjectTool,

@@ -462,7 +462,7 @@ Semantic search over indexed code sources.
 |------|----------|-------------|
 | `--project-id <id>` | ✓ | Project to search |
 | `--top-k <n>` | | Number of results (default: 10) |
-| `--branch <name>` | | Branch to search (default: current HEAD for code sources) |
+| `--branch <name>` | | Branch to search (default: current HEAD for code sources). Accepts short names (`dev`) or qualified refs (`origin/dev`) — scrybe resolves whichever form is indexed. |
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash

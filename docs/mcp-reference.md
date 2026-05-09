@@ -143,6 +143,8 @@ Semantic search over indexed code sources in a project.
 | `top_k` | number | | Number of results (default: 10) |
 | `branch` | string | | Branch to search (default: current HEAD of the source repo). Use `list_branches` to see indexed branches. |
 
+**Branch name resolution.** Scrybe accepts either short names (`dev`, `feat/example`) or qualified remote-tracking refs (`origin/dev`, `origin/feat/example`). The server resolves whichever form is actually stored — HEAD branches are indexed as short names, pinned branches as qualified refs — so callers do not need to know the stored form. If both a short name and its qualified ref have been indexed on the same source (unusual), pass the exact form you want. If neither form is indexed for a source, that source returns an empty result set. Set `SCRYBE_DEBUG_SEARCH=1` on the MCP server process to emit a debug line when a branch value cannot be resolved.
+
 **Returns:** array of `{ chunk_id, score, project_id, source_id, item_path, start_line, end_line, language, symbol_name, content, branches: string[] }`
 
 - `source_id` — the source the chunk came from (e.g. `"primary"`).
@@ -172,6 +174,68 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 For `item_type: "ticket_comment"`, `author` is the commenter's username, `timestamp` is the comment's `created_at`, and `item_url` includes a `#note_{id}` anchor linking to the specific comment.
 
 **Structured errors:** When a source needs migration, search returns `{ error_type: "needs_migration", error: "...", details: { migrate_command: "scrybe migrate ..." } }` instead of results. Run the indicated command to upgrade the source.
+
+---
+
+### `lookup_symbol`
+
+Deterministic exact-symbol lookup in a project's code index. Returns all chunks whose `symbol_name` matches the supplied name, without paying embedding or reranking cost. Use when you know a symbol name and need its file location, line range, and source content.
+
+**No `score` field** — results are sorted by `(language ASC, item_path ASC, start_line ASC)`, not by relevance.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project to search |
+| `symbol_name` | string | ✓ | Symbol name to look up. Must be non-empty after trimming. |
+| `match` | string | | `"suffix"` (default) or `"exact"`. See match modes below. |
+| `branch` | string | | Branch to scope results to. Accepts short names or `origin/` qualified refs — same resolution as `search_code`. If omitted, all indexed branches are searched. |
+| `source_id` | string | | Restrict to a specific source. Omit to search all code sources. |
+| `case_sensitive` | boolean | | Case-sensitive match (default `true`). Pass `false` to match case-insensitively. |
+| `limit` | number | | Max results (default 50, max 200). |
+
+**Match modes:**
+
+| `match` | `case_sensitive` | Behaviour |
+|---------|-----------------|-----------|
+| `suffix` | `true` (default) | Matches `symbol_name = 'X'` OR `symbol_name LIKE '%.X'` — finds both top-level `X` and dotted forms like `User.X`. |
+| `suffix` | `false` | Same as above but case-insensitive. |
+| `exact` | `true` | `symbol_name = 'X'` only. `getName` does **not** match `User.getName`. |
+| `exact` | `false` | `LOWER(symbol_name) = LOWER('X')` only. |
+
+**Dotted naming.** Class methods are stored as `ClassName.methodName` (e.g. `BetaEngine.transform`). In `suffix` mode, passing `transform` returns `BetaEngine.transform` and any other dotted form. In `exact` mode, you must pass the full qualified name.
+
+**Empty-name chunks excluded.** The `symbol_name != ''` filter always applies, which means:
+- Sliding-window fallback chunks (files in unsupported languages or with parse failures) are never returned.
+- Non-first sub-chunks of large declarations (those that exceeded `chunkSize`) are never returned — only the first sub-chunk, which carries the symbol name and declaration head.
+
+**Multi-chunk declarations.** For very large declarations, `lookup_symbol` returns only the first sub-chunk. Its `start_line` / `end_line` cover the head. To read the full body, use those line numbers to read the file directly.
+
+**Returns:** array of `{ chunk_id, project_id, source_id, item_path, start_line, end_line, language, symbol_name, content, branches: string[] }`
+
+- No `score` field (contrast with `search_code`).
+- `branches` — branch annotation, same sort order as `search_code` (master/main first).
+- Returns `[]` when nothing matches — no error thrown.
+
+**Branch name resolution.** Uses the same resolver as `search_code`. `branch="dev"` and `branch="origin/dev"` are both accepted; the server resolves whichever form is indexed for the source.
+
+**Examples:**
+
+```json
+// Find all definitions of "alphaGreeting" (exact, any source)
+{ "project_id": "myrepo", "symbol_name": "alphaGreeting", "match": "exact" }
+
+// Find "transform" anywhere it appears (top-level or as Foo.transform)
+{ "project_id": "myrepo", "symbol_name": "transform" }
+
+// Find User.getName specifically
+{ "project_id": "myrepo", "symbol_name": "User.getName", "match": "exact" }
+
+// Case-insensitive lookup for C#-style naming
+{ "project_id": "myrepo", "symbol_name": "USERSERVICE", "match": "exact", "case_sensitive": false }
+
+// Branch-scoped lookup
+{ "project_id": "myrepo", "symbol_name": "alphaFarewell", "branch": "feat/example" }
+```
 
 ---
 

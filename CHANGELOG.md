@@ -7,6 +7,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **New MCP tool `lookup_symbol`.** Deterministic exact-symbol lookup by name — no embedding, no reranking, no `score` field. Returns all code chunks whose `symbol_name` matches the supplied value, sorted by `(language, item_path, start_line)`. Two match modes: `suffix` (default) matches both bare names and dotted qualified forms (`getName` → `User.getName`); `exact` requires the full stored name. Optional `case_sensitive` override (default `true`). Branch filtering accepts short names or `origin/`-qualified refs interchangeably. Empty-name chunks (sliding-window fallback files, non-first sub-chunks of large declarations) are always excluded. MCP-only — no CLI command.
+
+### Fixed
+
+- **`search_code` and `scrybe search` now accept short branch names for pinned branches.** Passing `branch="dev"` to a project where `dev` was indexed via the pinned-branch path (stored as `origin/dev`) previously returned silently empty results. The server now resolves the supplied name to whichever form is actually indexed — trying the supplied value first, then flipping the `origin/` prefix on or off. Short names (`dev`) and qualified refs (`origin/dev`) are both accepted. If neither form is indexed, the source returns an empty result set (same silent-empty contract as before). Set `SCRYBE_DEBUG_SEARCH=1` to log unresolved branch values.
+
 ---
 
 ## [0.31.5] — 2026-05-08
