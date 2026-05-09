@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.31.6] — 2026-05-09
+
 ### Added
 
 - **New MCP tool `lookup_symbol`.** Deterministic exact-symbol lookup by name — no embedding, no reranking, no `score` field. Returns all code chunks whose `symbol_name` matches the supplied value, sorted by `(language, item_path, start_line)`. Two match modes: `suffix` (default) matches both bare names and dotted qualified forms (`getName` → `User.getName`); `exact` requires the full stored name. Optional `case_sensitive` override (default `true`). Branch filtering accepts short names or `origin/`-qualified refs interchangeably. Empty-name chunks (sliding-window fallback files, non-first sub-chunks of large declarations) are always excluded. MCP-only — no CLI command.
@@ -1154,7 +1158,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.31.5...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.31.6...HEAD
+[0.31.6]: https://github.com/siaarzh/scrybe/compare/v0.31.5...v0.31.6
 [0.31.5]: https://github.com/siaarzh/scrybe/compare/v0.31.4...v0.31.5
 [0.31.4]: https://github.com/siaarzh/scrybe/compare/v0.31.3...v0.31.4
 [0.18.0]: https://github.com/siaarzh/scrybe/compare/v0.17.1...v0.18.0
