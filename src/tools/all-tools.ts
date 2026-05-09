@@ -15,6 +15,7 @@ import {
 import { listBranchesTool, listPinnedBranchesTool, pinBranchesTool, unpinBranchesTool } from "./branch.js";
 import { setPrivateIgnoreTool, getPrivateIgnoreTool, listPrivateIgnoresTool } from "./private-ignores.js";
 import { gcTool } from "./gc.js";
+import { addEmbeddingPresetTool, assignPresetTool } from "./model-mcp.js";
 
 /** All tools in the registry (MCP + CLI). */
 export const allTools: Tool<any, any>[] = [
@@ -51,6 +52,9 @@ export const allTools: Tool<any, any>[] = [
   setPrivateIgnoreTool,
   getPrivateIgnoreTool,
   listPrivateIgnoresTool,
+  // Model presets
+  addEmbeddingPresetTool,
+  assignPresetTool,
 ];
 
 /** MCP-registered tools only (excludes cliOnly). */

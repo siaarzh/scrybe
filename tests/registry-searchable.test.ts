@@ -5,87 +5,118 @@
  * sources without requiring an API key, and must surface the correct env var
  * name for api-provider sources when the key is absent.
  *
- * Construct sources in-memory and exercise `isSearchable` directly. No filesystem,
- * no embedder load, no Lance.
+ * Each test sets SCRYBE_DATA_DIR to a temp dir with the appropriate config.json,
+ * so the preset resolver uses the test's intent rather than the user's real config.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import { isSearchable } from "../src/registry.js";
 import type { Source } from "../src/types.js";
 
-function localCodeSource(overrides: Partial<Source> = {}): Source {
+function codeSource(overrides: Partial<Source> = {}): Source {
   return {
     source_id: "primary",
     source_config: { type: "code", root_path: "/tmp/x", languages: ["ts"] },
     table_name: "code_abc123",
-    embedding: {
-      base_url: "",
-      model: "Xenova/multilingual-e5-small",
-      dimensions: 384,
-      api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
-      provider_type: "local",
-    },
     ...overrides,
   };
 }
 
-function apiCodeSource(overrides: Partial<Source> = {}): Source {
-  return {
-    source_id: "primary",
-    source_config: { type: "code", root_path: "/tmp/x", languages: ["ts"] },
-    table_name: "code_def456",
-    embedding: {
-      base_url: "https://api.voyageai.com/v1",
-      model: "voyage-code-3",
-      dimensions: 1024,
-      api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
-      provider_type: "api",
-    },
-    ...overrides,
-  };
+/** Write a config.json with the given preset/assignments to DATA_DIR. */
+function writeConfig(dir: string, config: import("../src/config.js").ScrybeConfig) {
+  writeFileSync(join(dir, "config.json"), JSON.stringify(config, null, 2) + "\n", "utf8");
 }
+
+const localConfig = (): import("../src/config.js").ScrybeConfig => ({
+  schema_version: 1,
+  embedding_presets: {
+    "local-code": {
+      provider: "local",
+      model: "Xenova/multilingual-e5-small",
+    },
+    "local-text": {
+      provider: "local",
+      model: "Xenova/multilingual-e5-small",
+    },
+  },
+  assignments: {
+    code_preset: "local-code",
+    text_preset: "local-text",
+  },
+});
+
+const apiConfig = (keyEnvVar: string): import("../src/config.js").ScrybeConfig => ({
+  schema_version: 1,
+  embedding_presets: {
+    "voyage-code": {
+      provider: "voyage",
+      model: "voyage-code-3",
+      credentials: `\${${keyEnvVar}}`,
+    },
+    "local-text": {
+      provider: "local",
+      model: "Xenova/multilingual-e5-small",
+    },
+  },
+  assignments: {
+    code_preset: "voyage-code",
+    text_preset: "local-text",
+  },
+});
 
 describe("isSearchable", () => {
-  let savedKey: string | undefined;
+  let dir: string;
+  let savedDataDir: string | undefined;
 
   beforeEach(() => {
-    // Snapshot then clear env so each test starts from a known baseline.
-    savedKey = process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
-    delete process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
+    dir = mkdtempSync(join(tmpdir(), "scrybe-searchable-test-"));
+    savedDataDir = process.env.SCRYBE_DATA_DIR;
+    process.env.SCRYBE_DATA_DIR = dir;
   });
 
-  function restoreEnv(): void {
-    if (savedKey === undefined) delete process.env.SCRYBE_CODE_EMBEDDING_API_KEY;
-    else process.env.SCRYBE_CODE_EMBEDDING_API_KEY = savedKey;
-  }
+  afterEach(() => {
+    if (savedDataDir === undefined) delete process.env.SCRYBE_DATA_DIR;
+    else process.env.SCRYBE_DATA_DIR = savedDataDir;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
 
   it("local-provider source is searchable without any API key in the environment", () => {
-    const src = localCodeSource();
+    writeConfig(dir, localConfig());
+    const src = codeSource();
     const result = isSearchable(src);
-    restoreEnv();
     expect(result.ok).toBe(true);
     expect(result.reason).toBeUndefined();
   });
 
   it("api-provider source without a key is NOT searchable and surfaces the env var name", () => {
-    const src = apiCodeSource();
+    const envVarName = "SCRYBE_VOYAGE_KEY_SEARCHABLE_TEST";
+    delete process.env[envVarName];
+    writeConfig(dir, apiConfig(envVarName));
+    const src = codeSource();
     const result = isSearchable(src);
-    restoreEnv();
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain("SCRYBE_CODE_EMBEDDING_API_KEY");
+    expect(result.reason).toContain(envVarName);
   });
 
-  it("api-provider source with SCRYBE_CODE_EMBEDDING_API_KEY set is searchable", () => {
-    process.env.SCRYBE_CODE_EMBEDDING_API_KEY = "test-key";
-    const src = apiCodeSource();
-    const result = isSearchable(src);
-    restoreEnv();
-    expect(result.ok).toBe(true);
+  it("api-provider source with API key set is searchable", () => {
+    const envVarName = "SCRYBE_VOYAGE_KEY_SEARCHABLE_TEST2";
+    process.env[envVarName] = "test-voyage-key";
+    try {
+      writeConfig(dir, apiConfig(envVarName));
+      const src = codeSource();
+      const result = isSearchable(src);
+      expect(result.ok).toBe(true);
+    } finally {
+      delete process.env[envVarName];
+    }
   });
 
   it("never-indexed source is not searchable regardless of provider", () => {
-    const src = localCodeSource({ table_name: undefined });
+    writeConfig(dir, localConfig());
+    const src = codeSource({ table_name: undefined });
     const result = isSearchable(src);
-    restoreEnv();
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("Never indexed");
   });

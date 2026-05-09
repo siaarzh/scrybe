@@ -609,6 +609,177 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
+  // ── 7. Config file checks ────────────────────────────────────────────────────
+  const SEC_CFG = "Config";
+
+  {
+    const { readScrybeConfig } = await import("../config.js");
+    const cfgPath = join(dataDir, "config.json");
+
+    // 7a. config.well_formed
+    let parsedCfg: Awaited<ReturnType<typeof readScrybeConfig>> = null;
+    if (!existsSync(cfgPath)) {
+      // config.json is optional while the preset system is being adopted; skip silently
+      checks.push(skip("config.well_formed", SEC_CFG, "config.json well-formed",
+        "config.json not present — run `scrybe init` to configure model presets"));
+      checks.push(skip("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+        "Skipped: config.json not present"));
+      checks.push(skip("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+        "Skipped: config.json not present"));
+    } else {
+      try {
+        parsedCfg = readScrybeConfig();
+        if (!parsedCfg) {
+          checks.push(fail("config.well_formed", SEC_CFG, "config.json well-formed",
+            "config.json exists but returned null unexpectedly",
+            "Delete config.json and re-run `scrybe init`"));
+        } else {
+          // Verify all preset references in assignments resolve to existing presets
+          const presetNames = new Set(Object.keys(parsedCfg.embedding_presets));
+          const badRefs: string[] = [];
+          for (const [slot, ref] of Object.entries(parsedCfg.assignments)) {
+            if (!ref) continue;
+            if (!presetNames.has(ref as string)) badRefs.push(`${slot}: "${ref}"`);
+          }
+          if (parsedCfg.reranker_presets) {
+            const reranker = parsedCfg.assignments.rerank_preset;
+            if (reranker && !parsedCfg.reranker_presets[reranker]) {
+              badRefs.push(`rerank_preset: "${reranker}"`);
+            }
+          }
+          if (badRefs.length > 0) {
+            checks.push(fail("config.well_formed", SEC_CFG, "config.json well-formed",
+              `Unresolved preset references: ${badRefs.join(", ")}`,
+              "Run `scrybe model preset add` to create the missing presets"));
+          } else {
+            checks.push(ok("config.well_formed", SEC_CFG, "config.json well-formed",
+              `schema_version=${parsedCfg.schema_version}, ${Object.keys(parsedCfg.embedding_presets).length} preset(s)`,
+              { schema_version: parsedCfg.schema_version }));
+          }
+        }
+      } catch (err: any) {
+        parsedCfg = null;
+        checks.push(fail("config.well_formed", SEC_CFG, "config.json well-formed",
+          `Parse error: ${err?.message ?? String(err)}`,
+          "Fix or delete config.json and re-run `scrybe init`"));
+      }
+
+      // 7b. config.refs_resolve
+      if (!parsedCfg) {
+        checks.push(skip("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+          "Skipped: config.json malformed"));
+      } else {
+        const missingVars: string[] = [];
+        for (const [name, preset] of Object.entries(parsedCfg.embedding_presets)) {
+          const creds = preset.credentials;
+          if (!creds) continue;
+          const refs = [...creds.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)].map((m) => m[1]!);
+          for (const varName of refs) {
+            if (!process.env[varName]) missingVars.push(`${name}: \${${varName}}`);
+          }
+        }
+        if (parsedCfg.reranker_presets) {
+          for (const [name, preset] of Object.entries(parsedCfg.reranker_presets)) {
+            const creds = preset.credentials;
+            if (!creds) continue;
+            const refs = [...creds.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)].map((m) => m[1]!);
+            for (const varName of refs) {
+              if (!process.env[varName]) missingVars.push(`${name}: \${${varName}}`);
+            }
+          }
+        }
+        if (missingVars.length > 0) {
+          checks.push(fail("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+            `Unset env vars: ${missingVars.join(", ")}`,
+            `Set the missing env var(s) in ${join(dataDir, ".env")}`));
+        } else {
+          checks.push(ok("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+            "All credential references resolve"));
+        }
+      }
+
+      // 7c. config.assignments_complete
+      if (!parsedCfg) {
+        checks.push(skip("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+          "Skipped: config.json malformed"));
+      } else {
+        const missing: string[] = [];
+        if (!parsedCfg.assignments.code_preset) missing.push("code_preset");
+        if (!parsedCfg.assignments.text_preset) missing.push("text_preset");
+        if (missing.length > 0) {
+          checks.push(fail("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+            `Missing assignments: ${missing.join(", ")}`,
+            `Run: scrybe model assign ${missing.map((s) => `--${s.replace("_preset", "")} <preset>`).join(" ")}`));
+        } else {
+          checks.push(ok("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+            `code=${parsedCfg.assignments.code_preset}, text=${parsedCfg.assignments.text_preset}` +
+            (parsedCfg.assignments.rerank_preset ? `, rerank=${parsedCfg.assignments.rerank_preset}` : "")));
+        }
+      }
+    }
+
+    // 7d. tables.consistent — sidecar (model, dim, provider) vs resolved preset
+    if (!parsedCfg) {
+      checks.push(skip("tables.consistent", SEC_CFG, "Table model consistency",
+        "Skipped: config.json not available"));
+    } else {
+      const { readTableMeta } = await import("../vector-store.js");
+      const { resolvePreset } = await import("../preset-resolver.js");
+      const mismatchedSources: string[] = [];
+      let checkedCount = 0;
+
+      for (const project of projects) {
+        for (const source of project.sources) {
+          const tableName = source.table_name;
+          if (!tableName) continue;
+          const meta = readTableMeta(tableName);
+          if (!meta) continue;
+
+          // Pre-migration sidecar: no model fields → skip
+          if (!meta["model"] || !meta["provider"]) continue;
+
+          // Determine which slot this source maps to
+          const slot = source.source_config.type === "code" ? "code_preset" : "text_preset";
+          const presetName = slot === "code_preset"
+            ? parsedCfg.assignments.code_preset
+            : parsedCfg.assignments.text_preset;
+
+          let resolved: import("../preset-resolver.js").ResolvedEmbedding;
+          try {
+            resolved = resolvePreset(presetName, slot, parsedCfg);
+          } catch {
+            continue; // preset resolution failed — already caught by config.well_formed
+          }
+
+          const sidcarModel = meta["model"] as string;
+          const sidcarDim = meta["dim"] as number | undefined;
+          const sidcarProvider = meta["provider"] as string;
+
+          const modelMatch = sidcarModel === resolved.model;
+          const dimMatch = sidcarDim === undefined || sidcarDim === resolved.dim;
+          const providerMatch = sidcarProvider === resolved.provider;
+
+          if (!modelMatch || !dimMatch || !providerMatch) {
+            mismatchedSources.push(`${project.id}/${source.source_id}`);
+          }
+          checkedCount++;
+        }
+      }
+
+      if (mismatchedSources.length > 0) {
+        checks.push(warn("tables.consistent", SEC_CFG, "Table model consistency",
+          `${mismatchedSources.length} source(s) have tables built with a different model: ${mismatchedSources.join(", ")}`,
+          `Run: scrybe model switch --source-type <code|text>  to rebuild affected tables`));
+      } else if (checkedCount === 0) {
+        checks.push(ok("tables.consistent", SEC_CFG, "Table model consistency",
+          "No indexed tables to check"));
+      } else {
+        checks.push(ok("tables.consistent", SEC_CFG, "Table model consistency",
+          `${checkedCount} table(s) match current preset configuration`));
+      }
+    }
+  }
+
   // ── Summary ─────────────────────────────────────────────────────────────────
   const summary = { ok: 0, warn: 0, fail: 0, skip: 0 };
   for (const c of checks) summary[c.status]++;

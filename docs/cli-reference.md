@@ -259,11 +259,133 @@ npm uninstall -g scrybe-cli
 
 ---
 
+## Model commands
+
+### `scrybe model`
+
+Manage embedding model presets and assignments. Presets are named configurations stored in `<DATA_DIR>/config.json`. Two slots are always assigned: `code` (used by code sources) and `text` (used by ticket / knowledge sources). An optional `rerank` slot enables result reranking when your provider supports it.
+
+---
+
+#### `scrybe model list`
+
+Show all providers and models in the built-in catalog.
+
+```bash
+scrybe model list
+```
+
+Sample output:
+
+```
+Provider            Model                           Dim   Profile Notes
+----------------------------------------------------------------------
+Voyage AI           voyage-code-3                   1024  code
+                    voyage-3                        1024  text
+                    voyage-3-large                  1024  text
+                    rerank-2.5                      -     rerank
+                    rerank-2                        -     rerank
+OpenAI              text-embedding-3-small          1536  text    configurable dim
+                    text-embedding-3-large          3072  text    configurable dim
+Local (in-process)  Xenova/multilingual-e5-small    384   text
+                    Xenova/all-MiniLM-L6-v2         384   text
+Custom (OpenAI-...) (user-defined)                  -     -       base_url + dim required
+```
+
+---
+
+#### `scrybe model show`
+
+Print the current assignments and resolved configuration. Credential values are masked as `${VAR}` (for env-var references) or `<set>` / `<unset>`.
+
+```bash
+scrybe model show
+```
+
+---
+
+#### `scrybe model preset add <name>`
+
+Add a new embedding preset to `config.json`.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--provider <key>` | ✓ | Provider: `voyage`, `openai`, `local`, or `custom` |
+| `--model <model>` | ✓ | Model name from the catalog (or a free-text model name for `custom`) |
+| `--credentials <ref>` | | Literal credential value or `${ENV_VAR}` reference |
+| `--credentials-from <preset>` | | Reuse credentials from another named preset |
+| `--base-url <url>` | custom only | API base URL (required for `custom` provider) |
+| `--dim <n>` | custom only | Embedding dimensions (required for `custom` provider) |
+
+```bash
+# Catalog provider
+scrybe model preset add voyage-code \
+  --provider voyage \
+  --model voyage-code-3 \
+  --credentials '${SCRYBE_VOYAGE_API_KEY}'
+
+# Custom OpenAI-compatible provider
+scrybe model preset add together-bert \
+  --provider custom \
+  --model togethercomputer/m2-bert-80M-8k-retrieval \
+  --base-url https://api.together.xyz/v1 \
+  --dim 768 \
+  --credentials '${SCRYBE_TOGETHER_API_KEY}'
+```
+
+---
+
+#### `scrybe model preset rm <name>`
+
+Remove a preset from `config.json`. Refuses if the preset is currently assigned to a slot or referenced via `credentials_from` by another preset.
+
+```bash
+scrybe model preset rm old-voyage-preset
+```
+
+---
+
+#### `scrybe model assign`
+
+Set the active preset for one or more slots. Validates catalog profile compatibility before writing.
+
+| Flag | Description |
+|------|-------------|
+| `--code <preset>` | Preset name to assign to the code embedding slot |
+| `--text <preset>` | Preset name to assign to the text embedding slot |
+| `--rerank <preset\|none>` | Reranker preset name, or `none` to clear the rerank slot |
+
+```bash
+scrybe model assign --code voyage-code
+scrybe model assign --text local-default
+scrybe model assign --rerank none
+```
+
+---
+
+#### `scrybe model switch`
+
+Drop and fully reindex all sources of the given type using the currently assigned preset. Prints a token-cost estimate before asking for confirmation when the target provider is remote.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--source-type <type>` | ✓ | `code` or `text` |
+| `--yes` / `-y` | | Skip the confirmation prompt |
+
+```bash
+scrybe model switch --source-type code
+scrybe model switch --source-type text --yes
+```
+
+After switching, restart any connected MCP client (Claude Code, Cline) to pick up the recreated tables.
+
+---
+
 ## Source commands
 
 ### `source add`
 
-Add an indexable source to a project.
+Add an indexable source to a project. Embedding configuration is set globally via `scrybe model` — see [Model commands](#model-commands).
 
 | Flag | Required | Description |
 |------|----------|-------------|
@@ -285,15 +407,6 @@ Add an indexable source to a project.
 | `--gitlab-url <url>` | ✓ | GitLab instance base URL |
 | `--gitlab-project-id <id>` | ✓ | GitLab project ID or path |
 | `--gitlab-token <token>` | ✓ | GitLab personal access token (validated against the API before saving) |
-
-**Embedding overrides (optional, any type):**
-
-| Flag | Description |
-|------|-------------|
-| `--embedding-base-url <url>` | Override embedding API base URL for this source |
-| `--embedding-model <model>` | Override embedding model |
-| `--embedding-dimensions <n>` | Override embedding dimensions |
-| `--embedding-api-key-env <var>` | Name of the env var holding the API key (not the key itself) |
 
 ```bash
 # Code source
@@ -333,15 +446,6 @@ Update an existing source's config. Only the flags you provide are changed — e
 |------|-------------|
 | `--root <path>` | Change the absolute path to repo root |
 | `--languages <langs>` | Change comma-separated language hints |
-
-**Embedding overrides (optional, any type):**
-
-| Flag | Description |
-|------|-------------|
-| `--embedding-base-url <url>` | Override embedding API base URL for this source |
-| `--embedding-model <model>` | Override embedding model |
-| `--embedding-dimensions <n>` | Override embedding dimensions |
-| `--embedding-api-key-env <var>` | Name of the env var holding the API key (not the key itself) |
 
 ```bash
 # Rotate a GitLab token

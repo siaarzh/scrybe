@@ -9,6 +9,27 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.32.0] — 2026-05-09
+
+### Added
+
+- **Catalog-driven embedding presets.** Scrybe now ships a built-in catalog of providers (Voyage AI, OpenAI, Local, Custom) with known models, dimensions, and base URLs. Presets are named configurations stored in `<DATA_DIR>/config.json`. Two global slots — `code` and `text` — replace per-source embedding overrides. An optional `rerank` slot enables result reranking. `${ENV_VAR}` interpolation in credential fields is resolved at read time; a `credentials_from` field lets rerank presets share a key with the embedding preset.
+- **`scrybe model` CLI subcommand tree.** New commands for managing embedding configuration: `scrybe model list` (show catalog), `scrybe model show` (current assignments + resolved config with masked credentials), `scrybe model preset add <name>` / `scrybe model preset rm <name>` (create/remove named presets), `scrybe model assign --code|--text|--rerank <preset>` (set slot assignments with profile-compatibility validation), and `scrybe model switch --source-type <code|text>` (drop and fully reindex all matching sources using the current preset, with cost estimate for remote providers).
+- **`add_embedding_preset` and `assign_preset` MCP tools.** Agent-facing tools for managing presets without a terminal. `add_embedding_preset` writes a named preset to `config.json`. `assign_preset` updates slot assignments and returns `requires_reindex: true` when the new preset's `(model, dim, provider)` triple differs from the previously stamped triple on any indexed source.
+- **Catalog-driven `scrybe init` wizard.** The first-run wizard now prompts for provider (Voyage AI, OpenAI, Local, Custom), derives model and dimension options from the catalog, and supports a Custom-provider branch (base URL → API key → optional `/models` probe → model name → dimensions). Writes `config.json` and provider-keyed env vars (`SCRYBE_VOYAGE_API_KEY`, `SCRYBE_OPENAI_API_KEY`, etc.) to `<DATA_DIR>/.env`.
+- **Four new `scrybe doctor` checks.** `config.well_formed` verifies `config.json` parses and all preset references are valid. `config.refs_resolve` verifies every `${VAR}` credential reference resolves against the environment. `config.assignments_complete` verifies both the `code` and `text` slots are assigned. `tables.consistent` verifies each source's indexed `(model, dim, provider)` triple matches the currently assigned preset, flagging sources that need reindexing.
+- **`model_mismatch` source-health flag.** When a source's indexed triple differs from the current preset assignment, `scrybe status --json` includes `flags: ["model_mismatch"]` on that source's row. Remediation: `scrybe model switch --source-type <code|text>`.
+
+### Removed
+
+- **Per-source `--embedding-base-url`, `--embedding-model`, `--embedding-dimensions`, `--embedding-api-key-env` flags** on `scrybe source add` and `scrybe source update` are removed. Embedding model selection is now global, managed via `scrybe model` presets. Use `scrybe model preset add` + `scrybe model assign` to configure providers, then `scrybe model switch --source-type <type>` to reindex with a new model.
+
+### Migration
+
+- On first startup after upgrade, scrybe synthesizes a starter `config.json` from existing `SCRYBE_CODE_EMBEDDING_*` / `SCRYBE_KNOWLEDGE_EMBEDDING_*` env vars (creating `migrated-code` and `migrated-text` presets referencing those vars by their existing names). If neither is set, local-embedder presets are created. Any per-source `embedding` overrides in `projects.json` are dropped with a logged warning per source; the resolved global preset takes effect instead. Existing table sidecars are backfilled with model-provenance fields. No chunk IDs are changed and no reindex is forced — run `scrybe doctor` to check if any source shows `model_mismatch`, and use `scrybe model switch` if needed.
+
+---
+
 ## [0.31.6] — 2026-05-09
 
 ### Added
@@ -169,7 +190,7 @@ Run `scrybe migrate --all` after upgrading to v0.31.0 to rehash all stored chunk
 
 ### Changed
 
-- **Tree-sitter grammar family bumped to 0.23.x in lockstep (Plan 36).** Bumped 9 grammars from 0.21 to their highest 0.23.x release with peer `tree-sitter@^0.21.x`: `tree-sitter-c` 0.23.2, `tree-sitter-c-sharp` 0.23.1, `tree-sitter-cpp` 0.23.4, `tree-sitter-go` 0.23.4, `tree-sitter-java` 0.23.5, `tree-sitter-javascript` 0.23.1, `tree-sitter-python` 0.23.4, `tree-sitter-rust` 0.23.1, `tree-sitter-typescript` 0.23.2 (`tree-sitter-ruby` was already on 0.23.1 from v0.29.7). Parent `tree-sitter` package stays on `^0.21.0` — bumping it to 0.22+ or 0.25+ isn't viable today because peer ranges across the 10 grammars don't form a coherent set above 0.21.x. All grammars deduplicate to `tree-sitter@0.21.1` in the lockfile. Pinned exact versions to keep `npm install` from re-resolving to incompatible 0.23.x patches (e.g. `tree-sitter-c@0.23.6` requires peer `^0.22.1` and would break). 605 tests green.
+- **Tree-sitter grammar family bumped to 0.23.x in lockstep.** Bumped 9 grammars from 0.21 to their highest 0.23.x release with peer `tree-sitter@^0.21.x`: `tree-sitter-c` 0.23.2, `tree-sitter-c-sharp` 0.23.1, `tree-sitter-cpp` 0.23.4, `tree-sitter-go` 0.23.4, `tree-sitter-java` 0.23.5, `tree-sitter-javascript` 0.23.1, `tree-sitter-python` 0.23.4, `tree-sitter-rust` 0.23.1, `tree-sitter-typescript` 0.23.2 (`tree-sitter-ruby` was already on 0.23.1 from v0.29.7). Parent `tree-sitter` package stays on `^0.21.0` — bumping it to 0.22+ or 0.25+ isn't viable today because peer ranges across the 10 grammars don't form a coherent set above 0.21.x. All grammars deduplicate to `tree-sitter@0.21.1` in the lockfile. Pinned exact versions to keep `npm install` from re-resolving to incompatible 0.23.x patches (e.g. `tree-sitter-c@0.23.6` requires peer `^0.22.1` and would break). 605 tests green.
 
 ---
 
@@ -177,7 +198,7 @@ Run `scrybe migrate --all` after upgrading to v0.31.0 to rehash all stored chunk
 
 ### Changed
 
-- **Dependency churn from Plan 35 dependabot triage.** Bumped `actions/checkout` 4→6, `actions/cache` 4→5, `github/codeql-action` 3→4, `actions/setup-node` 4→6 (workflow actions); `ignore` 5→7, `openai` 4→6, `tree-sitter-ruby` 0.21→0.23 (runtime/grammar deps); plus a dev-deps group bump. All transitive — no API surface change. 605 tests green. `tree-sitter-go` 0.25 deferred to a coordinated tree-sitter family bump (`.plans/36-tree-sitter-family-bump.md`).
+- **Dependency updates.** Bumped `actions/checkout` 4→6, `actions/cache` 4→5, `github/codeql-action` 3→4, `actions/setup-node` 4→6 (workflow actions); `ignore` 5→7, `openai` 4→6, `tree-sitter-ruby` 0.21→0.23 (runtime/grammar deps); plus a dev-deps group bump. All transitive — no API surface change. 605 tests green. `tree-sitter-go` 0.25 deferred to a coordinated tree-sitter family bump.
 
 ---
 
@@ -304,7 +325,7 @@ DATA_DIR location:
 
 ### Fixed
 
-- **Private ignore rules now apply to non-HEAD branch indexing.** `indexer.ts` was calling `scanRef(rootPath, branch)` without passing `projectId`/`sourceId`, so `loadPrivateIgnore` inside `buildScanRefFilter` was silently skipped. Result: any user with a private ignore + a pinned non-HEAD branch was re-indexing their entire repo on every branch reindex, burning embedding tokens proportional to the full codebase. One-line fix: pass `projectId`, `sourceId` through to `scanRef`. Plan 26 oversight, surfaced during a benchmark experiment that processed 5,701 files (3.56 M Voyage tokens) when only ~30 should have been touched. New regression test: `tests/scenarios/private-ignore-nonhead.test.ts`.
+- **Private ignore rules now apply to non-HEAD branch indexing.** `indexer.ts` was calling `scanRef(rootPath, branch)` without passing `projectId`/`sourceId`, so `loadPrivateIgnore` inside `buildScanRefFilter` was silently skipped. Result: any user with a private ignore + a pinned non-HEAD branch was re-indexing their entire repo on every branch reindex, burning embedding tokens proportional to the full codebase. One-line fix: pass `projectId`, `sourceId` through to `scanRef`. Surfaced during a benchmark experiment that processed 5,701 files (3.56 M Voyage tokens) when only ~30 should have been touched. New regression test: `tests/scenarios/private-ignore-nonhead.test.ts`.
 
 ---
 
@@ -1158,7 +1179,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.31.6...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/siaarzh/scrybe/compare/v0.31.6...v0.32.0
 [0.31.6]: https://github.com/siaarzh/scrybe/compare/v0.31.5...v0.31.6
 [0.31.5]: https://github.com/siaarzh/scrybe/compare/v0.31.4...v0.31.5
 [0.31.4]: https://github.com/siaarzh/scrybe/compare/v0.31.3...v0.31.4

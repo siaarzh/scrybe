@@ -1,9 +1,10 @@
+// ─── Legacy interface (kept for backward compat with config.ts / registry.ts) ──
+
 export interface ProviderDefaults {
   name: string;
   model: string;       // code embedding model
   textModel: string;   // text/knowledge embedding model
   dimensions: number;
-  // Whether this provider supports reranking (Voyage AI only).
   supports_rerank?: boolean;
 }
 
@@ -60,3 +61,84 @@ export function resolveProvider(baseUrl: string | undefined): ProviderDefaults |
 }
 
 export { KNOWN_PROVIDERS };
+
+// ─── Catalog (Plan 23) ────────────────────────────────────────────────────────
+
+export interface EmbeddingModelSpec {
+  dim: number;
+  profile: "code" | "text";
+  configurable_dim?: boolean;
+}
+
+export interface RerankModelSpec {
+  // extensible — no required fields yet
+}
+
+export interface ProviderSpec {
+  name: string;
+  embedding_base_url?: string;
+  rerank_base_url?: string;
+  auth: "bearer" | "none";
+  embedding_models: Record<string, EmbeddingModelSpec>;
+  rerank_models: Record<string, RerankModelSpec> | null;
+  models_endpoint?: string;
+  /** Custom provider accepts raw fields (base_url, dim) not present in catalog. */
+  accepts_raw_fields?: boolean;
+}
+
+export const PROVIDERS: Record<string, ProviderSpec> = {
+  voyage: {
+    name: "Voyage AI",
+    embedding_base_url: "https://api.voyageai.com/v1",
+    rerank_base_url: "https://api.voyageai.com/v1/rerank",
+    auth: "bearer",
+    embedding_models: {
+      "voyage-code-3":  { dim: 1024, profile: "code" },
+      "voyage-3":       { dim: 1024, profile: "text" },
+      "voyage-3-large": { dim: 1024, profile: "text" },
+    },
+    rerank_models: { "rerank-2.5": {}, "rerank-2": {} },
+    models_endpoint: "/v1/models",
+  },
+  openai: {
+    name: "OpenAI",
+    embedding_base_url: "https://api.openai.com/v1",
+    auth: "bearer",
+    embedding_models: {
+      "text-embedding-3-small": { dim: 1536, profile: "text", configurable_dim: true },
+      "text-embedding-3-large": { dim: 3072, profile: "text", configurable_dim: true },
+    },
+    rerank_models: null,
+  },
+  local: {
+    name: "Local (in-process)",
+    auth: "none",
+    embedding_models: {
+      "Xenova/multilingual-e5-small": { dim: 384, profile: "text" },
+      "Xenova/all-MiniLM-L6-v2":      { dim: 384, profile: "text" },
+    },
+    rerank_models: null,
+  },
+  custom: {
+    name: "Custom (OpenAI-compatible)",
+    auth: "bearer",
+    embedding_models: {},
+    rerank_models: null,
+    accepts_raw_fields: true,
+  },
+};
+
+/** Returns the provider spec or throws for unknown providers. */
+export function getProvider(providerKey: string): ProviderSpec {
+  const spec = PROVIDERS[providerKey];
+  if (!spec) throw new Error(`unknown provider: "${providerKey}"`);
+  return spec;
+}
+
+/** Returns the embedding model entry or throws if not found in the catalog. */
+export function getModel(providerKey: string, modelName: string): EmbeddingModelSpec {
+  const spec = getProvider(providerKey);
+  const model = spec.embedding_models[modelName];
+  if (!model) throw new Error(`model "${modelName}" not found in provider "${providerKey}"`);
+  return model;
+}

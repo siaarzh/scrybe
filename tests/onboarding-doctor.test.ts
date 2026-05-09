@@ -175,7 +175,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
 
     // branch-state mock: getLastIndexedSha returns per-branch SHAs
     vi.doMock("../src/branch-state.js", () => ({
-      getLastIndexedSha: vi.fn((projectId: string, sourceId: string, branch: string) => {
+      getLastIndexedSha: vi.fn((_projectId: string, _sourceId: string, branch: string) => {
         if (branch === "origin/main") return "abc123abc123abc123abc123abc123abc123abc1";
         if (branch === "origin/feature/x") return "old456old456old456old456old456old456old4";
         return null;

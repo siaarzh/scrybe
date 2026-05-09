@@ -99,6 +99,15 @@ export interface KnowledgeSearchResult {
 
 export type IndexMode = "full" | "incremental";
 
+/**
+ * Health flags that can appear in the `flags` array on a `ps --json` source row.
+ * "bloat"           — table has accumulated too many Lance versions; run `scrybe gc`.
+ * "needs_migration" — table was indexed with an older chunk-ID scheme; run `scrybe migrate`.
+ * "corrupt"         — table health probe failed; see healthFlag for detail.
+ * "model_mismatch"  — table was indexed with a different model than the current preset.
+ */
+export type SourceFlag = "bloat" | "needs_migration" | "corrupt" | "model_mismatch";
+
 export interface IndexResult {
   status: "ok";
   project_id: string;

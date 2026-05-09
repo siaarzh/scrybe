@@ -14,9 +14,15 @@ const DB_PATH = join(config.dataDir, "lancedb");
 export const CURRENT_CHUNK_ID_SCHEME = 2;
 export const CURRENT_CHUNK_ID_SCHEME_VERSION = "0.31.0";
 
-interface TableMeta {
+/**
+ * Per-table sidecar shape. Plan 47 fields are required; all other plans add
+ * optional fields additively. The index signature lets callers merge arbitrary
+ * fields without casting.
+ */
+export interface TableMeta {
   chunk_id_scheme: number | string;
   chunk_id_scheme_introduced_in?: string;
+  [key: string]: unknown;
 }
 
 function tableMetaPath(tableName: string): string {
@@ -33,9 +39,17 @@ export function readTableMeta(tableName: string): TableMeta | null {
   }
 }
 
-export function writeTableMeta(tableName: string, meta: TableMeta): void {
+/**
+ * Read-modify-write the per-table sidecar.
+ * Reads any existing fields, merges `fields` on top (supplied values win on
+ * collision), and writes back. Guarantees that Plan-47 chunk-id-scheme fields
+ * survive when Plan-23 model fields are added, and vice versa.
+ */
+export function writeTableMeta(tableName: string, fields: Partial<TableMeta>): void {
   mkdirSync(DB_PATH, { recursive: true });
-  writeFileSync(tableMetaPath(tableName), JSON.stringify(meta, null, 2) + "\n", "utf8");
+  const existing = readTableMeta(tableName) ?? {} as TableMeta;
+  const merged: TableMeta = { ...existing, ...fields } as TableMeta;
+  writeFileSync(tableMetaPath(tableName), JSON.stringify(merged, null, 2) + "\n", "utf8");
 }
 
 export function needsMigration(tableName: string): boolean {
@@ -659,6 +673,34 @@ export async function dropTable(tableName: string): Promise<void> {
   if (existsSync(metaPath)) {
     try { rmSync(metaPath); } catch { /* non-fatal */ }
   }
+}
+
+/**
+ * Drop a LanceDB table, recreate it with `newSchema`, and write `sidecarFields`
+ * into the per-table sidecar via read-modify-write (existing sidecar fields survive).
+ *
+ * Shared by `scrybe migrate` (chunk-id rehash) and `scrybe model switch` (model swap).
+ * The top-level command flows remain separate — only the table-recreation mechanics
+ * are shared here.
+ *
+ * RISK: if the process crashes between drop and recreate, the table is gone.
+ * The sidecar can be used to detect this state (missing table + valid sidecar).
+ * Recovery: `scrybe index --full` on the affected source.
+ */
+export async function dropAndRecreateTable(
+  tableName: string,
+  newSchema: Schema,
+  sidecarFields: Partial<TableMeta>,
+): Promise<void> {
+  const db = await getDb();
+  const names = await db.tableNames();
+  if (names.includes(tableName)) {
+    await db.dropTable(tableName);
+  }
+  _tableCache.delete(tableName);
+  _healthCache.delete(tableName);
+  await db.createEmptyTable(tableName, newSchema);
+  writeTableMeta(tableName, sidecarFields);
 }
 
 /**

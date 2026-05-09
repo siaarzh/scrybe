@@ -12,7 +12,7 @@
  *   8. Multiple matches sorted deterministically
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { writeFileSync, mkdirSync } from "fs";
+import { writeFileSync } from "fs";
 import { join } from "path";
 import { cloneFixture, type FixtureHandle } from "./helpers/fixtures.js";
 import { createTempProject, type TempProject } from "./helpers/project.js";

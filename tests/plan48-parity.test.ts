@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import * as lancedb from "@lancedb/lancedb";
-import { Schema, Field, Utf8, Int32, Float32, FixedSizeList } from "apache-arrow";
+import { Schema, Field, Utf8, Float32, FixedSizeList } from "apache-arrow";
 import { normalizeContent } from "../src/normalize.js";
 import {
   migrateTable,

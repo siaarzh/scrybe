@@ -711,6 +711,10 @@ export async function runCli(): Promise<void> {
       const { getExpectedDimensions } = await import("./health-probe.js");
       const { resolveEmbeddingConfig: resolveEmb, assignTableName: assignTN } = await import("./registry.js");
       const { getPlugin: getPlug } = await import("./plugins/index.js");
+      const { readTableMeta } = await import("./vector-store.js");
+      const { readScrybeConfig: readCfg } = await import("./config.js");
+      const { resolvePreset: resPreset } = await import("./preset-resolver.js");
+      const scrybeConfig = (() => { try { return readCfg(); } catch { return null; } })();
       const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => {
         const stats = s.table_name ? await getTableStats(s.table_name) : { sizeBytes: 0, versionCount: 0 };
         const flags: string[] = stats.versionCount > 2 * COMPACT_THRESHOLD ? ["bloat"] : [];
@@ -728,6 +732,27 @@ export async function runCli(): Promise<void> {
             const health = await getHealth(s.table_name, { expectedDimensions: expDims });
             if (health.state === "corrupt") { flags.push("corrupt"); healthFlag = health.reasons[0] ?? "corrupt"; }
           } catch { /* non-fatal — probe must not break status */ }
+          // model_mismatch: compare sidecar (model, dim, provider) vs resolved preset triple.
+          // Pre-migration sidecars (no model fields) are silently skipped — slice 6 backfills them.
+          try {
+            if (scrybeConfig !== null) {
+              const sidecar = readTableMeta(s.table_name);
+              if (sidecar && typeof sidecar["model"] === "string" && typeof sidecar["dim"] === "number" && typeof sidecar["provider"] === "string") {
+                let pluginProfile2: "code" | "text" = "code";
+                try { const pl = getPlug(s.source_config.type); pluginProfile2 = pl.embeddingProfile === "code" ? "code" : "text"; } catch { /* unknown */ }
+                const slot = pluginProfile2 === "code" ? "code_preset" as const : "text_preset" as const;
+                const presetName = scrybeConfig.assignments[slot];
+                if (presetName) {
+                  const resolved = resPreset(presetName, slot, scrybeConfig);
+                  const stampMatch =
+                    sidecar["model"] === resolved.model &&
+                    sidecar["dim"] === resolved.dim &&
+                    sidecar["provider"] === resolved.provider;
+                  if (!stampMatch) flags.push("model_mismatch");
+                }
+              }
+            }
+          } catch { /* non-fatal — mismatch check must not break status */ }
         }
         return { sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null, sizeBytes: stats.sizeBytes, versionCount: stats.versionCount, flags, healthFlag };
       })) })));
@@ -1386,6 +1411,12 @@ export async function runCli(): Promise<void> {
       }),
     { hidden: true }
   );
+
+  // ─── model subcommand tree ────────────────────────────────────────────────
+  {
+    const { registerModelCommand } = await import("./tools/model.js");
+    registerModelCommand(program);
+  }
 
   await program.parseAsync(process.argv);
 }

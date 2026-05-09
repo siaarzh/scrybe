@@ -46,11 +46,46 @@ Unregister a project and drop all its source tables (vector data deleted).
 
 ---
 
+## Model tools
+
+Embedding configuration is managed globally via presets stored in `<DATA_DIR>/config.json`. Use these tools to add presets and assign them to slots, then call `reindex_source` (or `reindex_project`) to apply the new model to existing sources.
+
+### `add_embedding_preset`
+
+Add a new named embedding preset. Catalog providers (`voyage`, `openai`, `local`) derive `base_url` and dimensions from the built-in catalog — only `provider`, `model`, and optional `credentials` are needed. The `custom` provider requires explicit `base_url` and `dim`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | ✓ | Unique preset name |
+| `provider` | string | ✓ | Provider key: `voyage`, `openai`, `local`, or `custom` |
+| `model` | string | ✓ | Model name from the provider catalog, or a free-text model name for `custom` |
+| `credentials` | string | | Literal credential value or `${ENV_VAR}` reference |
+| `credentials_from` | string | | Reuse credentials from another named preset (useful for rerank presets that share an embedding key) |
+| `base_url` | string | custom only | API base URL |
+| `dim` | number | custom only | Embedding dimensions |
+
+**Returns:** `{ ok: boolean, preset_name: string, error?: string }`
+
+---
+
+### `assign_preset`
+
+Assign a named preset to a slot (`code`, `text`, or `rerank`). Returns `requires_reindex: true` when the new preset's `(model, dim, provider)` triple differs from the previously stamped triple on any affected source, meaning existing vectors are no longer compatible and a full reindex is needed. Returns `false` for simple preset renames that keep the same triple.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slot` | string | ✓ | `"code"`, `"text"`, or `"rerank"` |
+| `preset_name` | string | ✓ | Preset name to assign. For `slot: "rerank"`, pass `"none"` to clear the rerank assignment. |
+
+**Returns:** `{ ok: boolean, requires_reindex: boolean, error?: string }`
+
+---
+
 ## Source tools
 
 ### `add_source`
 
-Add an indexable source to a project. Call `reindex_source` after to index it.
+Add an indexable source to a project. Call `reindex_source` after to index it. Embedding configuration is set globally via `add_embedding_preset` / `assign_preset` — see [Model tools](#model-tools).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -72,15 +107,6 @@ Add an indexable source to a project. Call `reindex_source` after to index it.
 | `gitlab_url` | string | ✓ | GitLab instance base URL |
 | `gitlab_project_id` | string | ✓ | GitLab project ID or path |
 | `gitlab_token` | string | ✓ | GitLab personal access token (validated against the API before saving) |
-
-**Embedding overrides (optional, any type):**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `embedding_base_url` | string | Override embedding API base URL |
-| `embedding_model` | string | Override embedding model |
-| `embedding_dimensions` | number | Override embedding dimensions |
-| `embedding_api_key_env` | string | Name of env var holding the API key (never the key itself) |
 
 ---
 
@@ -107,15 +133,6 @@ Update an existing source's config. Only the fields you provide are changed — 
 |-----------|------|-------------|
 | `root_path` | string | Change the absolute path to repo root |
 | `languages` | string[] | Change language hints |
-
-**Embedding overrides (optional, any type):**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `embedding_base_url` | string | Override embedding API base URL |
-| `embedding_model` | string | Override embedding model |
-| `embedding_dimensions` | number | Override embedding dimensions |
-| `embedding_api_key_env` | string | Name of env var holding the API key (never the key itself) |
 
 ---
 
