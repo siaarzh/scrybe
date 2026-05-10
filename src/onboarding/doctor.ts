@@ -1,6 +1,7 @@
 import { existsSync, accessSync, statSync, readdirSync, constants, readFileSync } from "fs";
 import { join } from "path";
 import { platform } from "os";
+import { execSync } from "child_process";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
 
@@ -197,6 +198,44 @@ export async function runDoctor(): Promise<DoctorReport> {
         checks.push(tipRow);
       }
     }
+  }
+
+  // ── 1c. npm global prefix writability ───────────────────────────────────────
+  // Windows ACL semantics differ from POSIX — accessSync may report writable on
+  // dirs that practically aren't (e.g. UNC paths, junction points). Skip on Win32
+  // to avoid false positives; the EACCES failure mode is a Linux/macOS concern.
+  if (process.platform !== "win32") {
+    try {
+      const rawPrefix = execSync("npm config get prefix", { timeout: 2000, encoding: "utf8" }).trim();
+      const modulesDir = join(rawPrefix, "lib", "node_modules");
+      try {
+        accessSync(modulesDir, constants.W_OK);
+        checks.push(ok("env.npm_prefix_writable", SEC_ENV, "npm global prefix writable",
+          `${modulesDir} is writable`, { prefix: rawPrefix }));
+      } catch {
+        checks.push(warn(
+          "env.npm_prefix_writable",
+          SEC_ENV,
+          "npm global prefix writable",
+          `${modulesDir} is not writable by your user — future \`npm install -g\` upgrades will fail with EACCES`,
+          `npm's global install dir ${modulesDir} is not writable by your user.\n` +
+          `Future \`npm install -g\` upgrades will fail with EACCES.\n\n` +
+          `Fix:\n` +
+          `  mkdir -p ~/.npm-global\n` +
+          `  npm config set prefix ~/.npm-global\n` +
+          `  echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc\n` +
+          `  source ~/.bashrc`,
+          { prefix: rawPrefix },
+        ));
+      }
+    } catch {
+      // npm not on PATH or execSync timed out — skip silently
+      checks.push(skip("env.npm_prefix_writable", SEC_ENV, "npm global prefix writable",
+        "npm not found on PATH — check skipped"));
+    }
+  } else {
+    checks.push(skip("env.npm_prefix_writable", SEC_ENV, "npm global prefix writable",
+      "Windows — check not applicable"));
   }
 
   // ── 2. Embedding Provider ───────────────────────────────────────────────────

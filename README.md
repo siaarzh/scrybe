@@ -101,6 +101,20 @@ The wizard handles everything: picks an embedding provider, validates your API k
 
 ### Manual setup
 
+> **Linux users:** if your Node.js came from `apt`/`dnf`/`snap`, the global npm
+> prefix is usually root-owned (`/usr/lib/node_modules`), so `npm install -g`
+> fails with `EACCES`. Fix it first by pointing npm at a user-writable location:
+>
+> ```bash
+> mkdir -p ~/.npm-global
+> npm config set prefix ~/.npm-global
+> echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+> source ~/.bashrc
+> ```
+>
+> Then proceed with the install below. `scrybe doctor` will warn you if the
+> prefix is still not writable after installation.
+
 ```bash
 # 1. Install globally
 npm install -g scrybe-cli

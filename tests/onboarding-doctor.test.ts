@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -396,6 +396,101 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
     expect(check).toBeDefined();
     expect(check!.status).toBe("warn");
     expect(check!.message).toContain("first reindex");
+  });
+});
+
+describe("runDoctor — env.npm_prefix_writable", () => {
+  function mockDoctorDeps() {
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 1024, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+    vi.doMock("../src/daemon/container-detect.js", () => ({
+      isContainer: () => false,
+    }));
+    vi.doMock("../src/daemon/install/index.js", () => ({
+      getInstallStatus: async () => ({ installed: false }),
+    }));
+  }
+
+  it("ok when npm prefix is writable", async () => {
+    // Create a real writable directory structure: <tmp>/lib/node_modules
+    // so that the actual accessSync call succeeds without any fs mocking.
+    const modulesDir = join(tmp, "lib", "node_modules");
+    mkdirSync(modulesDir, { recursive: true });
+
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+    vi.doMock("child_process", () => ({
+      execSync: () => tmp,
+    }));
+    mockDoctorDeps();
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const check = report.checks.find((c) => c.id === "env.npm_prefix_writable");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("ok");
+  });
+
+  it("warn when npm prefix is not writable (EACCES)", async () => {
+    // Return a path whose lib/node_modules does not exist on disk —
+    // accessSync throws (non-existent path), which triggers the warn branch.
+    // The warn branch catches any throw from accessSync regardless of error code.
+    const nonExistentPrefix = join(tmp, "non-existent-prefix");
+
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+    vi.doMock("child_process", () => ({
+      execSync: () => nonExistentPrefix,
+    }));
+    mockDoctorDeps();
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const check = report.checks.find((c) => c.id === "env.npm_prefix_writable");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("warn");
+    expect(check!.message).toContain("not writable");
+    expect(check!.remedy).toContain("~/.npm-global");
+    expect(check!.remedy).toContain("npm config set prefix");
+  });
+
+  it("skip when npm is not on PATH", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+    vi.doMock("child_process", () => ({
+      execSync: () => {
+        const err: NodeJS.ErrnoException = new Error("npm: command not found");
+        err.code = "ENOENT";
+        throw err;
+      },
+    }));
+    mockDoctorDeps();
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const check = report.checks.find((c) => c.id === "env.npm_prefix_writable");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("skip");
+  });
+
+  it("skip on Windows platform", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.doMock("../src/onboarding/windows-av.js", () => ({
+      detectWindowsAv: async () => ({ skip: true, skipReason: "non-windows" }),
+      AV_README_ANCHOR: "#windows-av",
+    }));
+    mockDoctorDeps();
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const check = report.checks.find((c) => c.id === "env.npm_prefix_writable");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("skip");
+    expect(check!.message).toContain("Windows");
   });
 });
 
