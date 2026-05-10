@@ -73,6 +73,25 @@ export async function runDoctor(): Promise<DoctorReport> {
   // ── 1. Environment ──────────────────────────────────────────────────────────
   const SEC_ENV = "Environment";
 
+  // ── 1a. Install integrity (must be first row) ───────────────────────────────
+  {
+    const { detectBrokenInstall } = await import("../install-doctor.js");
+    const broken = detectBrokenInstall();
+    if (broken) {
+      checks.push(warn(
+        "env.install_integrity",
+        SEC_ENV,
+        "Install integrity",
+        `Landmark packages missing: ${broken.missing.join(", ")} — install may be incomplete`,
+        `Run \`scrybe doctor --repair\` to attempt automatic repair, or manually:\n` +
+        `  npx -y scrybe-cli@latest --version  (then reconnect Claude Code)`,
+        { missing: broken.missing },
+      ));
+    } else {
+      checks.push(ok("env.install_integrity", SEC_ENV, "Install integrity", "All landmark packages present"));
+    }
+  }
+
   const dataDir = config.dataDir;
   if (!existsSync(dataDir)) {
     checks.push(fail("env.data_dir", SEC_ENV, "DATA_DIR exists", `Missing: ${dataDir}`,

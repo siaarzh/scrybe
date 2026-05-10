@@ -1190,6 +1190,21 @@ export async function runCli(): Promise<void> {
     .addHelpText("after", "\nExamples:\n  scrybe doctor\n  scrybe doctor --repair")
     .action(async (opts: { json?: boolean; strict?: boolean; repair?: boolean }) => {
       if (opts.repair) {
+        // Check install integrity first — if broken, repair and re-exec
+        const { detectBrokenInstall, attemptSelfRepair } = await import("./install-doctor.js");
+        const broken = detectBrokenInstall();
+        if (broken) {
+          const repaired = attemptSelfRepair(broken);
+          if (!repaired) {
+            process.stderr.write(
+              "[scrybe] Automatic repair failed or not applicable (not an npx install).\n" +
+              "Manual recovery: npx -y scrybe-cli@latest --version  (then reconnect)\n",
+            );
+            process.exit(1);
+          }
+          return;
+        }
+        // No install issue — proceed with index corruption repair
         await runDoctorRepair();
         return;
       }

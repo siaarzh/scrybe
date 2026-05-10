@@ -144,7 +144,19 @@ scrybe doctor --json   # machine-readable output
 
 ## MCP server (Claude Code integration)
 
-The recommended setup uses `npx` — no global install needed:
+After running `scrybe init` (or `npm install -g scrybe-cli` — see [Manual setup](#manual-setup) above), add scrybe to `~/.claude.json` under `mcpServers`:
+
+```json
+"scrybe": {
+  "type": "stdio",
+  "command": "scrybe",
+  "args": ["mcp"]
+}
+```
+
+Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
+
+**No-config alternative (npx):** if you prefer not to install globally, you can use:
 
 ```json
 "scrybe": {
@@ -154,17 +166,9 @@ The recommended setup uses `npx` — no global install needed:
 }
 ```
 
-Add to `~/.claude.json` under `mcpServers`. Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
+Note: the first invocation via `npx` takes ~10 seconds to install. Claude Code's MCP probe may time out during this first install, leaving the cache in an incomplete state. If this happens, run `npx -y scrybe-cli@latest --version` once in a terminal (without a parent timeout), then reconnect.
 
-If you installed globally (`npm install -g scrybe-cli`):
-
-```json
-"scrybe": {
-  "type": "stdio",
-  "command": "scrybe",
-  "args": ["mcp"]
-}
-```
+> **If Claude Code shows an `scrybe (install incomplete)` MCP server** with a `scrybe_install_incomplete` tool, run `scrybe doctor --repair` (or follow the command in the tool description) to repair the install automatically.
 
 ### Available tools
 

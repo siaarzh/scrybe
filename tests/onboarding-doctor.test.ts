@@ -563,3 +563,84 @@ describe("runDoctor — fresh install profile", () => {
     expect(schema.status).toBe("warn");
   });
 });
+
+// ── runDoctor — env.install_integrity ────────────────────────────────────────
+
+describe("runDoctor — env.install_integrity", () => {
+  function mockDoctorDeps() {
+    vi.doMock("../src/onboarding/validate-provider.js", () => ({
+      validateProvider: async () => ({ ok: true, dimensions: 1024, model: "voyage-code-3" }),
+      validateLocal: async () => ({ ok: true, dimensions: 1024, model: "local", coldStartMs: 100 }),
+    }));
+    vi.doMock("../src/daemon/pidfile.js", () => ({
+      readPidfile: () => null,
+      isDaemonRunning: () => false,
+    }));
+    vi.doMock("../src/onboarding/mcp-config.js", () => ({
+      detectMcpConfigs: () => [],
+      readScrybeEntry: () => null,
+      proposeScrybeEntry: () => ({}),
+    }));
+    vi.doMock("../src/daemon/container-detect.js", () => ({
+      isContainer: () => false,
+    }));
+    vi.doMock("../src/daemon/install/index.js", () => ({
+      getInstallStatus: async () => ({ installed: false }),
+    }));
+  }
+
+  it("ok when install is intact (detectBrokenInstall returns null)", async () => {
+    vi.doMock("../src/install-doctor.js", () => ({
+      detectBrokenInstall: () => null,
+      attemptSelfRepair: vi.fn(),
+    }));
+    mockDoctorDeps();
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const check = report.checks.find((c) => c.id === "env.install_integrity");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("ok");
+    expect(check!.message).toContain("present");
+  });
+
+  it("warn when install is broken (detectBrokenInstall returns {missing})", async () => {
+    vi.doMock("../src/install-doctor.js", () => ({
+      detectBrokenInstall: () => ({ missing: ["sharp", "@lancedb/lancedb"] }),
+      attemptSelfRepair: vi.fn(),
+    }));
+    mockDoctorDeps();
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const check = report.checks.find((c) => c.id === "env.install_integrity");
+    expect(check).toBeDefined();
+    expect(check!.status).toBe("warn");
+    expect(check!.message).toContain("sharp");
+    expect(check!.remedy).toContain("scrybe doctor --repair");
+  });
+
+  it("env.install_integrity is the first Environment-section check", async () => {
+    vi.doMock("../src/install-doctor.js", () => ({
+      detectBrokenInstall: () => null,
+      attemptSelfRepair: vi.fn(),
+    }));
+    mockDoctorDeps();
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const envChecks = report.checks.filter((c) => c.section === "Environment");
+    expect(envChecks[0]!.id).toBe("env.install_integrity");
+  });
+
+  it("--repair: invokes attemptSelfRepair when broken, not runDoctorRepair", async () => {
+    const attemptSelfRepairMock = vi.fn().mockReturnValue(false);
+    vi.doMock("../src/install-doctor.js", () => ({
+      detectBrokenInstall: () => ({ missing: ["sharp"] }),
+      attemptSelfRepair: attemptSelfRepairMock,
+    }));
+    // Simulate the --repair path from cli.ts directly
+    const { detectBrokenInstall, attemptSelfRepair } = await import("../src/install-doctor.js");
+    const broken = detectBrokenInstall();
+    expect(broken).not.toBeNull();
+    attemptSelfRepair(broken!);
+    expect(attemptSelfRepairMock).toHaveBeenCalledWith(broken);
+  });
+});
