@@ -554,6 +554,60 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push(skip("daemon.always_on", SEC_DAEMON, "Always-on mode", "Could not check install status"));
   }
 
+  // ── daemon.installed — autostart configured ─────────────────────────────────
+  try {
+    const { isContainer } = await import("../daemon/container-detect.js");
+    if (isContainer()) {
+      checks.push(skip("daemon.installed", SEC_DAEMON, "Daemon autostart",
+        "Containerized environment — not applicable"));
+    } else {
+      const { getInstallStatus } = await import("../daemon/install/index.js");
+      const installStatus = await getInstallStatus();
+      if (installStatus.installed) {
+        checks.push(ok("daemon.installed", SEC_DAEMON, "Daemon autostart",
+          `Configured (${installStatus.method ?? "unknown"})`,
+          { method: installStatus.method }));
+      } else {
+        checks.push(warn("daemon.installed", SEC_DAEMON, "Daemon autostart",
+          "Not configured — MCP shim requires the daemon",
+          "Run `scrybe daemon install` to register the daemon for autostart at login"));
+      }
+    }
+  } catch {
+    checks.push(skip("daemon.installed", SEC_DAEMON, "Daemon autostart", "Could not check install status"));
+  }
+
+  // ── daemon.running — pidfile present + /health 200 ──────────────────────────
+  if (!pidData) {
+    checks.push(warn("daemon.running", SEC_DAEMON, "Daemon running",
+      "Not running (no pidfile)",
+      "Run `scrybe daemon start` to start the daemon"));
+  } else {
+    try {
+      const { DaemonClient } = await import("../daemon/client.js");
+      const client = DaemonClient.fromPidfile();
+      if (!client) {
+        checks.push(warn("daemon.running", SEC_DAEMON, "Daemon running",
+          "Pidfile present but DaemonClient could not connect",
+          "Run `scrybe daemon restart`"));
+      } else {
+        await client.health();
+        checks.push(ok("daemon.running", SEC_DAEMON, "Daemon running",
+          `Running (PID ${pidData.pid}, port ${pidData.port})`,
+          { pid: pidData.pid, port: pidData.port }));
+      }
+    } catch {
+      checks.push({
+        id: "daemon.running",
+        section: SEC_DAEMON,
+        title: "Daemon running",
+        status: "fail",
+        message: `Pidfile present (PID ${pidData.pid}) but health check failed`,
+        remedy: "Run `scrybe daemon restart`",
+      });
+    }
+  }
+
   // Git hooks — check per code source (best-effort; skip if not a git repo)
   for (const project of projects) {
     for (const source of project.sources) {

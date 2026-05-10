@@ -7,6 +7,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **MCP shim mode:** `scrybe mcp` now connects to the daemon via HTTP instead of loading heavy modules in-process. Cold-boot < 500 ms (vs ~8.5 s previously). The daemon must be installed (`scrybe daemon install`) and running.
+- **`daemon.installed` doctor row** — checks whether daemon autostart is configured for the current platform. Green if installed, yellow with `run scrybe daemon install` hint if not.
+- **`daemon.running` doctor row** — checks pidfile presence and `/health` 200 response. Green if running, yellow/red with `run scrybe daemon start` or `run scrybe daemon restart` hint otherwise.
+
+### Deprecated
+
+- **In-process MCP mode (`scrybe mcp --legacy-in-process`)** is deprecated. Will be removed in v0.34.0. See `scrybe daemon install`.
+
 ---
 
 ## [0.32.4] — 2026-05-10

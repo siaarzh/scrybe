@@ -2,6 +2,38 @@
 
 All tools are exposed via the `scrybe` MCP server. Call `list_projects` first to confirm what's indexed before searching.
 
+## Deployment modes
+
+Scrybe supports two MCP deployment modes:
+
+### Shim mode (recommended)
+
+Command: `scrybe mcp`
+
+The MCP entrypoint is a thin stdio↔HTTP shim that communicates with the daemon via HTTP. Heavy modules (embedder, LanceDB, tree-sitter, sharp, watcher) run in the daemon process, not in-process. Cold-boot time is sub-second.
+
+**Requires:** `scrybe daemon install` to set up autostart. The daemon must be running before MCP probes.
+
+**Setup:**
+
+```bash
+# One-time setup
+npm install -g scrybe-cli
+scrybe daemon install
+
+# MCP config (Claude Code, Cursor, Cline, etc.)
+"command": "scrybe",
+"args": ["mcp"]
+```
+
+### In-process mode (deprecated)
+
+Command: `scrybe mcp --legacy-in-process`
+
+Loads all modules (embedder, LanceDB, etc.) in the MCP process itself. No background daemon. Boot time is ~8–10 seconds (will be slower on slow networks or systems). **Deprecated as of v0.33.0 — will be removed in v0.34.0.**
+
+Only use this if you do not want a background daemon (e.g., CI scripts, sandboxed environments).
+
 ---
 
 ## Project tools

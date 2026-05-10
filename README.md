@@ -144,7 +144,17 @@ scrybe doctor --json   # machine-readable output
 
 ## MCP server (Claude Code integration)
 
-After running `scrybe init` (or `npm install -g scrybe-cli` — see [Manual setup](#manual-setup) above), add scrybe to `~/.claude.json` under `mcpServers`:
+**Recommended setup** (global install — fastest cold boot, no per-session install delay):
+
+```bash
+# 1. Install globally
+npm install -g scrybe-cli
+
+# 2. Register daemon autostart (starts at login, no admin required)
+scrybe daemon install
+
+# 3. Add to your MCP config (e.g. ~/.claude.json, ~/.cursor/mcp.json)
+```
 
 ```json
 "scrybe": {
@@ -154,9 +164,9 @@ After running `scrybe init` (or `npm install -g scrybe-cli` — see [Manual setu
 }
 ```
 
-Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
+Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`). Run `scrybe init` to configure everything interactively.
 
-**No-config alternative (npx):** if you prefer not to install globally, you can use:
+**Alternative (npx — no global install required):** if you prefer not to install globally, you can use:
 
 ```json
 "scrybe": {

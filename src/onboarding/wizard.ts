@@ -748,47 +748,32 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
     p.log.warn("Restart your agent (Claude Code, Cursor, etc.) to pick up the new MCP config.");
   }
 
-  // ── Step 4.5: Always-on daemon prompt ─────────────────────────────────────
+  // ── Step 4.5: Daemon autostart ────────────────────────────────────────────
   const { isContainer } = await import("../daemon/container-detect.js");
   if (isContainer()) {
-    p.log.info("Containerized environment — always-on mode skipped (daemon runs on-demand when an agent uses scrybe).");
+    p.log.info("Containerized environment — daemon autostart skipped (daemon runs on-demand when an agent uses scrybe).");
   } else {
     const { getInstallStatus } = await import("../daemon/install/index.js");
     const installStatus = await getInstallStatus();
-    const alreadyAlwaysOn = installStatus.installed;
 
-    if (alreadyAlwaysOn) {
-      const keepAlwaysOn = await p.confirm({
-        message: `Always-on currently enabled (${installStatus.method ?? "autostart"}). Keep it? (No = switch to on-demand)`,
-        initialValue: true,
-      });
-      if (p.isCancel(keepAlwaysOn)) { p.cancel("Setup cancelled."); return; }
-      if (!keepAlwaysOn) {
-        const spin = p.spinner();
-        spin.start("Disabling always-on...");
-        try {
-          const { uninstallAutostart } = await import("../daemon/install/index.js");
-          await uninstallAutostart();
-          spin.stop("Always-on disabled. Daemon will run on-demand while an agent uses scrybe.");
-        } catch (err: any) {
-          spin.stop(`Could not disable: ${err?.message ?? String(err)}`);
-        }
-      }
+    if (installStatus.installed) {
+      p.log.info(`Daemon autostart already configured (${installStatus.method ?? "autostart"}).`);
     } else {
       p.log.message(
         "Background daemon — keep your index in sync automatically.\n\n" +
         "  The daemon runs while your agent is using scrybe and stops ~10 min after you\n" +
-        "  close the agent. Files you change are re-indexed in the background.\n"
+        "  close the agent. Files you change are re-indexed in the background.\n" +
+        "  The MCP shim (`scrybe mcp`) requires the daemon to be running.\n"
       );
       const alwaysOn = await p.confirm({
-        message: "Keep scrybe running even when no agent is open? (useful for git pull, overnight ticket polling)",
-        initialValue: false,
+        message: "Register daemon autostart now? (lets the daemon start at login — no admin required)",
+        initialValue: true,
       });
       if (p.isCancel(alwaysOn)) { p.cancel("Setup cancelled."); return; }
 
       if (alwaysOn) {
         const spin = p.spinner();
-        spin.start("Registering autostart...");
+        spin.start("Registering daemon autostart...");
         try {
           const { installAutostart } = await import("../daemon/install/index.js");
           const status = await installAutostart();
@@ -798,15 +783,15 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
           const { readPidfile } = await import("../daemon/pidfile.js");
           const pidData = readPidfile();
           const pidStr = pidData ? `PID ${pidData.pid} · port ${pidData.port}` : "starting";
-          spin.stop(`Always-on enabled · ${status.method ?? "autostart"} · daemon started · ${pidStr}`);
+          spin.stop(`Daemon autostart registered · ${status.method ?? "autostart"} · daemon started · ${pidStr}`);
         } catch (err: any) {
           spin.stop(
             `Could not register autostart: ${err?.message ?? String(err)}\n` +
-            "  Continuing. Run `scrybe daemon install` later or use on-demand mode only."
+            "  Continuing. Run `scrybe daemon install` to complete setup."
           );
         }
       } else {
-        p.log.info("Always-on declined. Daemon runs on-demand while an agent uses scrybe.");
+        p.log.info("Autostart skipped. Run `scrybe daemon install` to set it up later.");
       }
     }
   }

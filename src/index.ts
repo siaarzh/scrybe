@@ -7,7 +7,7 @@ import { detectBrokenInstall, emitInstallErrorOverMcp, attemptSelfRepair } from 
 const subcommand = process.argv[2];
 
 if (subcommand === "mcp") {
-  // MCP path: check install first, then lazy-import heavy modules
+  // MCP path: check install first, then dispatch to shim or in-process
   const broken = detectBrokenInstall();
   if (broken) {
     emitInstallErrorOverMcp(broken).catch((err) => {
@@ -16,20 +16,34 @@ if (subcommand === "mcp") {
       process.exit(0);
     });
   } else {
-    Promise.all([import("./mcp-server.js"), import("./jobs.js")])
-      .then(([{ runMcpServer }, { cancelAllJobs }]) => {
-        for (const sig of ["SIGTERM", "SIGINT"] as const) {
-          process.on(sig, () => {
-            cancelAllJobs();
-            process.exit(0);
-          });
-        }
-        return runMcpServer();
-      })
-      .catch((err) => {
-        process.stderr.write(`scrybe mcp error: ${err}\n`);
-        process.exit(1);
-      });
+    const legacyMode = process.argv.includes("--legacy-in-process");
+
+    if (legacyMode) {
+      process.stderr.write(
+        "[scrybe] in-process MCP mode is deprecated, will be removed in v0.34.0. See `scrybe daemon install`.\n"
+      );
+      Promise.all([import("./mcp-server.js"), import("./jobs.js")])
+        .then(([{ runMcpServer }, { cancelAllJobs }]) => {
+          for (const sig of ["SIGTERM", "SIGINT"] as const) {
+            process.on(sig, () => {
+              cancelAllJobs();
+              process.exit(0);
+            });
+          }
+          return runMcpServer();
+        })
+        .catch((err) => {
+          process.stderr.write(`scrybe mcp error: ${err}\n`);
+          process.exit(1);
+        });
+    } else {
+      import("./mcp-shim.js")
+        .then(({ runMcpShim }) => runMcpShim())
+        .catch((err) => {
+          process.stderr.write(`scrybe mcp error: ${err}\n`);
+          process.exit(1);
+        });
+    }
   }
 } else {
   // CLI path: check install first, attempt repair if broken, then lazy-import
