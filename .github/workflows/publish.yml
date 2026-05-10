@@ -45,7 +45,7 @@ jobs:
           ' CHANGELOG.md | sed -e 's/^---$//' | awk 'NF || prev_blank == 0 { print; prev_blank = !NF }')
           if [ -z "$(echo "$notes" | tr -d '[:space:]')" ]; then
             echo "No CHANGELOG entry for $TAG; falling back to --generate-notes."
-            gh release create "$TAG" --title "$TAG" --generate-notes
+            gh release create "$TAG" --title "$TAG" --latest --generate-notes
           else
-            gh release create "$TAG" --title "$TAG" --notes "$notes"
+            gh release create "$TAG" --title "$TAG" --latest --notes "$notes"
           fi
