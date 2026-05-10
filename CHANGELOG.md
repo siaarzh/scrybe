@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.32.3] — 2026-05-10
+
+### Added
+
+- **`env.npm_prefix_writable` doctor check.** Warns when npm's global install dir (`<npm config get prefix>/lib/node_modules`) isn't writable by the current user, with the canonical `~/.npm-global` prefix workaround in the remedy. Skips on Windows (ACL semantics differ in ways `accessSync` can't detect cleanly) and when `npm` isn't on PATH. Catches the case where `npm install -g scrybe-cli` fails with EACCES on Linux installs that use the system-managed Node from apt/yum (root-owned `/usr/lib/`).
+- **README "Manual setup" Linux first-install caveat.** Surfaces the same `~/.npm-global` workaround before the `npm install -g` line, so users hit the guidance pre-fail rather than only post-fail via doctor.
+
+---
+
 ## [0.32.2] — 2026-05-09
 
 ### Fixed
@@ -1196,7 +1205,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.2...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.3...HEAD
+[0.32.3]: https://github.com/siaarzh/scrybe/compare/v0.32.2...v0.32.3
 [0.32.2]: https://github.com/siaarzh/scrybe/compare/v0.32.1...v0.32.2
 [0.32.1]: https://github.com/siaarzh/scrybe/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/siaarzh/scrybe/compare/v0.31.6...v0.32.0

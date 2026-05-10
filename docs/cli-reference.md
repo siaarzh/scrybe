@@ -29,7 +29,7 @@ MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.
 
 ### `doctor`
 
-One-shot diagnostics. Checks: DATA_DIR, Node version, provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
+One-shot diagnostics. Checks: DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
 
 | Flag | Description |
 |------|-------------|
@@ -58,6 +58,14 @@ On Windows, `scrybe doctor` also queries registered AV products and Defender sta
 | `env.windows_av.repos_tip` | `ok` | Informational tip about AV scanning indexed repo paths. Only emitted when at least one of the above rows is `warn`. |
 
 See [README #windows-av](../README.md#windows-av) for remediation steps (Defender exclusion snippet, MBAM allow-list walkthrough).
+
+#### npm prefix writability (POSIX)
+
+On macOS and Linux, `scrybe doctor` checks whether the directory that would receive global npm installs (`<npm config get prefix>/lib/node_modules`) is writable by the current user:
+
+| Row ID | Typical status | Meaning |
+|--------|---------------|---------|
+| `env.npm_prefix_writable` | `ok` / `warn` / `skip` | `warn` = global install dir not writable (e.g. `/usr/lib/node_modules` on a system-managed Node from apt/yum). The remedy points at the canonical `~/.npm-global` prefix workaround. `skip` = `npm` not on PATH or Windows (ACL semantics differ). |
 
 ---
 
