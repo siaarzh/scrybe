@@ -9,6 +9,21 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.32.4] — 2026-05-10
+
+### Added
+
+- **Self-healing for half-extracted `npx -y scrybe-cli` installs.** When Claude Code's MCP probe times out during a cold `npx` install, npm aborts mid-extract and leaves a `~/.npm/_npx/<hash>` tree with empty package directories. Subsequent invocations silently fail with `Failed to connect` because Node can't resolve required dependencies. The MCP entrypoint now detects this state via a `createRequire` landmark check across heavy deps (`@xenova/transformers`, `sharp`, `@lancedb/lancedb`, `apache-arrow`, `@modelcontextprotocol/sdk`, `@parcel/watcher`, `tree-sitter`) and, on a broken install, completes the MCP `initialize` handshake and registers a structured `scrybe_install_incomplete` tool whose description starts with the recovery command. Claude Code's MCP UI then shows the actionable command in the tool list preview instead of an opaque connection failure.
+- **`scrybe doctor --repair`** — runs `npm install` inside the half-extracted npx workspace, then re-execs the original command so the user's invocation completes against the now-clean install. Sentinel file + env-var guard against recursion if repair itself fails. Restricted to npx caches (path-walks for an `_npx` ancestor); a no-op on global installs.
+- **`env.install_integrity` doctor row** — checks the same landmarks as the MCP entrypoint, surfaced as the first Environment-section check. Warns when one or more landmarks are missing, with a remedy pointing at `scrybe doctor --repair`.
+
+### Changed
+
+- **MCP setup README pivot.** The bare `"command": "npx", "args": ["-y", "scrybe-cli@latest", "mcp"]` snippet has been demoted from the primary example to a "no-config alternative" with a cold-install caveat. `"command": "scrybe"` (assuming a global install via `npm install -g scrybe-cli`) is now the recommended path; the `npx scrybe-cli@latest init` wizard remains the canonical first-step setup. Existing configs continue to work — but on first install, if interrupted, they will now show the `scrybe (install incomplete)` MCP server with a clear recovery command instead of failing silently.
+- **`src/index.ts` rewritten to lazy-import the heavy modules (`./mcp-server`, `./cli`, `./jobs`).** Only `node:*` builtins and the new `./install-doctor.js` module are static-imported at process entry, so the install-integrity check can run before any potentially-missing dependency is touched. Without this change, a half-extracted tree would crash Node at module-resolution time before any pre-flight check could fire.
+
+---
+
 ## [0.32.3] — 2026-05-10
 
 ### Added
@@ -1205,7 +1220,8 @@ See [docs/migration-v0.14.md](docs/migration-v0.14.md) for the upgrade guide.
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.3...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.4...HEAD
+[0.32.4]: https://github.com/siaarzh/scrybe/compare/v0.32.3...v0.32.4
 [0.32.3]: https://github.com/siaarzh/scrybe/compare/v0.32.2...v0.32.3
 [0.32.2]: https://github.com/siaarzh/scrybe/compare/v0.32.1...v0.32.2
 [0.32.1]: https://github.com/siaarzh/scrybe/compare/v0.32.0...v0.32.1

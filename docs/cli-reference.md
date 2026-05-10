@@ -29,13 +29,13 @@ MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.
 
 ### `doctor`
 
-One-shot diagnostics. Checks: DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
+One-shot diagnostics. Checks: install integrity (landmark deps resolvable), DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
 
 | Flag | Description |
 |------|-------------|
 | `--json` | Output a stable `DoctorReport` JSON object (schemaVersion: 1) for machine consumption |
 | `--strict` | Exit code 1 on warnings as well as failures |
-| `--repair` | Scan all indexed sources for corruption and offer to rebuild them interactively. Presents an estimated token cost before asking for confirmation. |
+| `--repair` | If a half-extracted `npx` install is detected, runs `npm install` inside the npx workspace and re-execs the original command. Otherwise scans all indexed sources for corruption and offers to rebuild them interactively (estimated token cost shown before confirmation). |
 
 ```bash
 scrybe doctor
@@ -66,6 +66,16 @@ On macOS and Linux, `scrybe doctor` checks whether the directory that would rece
 | Row ID | Typical status | Meaning |
 |--------|---------------|---------|
 | `env.npm_prefix_writable` | `ok` / `warn` / `skip` | `warn` = global install dir not writable (e.g. `/usr/lib/node_modules` on a system-managed Node from apt/yum). The remedy points at the canonical `~/.npm-global` prefix workaround. `skip` = `npm` not on PATH or Windows (ACL semantics differ). |
+
+#### Install integrity
+
+`scrybe doctor` runs a `createRequire`-based landmark check across heavy dependencies (`@xenova/transformers`, `sharp`, `@lancedb/lancedb`, `apache-arrow`, `@modelcontextprotocol/sdk`, `@parcel/watcher`, `tree-sitter`) before any other check. Detects half-extracted `npx -y` installs that npm aborted mid-reify (e.g. when Claude Code's MCP probe SIGTERMed the install before it finished):
+
+| Row ID | Typical status | Meaning |
+|--------|---------------|---------|
+| `env.install_integrity` | `ok` / `warn` | `warn` = one or more landmark deps cannot be resolved. The remedy points at `scrybe doctor --repair`, which runs `npm install` inside the half-extracted npx workspace and re-execs. Self-repair is restricted to npx caches (no-op on global installs). |
+
+When detected during MCP startup, `scrybe mcp` completes the MCP `initialize` handshake and registers a structured `scrybe_install_incomplete` tool whose description starts with the recovery command — Claude Code's MCP UI shows the actionable copy-pasteable command in the tool list preview instead of failing with an opaque "Failed to connect."
 
 ---
 
