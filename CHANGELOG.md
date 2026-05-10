@@ -7,15 +7,24 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.33.0] — 2026-05-10
+
 ### Added
 
-- **MCP shim mode:** `scrybe mcp` now connects to the daemon via HTTP instead of loading heavy modules in-process. Cold-boot < 500 ms (vs ~8.5 s previously). The daemon must be installed (`scrybe daemon install`) and running.
-- **`daemon.installed` doctor row** — checks whether daemon autostart is configured for the current platform. Green if installed, yellow with `run scrybe daemon install` hint if not.
-- **`daemon.running` doctor row** — checks pidfile presence and `/health` 200 response. Green if running, yellow/red with `run scrybe daemon start` or `run scrybe daemon restart` hint otherwise.
+- **MCP shim mode.** `scrybe mcp` now connects to the long-running daemon over HTTP instead of loading the embedder, lancedb, tree-sitter, and sharp in-process on every probe. Cold MCP boot drops from ~8.5 s to <500 ms — install latency is permanently off the Claude Code MCP probe path. Daemon owns all heavy modules; the shim's runtime dependency surface is just the MCP SDK plus a small HTTP client. The daemon must be installed (`scrybe daemon install`) and running for the shim to work; if the daemon is unavailable, the shim returns a structured-error tool whose description front-loads the recovery command (`scrybe daemon install`, `scrybe daemon start`, or `scrybe daemon restart` depending on the variant — no pidfile, daemon process dead, or mid-restart).
+- **Daemon HTTP surface for MCP traffic.** New `GET /mcp/manifest` returns `{daemon_version, tools}` derived from the existing tool registry. New `POST /mcp/rpc` dispatches tool calls with body `{id, method, params}` and JSON-RPC-style error codes (`-32600` invalid request, `-32601` method not found, `-32603` internal error). An optional `X-Scrybe-Client-Id` header is propagated from the shim heartbeat for per-client logging.
+- **Version handshake at MCP `initialize`.** Shim and daemon versions are SemVer-compared. MAJOR mismatch refuses with a single `scrybe_daemon_unavailable` tool whose description points at `scrybe daemon restart`. MINOR / PATCH mismatch logs a stderr warning and exposes the intersection of tools the shim was built knowing about with what the daemon's manifest reports — so a stale daemon doesn't surface tools the shim can't reach, and a newer daemon doesn't surface tools the shim wasn't tested against.
+- **`daemon.installed` and `daemon.running` doctor rows.** `daemon.installed` checks whether autostart is configured for the current platform (yellow with a `run scrybe daemon install` hint if not). `daemon.running` checks pidfile presence and `/health` 200 (green when running, yellow / red with a `run scrybe daemon start` or `run scrybe daemon restart` hint when something's off).
+
+### Changed
+
+- **README MCP setup pivot.** The recommended path is now `npm install -g scrybe-cli` → `scrybe daemon install` → MCP config with `"command": "scrybe", "args": ["mcp"]`. The `npx -y scrybe-cli@latest mcp` form still works (and continues to benefit from v0.32.4's install-doctor self-heal) but is documented as a secondary quick-start.
 
 ### Deprecated
 
-- **In-process MCP mode (`scrybe mcp --legacy-in-process`)** is deprecated. Will be removed in v0.34.0. See `scrybe daemon install`.
+- **In-process MCP mode (`scrybe mcp --legacy-in-process`)** prints a stderr warning at boot and is scheduled for removal in v0.34.0. Existing setups that relied on the in-process path continue to work for one minor cycle while users migrate to `scrybe daemon install`.
 
 ---
 
@@ -81,29 +90,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.31.6] — 2026-05-09
-
-### Added
-
-- **New MCP tool `lookup_symbol`.** Deterministic exact-symbol lookup by name — no embedding, no reranking, no `score` field. Returns all code chunks whose `symbol_name` matches the supplied value, sorted by `(language, item_path, start_line)`. Two match modes: `suffix` (default) matches both bare names and dotted qualified forms (`getName` → `User.getName`); `exact` requires the full stored name. Optional `case_sensitive` override (default `true`). Branch filtering accepts short names or `origin/`-qualified refs interchangeably. Empty-name chunks (sliding-window fallback files, non-first sub-chunks of large declarations) are always excluded. MCP-only — no CLI command.
-
-### Fixed
-
-- **`search_code` and `scrybe search` now accept short branch names for pinned branches.** Passing `branch="dev"` to a project where `dev` was indexed via the pinned-branch path (stored as `origin/dev`) previously returned silently empty results. The server now resolves the supplied name to whichever form is actually indexed — trying the supplied value first, then flipping the `origin/` prefix on or off. Short names (`dev`) and qualified refs (`origin/dev`) are both accepted. If neither form is indexed, the source returns an empty result set (same silent-empty contract as before). Set `SCRYBE_DEBUG_SEARCH=1` to log unresolved branch values.
-
----
-
-
 ## Older releases
 
-For releases v0.31.5 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.31.6 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.32.4...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/siaarzh/scrybe/compare/v0.32.4...v0.33.0
 [0.32.4]: https://github.com/siaarzh/scrybe/compare/v0.32.3...v0.32.4
 [0.32.3]: https://github.com/siaarzh/scrybe/compare/v0.32.2...v0.32.3
 [0.32.2]: https://github.com/siaarzh/scrybe/compare/v0.32.1...v0.32.2
 [0.32.1]: https://github.com/siaarzh/scrybe/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/siaarzh/scrybe/compare/v0.31.6...v0.32.0
-[0.31.6]: https://github.com/siaarzh/scrybe/compare/v0.31.5...v0.31.6
