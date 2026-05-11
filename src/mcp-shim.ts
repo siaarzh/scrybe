@@ -67,6 +67,7 @@ async function _sendHeartbeat(): Promise<void> {
   const pidData = readPidfile();
   if (!pidData?.port) return;
   try {
+    // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
     await fetch(`http://127.0.0.1:${pidData.port}/clients/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -97,6 +98,7 @@ async function _unregisterAndExit(): Promise<void> {
   try {
     const pidData = readPidfile();
     if (pidData?.port) {
+      // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
       await fetch(`http://127.0.0.1:${pidData.port}/clients/unregister`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -125,6 +127,7 @@ async function callRpc(
   params: Record<string, unknown>
 ): Promise<unknown> {
   const id = Math.random().toString(36).slice(2);
+  // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
   const res = await fetch(`${baseUrl}/mcp/rpc`, {
     method: "POST",
     headers: {
@@ -300,6 +303,7 @@ export async function runMcpShim(): Promise<void> {
   const port = pidData!.port;
   const baseUrl = `http://127.0.0.1:${port}`;
 
+  // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
   const manifestRes = await fetch(`${baseUrl}/mcp/manifest`, {
     signal: AbortSignal.timeout(5000),
   });

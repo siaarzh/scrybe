@@ -73,6 +73,14 @@ function getClientId(req: http.IncomingMessage): string {
   return "anon";
 }
 
+// Strip CR/LF/control chars so client-controlled clientId/method/error strings
+// can't forge fake log lines when logs are pasted into issues or shared.
+function sanitizeForLog(s: string): string {
+  return s.replace(/[\r\n\x00-\x1f\x7f]/g, "?");
+}
+
+const EXPOSE_INTERNAL_ERRORS = process.env["NODE_ENV"] === "development";
+
 // ─── Manifest (cached once per process — tool list is static) ─────────────
 
 let _manifest: McpManifest | null = null;
@@ -138,9 +146,11 @@ async function handleRpc(
     : {};
 
   const tool = mcpTools.find((t) => t.spec.name === method);
+  const safeClientId = sanitizeForLog(clientId);
+  const safeMethod = sanitizeForLog(method);
 
   if (!tool) {
-    console.log(`[mcp-rpc] client=${clientId} method=${method} → method not found`);
+    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → method not found`);
     jsonRes(res, 200, {
       id,
       error: { code: METHOD_NOT_FOUND, message: `method not found: ${method}` },
@@ -148,17 +158,20 @@ async function handleRpc(
     return;
   }
 
-  console.log(`[mcp-rpc] client=${clientId} method=${method}`);
+  console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod}`);
 
   try {
     const result = await tool.handler(params);
     jsonRes(res, 200, { id, result } satisfies RpcSuccess);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.log(`[mcp-rpc] client=${clientId} method=${method} → error: ${message}`);
+    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(message)}`);
     jsonRes(res, 200, {
       id,
-      error: { code: INTERNAL_ERROR, message },
+      error: {
+        code: INTERNAL_ERROR,
+        message: EXPOSE_INTERNAL_ERRORS ? message : "internal error",
+      },
     } satisfies RpcError);
   }
 }

@@ -7,6 +7,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Security
+
+- **MCP daemon RPC log injection hardened.** `clientId` and `method` strings (read from request headers / body) are now stripped of CR/LF/control characters before being written to `console.log`, so a malicious MCP client cannot forge fake log lines when logs are pasted in support tickets or issues.
+- **MCP daemon RPC error responses no longer echo internal `err.message` by default.** Tool-handler exceptions return a generic `"internal error"` to the client; full message is exposed only when `NODE_ENV=development`. Daemon logs continue to record the full (sanitized) message for local debugging.
+
 ---
 
 ## [0.34.0] — 2026-05-11
