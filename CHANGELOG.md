@@ -7,21 +7,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.34.0] — 2026-05-11
+
 ### Added
 
-- Upgraded vector store dependency `@lancedb/lancedb` 0.14 → 0.27 (Apache Arrow stays at ^17). Existing data is read transparently; no migration required.
+- **`@lancedb/lancedb` upgraded 0.14 → 0.27.** Apache Arrow stays pinned at ^17. Existing data is read transparently; no migration required. Because the running daemon holds the old lancedb native binding open, upgrading requires a daemon restart (and on Windows, closing IDE / Claude Code sessions first to release the file lock). See README's "Upgrading from v0.33.x to v0.34.0" block for the required sequence.
+- **`daemon-version-mismatch` MCP variant.** New variant of the existing `scrybe_daemon_unavailable` tool fires when the shim is v0.34.0+ but the running daemon is still on a pre-0.34.0 version. Tool description front-loads `scrybe daemon stop && scrybe daemon start`, so the recovery dance shows up in Claude Code's MCP UI instead of an opaque "daemon broken" state.
 
 ### Changed
 
-- MCP cold-boot measurement clarified: shim mode via `npx -y scrybe-cli@latest mcp`
-  is ~900ms (mostly npx cache-revalidation overhead). The recommended
-  `"command": "scrybe"` config with a global install measures closer to <500ms.
+- **MCP cold-boot measurement clarified.** Shim mode via `npx -y scrybe-cli@latest mcp` is ~900 ms (mostly npx cache-revalidation overhead). The recommended `"command": "scrybe"` config with a global install measures closer to <500 ms. v0.33.0's CHANGELOG quoted the global-install number without noting the npx caveat.
 
 ### Deprecated
 
-- In-process MCP mode (`scrybe mcp --legacy-in-process`) remains deprecated.
-  Removal target was previously v0.34.0; pushed to a future minor pending wider
-  shim-mode validation on Linux. Continues to print a stderr warning at boot.
+- **In-process MCP mode (`scrybe mcp --legacy-in-process`)** remains deprecated. Removal target was previously v0.34.0; pushed to a future minor pending wider shim-mode validation on Linux. Continues to print a stderr warning at boot.
 
 ---
 
@@ -85,37 +86,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.32.0] — 2026-05-09
-
-### Added
-
-- **Catalog-driven embedding presets.** Scrybe now ships a built-in catalog of providers (Voyage AI, OpenAI, Local, Custom) with known models, dimensions, and base URLs. Presets are named configurations stored in `<DATA_DIR>/config.json`. Two global slots — `code` and `text` — replace per-source embedding overrides. An optional `rerank` slot enables result reranking. `${ENV_VAR}` interpolation in credential fields is resolved at read time; a `credentials_from` field lets rerank presets share a key with the embedding preset.
-- **`scrybe model` CLI subcommand tree.** New commands for managing embedding configuration: `scrybe model list` (show catalog), `scrybe model show` (current assignments + resolved config with masked credentials), `scrybe model preset add <name>` / `scrybe model preset rm <name>` (create/remove named presets), `scrybe model assign --code|--text|--rerank <preset>` (set slot assignments with profile-compatibility validation), and `scrybe model switch --source-type <code|text>` (drop and fully reindex all matching sources using the current preset, with cost estimate for remote providers).
-- **`add_embedding_preset` and `assign_preset` MCP tools.** Agent-facing tools for managing presets without a terminal. `add_embedding_preset` writes a named preset to `config.json`. `assign_preset` updates slot assignments and returns `requires_reindex: true` when the new preset's `(model, dim, provider)` triple differs from the previously stamped triple on any indexed source.
-- **Catalog-driven `scrybe init` wizard.** The first-run wizard now prompts for provider (Voyage AI, OpenAI, Local, Custom), derives model and dimension options from the catalog, and supports a Custom-provider branch (base URL → API key → optional `/models` probe → model name → dimensions). Writes `config.json` and provider-keyed env vars (`SCRYBE_VOYAGE_API_KEY`, `SCRYBE_OPENAI_API_KEY`, etc.) to `<DATA_DIR>/.env`.
-- **Four new `scrybe doctor` checks.** `config.well_formed` verifies `config.json` parses and all preset references are valid. `config.refs_resolve` verifies every `${VAR}` credential reference resolves against the environment. `config.assignments_complete` verifies both the `code` and `text` slots are assigned. `tables.consistent` verifies each source's indexed `(model, dim, provider)` triple matches the currently assigned preset, flagging sources that need reindexing.
-- **`model_mismatch` source-health flag.** When a source's indexed triple differs from the current preset assignment, `scrybe status --json` includes `flags: ["model_mismatch"]` on that source's row. Remediation: `scrybe model switch --source-type <code|text>`.
-
-### Removed
-
-- **Per-source `--embedding-base-url`, `--embedding-model`, `--embedding-dimensions`, `--embedding-api-key-env` flags** on `scrybe source add` and `scrybe source update` are removed. Embedding model selection is now global, managed via `scrybe model` presets. Use `scrybe model preset add` + `scrybe model assign` to configure providers, then `scrybe model switch --source-type <type>` to reindex with a new model.
-
-### Migration
-
-- On first startup after upgrade, scrybe synthesizes a starter `config.json` from existing `SCRYBE_CODE_EMBEDDING_*` / `SCRYBE_KNOWLEDGE_EMBEDDING_*` env vars (creating `migrated-code` and `migrated-text` presets referencing those vars by their existing names). If neither is set, local-embedder presets are created. Any per-source `embedding` overrides in `projects.json` are dropped with a logged warning per source; the resolved global preset takes effect instead. Existing table sidecars are backfilled with model-provenance fields. No chunk IDs are changed and no reindex is forced — run `scrybe doctor` to check if any source shows `model_mismatch`, and use `scrybe model switch` if needed.
-
----
-
 ## Older releases
 
-For releases v0.31.6 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.32.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/siaarzh/scrybe/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/siaarzh/scrybe/compare/v0.32.4...v0.33.0
 [0.32.4]: https://github.com/siaarzh/scrybe/compare/v0.32.3...v0.32.4
 [0.32.3]: https://github.com/siaarzh/scrybe/compare/v0.32.2...v0.32.3
 [0.32.2]: https://github.com/siaarzh/scrybe/compare/v0.32.1...v0.32.2
 [0.32.1]: https://github.com/siaarzh/scrybe/compare/v0.32.0...v0.32.1
-[0.32.0]: https://github.com/siaarzh/scrybe/compare/v0.31.6...v0.32.0
