@@ -4,6 +4,19 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Known Vulnerabilities](https://snyk.io/test/github/siaarzh/scrybe/badge.svg)](https://snyk.io/test/github/siaarzh/scrybe)
 
+> ## Upgrading from v0.33.x to v0.34.0
+>
+> v0.34.0 upgrades lancedb (vector store). The running daemon must be restarted
+> to pick up the new binary. **Required steps:**
+>
+> 1. `scrybe daemon stop`
+> 2. Close all Claude Code / IDE sessions (they hold the daemon's lancedb binary).
+> 3. `npm install -g scrybe-cli@latest`  *(or wait for the next cold MCP probe if using `npx -y`)*
+> 4. `scrybe daemon start`
+>
+> Existing data is preserved — lancedb 0.27 reads 0.14-written tables transparently.
+> Skip these steps and you'll likely see `EPERM` on Windows or a confused daemon on Linux.
+
 **No API key required. Works fully offline.**
 
 Self-hosted code memory with semantic search. Index your repos and knowledge sources into a local vector database and search them by natural language — from the CLI or directly inside Claude Code via MCP.

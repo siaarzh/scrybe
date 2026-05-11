@@ -11,6 +11,27 @@ import { readPidfile } from "./daemon/pidfile.js";
 import { KNOWN_TOOL_NAMES } from "./tools/tool-names.js";
 import { compareSemVer, getMajorVersion } from "./util/semver-compare.js";
 
+// ─── Version boundary for lancedb upgrade comms ───────────────────────────────
+
+const LANCEDB_UPGRADE_BOUNDARY = "0.34.0";
+
+/**
+ * Returns true when `version` is strictly less than the lancedb upgrade boundary
+ * (0.34.0).  Used to detect a daemon still running the pre-upgrade lancedb.
+ */
+function isDaemonPreUpgrade(daemonVersion: string): boolean {
+  const cmp = compareSemVer(daemonVersion, LANCEDB_UPGRADE_BOUNDARY);
+  return cmp !== null && cmp < 0;
+}
+
+/**
+ * Returns true when `version` is at or above the lancedb upgrade boundary.
+ */
+function isShimPostUpgrade(shimVersion: string): boolean {
+  const cmp = compareSemVer(shimVersion, LANCEDB_UPGRADE_BOUNDARY);
+  return cmp !== null && cmp >= 0;
+}
+
 // ─── Types mirrored from mcp-rpc (no cross-import into daemon internals) ──────
 
 interface ManifestTool {
@@ -167,7 +188,7 @@ function analyzeVersionSkew(daemonVersion: string, shimVersion: string): Version
 
 // ─── Daemon-unavailable detection ─────────────────────────────────────────────
 
-type DaemonUnavailableVariant = "no-pidfile" | "daemon-dead" | "mid-restart";
+type DaemonUnavailableVariant = "no-pidfile" | "daemon-dead" | "mid-restart" | "daemon-version-mismatch";
 
 interface DaemonUnavailableState {
   variant: DaemonUnavailableVariant;
@@ -289,6 +310,24 @@ export async function runMcpShim(): Promise<void> {
 
   const manifest = (await manifestRes.json()) as McpManifest;
   const daemonVersion = manifest.daemon_version || "";
+
+  // ── lancedb upgrade boundary: shim >= 0.34.0, daemon < 0.34.0 ──────────────
+  if (isShimPostUpgrade(VERSION) && isDaemonPreUpgrade(daemonVersion)) {
+    serveUnavailableServer({
+      variant: "daemon-version-mismatch",
+      description:
+        "Run: scrybe daemon stop && scrybe daemon start   (then reconnect)\n" +
+        "\n" +
+        "scrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\n" +
+        "and cannot use the new on-disk format helpers. Stop + start refreshes the daemon\n" +
+        "with the new lancedb binary. Existing data is preserved (lancedb 0.27 reads\n" +
+        "0.14-written tables transparently).\n" +
+        "\n" +
+        "If the stop command fails with EPERM on Windows, close all Claude Code / IDE\n" +
+        "sessions first — they hold the lancedb native binding open.",
+    });
+    return;
+  }
 
   const skew = analyzeVersionSkew(daemonVersion, VERSION);
 

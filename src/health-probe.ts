@@ -193,7 +193,7 @@ function classifyLanceError(err: unknown): "manifest_missing_data" | "schema_unr
  */
 function extractMissingFilePaths(err: unknown): string[] {
   const msg = err instanceof Error ? err.message : String(err);
-  const matches = msg.match(/data[\\/]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.lance/gi);
+  const matches = msg.match(/data[\\/][0-9a-f][0-9a-f-]*\.lance/gi);
   if (!matches) return [];
   return [...new Set(matches.map((m) => m.replace(/\\/g, "/")))];
 }

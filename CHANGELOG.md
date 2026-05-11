@@ -7,6 +7,22 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- Upgraded vector store dependency `@lancedb/lancedb` 0.14 → 0.27 (Apache Arrow stays at ^17). Existing data is read transparently; no migration required.
+
+### Changed
+
+- MCP cold-boot measurement clarified: shim mode via `npx -y scrybe-cli@latest mcp`
+  is ~900ms (mostly npx cache-revalidation overhead). The recommended
+  `"command": "scrybe"` config with a global install measures closer to <500ms.
+
+### Deprecated
+
+- In-process MCP mode (`scrybe mcp --legacy-in-process`) remains deprecated.
+  Removal target was previously v0.34.0; pushed to a future minor pending wider
+  shim-mode validation on Linux. Continues to print a stderr warning at boot.
+
 ---
 
 ## [0.33.0] — 2026-05-10

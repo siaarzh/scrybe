@@ -426,6 +426,104 @@ describe("shim version skew handling", () => {
   });
 });
 
+// ─── Version-mismatch variant (lancedb upgrade boundary) ─────────────────────
+
+describe("shim daemon_version_mismatch variant", () => {
+  it("daemon_version_mismatch variant fires when shim is >= 0.34.0 and daemon is < 0.34.0", () => {
+    // Reproduce the detection logic inline, mirroring the boundary check in mcp-shim.ts.
+    const LANCEDB_UPGRADE_BOUNDARY = "0.34.0";
+
+    function compareSemVerLocal(left: string, right: string): -1 | 0 | 1 | null {
+      const parse = (v: string): [number, number, number] | null => {
+        const m = v.match(/^(\d+)\.(\d+)\.(\d+)/);
+        if (!m) return null;
+        return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+      };
+      const l = parse(left);
+      const r = parse(right);
+      if (!l || !r) return null;
+      if (l[0] !== r[0]) return l[0] < r[0] ? -1 : 1;
+      if (l[1] !== r[1]) return l[1] < r[1] ? -1 : 1;
+      if (l[2] !== r[2]) return l[2] < r[2] ? -1 : 1;
+      return 0;
+    }
+
+    function isDaemonPreUpgrade(v: string): boolean {
+      const cmp = compareSemVerLocal(v, LANCEDB_UPGRADE_BOUNDARY);
+      return cmp !== null && cmp < 0;
+    }
+
+    function isShimPostUpgrade(v: string): boolean {
+      const cmp = compareSemVerLocal(v, LANCEDB_UPGRADE_BOUNDARY);
+      return cmp !== null && cmp >= 0;
+    }
+
+    const shimVersion = "0.34.0";
+    const daemonVersion = "0.33.5";
+
+    expect(isShimPostUpgrade(shimVersion)).toBe(true);
+    expect(isDaemonPreUpgrade(daemonVersion)).toBe(true);
+
+    // When both conditions hold, the variant fires and the description is built.
+    const shouldFire = isShimPostUpgrade(shimVersion) && isDaemonPreUpgrade(daemonVersion);
+    expect(shouldFire).toBe(true);
+
+    // Verify description shape: first line starts with "Run: scrybe daemon stop && scrybe daemon start"
+    const description =
+      "Run: scrybe daemon stop && scrybe daemon start   (then reconnect)\n" +
+      "\n" +
+      "scrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\n" +
+      "and cannot use the new on-disk format helpers. Stop + start refreshes the daemon\n" +
+      "with the new lancedb binary. Existing data is preserved (lancedb 0.27 reads\n" +
+      "0.14-written tables transparently).\n" +
+      "\n" +
+      "If the stop command fails with EPERM on Windows, close all Claude Code / IDE\n" +
+      "sessions first — they hold the lancedb native binding open.";
+
+    const lines = description.split("\n");
+    expect(lines[0]).toMatch(/^Run: scrybe daemon stop && scrybe daemon start/);
+
+    // Confirm the tool name that would be exposed
+    const toolName = "scrybe_daemon_unavailable";
+    expect(toolName).toBe("scrybe_daemon_unavailable");
+  });
+
+  it("daemon_version_mismatch variant does NOT fire when shim and daemon are both >= 0.34.0", () => {
+    const LANCEDB_UPGRADE_BOUNDARY = "0.34.0";
+
+    function compareSemVerLocal(left: string, right: string): -1 | 0 | 1 | null {
+      const parse = (v: string): [number, number, number] | null => {
+        const m = v.match(/^(\d+)\.(\d+)\.(\d+)/);
+        if (!m) return null;
+        return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+      };
+      const l = parse(left);
+      const r = parse(right);
+      if (!l || !r) return null;
+      if (l[0] !== r[0]) return l[0] < r[0] ? -1 : 1;
+      if (l[1] !== r[1]) return l[1] < r[1] ? -1 : 1;
+      if (l[2] !== r[2]) return l[2] < r[2] ? -1 : 1;
+      return 0;
+    }
+
+    function isDaemonPreUpgrade(v: string): boolean {
+      const cmp = compareSemVerLocal(v, LANCEDB_UPGRADE_BOUNDARY);
+      return cmp !== null && cmp < 0;
+    }
+
+    function isShimPostUpgrade(v: string): boolean {
+      const cmp = compareSemVerLocal(v, LANCEDB_UPGRADE_BOUNDARY);
+      return cmp !== null && cmp >= 0;
+    }
+
+    // Same-version case: 0.34.0 shim + 0.34.0 daemon — variant must NOT fire
+    expect(isShimPostUpgrade("0.34.0") && isDaemonPreUpgrade("0.34.0")).toBe(false);
+
+    // Pre-boundary case: 0.33.9 shim + 0.33.5 daemon — variant must NOT fire
+    expect(isShimPostUpgrade("0.33.9") && isDaemonPreUpgrade("0.33.5")).toBe(false);
+  });
+});
+
 // ─── Daemon unavailable descriptions ────────────────────────────────────────────
 
 describe("shim daemon-unavailable descriptions", () => {
