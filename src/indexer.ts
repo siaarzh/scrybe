@@ -20,12 +20,12 @@ import {
 } from "./vector-store.js";
 import { listManifestsSorted, isManifestClean, getExpectedDimensions } from "./health-probe.js";
 import { createHash } from "node:crypto";
-import { gitExecOrThrow } from "./util/git-exec.js";
+import { gitExec, gitExecOrThrow } from "./util/git-exec.js";
 import { appendFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { withBranchSession, resolveBranchForPath, type BranchTag } from "./branch-state.js";
+import { withBranchSession, resolveBranchForPath, setLastIndexedSha, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage } from "./chunker.js";
 import { diagEmit } from "./daemon/events.js";
@@ -106,6 +106,12 @@ export async function indexSource(
     { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode },
     async (session, branch) => {
       const jobStart = Date.now();
+
+      // Capture the SHA at indexer start (code sources only). Used to record the
+      // last-indexed SHA in branch_state on successful completion.
+      const indexedShaAtStart: string | null = (isCode && rootPath !== "")
+        ? (gitExec(["rev-parse", branch], { cwd: rootPath }) ?? null)
+        : null;
 
       // For code sources: detect non-HEAD branch indexing (content from git objects).
       const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
@@ -340,14 +346,35 @@ export async function indexSource(
 
         // One upsert call per flushBatch — keeps manifest version count to ~1
         // per batch, so end-of-run optimize() stays cheap.
-        const allChunksToWrite: AnyChunk[] = [];
-        const allVectorsToWrite: number[][] = [];
+        let allChunksToWrite: AnyChunk[] = [];
+        let allVectorsToWrite: number[][] = [];
         for (const { chunks } of keyBatches) {
           for (const c of chunks) {
             if (vectorMap.has(c.chunk_id)) {
               allChunksToWrite.push(c);
               allVectorsToWrite.push(vectorMap.get(c.chunk_id)!);
             }
+          }
+        }
+
+        // Defence-in-depth: collapse intra-batch chunk_id duplicates.
+        // Pre-v0.31.0 scheme-1 hash collisions could produce N chunks with the same
+        // chunk_id from one keyBatch flush; mergeInsert's source-side dedup gap then
+        // inserted all N. Scheme-2 makes collisions extremely unlikely (chunk_id is
+        // content+path-deterministic), but a future plugin emitting near-identical
+        // chunks could reintroduce the snowball. This Set-based filter closes the gate.
+        {
+          const deduped = dedupeChunkBatch(allChunksToWrite, allVectorsToWrite);
+          allChunksToWrite = deduped.chunks;
+          allVectorsToWrite = deduped.vectors;
+          if (deduped.dupesRemoved > 0) {
+            diagEmit({
+              event: "indexer.flush.intra_batch_dedup",
+              projectId,
+              sourceId,
+              branch,
+              intra_batch_dupes: deduped.dupesRemoved,
+            });
           }
         }
 
@@ -457,6 +484,29 @@ export async function indexSource(
       await flushBatch();
       onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
 
+      // Sweep "attempted but produced 0 chunks" files — give them a hash so the scanner
+      // stops re-marking them next cycle. Uses the existing "embedded" outcome with empty
+      // tags (knowledge sources already use this path at line 423 / similar).
+      if (isCode) {
+        const noChunkFiles = [...toReindex].filter((p) => !filesSeenSoFar.has(p));
+        for (const p of noChunkFiles) {
+          if (merged[p] === undefined) continue; // defensive
+          try {
+            session.applyFile(p, { kind: "embedded", hash: merged[p], tags: [] });
+          } catch (err) {
+            // non-fatal — log warn, continue
+            debugEmit({
+              event: "indexer.zero-chunk-hash-save-failed",
+              projectId,
+              sourceId,
+              branch,
+              path: p,
+              error: String(err),
+            });
+          }
+        }
+      }
+
       if (halvingSession) {
         const existingMaxFailed = stateEntry?.maxFailed ?? 0;
         writeEntry(stateKey, {
@@ -534,9 +584,57 @@ export async function indexSource(
         total_ms: Date.now() - jobStart,
       });
 
+      // Record the last-indexed SHA in branch_state for code sources on success.
+      // Non-fatal: a write failure logs a warning but does not propagate.
+      if (isCode && indexedShaAtStart !== null) {
+        try {
+          setLastIndexedSha(projectId, sourceId, branch, indexedShaAtStart, Date.now());
+        } catch (shaWriteErr) {
+          diagEmit({
+            event: "indexer.branch_state.write_failed",
+            projectId,
+            sourceId,
+            branch,
+            error: String(shaWriteErr),
+          });
+        }
+      }
+
       return result;
     }
   );
+}
+
+// ─── Exported dedup helper (also used in flushBatch above) ───────────────────
+
+/**
+ * Collapse intra-batch chunk_id duplicates from two parallel arrays.
+ *
+ * Walks `chunks` and `vectors` in lock-step. First-seen chunk_id wins;
+ * subsequent rows sharing the same id are dropped. Returns the deduped
+ * arrays and the count of rows removed.
+ *
+ * Extracted for testability — flushBatch calls this before every upsert.
+ */
+export function dedupeChunkBatch<C extends { chunk_id: string }>(
+  chunks: C[],
+  vectors: number[][],
+): { chunks: C[]; vectors: number[][]; dupesRemoved: number } {
+  const seen = new Set<string>();
+  const dedupedChunks: C[] = [];
+  const dedupedVectors: number[][] = [];
+  let dupesRemoved = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i]!;
+    if (seen.has(c.chunk_id)) {
+      dupesRemoved++;
+      continue;
+    }
+    seen.add(c.chunk_id);
+    dedupedChunks.push(c);
+    dedupedVectors.push(vectors[i]!);
+  }
+  return { chunks: dedupedChunks, vectors: dedupedVectors, dupesRemoved };
 }
 
 async function* fetchChunksFromRef(

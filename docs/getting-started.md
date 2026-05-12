@@ -84,21 +84,25 @@ scrybe search knowledge -P myrepo "password reset broken"
 
 ## 7. Connect to Claude Code (MCP)
 
-Add to `~/.claude.json` under `mcpServers`:
+First, install the daemon for autostart so MCP probes connect instantly:
+
+```bash
+scrybe daemon install
+```
+
+Then add to `~/.claude.json` under `mcpServers`:
 
 ```json
 "scrybe": {
   "type": "stdio",
-  "command": "node",
-  "args": ["/absolute/path/to/scrybe/dist/index.js", "mcp"],
-  "env": {
-    "EMBEDDING_API_KEY": "your-key-here",
-    "EMBEDDING_BASE_URL": "https://api.voyageai.com/v1"
-  }
+  "command": "scrybe",
+  "args": ["mcp"]
 }
 ```
 
-After adding, restart Claude Code. The `mcp__scrybe__*` tools become available in all projects.
+Restart Claude Code. The `mcp__scrybe__*` tools become available in all projects. `scrybe mcp` runs as a thin shim that talks HTTP to the daemon — heavy modules (embedder, lancedb, tree-sitter) load once on the daemon side, so cold MCP boot is sub-second.
+
+If the daemon isn't installed or isn't running, the MCP server will surface a single `scrybe_daemon_unavailable` tool whose description includes the exact recovery command (`scrybe daemon install`, `scrybe daemon start`, or `scrybe daemon restart`).
 
 ## Day-to-day workflow
 

@@ -103,6 +103,7 @@ describe("migration registry (Fix 6)", () => {
       "rename-env-vars-v0.29.0",
       "add-rerank-key-v0.29.1",
       "cleanup-zombie-jobs-v0.29.3",
+      "init-config-v0.32.0",
     ];
     writeFileSync(
       join(dataDir(), "schema.json"),

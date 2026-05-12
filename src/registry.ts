@@ -1,10 +1,11 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
 import { createHash } from "crypto";
-import { config } from "./config.js";
+import { config, readScrybeConfig } from "./config.js";
 import { dropTable } from "./vector-store.js";
 import { wipeSource, getDB } from "./branch-state.js";
 import { getPlugin } from "./plugins/index.js";
+import { resolvePreset } from "./preset-resolver.js";
 import type { Project, Source, EmbeddingConfig } from "./types.js";
 
 const REGISTRY_PATH = join(config.dataDir, "projects.json");
@@ -265,12 +266,14 @@ export async function removeSource(projectId: string, sourceId: string): Promise
 
 /**
  * Resolve the embedding config for a source.
- * If the source has its own embedding config, use it.
- * Otherwise, fall back to the global env var config for the plugin's profile.
+ *
+ * When `config.json` is present, routes through the preset resolver using the
+ * source's plugin profile to pick the correct slot (code_preset or text_preset).
+ * When `config.json` is absent, falls back to the legacy global env var path.
+ * The `source.embedding` per-source override field is no longer read here;
+ * slice 6 migration will drop it from persisted JSON.
  */
 export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
-  if (source.embedding) return source.embedding;
-
   let profile: "code" | "text";
   try {
     profile = getPlugin(source.source_config.type).embeddingProfile;
@@ -278,6 +281,26 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
     profile = "code"; // unknown plugin type — assume code
   }
 
+  const cfg = readScrybeConfig();
+  if (cfg !== null) {
+    const slot = profile === "code" ? "code_preset" : "text_preset";
+    const presetName = cfg.assignments[slot];
+    if (!presetName) {
+      throw new Error(`scrybe is not configured — run 'scrybe init'`);
+    }
+    const resolved = resolvePreset(presetName, slot, cfg);
+    return {
+      base_url: resolved.base_url,
+      model: resolved.model,
+      dimensions: resolved.dim,
+      // Store credentials in a synthetic env var name derived from the preset.
+      // The embedder reads process.env[api_key_env]; we inject the resolved value there.
+      api_key_env: _injectCredential(presetName, resolved.credentials),
+      provider_type: resolved.provider === "local" ? "local" : "api",
+    };
+  }
+
+  // Legacy path — config.json not present yet.
   if (profile === "code") {
     return {
       base_url: config.embeddingBaseUrl ?? "",
@@ -295,6 +318,23 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       provider_type: config.textEmbeddingProviderType,
     };
   }
+}
+
+/**
+ * Injects a resolved credential value into process.env under a synthetic key
+ * and returns that key name. This bridges the preset resolver (which returns
+ * the resolved credential value) with the embedder (which reads process.env[api_key_env]).
+ *
+ * The synthetic key is `SCRYBE_PRESET_<normalized-preset-name>` and is written
+ * once per process invocation. Subsequent calls with the same preset name are
+ * idempotent (value already in env).
+ */
+function _injectCredential(presetName: string, credentials: string): string {
+  const envKey = `SCRYBE_PRESET_${presetName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  if (!(envKey in process.env)) {
+    process.env[envKey] = credentials;
+  }
+  return envKey;
 }
 
 /**
@@ -323,11 +363,58 @@ export function assignTableName(projectId: string, source: Source): Source {
 /**
  * Check whether a source can be searched right now.
  * Returns { ok: true } or { ok: false, reason: string }.
+ *
+ * When config.json is present, checks the assigned preset's credential without
+ * resolving it (to avoid throwing on missing vars). Local-provider presets are
+ * always searchable. API presets require the referenced env var to be set.
  */
 export function isSearchable(source: Source): { ok: boolean; reason?: string } {
   if (!source.table_name) {
     return { ok: false, reason: "Never indexed — run a full index first" };
   }
+
+  const cfg = readScrybeConfig();
+  if (cfg !== null) {
+    let profile: "code" | "text";
+    try {
+      profile = getPlugin(source.source_config.type).embeddingProfile;
+    } catch {
+      profile = "code";
+    }
+    const slot = profile === "code" ? "code_preset" : "text_preset";
+    const presetName = cfg.assignments[slot];
+    if (!presetName) {
+      return { ok: false, reason: "scrybe is not configured — run 'scrybe init'" };
+    }
+    const preset = cfg.embedding_presets[presetName];
+    if (!preset) {
+      return { ok: false, reason: `Preset "${presetName}" not found in config — run 'scrybe init'` };
+    }
+    if (preset.provider === "local") return { ok: true };
+
+    // Determine the credential env var name from the raw credentials field.
+    const rawCred = preset.credentials_from
+      ? cfg.embedding_presets[preset.credentials_from]?.credentials
+      : preset.credentials;
+    if (!rawCred) return { ok: true }; // no credentials field — provider uses none
+
+    // Extract VAR name from "${VAR}" pattern, or treat as literal.
+    const match = rawCred.match(/^\$\{([A-Z_][A-Z0-9_]*)\}$/);
+    if (!match) return { ok: true }; // literal credential — always present
+
+    const envVarName = match[1];
+    if (!process.env[envVarName]) {
+      return {
+        ok: false,
+        reason:
+          `Requires env var ${envVarName} (model: ${preset.model}) — ` +
+          `not set in current environment`,
+      };
+    }
+    return { ok: true };
+  }
+
+  // Legacy path — config.json not present yet.
   const emb = resolveEmbeddingConfig(source);
   if (emb.provider_type === "local") return { ok: true };
   const key = process.env[emb.api_key_env] ?? "";

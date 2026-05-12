@@ -1,6 +1,7 @@
 import { existsSync, accessSync, statSync, readdirSync, constants, readFileSync } from "fs";
 import { join } from "path";
 import { platform } from "os";
+import { execSync } from "child_process";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
 
@@ -72,6 +73,25 @@ export async function runDoctor(): Promise<DoctorReport> {
   // ── 1. Environment ──────────────────────────────────────────────────────────
   const SEC_ENV = "Environment";
 
+  // ── 1a. Install integrity (must be first row) ───────────────────────────────
+  {
+    const { detectBrokenInstall } = await import("../install-doctor.js");
+    const broken = detectBrokenInstall();
+    if (broken) {
+      checks.push(warn(
+        "env.install_integrity",
+        SEC_ENV,
+        "Install integrity",
+        `Landmark packages missing: ${broken.missing.join(", ")} — install may be incomplete`,
+        `Run \`scrybe doctor --repair\` to attempt automatic repair, or manually:\n` +
+        `  npx -y scrybe-cli@latest --version  (then reconnect Claude Code)`,
+        { missing: broken.missing },
+      ));
+    } else {
+      checks.push(ok("env.install_integrity", SEC_ENV, "Install integrity", "All landmark packages present"));
+    }
+  }
+
   const dataDir = config.dataDir;
   if (!existsSync(dataDir)) {
     checks.push(fail("env.data_dir", SEC_ENV, "DATA_DIR exists", `Missing: ${dataDir}`,
@@ -97,6 +117,145 @@ export async function runDoctor(): Promise<DoctorReport> {
   }
 
   checks.push(ok("env.scrybe_version", SEC_ENV, "Scrybe version", `v${VERSION}`));
+
+  // ── 1b. Windows AV check ─────────────────────────────────────────────────────
+  if (process.platform === "win32") {
+    const { detectWindowsAv, AV_README_ANCHOR } = await import("./windows-av.js");
+    const avReport = await detectWindowsAv(dataDir);
+
+    if (avReport.skip) {
+      // Single skip row when Defender service is not installed or PS timed out
+      if (avReport.skipReason !== "non-windows") {
+        checks.push(skip("env.windows_av.defender", SEC_ENV, "Windows AV",
+          avReport.skipReason === "defender-not-installed"
+            ? "Defender service not installed — AV check skipped"
+            : "PowerShell timed out — AV check skipped"));
+      }
+    } else {
+      const d = avReport.defender!;
+      let hasAvWarn = false;
+
+      // ── Defender row ────────────────────────────────────────────────────────
+      if (d.active) {
+        if (d.dataDirExcluded) {
+          checks.push({
+            id: "env.windows_av.defender",
+            section: SEC_ENV,
+            title: "Windows Defender",
+            status: "ok",
+            message: `Active (${d.runningMode}), real-time on, exclusions: ${d.exclusions.length}`,
+            data: { running_mode: d.runningMode, real_time_enabled: d.realTimeEnabled, exclusion_count: d.exclusions.length, data_dir_excluded: true },
+          });
+        } else {
+          hasAvWarn = true;
+          checks.push({
+            id: "env.windows_av.defender",
+            section: SEC_ENV,
+            title: "Windows Defender",
+            status: "warn",
+            message: `Active (${d.runningMode}), DATA_DIR not in exclusion list — real-time scanning may slow indexing`,
+            remedy: `Run in elevated PowerShell to exclude DATA_DIR:\n  Add-MpPreference -ExclusionPath "${dataDir}"\nTo rollback:\n  Remove-MpPreference -ExclusionPath "${dataDir}"\nSee README ${AV_README_ANCHOR} for details.`,
+            data: { running_mode: d.runningMode, real_time_enabled: d.realTimeEnabled, exclusion_count: d.exclusions.length, data_dir_excluded: false },
+          });
+        }
+      } else {
+        // Defender is not running (e.g. stepped down by MBAM)
+        checks.push(skip("env.windows_av.defender", SEC_ENV, "Windows Defender",
+          `Defender in mode "${d.runningMode}" — not actively scanning`));
+      }
+
+      // ── MBAM row ────────────────────────────────────────────────────────────
+      if (avReport.mbamDetected) {
+        const mbamVerified = process.env["SCRYBE_DOCTOR_AV_MBAM_VERIFIED"] === "1";
+        if (mbamVerified) {
+          checks.push({
+            id: "env.windows_av.mbam",
+            section: SEC_ENV,
+            title: "Malwarebytes",
+            status: "ok",
+            message: "Detected — SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1 (user confirmed allow-list configured)",
+            data: { mbam_verified: true },
+          });
+        } else {
+          hasAvWarn = true;
+          checks.push({
+            id: "env.windows_av.mbam",
+            section: SEC_ENV,
+            title: "Malwarebytes",
+            status: "warn",
+            message: "Malwarebytes detected — DATA_DIR may be scanned in real time (no API to verify allow-list)",
+            remedy: `Add DATA_DIR to Malwarebytes allow list:\n  Open Malwarebytes → Settings → Allow List → Add → Allow a Folder → ${dataDir}\nOnce configured, set SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1 to suppress this warning.\nSee README ${AV_README_ANCHOR} for details.`,
+            data: { mbam_verified: false },
+          });
+        }
+      } else {
+        checks.push(skip("env.windows_av.mbam", SEC_ENV, "Malwarebytes", "Not detected"));
+      }
+
+      // ── No active AV row (info) ─────────────────────────────────────────────
+      if (avReport.noActiveAv) {
+        const noAvRow: CheckResult = {
+          id: "env.windows_av.no_active_av",
+          section: SEC_ENV,
+          title: "Windows AV",
+          status: "ok",
+          message: "No real-time AV detected — DATA_DIR scanning not a concern",
+          data: { defender_mode: d.runningMode },
+        };
+        checks.push(noAvRow);
+      }
+
+      // ── repos_tip row (info, only when a warn was emitted) ──────────────────
+      if (hasAvWarn) {
+        const tipRow: CheckResult = {
+          id: "env.windows_av.repos_tip",
+          section: SEC_ENV,
+          title: "AV tip — indexed repos",
+          status: "ok",
+          message: `Indexed repo paths can also be slowed by AV on \`git status\`. See README ${AV_README_ANCHOR} for the trade-off if shell-open feels slow.`,
+        };
+        checks.push(tipRow);
+      }
+    }
+  }
+
+  // ── 1c. npm global prefix writability ───────────────────────────────────────
+  // Windows ACL semantics differ from POSIX — accessSync may report writable on
+  // dirs that practically aren't (e.g. UNC paths, junction points). Skip on Win32
+  // to avoid false positives; the EACCES failure mode is a Linux/macOS concern.
+  if (process.platform !== "win32") {
+    try {
+      const rawPrefix = execSync("npm config get prefix", { timeout: 2000, encoding: "utf8" }).trim();
+      const modulesDir = join(rawPrefix, "lib", "node_modules");
+      try {
+        accessSync(modulesDir, constants.W_OK);
+        checks.push(ok("env.npm_prefix_writable", SEC_ENV, "npm global prefix writable",
+          `${modulesDir} is writable`, { prefix: rawPrefix }));
+      } catch {
+        checks.push(warn(
+          "env.npm_prefix_writable",
+          SEC_ENV,
+          "npm global prefix writable",
+          `${modulesDir} is not writable by your user — future \`npm install -g\` upgrades will fail with EACCES`,
+          `npm's global install dir ${modulesDir} is not writable by your user.\n` +
+          `Future \`npm install -g\` upgrades will fail with EACCES.\n\n` +
+          `Fix:\n` +
+          `  mkdir -p ~/.npm-global\n` +
+          `  npm config set prefix ~/.npm-global\n` +
+          `  echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc\n` +
+          `  source ~/.bashrc`,
+          { prefix: rawPrefix },
+        ));
+      }
+    } catch {
+      // npm not on PATH or execSync timed out — skip silently
+      checks.push(skip("env.npm_prefix_writable", SEC_ENV, "npm global prefix writable",
+        "npm not found on PATH — check skipped"));
+    }
+  } else {
+    checks.push(skip("env.npm_prefix_writable", SEC_ENV, "npm global prefix writable",
+      "Windows — check not applicable"));
+  }
 
   // ── 2. Embedding Provider ───────────────────────────────────────────────────
   const SEC_PROV = "Embedding Provider";
@@ -395,6 +554,60 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push(skip("daemon.always_on", SEC_DAEMON, "Always-on mode", "Could not check install status"));
   }
 
+  // ── daemon.installed — autostart configured ─────────────────────────────────
+  try {
+    const { isContainer } = await import("../daemon/container-detect.js");
+    if (isContainer()) {
+      checks.push(skip("daemon.installed", SEC_DAEMON, "Daemon autostart",
+        "Containerized environment — not applicable"));
+    } else {
+      const { getInstallStatus } = await import("../daemon/install/index.js");
+      const installStatus = await getInstallStatus();
+      if (installStatus.installed) {
+        checks.push(ok("daemon.installed", SEC_DAEMON, "Daemon autostart",
+          `Configured (${installStatus.method ?? "unknown"})`,
+          { method: installStatus.method }));
+      } else {
+        checks.push(warn("daemon.installed", SEC_DAEMON, "Daemon autostart",
+          "Not configured — MCP shim requires the daemon",
+          "Run `scrybe daemon install` to register the daemon for autostart at login"));
+      }
+    }
+  } catch {
+    checks.push(skip("daemon.installed", SEC_DAEMON, "Daemon autostart", "Could not check install status"));
+  }
+
+  // ── daemon.running — pidfile present + /health 200 ──────────────────────────
+  if (!pidData) {
+    checks.push(warn("daemon.running", SEC_DAEMON, "Daemon running",
+      "Not running (no pidfile)",
+      "Run `scrybe daemon start` to start the daemon"));
+  } else {
+    try {
+      const { DaemonClient } = await import("../daemon/client.js");
+      const client = DaemonClient.fromPidfile();
+      if (!client) {
+        checks.push(warn("daemon.running", SEC_DAEMON, "Daemon running",
+          "Pidfile present but DaemonClient could not connect",
+          "Run `scrybe daemon restart`"));
+      } else {
+        await client.health();
+        checks.push(ok("daemon.running", SEC_DAEMON, "Daemon running",
+          `Running (PID ${pidData.pid}, port ${pidData.port})`,
+          { pid: pidData.pid, port: pidData.port }));
+      }
+    } catch {
+      checks.push({
+        id: "daemon.running",
+        section: SEC_DAEMON,
+        title: "Daemon running",
+        status: "fail",
+        message: `Pidfile present (PID ${pidData.pid}) but health check failed`,
+        remedy: "Run `scrybe daemon restart`",
+      });
+    }
+  }
+
   // Git hooks — check per code source (best-effort; skip if not a git repo)
   for (const project of projects) {
     for (const source of project.sources) {
@@ -412,6 +625,65 @@ export async function runDoctor(): Promise<DoctorReport> {
         checks.push(warn(`daemon.hook.${project.id}.${source.source_id}`, SEC_DAEMON,
           `Git hooks (${project.id}/${source.source_id})`, "Not installed",
           `Run: scrybe hook install --project-id ${project.id} --repo ${root}`));
+      }
+    }
+  }
+
+  // Fetch-poller branch sync — one check per pinned branch per code source
+  {
+    const { getLastIndexedSha, listBranches } = await import("../branch-state.js");
+    const { gitExec } = await import("../util/git-exec.js");
+
+    for (const project of projects) {
+      for (const source of project.sources) {
+        if (source.source_config.type !== "code") continue;
+        const pinnedBranches: string[] = source.pinned_branches ?? [];
+        if (pinnedBranches.length === 0) continue;
+
+        const rootPath = (source.source_config as any).root_path as string;
+        const indexedBranches = listBranches(project.id, source.source_id);
+
+        for (const branch of pinnedBranches) {
+          const qualifiedRef = `origin/${branch}`;
+          const safeBranch = branch.replace(/\//g, "__");
+          const checkId = `daemon.fetch-poller.${project.id}.${source.source_id}.${safeBranch}`;
+          const title = `Fetch-poller sync (${project.id}/${source.source_id}/${branch})`;
+
+          try {
+            const currentRemoteSha = gitExec(["rev-parse", qualifiedRef], { cwd: rootPath }) ?? null;
+            const lastIndexedSha = getLastIndexedSha(project.id, source.source_id, qualifiedRef);
+            const inBranchTags = indexedBranches.includes(qualifiedRef);
+
+            if (currentRemoteSha === null) {
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `Remote no longer has branch "${branch}"`,
+                `Remove this pinned branch if the remote branch has been deleted`));
+            } else if (lastIndexedSha === currentRemoteSha) {
+              checks.push(ok(checkId, SEC_DAEMON, title,
+                `In sync (SHA ${currentRemoteSha.slice(0, 8)})`,
+                { sha: currentRemoteSha, branch: qualifiedRef }));
+            } else if (lastIndexedSha !== null) {
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `indexed at SHA ${lastIndexedSha.slice(0, 8)}, remote at ${currentRemoteSha.slice(0, 8)} — daemon will reindex on next poll`,
+                undefined,
+                { lastIndexedSha, currentRemoteSha, branch: qualifiedRef }));
+            } else if (inBranchTags) {
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `Transient: indexed but no last-SHA recorded yet — daemon will silently backfill on next poll`,
+                undefined,
+                { branch: qualifiedRef }));
+            } else {
+              checks.push(warn(checkId, SEC_DAEMON, title,
+                `Transient: pinned but not yet indexed — daemon will queue first reindex on next poll`,
+                undefined,
+                { branch: qualifiedRef }));
+            }
+          } catch (e: any) {
+            checks.push(warn(checkId, SEC_DAEMON, title,
+              `Check failed: ${e?.message ?? String(e)}`,
+              undefined));
+          }
+        }
       }
     }
   }
@@ -446,6 +718,180 @@ export async function runDoctor(): Promise<DoctorReport> {
         `Run: scrybe init  (will offer to update)`));
     } else {
       checks.push(ok(checkId, SEC_MCP, clientLabel, "Entry present and up to date"));
+    }
+  }
+
+  // ── 7. Config file checks ────────────────────────────────────────────────────
+  const SEC_CFG = "Config";
+
+  {
+    const { readScrybeConfig } = await import("../config.js");
+    const cfgPath = join(dataDir, "config.json");
+
+    // 7a. config.well_formed
+    let parsedCfg: Awaited<ReturnType<typeof readScrybeConfig>> = null;
+    if (!existsSync(cfgPath)) {
+      // config.json is optional while the preset system is being adopted; skip silently
+      checks.push(skip("config.well_formed", SEC_CFG, "config.json well-formed",
+        "config.json not present — run `scrybe init` to configure model presets"));
+      checks.push(skip("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+        "Skipped: config.json not present"));
+      checks.push(skip("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+        "Skipped: config.json not present"));
+    } else {
+      try {
+        parsedCfg = readScrybeConfig();
+        if (!parsedCfg) {
+          checks.push(fail("config.well_formed", SEC_CFG, "config.json well-formed",
+            "config.json exists but returned null unexpectedly",
+            "Delete config.json and re-run `scrybe init`"));
+        } else {
+          // Verify all preset references in assignments resolve to existing presets.
+          // Embedding slots resolve against embedding_presets; rerank_preset against reranker_presets.
+          const presetNames = new Set(Object.keys(parsedCfg.embedding_presets));
+          const badRefs: string[] = [];
+          for (const [slot, ref] of Object.entries(parsedCfg.assignments)) {
+            if (!ref) continue;
+            if (slot === "rerank_preset") continue;
+            if (!presetNames.has(ref as string)) badRefs.push(`${slot}: "${ref}"`);
+          }
+          const reranker = parsedCfg.assignments.rerank_preset;
+          if (reranker) {
+            const rerankerPool = parsedCfg.reranker_presets ?? {};
+            if (!rerankerPool[reranker]) {
+              badRefs.push(`rerank_preset: "${reranker}"`);
+            }
+          }
+          if (badRefs.length > 0) {
+            checks.push(fail("config.well_formed", SEC_CFG, "config.json well-formed",
+              `Unresolved preset references: ${badRefs.join(", ")}`,
+              "Run `scrybe model preset add` to create the missing presets"));
+          } else {
+            checks.push(ok("config.well_formed", SEC_CFG, "config.json well-formed",
+              `schema_version=${parsedCfg.schema_version}, ${Object.keys(parsedCfg.embedding_presets).length} preset(s)`,
+              { schema_version: parsedCfg.schema_version }));
+          }
+        }
+      } catch (err: any) {
+        parsedCfg = null;
+        checks.push(fail("config.well_formed", SEC_CFG, "config.json well-formed",
+          `Parse error: ${err?.message ?? String(err)}`,
+          "Fix or delete config.json and re-run `scrybe init`"));
+      }
+
+      // 7b. config.refs_resolve
+      if (!parsedCfg) {
+        checks.push(skip("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+          "Skipped: config.json malformed"));
+      } else {
+        const missingVars: string[] = [];
+        for (const [name, preset] of Object.entries(parsedCfg.embedding_presets)) {
+          const creds = preset.credentials;
+          if (!creds) continue;
+          const refs = [...creds.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)].map((m) => m[1]!);
+          for (const varName of refs) {
+            if (!process.env[varName]) missingVars.push(`${name}: \${${varName}}`);
+          }
+        }
+        if (parsedCfg.reranker_presets) {
+          for (const [name, preset] of Object.entries(parsedCfg.reranker_presets)) {
+            const creds = preset.credentials;
+            if (!creds) continue;
+            const refs = [...creds.matchAll(/\$\{([A-Z_][A-Z0-9_]*)\}/g)].map((m) => m[1]!);
+            for (const varName of refs) {
+              if (!process.env[varName]) missingVars.push(`${name}: \${${varName}}`);
+            }
+          }
+        }
+        if (missingVars.length > 0) {
+          checks.push(fail("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+            `Unset env vars: ${missingVars.join(", ")}`,
+            `Set the missing env var(s) in ${join(dataDir, ".env")}`));
+        } else {
+          checks.push(ok("config.refs_resolve", SEC_CFG, "config.json env refs resolve",
+            "All credential references resolve"));
+        }
+      }
+
+      // 7c. config.assignments_complete
+      if (!parsedCfg) {
+        checks.push(skip("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+          "Skipped: config.json malformed"));
+      } else {
+        const missing: string[] = [];
+        if (!parsedCfg.assignments.code_preset) missing.push("code_preset");
+        if (!parsedCfg.assignments.text_preset) missing.push("text_preset");
+        if (missing.length > 0) {
+          checks.push(fail("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+            `Missing assignments: ${missing.join(", ")}`,
+            `Run: scrybe model assign ${missing.map((s) => `--${s.replace("_preset", "")} <preset>`).join(" ")}`));
+        } else {
+          checks.push(ok("config.assignments_complete", SEC_CFG, "Preset assignments complete",
+            `code=${parsedCfg.assignments.code_preset}, text=${parsedCfg.assignments.text_preset}` +
+            (parsedCfg.assignments.rerank_preset ? `, rerank=${parsedCfg.assignments.rerank_preset}` : "")));
+        }
+      }
+    }
+
+    // 7d. tables.consistent — sidecar (model, dim, provider) vs resolved preset
+    if (!parsedCfg) {
+      checks.push(skip("tables.consistent", SEC_CFG, "Table model consistency",
+        "Skipped: config.json not available"));
+    } else {
+      const { readTableMeta } = await import("../vector-store.js");
+      const { resolvePreset } = await import("../preset-resolver.js");
+      const mismatchedSources: string[] = [];
+      let checkedCount = 0;
+
+      for (const project of projects) {
+        for (const source of project.sources) {
+          const tableName = source.table_name;
+          if (!tableName) continue;
+          const meta = readTableMeta(tableName);
+          if (!meta) continue;
+
+          // Pre-migration sidecar: no model fields → skip
+          if (!meta["model"] || !meta["provider"]) continue;
+
+          // Determine which slot this source maps to
+          const slot = source.source_config.type === "code" ? "code_preset" : "text_preset";
+          const presetName = slot === "code_preset"
+            ? parsedCfg.assignments.code_preset
+            : parsedCfg.assignments.text_preset;
+
+          let resolved: import("../preset-resolver.js").ResolvedEmbedding;
+          try {
+            resolved = resolvePreset(presetName, slot, parsedCfg);
+          } catch {
+            continue; // preset resolution failed — already caught by config.well_formed
+          }
+
+          const sidcarModel = meta["model"] as string;
+          const sidcarDim = meta["dim"] as number | undefined;
+          const sidcarProvider = meta["provider"] as string;
+
+          const modelMatch = sidcarModel === resolved.model;
+          const dimMatch = sidcarDim === undefined || sidcarDim === resolved.dim;
+          const providerMatch = sidcarProvider === resolved.provider;
+
+          if (!modelMatch || !dimMatch || !providerMatch) {
+            mismatchedSources.push(`${project.id}/${source.source_id}`);
+          }
+          checkedCount++;
+        }
+      }
+
+      if (mismatchedSources.length > 0) {
+        checks.push(warn("tables.consistent", SEC_CFG, "Table model consistency",
+          `${mismatchedSources.length} source(s) have tables built with a different model: ${mismatchedSources.join(", ")}`,
+          `Run: scrybe model switch --source-type <code|text>  to rebuild affected tables`));
+      } else if (checkedCount === 0) {
+        checks.push(ok("tables.consistent", SEC_CFG, "Table model consistency",
+          "No indexed tables to check"));
+      } else {
+        checks.push(ok("tables.consistent", SEC_CFG, "Table model consistency",
+          `${checkedCount} table(s) match current preset configuration`));
+      }
     }
   }
 

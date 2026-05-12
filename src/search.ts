@@ -10,7 +10,7 @@ import {
   ftsSearchKnowledge,
 } from "./vector-store.js";
 import { rerank } from "./reranker.js";
-import { resolveBranch, getChunkIdsForBranch, getBranchesForChunks } from "./branch-state.js";
+import { resolveBranch, getChunkIdsForBranch, getBranchesForChunks, resolveBranchForSearch } from "./branch-state.js";
 import type { SearchResult, KnowledgeSearchResult, Source } from "./types.js";
 
 const MAX_RERANK_CANDIDATES = 500;
@@ -67,7 +67,14 @@ function getKnowledgeSources(sources: Source[]): Source[] {
 export interface SearchCodeOptions {
   /** Max results to return (default: 10). */
   limit?: number;
-  /** Branch to filter by. Defaults to current HEAD per source. Pass "*" to skip filter. */
+  /**
+   * Branch to filter by. Defaults to current HEAD per source. Pass "*" to skip filter.
+   *
+   * Accepts either the short name (`dev`, `feat/example`) or the qualified ref (`origin/dev`).
+   * The server resolves whichever form is indexed via resolveBranchForSearch. If neither form
+   * is indexed for a source, that source returns []. Use SCRYBE_DEBUG_SEARCH=1 to log unmatched
+   * branch values.
+   */
   branch?: string;
   /** Restrict to specific source IDs within the project. */
   sources?: string[];
@@ -105,7 +112,11 @@ export async function searchCode(
         const embConfig = resolveEmbeddingConfig(source);
         const tableName = source.table_name!;
 
-        // Resolve branch for this source
+        // Resolve branch for this source.
+        // resolveBranchForSearch maps the caller-supplied form (short or qualified) to whichever
+        // form is actually stored in branch_tags — handling the mixed-format reality where HEAD
+        // branches are stored as short names ("feat/example") and pinned branches as qualified
+        // refs ("origin/dev"). Callers may supply either form; the resolver bridges the gap.
         const sourceBranch = opts?.branch ?? resolveBranch(projectId, source.source_id);
         const applyFilter = !skipBranchFilter && sourceBranch !== "*";
 
@@ -113,11 +124,15 @@ export async function searchCode(
         let postFilterIds: Set<string> | undefined;
 
         if (applyFilter) {
-          const ids = getChunkIdsForBranch(projectId, source.source_id, sourceBranch);
-          if (ids.size === 0) {
-            // No chunks indexed for this branch on this source
+          const resolvedBranch = resolveBranchForSearch(projectId, source.source_id, sourceBranch);
+          if (resolvedBranch === null) {
+            // Branch supplied but unknown to this source (neither form matched) — return no hits.
+            if (process.env.SCRYBE_DEBUG_SEARCH === "1") {
+              console.debug(`[scrybe:search] branch "${sourceBranch}" unresolved for source ${source.source_id} (project ${projectId}) — returning []`);
+            }
             return [] as SearchResult[];
           }
+          const ids = getChunkIdsForBranch(projectId, source.source_id, resolvedBranch);
           if (ids.size <= BRANCH_FILTER_INLINE_LIMIT) {
             inlineIds = [...ids];
           } else {

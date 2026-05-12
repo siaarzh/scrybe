@@ -9,7 +9,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write   # write: needed for `gh release create`
       id-token: write   # required for --provenance attestation
 
     steps:
@@ -29,3 +29,23 @@ jobs:
       - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release from CHANGELOG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          # Extract the section between "## [<version>] — DATE" and the next "## ["
+          notes=$(awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md | sed -e 's/^---$//' | awk 'NF || prev_blank == 0 { print; prev_blank = !NF }')
+          if [ -z "$(echo "$notes" | tr -d '[:space:]')" ]; then
+            echo "No CHANGELOG entry for $TAG; falling back to --generate-notes."
+            gh release create "$TAG" --title "$TAG" --latest --generate-notes
+          else
+            gh release create "$TAG" --title "$TAG" --latest --notes "$notes"
+          fi

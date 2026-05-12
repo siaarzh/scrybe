@@ -3,9 +3,14 @@
  * Starts a fresh sidecar child process with SCRYBE_SIDECAR_INJECT_429=2,
  * runs indexing against it, and asserts that indexing succeeds despite 429s.
  * Uses SCRYBE_EMBED_RETRY_DELAY_MS=200 to keep the test fast (vs 5s default).
+ *
+ * Uses a config.json with a custom preset pointing at the injected sidecar.
+ * The config.json is written inside the test body, after isolate.ts has set up
+ * the per-test SCRYBE_DATA_DIR.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
+import { writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { cloneFixture, type FixtureHandle } from "./helpers/fixtures.js";
@@ -77,6 +82,33 @@ describe("retry/backoff — 429 injection", () => {
     expect(injectedSidecar).not.toBeNull();
     expect(fixture).not.toBeNull();
 
+    // Write a config.json pointing at the injected sidecar into the DATA_DIR
+    // that isolate.ts set up for this test (process.env.SCRYBE_DATA_DIR).
+    const testDataDir = process.env.SCRYBE_DATA_DIR!;
+    const cfg = {
+      schema_version: 1,
+      embedding_presets: {
+        "injected-sidecar": {
+          provider: "custom",
+          model: mainSidecar.model,
+          dim: mainSidecar.dimensions,
+          base_url: injectedSidecar!.info.baseUrl,
+          // Local sidecar doesn't validate auth — use a placeholder so the
+          // OpenAI-compatible client initialises without throwing on missing key.
+          credentials: "test-placeholder",
+        },
+        "local-text": {
+          provider: "local",
+          model: "Xenova/multilingual-e5-small",
+        },
+      },
+      assignments: {
+        code_preset: "injected-sidecar",
+        text_preset: "local-text",
+      },
+    };
+    writeFileSync(join(testDataDir, "config.json"), JSON.stringify(cfg, null, 2) + "\n", "utf8");
+
     // Use fast retry delay so test doesn't take 15+ seconds
     process.env["SCRYBE_EMBED_RETRY_DELAY_MS"] = "200";
 
@@ -90,19 +122,13 @@ describe("retry/backoff — 429 injection", () => {
         root_path: fixture!.path,
         languages: ["ts"],
       },
-      embedding: {
-        base_url: injectedSidecar!.info.baseUrl,
-        model: mainSidecar.model,
-        dimensions: mainSidecar.dimensions,
-        api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
-      },
     });
 
     const result = await runIndex(projectId, "primary", "full");
     expect(result.status).toBe("ok");
     expect(result.chunks_prepared).toBeGreaterThan(0);
 
-    // Confirm the sidecar logged successful requests (after the 429s)
+    // Confirm the injected sidecar logged successful requests (after the 429s)
     const healthResp = await fetch(injectedSidecar!.healthUrl);
     const health = await healthResp.json() as { total_requests: number };
     expect(health.total_requests).toBeGreaterThan(0);

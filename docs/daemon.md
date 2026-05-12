@@ -185,6 +185,117 @@ Error responses: `400 invalid_source_type` (non-code source), `404 project_not_f
 
 ---
 
+## MCP-RPC transport (Contract 20)
+
+The daemon exposes two endpoints for MCP communication:
+
+### `GET /mcp/manifest`
+
+Returns the list of available tools and the daemon version.
+
+**Response:**
+
+```json
+{
+  "daemon_version": "0.33.0",
+  "tools": [
+    {
+      "name": "list_projects",
+      "description": "List all registered projects and their sources",
+      "inputSchema": { "type": "object", "properties": {}, "required": [] }
+    },
+    {
+      "name": "search_code",
+      "description": "Semantic search over indexed code sources in a project",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project_id": { "type": "string" },
+          "query": { "type": "string" },
+          "top_k": { "type": "number" }
+        },
+        "required": ["project_id", "query"]
+      }
+    }
+  ]
+}
+```
+
+**Used by:** MCP shim at `initialize` handshake to fetch the current tool surface and version. Cached per connection lifetime.
+
+### `POST /mcp/rpc`
+
+Dispatch a tool call to the daemon. Request body is a JSON-RPC 2.0 request; response is JSON-RPC 2.0 result or error.
+
+**Request:**
+
+```json
+{
+  "id": "<request_id_string_or_number>",
+  "method": "<tool_name>",
+  "params": { "<param_name>": "<value>" }
+}
+```
+
+**Response (success):**
+
+```json
+{
+  "id": "<matching_request_id>",
+  "result": { "<tool_result>" }
+}
+```
+
+**Response (error):**
+
+```json
+{
+  "id": "<matching_request_id>",
+  "error": {
+    "code": -32601,
+    "message": "method not found: unknown_tool"
+  }
+}
+```
+
+**Error codes (JSON-RPC 2.0):**
+
+| Code | Meaning |
+|---|---|
+| `-32600` | Invalid Request — body is not valid JSON-RPC |
+| `-32601` | Method not found — tool does not exist |
+| `-32603` | Internal error — tool handler threw or returned an error |
+
+**Request ID semantics:** The `id` field echoes back in the response. MCP shim uses this to correlate async tool calls with their results.
+
+**Optional `X-Scrybe-Client-Id` header:**
+
+The shim sends an optional header with each `/mcp/rpc` call:
+
+```
+X-Scrybe-Client-Id: <hostname>:<pid>:<timestamp>
+```
+
+Daemon logs this for per-client tracing. Not required, but recommended for debugging multi-client scenarios (VS Code + Claude Code on the same machine).
+
+### Version handshake
+
+At MCP `initialize`, the shim:
+1. Fetches `GET /mcp/manifest`
+2. Compares `daemon_version` against shim's `package.json` version (SemVer)
+3. Routes based on version match:
+
+| Daemon vs shim | Shim behavior |
+|---|---|
+| Exact match | Full tool surface from manifest |
+| MAJOR mismatch (e.g. 0.x vs 1.x) | Refuse: return degraded MCP server with single `scrybe_daemon_unavailable` tool, description front-loads `scrybe daemon restart` |
+| Shim ≥ 0.34.0, daemon < 0.34.0 (lancedb upgrade boundary) | Refuse: return degraded MCP server with single `scrybe_daemon_unavailable` tool (`daemon-version-mismatch` variant), description front-loads `scrybe daemon stop && scrybe daemon start`. Catches users who upgraded the CLI but didn't restart a daemon still holding the old lancedb native binding. |
+| MINOR or PATCH mismatch | Degrade: expose only the intersection of (shim's known tool names) ∩ (manifest tools), `console.warn` to stderr. Calls to tools missing from the intersection return MCP error `-32601 method not found` |
+
+**Example:** Shim v0.33.0, daemon v0.32.5 (PATCH mismatch) → warn to stderr, expose tools present in both versions. On next daemon upgrade, the warn goes away.
+
+---
+
 ## DaemonClient (Contract 15)
 
 `src/daemon/client.ts` exports a typed TS client for use by the VS Code extension (M-D3) and test helpers:

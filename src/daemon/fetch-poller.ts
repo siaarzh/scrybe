@@ -10,7 +10,7 @@
  * Idle interval:   SCRYBE_DAEMON_FETCH_IDLE_MS   (default 30 min)
  * Disable all fetching: SCRYBE_DAEMON_NO_FETCH=1
  */
-import { listBranches } from "../branch-state.js";
+import { listBranches, getLastIndexedSha, setLastIndexedSha } from "../branch-state.js";
 import { gitExec, gitExecOrThrow } from "../util/git-exec.js";
 import { getSource } from "../registry.js";
 import { getState } from "./idle-state.js";
@@ -134,13 +134,18 @@ async function pollProject(ps: PollerState): Promise<void> {
   const pinned = source.pinned_branches ?? [];
   if (pinned.length === 0) return;
 
-  // Snapshot remote SHAs before the fetch
+  // Observability counters for this cycle
+  const branchesPolled = pinned.length;
+  let deltasFound = 0;
+  let outOfBandCount = 0;
+
+  // shasBefore is telemetry-only — captures pre-fetch ref state to detect out-of-band fetches
   const shasBefore = new Map<string, string | null>();
   for (const branch of pinned) {
     shasBefore.set(branch, resolveRemoteSha(ps.rootPath, `origin/${branch}`));
   }
 
-  // Which pinned branches have never been indexed (backfill candidates)
+  // Which pinned branches have been indexed (used for bootstrap detection)
   const indexedBranches = new Set(listBranches(ps.projectId, ps.sourceId));
 
   try {
@@ -149,13 +154,12 @@ async function pollProject(ps: PollerState): Promise<void> {
     throw new Error(`git fetch failed for ${ps.projectId}`);
   }
 
-  // Queue reindex for branches whose SHA changed or were never indexed
+  // Queue reindex for branches that need it, using branch_state as the baseline
   const changed: string[] = [];
   for (const branch of pinned) {
     const remoteBranch = `origin/${branch}`;
     const shaAfter = resolveRemoteSha(ps.rootPath, remoteBranch);
-    const shaBefore = shasBefore.get(branch);
-    const neverIndexed = !indexedBranches.has(remoteBranch);
+    const shaBefore = shasBefore.get(branch) ?? null;
 
     if (shaAfter == null) {
       if (!ps.warnedMissing.has(branch)) {
@@ -170,7 +174,19 @@ async function pollProject(ps: PollerState): Promise<void> {
       }
       continue;
     }
-    if (neverIndexed || shaAfter !== shaBefore) {
+
+    const lastIndexedSha = getLastIndexedSha(ps.projectId, ps.sourceId, remoteBranch);
+
+    if (lastIndexedSha === null) {
+      if (indexedBranches.has(remoteBranch)) {
+        // Bootstrap on upgrade: branch has chunks but no branch_state row yet.
+        // Write current SHA as baseline; skip enqueue — nothing new to index.
+        try {
+          setLastIndexedSha(ps.projectId, ps.sourceId, remoteBranch, shaAfter);
+        } catch { /* non-fatal */ }
+        continue;
+      }
+      // Truly never indexed — preserve neverIndexed semantics.
       await enqueue({
         projectId: ps.projectId,
         sourceId: ps.sourceId,
@@ -178,6 +194,32 @@ async function pollProject(ps: PollerState): Promise<void> {
         mode: "incremental",
       });
       changed.push(branch);
+      deltasFound++;
+      continue;
+    }
+
+    // lastIndexedSha is non-null — compare against shaAfter
+    if (shaAfter !== lastIndexedSha) {
+      // Out-of-band detection: shaBefore equals shaAfter means the daemon's own
+      // fetch did NOT advance the ref this cycle — something else fetched first.
+      if (shaBefore === shaAfter) {
+        outOfBandCount++;
+        _push?.({
+          ts: new Date().toISOString(),
+          level: "info",
+          event: "watcher.event",
+          projectId: ps.projectId,
+          detail: { phase: "fetch-poller", outOfBandFetch: true, branch: remoteBranch, lastSha: lastIndexedSha, shaAfter },
+        });
+      }
+      await enqueue({
+        projectId: ps.projectId,
+        sourceId: ps.sourceId,
+        branch: remoteBranch,
+        mode: "incremental",
+      });
+      changed.push(branch);
+      deltasFound++;
     }
   }
 
@@ -188,6 +230,16 @@ async function pollProject(ps: PollerState): Promise<void> {
       event: "watcher.event",
       projectId: ps.projectId,
       detail: { phase: "fetch-poller", shaChanged: changed },
+    });
+  }
+
+  if (process.env["SCRYBE_DEBUG_FETCH_POLLER"] === "1") {
+    _push?.({
+      ts: new Date().toISOString(),
+      level: "info",
+      event: "watcher.event",
+      projectId: ps.projectId,
+      detail: { phase: "fetch-poller.tick", branchesPolled, deltasFound, outOfBandDetected: outOfBandCount },
     });
   }
 }

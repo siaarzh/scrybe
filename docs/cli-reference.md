@@ -29,13 +29,13 @@ MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.
 
 ### `doctor`
 
-One-shot diagnostics. Checks: DATA_DIR, Node version, provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
+One-shot diagnostics. Checks: install integrity (landmark deps resolvable), DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
 
 | Flag | Description |
 |------|-------------|
 | `--json` | Output a stable `DoctorReport` JSON object (schemaVersion: 1) for machine consumption |
 | `--strict` | Exit code 1 on warnings as well as failures |
-| `--repair` | Scan all indexed sources for corruption and offer to rebuild them interactively. Presents an estimated token cost before asking for confirmation. |
+| `--repair` | If a half-extracted `npx` install is detected, runs `npm install` inside the npx workspace and re-execs the original command. Otherwise scans all indexed sources for corruption and offers to rebuild them interactively (estimated token cost shown before confirmation). |
 
 ```bash
 scrybe doctor
@@ -45,6 +45,39 @@ scrybe doctor --repair
 ```
 
 Exit codes: 0 = all ok, 1 = any failure (or any warning with `--strict`).
+
+#### Windows AV check rows (Windows only)
+
+On Windows, `scrybe doctor` also queries registered AV products and Defender state. These rows appear in `checks[]` only on Windows (zero rows on macOS / Linux):
+
+| Row ID | Typical status | Meaning |
+|--------|---------------|---------|
+| `env.windows_av.defender` | `ok` / `warn` / `skip` | Defender active and DATA_DIR exclusion state. `warn` = Defender scanning DATA_DIR (exclusion missing). `skip` = Defender disabled or not primary. |
+| `env.windows_av.mbam` | `warn` / `ok` / `skip` | Malwarebytes detected. `warn` = present but allow-list unverifiable (no MBAM API). Downgrade to `ok` by setting `SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1`. |
+| `env.windows_av.no_active_av` | `ok` | Defender disabled and no other AV active — informational only. |
+| `env.windows_av.repos_tip` | `ok` | Informational tip about AV scanning indexed repo paths. Only emitted when at least one of the above rows is `warn`. |
+
+See [README #windows-av](../README.md#windows-av) for remediation steps (Defender exclusion snippet, MBAM allow-list walkthrough).
+
+#### npm prefix writability (POSIX)
+
+On macOS and Linux, `scrybe doctor` checks whether the directory that would receive global npm installs (`<npm config get prefix>/lib/node_modules`) is writable by the current user:
+
+| Row ID | Typical status | Meaning |
+|--------|---------------|---------|
+| `env.npm_prefix_writable` | `ok` / `warn` / `skip` | `warn` = global install dir not writable (e.g. `/usr/lib/node_modules` on a system-managed Node from apt/yum). The remedy points at the canonical `~/.npm-global` prefix workaround. `skip` = `npm` not on PATH or Windows (ACL semantics differ). |
+
+#### Install integrity
+
+`scrybe doctor` runs a `createRequire`-based landmark check across heavy dependencies (`@xenova/transformers`, `sharp`, `@lancedb/lancedb`, `apache-arrow`, `@modelcontextprotocol/sdk`, `@parcel/watcher`, `tree-sitter`) before any other check. Detects half-extracted `npx -y` installs that npm aborted mid-reify (e.g. when Claude Code's MCP probe SIGTERMed the install before it finished):
+
+| Row ID | Typical status | Meaning |
+|--------|---------------|---------|
+| `env.install_integrity` | `ok` / `warn` | `warn` = one or more landmark deps cannot be resolved. The remedy points at `scrybe doctor --repair`, which runs `npm install` inside the half-extracted npx workspace and re-execs. Self-repair is restricted to npx caches (no-op on global installs). |
+
+When detected during MCP startup, `scrybe mcp` completes the MCP `initialize` handshake and registers a structured `scrybe_install_incomplete` tool whose description starts with the recovery command — Claude Code's MCP UI shows the actionable copy-pasteable command in the tool list preview instead of failing with an opaque "Failed to connect."
+
+---
 
 #### HEALTH column states
 
@@ -101,9 +134,16 @@ scrybe --auto
 Edit per-source private ignore rules. Rules are stored in `DATA_DIR/ignores/<project_id>/<source_id>.gitignore` and are **never committed** to the repo. Applied additively on top of `.gitignore` and committed `.scrybeignore`.
 
 ```bash
-scrybe ignore        # interactive wizard
-scrybe ignore edit   # same (alias)
+scrybe ignore                            # interactive wizard
+scrybe ignore edit                       # same (alias)
+scrybe ignore list [-P <id>] [--json]    # non-interactive — list all private ignore files (stdout)
+scrybe ignore get -P <id> -S <id> [--json]  # non-interactive — print one file's content (stdout)
 ```
+
+**Non-interactive subcommands** (added v0.31.4):
+
+- `ignore list` — enumerates per-source private ignore files across registered projects. Skips sources with no rules. Use `-P, --project-id <id>` to limit to a single project. `--json` returns `[{ project_id, source_id, path, rule_count, mtime }]`. Default human format prints one entry per project/source with rule count and mtime.
+- `ignore get` — prints the file content to stdout. `--json` returns `{ project_id, source_id, content, path, rule_count }` with `content: null` if the file doesn't exist. Default human format writes the raw file content to stdout (or `# No private ignore file …` if missing). Useful for scripts and LLM agents that need read-only access without invoking the editor.
 
 **Wizard flow:**
 
@@ -237,11 +277,133 @@ npm uninstall -g scrybe-cli
 
 ---
 
+## Model commands
+
+### `scrybe model`
+
+Manage embedding model presets and assignments. Presets are named configurations stored in `<DATA_DIR>/config.json`. Two slots are always assigned: `code` (used by code sources) and `text` (used by ticket / knowledge sources). An optional `rerank` slot enables result reranking when your provider supports it.
+
+---
+
+#### `scrybe model list`
+
+Show all providers and models in the built-in catalog.
+
+```bash
+scrybe model list
+```
+
+Sample output:
+
+```
+Provider            Model                           Dim   Profile Notes
+----------------------------------------------------------------------
+Voyage AI           voyage-code-3                   1024  code
+                    voyage-3                        1024  text
+                    voyage-3-large                  1024  text
+                    rerank-2.5                      -     rerank
+                    rerank-2                        -     rerank
+OpenAI              text-embedding-3-small          1536  text    configurable dim
+                    text-embedding-3-large          3072  text    configurable dim
+Local (in-process)  Xenova/multilingual-e5-small    384   text
+                    Xenova/all-MiniLM-L6-v2         384   text
+Custom (OpenAI-...) (user-defined)                  -     -       base_url + dim required
+```
+
+---
+
+#### `scrybe model show`
+
+Print the current assignments and resolved configuration. Credential values are masked as `${VAR}` (for env-var references) or `<set>` / `<unset>`.
+
+```bash
+scrybe model show
+```
+
+---
+
+#### `scrybe model preset add <name>`
+
+Add a new embedding preset to `config.json`.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--provider <key>` | ✓ | Provider: `voyage`, `openai`, `local`, or `custom` |
+| `--model <model>` | ✓ | Model name from the catalog (or a free-text model name for `custom`) |
+| `--credentials <ref>` | | Literal credential value or `${ENV_VAR}` reference |
+| `--credentials-from <preset>` | | Reuse credentials from another named preset |
+| `--base-url <url>` | custom only | API base URL (required for `custom` provider) |
+| `--dim <n>` | custom only | Embedding dimensions (required for `custom` provider) |
+
+```bash
+# Catalog provider
+scrybe model preset add voyage-code \
+  --provider voyage \
+  --model voyage-code-3 \
+  --credentials '${SCRYBE_VOYAGE_API_KEY}'
+
+# Custom OpenAI-compatible provider
+scrybe model preset add together-bert \
+  --provider custom \
+  --model togethercomputer/m2-bert-80M-8k-retrieval \
+  --base-url https://api.together.xyz/v1 \
+  --dim 768 \
+  --credentials '${SCRYBE_TOGETHER_API_KEY}'
+```
+
+---
+
+#### `scrybe model preset rm <name>`
+
+Remove a preset from `config.json`. Refuses if the preset is currently assigned to a slot or referenced via `credentials_from` by another preset.
+
+```bash
+scrybe model preset rm old-voyage-preset
+```
+
+---
+
+#### `scrybe model assign`
+
+Set the active preset for one or more slots. Validates catalog profile compatibility before writing.
+
+| Flag | Description |
+|------|-------------|
+| `--code <preset>` | Preset name to assign to the code embedding slot |
+| `--text <preset>` | Preset name to assign to the text embedding slot |
+| `--rerank <preset\|none>` | Reranker preset name, or `none` to clear the rerank slot |
+
+```bash
+scrybe model assign --code voyage-code
+scrybe model assign --text local-default
+scrybe model assign --rerank none
+```
+
+---
+
+#### `scrybe model switch`
+
+Drop and fully reindex all sources of the given type using the currently assigned preset. Prints a token-cost estimate before asking for confirmation when the target provider is remote.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--source-type <type>` | ✓ | `code` or `text` |
+| `--yes` / `-y` | | Skip the confirmation prompt |
+
+```bash
+scrybe model switch --source-type code
+scrybe model switch --source-type text --yes
+```
+
+After switching, restart any connected MCP client (Claude Code, Cline) to pick up the recreated tables.
+
+---
+
 ## Source commands
 
 ### `source add`
 
-Add an indexable source to a project.
+Add an indexable source to a project. Embedding configuration is set globally via `scrybe model` — see [Model commands](#model-commands).
 
 | Flag | Required | Description |
 |------|----------|-------------|
@@ -263,15 +425,6 @@ Add an indexable source to a project.
 | `--gitlab-url <url>` | ✓ | GitLab instance base URL |
 | `--gitlab-project-id <id>` | ✓ | GitLab project ID or path |
 | `--gitlab-token <token>` | ✓ | GitLab personal access token (validated against the API before saving) |
-
-**Embedding overrides (optional, any type):**
-
-| Flag | Description |
-|------|-------------|
-| `--embedding-base-url <url>` | Override embedding API base URL for this source |
-| `--embedding-model <model>` | Override embedding model |
-| `--embedding-dimensions <n>` | Override embedding dimensions |
-| `--embedding-api-key-env <var>` | Name of the env var holding the API key (not the key itself) |
 
 ```bash
 # Code source
@@ -311,15 +464,6 @@ Update an existing source's config. Only the flags you provide are changed — e
 |------|-------------|
 | `--root <path>` | Change the absolute path to repo root |
 | `--languages <langs>` | Change comma-separated language hints |
-
-**Embedding overrides (optional, any type):**
-
-| Flag | Description |
-|------|-------------|
-| `--embedding-base-url <url>` | Override embedding API base URL for this source |
-| `--embedding-model <model>` | Override embedding model |
-| `--embedding-dimensions <n>` | Override embedding dimensions |
-| `--embedding-api-key-env <var>` | Name of the env var holding the API key (not the key itself) |
 
 ```bash
 # Rotate a GitLab token
@@ -440,7 +584,7 @@ Semantic search over indexed code sources.
 |------|----------|-------------|
 | `--project-id <id>` | ✓ | Project to search |
 | `--top-k <n>` | | Number of results (default: 10) |
-| `--branch <name>` | | Branch to search (default: current HEAD for code sources) |
+| `--branch <name>` | | Branch to search (default: current HEAD for code sources). Accepts short names (`dev`) or qualified refs (`origin/dev`) — scrybe resolves whichever form is indexed. |
 | `<query>` | ✓ | Natural language search query (positional) |
 
 ```bash
@@ -761,3 +905,4 @@ All variables are read from `<DATA_DIR>/.env` (lower priority) or from the OS en
 | `SCRYBE_NO_AUTO_DAEMON` | — | Set `1` to prevent auto-spawning the daemon |
 | `SCRYBE_DAEMON_MAX_CONCURRENT` | `max(1, cpus/2)` | Max simultaneous jobs in daemon queue |
 | `SCRYBE_DEBUG_INDEXER` | — | Set `1` to enable verbose indexer diagnostic logging |
+| `SCRYBE_DEBUG_FETCH_POLLER` | — | Set `1` to emit a per-cycle `fetch-poller.tick` event (with `branchesPolled` / `deltasFound` / `outOfBandDetected` counters) for daemon fetch-poller observability |

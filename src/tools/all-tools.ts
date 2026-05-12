@@ -2,6 +2,7 @@ import type { Tool } from "./types.js";
 import { listProjectsTool, addProjectTool, updateProjectTool, removeProjectTool } from "./project.js";
 import { listSourcesTool, addSourceTool, updateSourceTool, removeSourceTool } from "./source.js";
 import { searchCodeTool, searchKnowledgeTool } from "./search.js";
+import { lookupSymbolTool } from "./lookup.js";
 import {
   reindexAllTool,
   reindexProjectTool,
@@ -14,6 +15,7 @@ import {
 import { listBranchesTool, listPinnedBranchesTool, pinBranchesTool, unpinBranchesTool } from "./branch.js";
 import { setPrivateIgnoreTool, getPrivateIgnoreTool, listPrivateIgnoresTool } from "./private-ignores.js";
 import { gcTool } from "./gc.js";
+import { addEmbeddingPresetTool, assignPresetTool } from "./model-mcp.js";
 
 /** All tools in the registry (MCP + CLI). */
 export const allTools: Tool<any, any>[] = [
@@ -30,6 +32,7 @@ export const allTools: Tool<any, any>[] = [
   // Search
   searchCodeTool,
   searchKnowledgeTool,
+  lookupSymbolTool,
   // Reindex
   reindexAllTool,
   reindexProjectTool,
@@ -49,6 +52,9 @@ export const allTools: Tool<any, any>[] = [
   setPrivateIgnoreTool,
   getPrivateIgnoreTool,
   listPrivateIgnoresTool,
+  // Model presets
+  addEmbeddingPresetTool,
+  assignPresetTool,
 ];
 
 /** MCP-registered tools only (excludes cliOnly). */

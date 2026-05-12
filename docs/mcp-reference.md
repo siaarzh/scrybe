@@ -2,6 +2,38 @@
 
 All tools are exposed via the `scrybe` MCP server. Call `list_projects` first to confirm what's indexed before searching.
 
+## Deployment modes
+
+Scrybe supports two MCP deployment modes:
+
+### Shim mode (recommended)
+
+Command: `scrybe mcp`
+
+The MCP entrypoint is a thin stdio↔HTTP shim that communicates with the daemon via HTTP. Heavy modules (embedder, LanceDB, tree-sitter, sharp, watcher) run in the daemon process, not in-process. Cold-boot time is sub-second.
+
+**Requires:** `scrybe daemon install` to set up autostart. The daemon must be running before MCP probes.
+
+**Setup:**
+
+```bash
+# One-time setup
+npm install -g scrybe-cli
+scrybe daemon install
+
+# MCP config (Claude Code, Cursor, Cline, etc.)
+"command": "scrybe",
+"args": ["mcp"]
+```
+
+### In-process mode (deprecated)
+
+Command: `scrybe mcp --legacy-in-process`
+
+Loads all modules (embedder, LanceDB, etc.) in the MCP process itself. No background daemon. Boot time is ~8–10 seconds (will be slower on slow networks or systems). **Deprecated as of v0.33.0 — will be removed in v0.34.0.**
+
+Only use this if you do not want a background daemon (e.g., CI scripts, sandboxed environments).
+
 ---
 
 ## Project tools
@@ -46,11 +78,46 @@ Unregister a project and drop all its source tables (vector data deleted).
 
 ---
 
+## Model tools
+
+Embedding configuration is managed globally via presets stored in `<DATA_DIR>/config.json`. Use these tools to add presets and assign them to slots, then call `reindex_source` (or `reindex_project`) to apply the new model to existing sources.
+
+### `add_embedding_preset`
+
+Add a new named embedding preset. Catalog providers (`voyage`, `openai`, `local`) derive `base_url` and dimensions from the built-in catalog — only `provider`, `model`, and optional `credentials` are needed. The `custom` provider requires explicit `base_url` and `dim`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | ✓ | Unique preset name |
+| `provider` | string | ✓ | Provider key: `voyage`, `openai`, `local`, or `custom` |
+| `model` | string | ✓ | Model name from the provider catalog, or a free-text model name for `custom` |
+| `credentials` | string | | Literal credential value or `${ENV_VAR}` reference |
+| `credentials_from` | string | | Reuse credentials from another named preset (useful for rerank presets that share an embedding key) |
+| `base_url` | string | custom only | API base URL |
+| `dim` | number | custom only | Embedding dimensions |
+
+**Returns:** `{ ok: boolean, preset_name: string, error?: string }`
+
+---
+
+### `assign_preset`
+
+Assign a named preset to a slot (`code`, `text`, or `rerank`). Returns `requires_reindex: true` when the new preset's `(model, dim, provider)` triple differs from the previously stamped triple on any affected source, meaning existing vectors are no longer compatible and a full reindex is needed. Returns `false` for simple preset renames that keep the same triple.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `slot` | string | ✓ | `"code"`, `"text"`, or `"rerank"` |
+| `preset_name` | string | ✓ | Preset name to assign. For `slot: "rerank"`, pass `"none"` to clear the rerank assignment. |
+
+**Returns:** `{ ok: boolean, requires_reindex: boolean, error?: string }`
+
+---
+
 ## Source tools
 
 ### `add_source`
 
-Add an indexable source to a project. Call `reindex_source` after to index it.
+Add an indexable source to a project. Call `reindex_source` after to index it. Embedding configuration is set globally via `add_embedding_preset` / `assign_preset` — see [Model tools](#model-tools).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -72,15 +139,6 @@ Add an indexable source to a project. Call `reindex_source` after to index it.
 | `gitlab_url` | string | ✓ | GitLab instance base URL |
 | `gitlab_project_id` | string | ✓ | GitLab project ID or path |
 | `gitlab_token` | string | ✓ | GitLab personal access token (validated against the API before saving) |
-
-**Embedding overrides (optional, any type):**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `embedding_base_url` | string | Override embedding API base URL |
-| `embedding_model` | string | Override embedding model |
-| `embedding_dimensions` | number | Override embedding dimensions |
-| `embedding_api_key_env` | string | Name of env var holding the API key (never the key itself) |
 
 ---
 
@@ -108,15 +166,6 @@ Update an existing source's config. Only the fields you provide are changed — 
 | `root_path` | string | Change the absolute path to repo root |
 | `languages` | string[] | Change language hints |
 
-**Embedding overrides (optional, any type):**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `embedding_base_url` | string | Override embedding API base URL |
-| `embedding_model` | string | Override embedding model |
-| `embedding_dimensions` | number | Override embedding dimensions |
-| `embedding_api_key_env` | string | Name of env var holding the API key (never the key itself) |
-
 ---
 
 ### `remove_source`
@@ -142,6 +191,8 @@ Semantic search over indexed code sources in a project.
 | `query` | string | ✓ | Natural language search query |
 | `top_k` | number | | Number of results (default: 10) |
 | `branch` | string | | Branch to search (default: current HEAD of the source repo). Use `list_branches` to see indexed branches. |
+
+**Branch name resolution.** Scrybe accepts either short names (`dev`, `feat/example`) or qualified remote-tracking refs (`origin/dev`, `origin/feat/example`). The server resolves whichever form is actually stored — HEAD branches are indexed as short names, pinned branches as qualified refs — so callers do not need to know the stored form. If both a short name and its qualified ref have been indexed on the same source (unusual), pass the exact form you want. If neither form is indexed for a source, that source returns an empty result set. Set `SCRYBE_DEBUG_SEARCH=1` on the MCP server process to emit a debug line when a branch value cannot be resolved.
 
 **Returns:** array of `{ chunk_id, score, project_id, source_id, item_path, start_line, end_line, language, symbol_name, content, branches: string[] }`
 
@@ -172,6 +223,68 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 For `item_type: "ticket_comment"`, `author` is the commenter's username, `timestamp` is the comment's `created_at`, and `item_url` includes a `#note_{id}` anchor linking to the specific comment.
 
 **Structured errors:** When a source needs migration, search returns `{ error_type: "needs_migration", error: "...", details: { migrate_command: "scrybe migrate ..." } }` instead of results. Run the indicated command to upgrade the source.
+
+---
+
+### `lookup_symbol`
+
+Deterministic exact-symbol lookup in a project's code index. Returns all chunks whose `symbol_name` matches the supplied name, without paying embedding or reranking cost. Use when you know a symbol name and need its file location, line range, and source content.
+
+**No `score` field** — results are sorted by `(language ASC, item_path ASC, start_line ASC)`, not by relevance.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project to search |
+| `symbol_name` | string | ✓ | Symbol name to look up. Must be non-empty after trimming. |
+| `match` | string | | `"suffix"` (default) or `"exact"`. See match modes below. |
+| `branch` | string | | Branch to scope results to. Accepts short names or `origin/` qualified refs — same resolution as `search_code`. If omitted, all indexed branches are searched. |
+| `source_id` | string | | Restrict to a specific source. Omit to search all code sources. |
+| `case_sensitive` | boolean | | Case-sensitive match (default `true`). Pass `false` to match case-insensitively. |
+| `limit` | number | | Max results (default 50, max 200). |
+
+**Match modes:**
+
+| `match` | `case_sensitive` | Behaviour |
+|---------|-----------------|-----------|
+| `suffix` | `true` (default) | Matches `symbol_name = 'X'` OR `symbol_name LIKE '%.X'` — finds both top-level `X` and dotted forms like `User.X`. |
+| `suffix` | `false` | Same as above but case-insensitive. |
+| `exact` | `true` | `symbol_name = 'X'` only. `getName` does **not** match `User.getName`. |
+| `exact` | `false` | `LOWER(symbol_name) = LOWER('X')` only. |
+
+**Dotted naming.** Class methods are stored as `ClassName.methodName` (e.g. `BetaEngine.transform`). In `suffix` mode, passing `transform` returns `BetaEngine.transform` and any other dotted form. In `exact` mode, you must pass the full qualified name.
+
+**Empty-name chunks excluded.** The `symbol_name != ''` filter always applies, which means:
+- Sliding-window fallback chunks (files in unsupported languages or with parse failures) are never returned.
+- Non-first sub-chunks of large declarations (those that exceeded `chunkSize`) are never returned — only the first sub-chunk, which carries the symbol name and declaration head.
+
+**Multi-chunk declarations.** For very large declarations, `lookup_symbol` returns only the first sub-chunk. Its `start_line` / `end_line` cover the head. To read the full body, use those line numbers to read the file directly.
+
+**Returns:** array of `{ chunk_id, project_id, source_id, item_path, start_line, end_line, language, symbol_name, content, branches: string[] }`
+
+- No `score` field (contrast with `search_code`).
+- `branches` — branch annotation, same sort order as `search_code` (master/main first).
+- Returns `[]` when nothing matches — no error thrown.
+
+**Branch name resolution.** Uses the same resolver as `search_code`. `branch="dev"` and `branch="origin/dev"` are both accepted; the server resolves whichever form is indexed for the source.
+
+**Examples:**
+
+```json
+// Find all definitions of "alphaGreeting" (exact, any source)
+{ "project_id": "myrepo", "symbol_name": "alphaGreeting", "match": "exact" }
+
+// Find "transform" anywhere it appears (top-level or as Foo.transform)
+{ "project_id": "myrepo", "symbol_name": "transform" }
+
+// Find User.getName specifically
+{ "project_id": "myrepo", "symbol_name": "User.getName", "match": "exact" }
+
+// Case-insensitive lookup for C#-style naming
+{ "project_id": "myrepo", "symbol_name": "USERSERVICE", "match": "exact", "case_sensitive": false }
+
+// Branch-scoped lookup
+{ "project_id": "myrepo", "symbol_name": "alphaFarewell", "branch": "feat/example" }
+```
 
 ---
 

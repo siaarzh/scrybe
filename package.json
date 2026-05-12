@@ -1,6 +1,6 @@
 {
   "name": "scrybe-cli",
-  "version": "0.31.0",
+  "version": "0.34.0",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",
   "license": "MIT",
@@ -46,12 +46,12 @@
   ],
   "overrides": {
     "protobufjs": "^7.5.5",
-    "hono": "^4.12.16",
+    "hono": "^4.12.18",
     "@hono/node-server": "^1.19.13"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
-    "@lancedb/lancedb": "^0.14.0",
+    "@lancedb/lancedb": "^0.27.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@parcel/watcher": "^2.5.6",
     "@xenova/transformers": "~2.17.2",

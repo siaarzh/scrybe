@@ -1,6 +1,6 @@
 import { homedir } from "os";
 import { join } from "path";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { createRequire } from "module";
 import { resolveProvider, LOCAL_PROVIDER_DEFAULTS } from "./providers.js";
 
@@ -345,4 +345,111 @@ if (config.chunkOverlap >= config.chunkSize) {
     `Invalid chunking config: SCRYBE_CHUNK_OVERLAP (${config.chunkOverlap}) must be ` +
     `less than SCRYBE_CHUNK_SIZE (${config.chunkSize}). Defaults: size=60, overlap=10.`
   );
+}
+
+// ─── config.json (Plan 23) ────────────────────────────────────────────────────
+
+/**
+ * Resolves `${VAR}` references in a string against process.env.
+ * - Strings with no `${...}` tokens are returned verbatim.
+ * - A missing env var throws with a message that names the variable.
+ */
+export function resolveEnvRef(value: string): string {
+  return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_, name: string) => {
+    const v = process.env[name];
+    if (v === undefined) {
+      throw new Error(`env var ${name} not set (referenced in scrybe config)`);
+    }
+    return v;
+  });
+}
+
+export interface EmbeddingPreset {
+  provider: string;
+  model: string;
+  credentials?: string;
+  /** Reuse credentials from another named embedding preset (avoids duplicate paste). One level only. */
+  credentials_from?: string;
+  /** Custom-provider only: raw API base URL (not in catalog). */
+  base_url?: string;
+  /** Custom-provider only: embedding dimensions (not in catalog). */
+  dim?: number;
+}
+
+export interface RerankerPreset {
+  provider: string;
+  model: string;
+  /** Reuse credentials from a named embedding preset (avoids duplicate paste). */
+  credentials_from?: string;
+  credentials?: string;
+}
+
+export interface ScrybeConfigAssignments {
+  code_preset: string;
+  text_preset: string;
+  rerank_preset?: string;
+}
+
+export interface ScrybeConfig {
+  schema_version: number;
+  embedding_presets: Record<string, EmbeddingPreset>;
+  reranker_presets?: Record<string, RerankerPreset>;
+  assignments: ScrybeConfigAssignments;
+}
+
+/** Validates a parsed object as a ScrybeConfig. Returns an error string or null. */
+function validateScrybeConfig(obj: unknown): string | null {
+  if (typeof obj !== "object" || obj === null) return "config.json is not a JSON object";
+  const c = obj as Record<string, unknown>;
+  if (typeof c["schema_version"] !== "number") return "config.json: missing or non-numeric schema_version";
+  if (typeof c["embedding_presets"] !== "object" || c["embedding_presets"] === null) {
+    return "config.json: missing embedding_presets";
+  }
+  for (const [name, preset] of Object.entries(c["embedding_presets"] as Record<string, unknown>)) {
+    if (typeof preset !== "object" || preset === null) return `config.json: embedding_presets.${name} is not an object`;
+    const p = preset as Record<string, unknown>;
+    if (typeof p["provider"] !== "string") return `config.json: embedding_presets.${name}.provider missing`;
+    if (typeof p["model"] !== "string") return `config.json: embedding_presets.${name}.model missing`;
+  }
+  if (typeof c["assignments"] !== "object" || c["assignments"] === null) {
+    return "config.json: missing assignments";
+  }
+  const a = c["assignments"] as Record<string, unknown>;
+  if (typeof a["code_preset"] !== "string") return "config.json: assignments.code_preset missing";
+  if (typeof a["text_preset"] !== "string") return "config.json: assignments.text_preset missing";
+  return null;
+}
+
+/**
+ * Reads `<DATA_DIR>/config.json`.
+ * Returns null if the file does not exist.
+ * Throws with a descriptive message on parse or schema errors.
+ *
+ * Path is computed dynamically (respects SCRYBE_DATA_DIR changes during testing).
+ */
+export function readScrybeConfig(): ScrybeConfig | null {
+  const p = join(getDataDir(), "config.json");
+  if (!existsSync(p)) return null;
+  let raw: string;
+  try {
+    raw = readFileSync(p, "utf8");
+  } catch (err) {
+    throw new Error(`Failed to read config.json: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`config.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const validationError = validateScrybeConfig(parsed);
+  if (validationError) throw new Error(validationError);
+  return parsed as ScrybeConfig;
+}
+
+/** Writes a ScrybeConfig to `<DATA_DIR>/config.json`. */
+export function writeScrybeConfig(cfg: ScrybeConfig): void {
+  const dir = getDataDir();
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify(cfg, null, 2) + "\n", "utf8");
 }

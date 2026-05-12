@@ -711,6 +711,10 @@ export async function runCli(): Promise<void> {
       const { getExpectedDimensions } = await import("./health-probe.js");
       const { resolveEmbeddingConfig: resolveEmb, assignTableName: assignTN } = await import("./registry.js");
       const { getPlugin: getPlug } = await import("./plugins/index.js");
+      const { readTableMeta } = await import("./vector-store.js");
+      const { readScrybeConfig: readCfg } = await import("./config.js");
+      const { resolvePreset: resPreset } = await import("./preset-resolver.js");
+      const scrybeConfig = (() => { try { return readCfg(); } catch { return null; } })();
       const sourceSummaries = await Promise.all(projects.map(async (p) => ({ id: p.id, sources: await Promise.all(p.sources.map(async (s) => {
         const stats = s.table_name ? await getTableStats(s.table_name) : { sizeBytes: 0, versionCount: 0 };
         const flags: string[] = stats.versionCount > 2 * COMPACT_THRESHOLD ? ["bloat"] : [];
@@ -728,6 +732,27 @@ export async function runCli(): Promise<void> {
             const health = await getHealth(s.table_name, { expectedDimensions: expDims });
             if (health.state === "corrupt") { flags.push("corrupt"); healthFlag = health.reasons[0] ?? "corrupt"; }
           } catch { /* non-fatal — probe must not break status */ }
+          // model_mismatch: compare sidecar (model, dim, provider) vs resolved preset triple.
+          // Pre-migration sidecars (no model fields) are silently skipped — slice 6 backfills them.
+          try {
+            if (scrybeConfig !== null) {
+              const sidecar = readTableMeta(s.table_name);
+              if (sidecar && typeof sidecar["model"] === "string" && typeof sidecar["dim"] === "number" && typeof sidecar["provider"] === "string") {
+                let pluginProfile2: "code" | "text" = "code";
+                try { const pl = getPlug(s.source_config.type); pluginProfile2 = pl.embeddingProfile === "code" ? "code" : "text"; } catch { /* unknown */ }
+                const slot = pluginProfile2 === "code" ? "code_preset" as const : "text_preset" as const;
+                const presetName = scrybeConfig.assignments[slot];
+                if (presetName) {
+                  const resolved = resPreset(presetName, slot, scrybeConfig);
+                  const stampMatch =
+                    sidecar["model"] === resolved.model &&
+                    sidecar["dim"] === resolved.dim &&
+                    sidecar["provider"] === resolved.provider;
+                  if (!stampMatch) flags.push("model_mismatch");
+                }
+              }
+            }
+          } catch { /* non-fatal — mismatch check must not break status */ }
         }
         return { sourceId: s.source_id, chunks: s.table_name ? await countTableRows(s.table_name) : 0, lastIndexed: s.last_indexed ?? null, sizeBytes: stats.sizeBytes, versionCount: stats.versionCount, flags, healthFlag };
       })) })));
@@ -1042,8 +1067,10 @@ export async function runCli(): Promise<void> {
       "It is applied additively on top of .gitignore and .scrybeignore.",
       "",
       "Examples:",
-      "  scrybe ignore              # interactive wizard",
-      "  scrybe ignore edit         # same (alias subcommand)",
+      "  scrybe ignore                            # interactive wizard",
+      "  scrybe ignore edit                       # same (alias subcommand)",
+      "  scrybe ignore list                       # list all private ignore files (stdout)",
+      "  scrybe ignore get -P myrepo -S primary   # print one file's content (stdout)",
     ].join("\n"))
     .action(async () => {
       const { runIgnoreWizard } = await import("./onboarding/ignore-wizard.js");
@@ -1056,6 +1083,92 @@ export async function runCli(): Promise<void> {
     .action(async () => {
       const { runIgnoreWizard } = await import("./onboarding/ignore-wizard.js");
       await runIgnoreWizard();
+    });
+
+  ignoreGroup.command("list")
+    .description("List private ignore files across registered projects (stdout, non-interactive)")
+    .option("-P, --project-id <id>", "Limit to a specific project")
+    .option("--json", "Machine-readable output")
+    .addHelpText("after", "\nExamples:\n  scrybe ignore list\n  scrybe ignore list -P myrepo\n  scrybe ignore list --json")
+    .action(async (opts: { projectId?: string; json?: boolean }) => {
+      try {
+        const { loadPrivateIgnore, getPrivateIgnorePath, isMissingOrEmpty, countRules } =
+          await import("./private-ignore.js");
+        const { getProject, listProjects } = await import("./registry.js");
+        const { existsSync, statSync } = await import("fs");
+        const projects = opts.projectId
+          ? (() => {
+            const p = getProject(opts.projectId!);
+            if (!p) throw new Error(`Project '${opts.projectId}' not found`);
+            return [p];
+          })()
+          : listProjects();
+        type Entry = { project_id: string; source_id: string; path: string; rule_count: number; mtime: string | null };
+        const entries: Entry[] = [];
+        for (const project of projects) {
+          for (const source of project.sources) {
+            if (source.source_config.type !== "code") continue;
+            const content = loadPrivateIgnore(project.id, source.source_id);
+            if (isMissingOrEmpty(content)) continue;
+            const path = getPrivateIgnorePath(project.id, source.source_id);
+            let mtime: string | null = null;
+            if (existsSync(path)) {
+              try { mtime = statSync(path).mtime.toISOString(); } catch { /* */ }
+            }
+            entries.push({
+              project_id: project.id,
+              source_id: source.source_id,
+              path,
+              rule_count: countRules(content),
+              mtime,
+            });
+          }
+        }
+        if (opts.json) { console.log(JSON.stringify(entries, null, 2)); return; }
+        if (entries.length === 0) { console.log("No private ignore files."); return; }
+        for (const e of entries) {
+          const mt = e.mtime ? ` (modified ${e.mtime})` : "";
+          console.log(`${e.project_id}/${e.source_id} — ${e.rule_count} rule(s)${mt}`);
+          console.log(`  ${e.path}`);
+        }
+      } catch (err: any) { console.error(`[scrybe] ${err.message}`); process.exit(1); }
+    });
+
+  ignoreGroup.command("get")
+    .description("Print the private ignore file content for a source (stdout, non-interactive)")
+    .requiredOption("-P, --project-id <id>", "Project identifier")
+    .requiredOption("-S, --source-id <id>", "Source identifier")
+    .option("--json", "Machine-readable output (includes path + rule_count)")
+    .addHelpText("after", "\nExamples:\n  scrybe ignore get -P myrepo -S primary\n  scrybe ignore get -P myrepo -S primary --json")
+    .action(async (opts: { projectId: string; sourceId: string; json?: boolean }) => {
+      try {
+        const { loadPrivateIgnore, getPrivateIgnorePath, countRules } =
+          await import("./private-ignore.js");
+        const { getProject } = await import("./registry.js");
+        const project = getProject(opts.projectId);
+        if (!project) throw new Error(`Project '${opts.projectId}' not found`);
+        const source = project.sources.find((s) => s.source_id === opts.sourceId);
+        if (!source) throw new Error(`Source '${opts.sourceId}' not found in project '${opts.projectId}'`);
+        const content = loadPrivateIgnore(opts.projectId, opts.sourceId);
+        const path = getPrivateIgnorePath(opts.projectId, opts.sourceId);
+        if (opts.json) {
+          console.log(JSON.stringify({
+            project_id: opts.projectId,
+            source_id: opts.sourceId,
+            content,
+            path,
+            rule_count: countRules(content),
+          }, null, 2));
+          return;
+        }
+        if (content === null) {
+          console.log(`# No private ignore file for ${opts.projectId}/${opts.sourceId}`);
+          console.log(`# Expected at: ${path}`);
+          return;
+        }
+        process.stdout.write(content);
+        if (!content.endsWith("\n")) process.stdout.write("\n");
+      } catch (err: any) { console.error(`[scrybe] ${err.message}`); process.exit(1); }
     });
 
   // ─── init ─────────────────────────────────────────────────────────────────
@@ -1077,6 +1190,21 @@ export async function runCli(): Promise<void> {
     .addHelpText("after", "\nExamples:\n  scrybe doctor\n  scrybe doctor --repair")
     .action(async (opts: { json?: boolean; strict?: boolean; repair?: boolean }) => {
       if (opts.repair) {
+        // Check install integrity first — if broken, repair and re-exec
+        const { detectBrokenInstall, attemptSelfRepair } = await import("./install-doctor.js");
+        const broken = detectBrokenInstall();
+        if (broken) {
+          const repaired = attemptSelfRepair(broken);
+          if (!repaired) {
+            process.stderr.write(
+              "[scrybe] Automatic repair failed or not applicable (not an npx install).\n" +
+              "Manual recovery: npx -y scrybe-cli@latest --version  (then reconnect)\n",
+            );
+            process.exit(1);
+          }
+          return;
+        }
+        // No install issue — proceed with index corruption repair
         await runDoctorRepair();
         return;
       }
@@ -1298,6 +1426,12 @@ export async function runCli(): Promise<void> {
       }),
     { hidden: true }
   );
+
+  // ─── model subcommand tree ────────────────────────────────────────────────
+  {
+    const { registerModelCommand } = await import("./tools/model.js");
+    registerModelCommand(program);
+  }
 
   await program.parseAsync(process.argv);
 }

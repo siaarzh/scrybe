@@ -1,27 +1,78 @@
 #!/usr/bin/env node
 // Suppress Node.js experimental-feature warnings (e.g. SQLite) from user output
 process.removeAllListeners("warning");
-import { runMcpServer } from "./mcp-server.js";
-import { runCli } from "./cli.js";
-import { cancelAllJobs } from "./jobs.js";
 
-for (const sig of ["SIGTERM", "SIGINT"] as const) {
-  process.on(sig, () => {
-    cancelAllJobs();
-    process.exit(0);
-  });
-}
+import { detectBrokenInstall, emitInstallErrorOverMcp, attemptSelfRepair } from "./install-doctor.js";
 
 const subcommand = process.argv[2];
 
 if (subcommand === "mcp") {
-  runMcpServer().catch((err) => {
-    process.stderr.write(`scrybe mcp error: ${err}\n`);
-    process.exit(1);
-  });
+  // MCP path: check install first, then dispatch to shim or in-process
+  const broken = detectBrokenInstall();
+  if (broken) {
+    emitInstallErrorOverMcp(broken).catch((err) => {
+      process.stderr.write(`scrybe mcp error: ${err}\n`);
+    }).finally(() => {
+      process.exit(0);
+    });
+  } else {
+    const legacyMode = process.argv.includes("--legacy-in-process");
+
+    if (legacyMode) {
+      process.stderr.write(
+        "[scrybe] in-process MCP mode is deprecated, will be removed in v0.34.0. See `scrybe daemon install`.\n"
+      );
+      Promise.all([import("./mcp-server.js"), import("./jobs.js")])
+        .then(([{ runMcpServer }, { cancelAllJobs }]) => {
+          for (const sig of ["SIGTERM", "SIGINT"] as const) {
+            process.on(sig, () => {
+              cancelAllJobs();
+              process.exit(0);
+            });
+          }
+          return runMcpServer();
+        })
+        .catch((err) => {
+          process.stderr.write(`scrybe mcp error: ${err}\n`);
+          process.exit(1);
+        });
+    } else {
+      import("./mcp-shim.js")
+        .then(({ runMcpShim }) => runMcpShim())
+        .catch((err) => {
+          process.stderr.write(`scrybe mcp error: ${err}\n`);
+          process.exit(1);
+        });
+    }
+  }
 } else {
-  runCli().catch((err) => {
-    process.stderr.write(`scrybe error: ${err}\n`);
-    process.exit(1);
-  });
+  // CLI path: check install first, attempt repair if broken, then lazy-import
+  const broken = detectBrokenInstall();
+  if (broken) {
+    const repaired = attemptSelfRepair(broken);
+    if (!repaired) {
+      // Not in npx cache or repair failed — print recovery text and exit
+      process.stderr.write(
+        "[scrybe] Install incomplete. Run `scrybe doctor` for diagnostics.\n",
+      );
+      process.exit(1);
+    }
+    // repair spawned re-exec — this process will exit via child.on("close")
+    // hang here so we don't fall through to runCli
+  } else {
+    Promise.all([import("./cli.js"), import("./jobs.js")])
+      .then(([{ runCli }, { cancelAllJobs }]) => {
+        for (const sig of ["SIGTERM", "SIGINT"] as const) {
+          process.on(sig, () => {
+            cancelAllJobs();
+            process.exit(0);
+          });
+        }
+        return runCli();
+      })
+      .catch((err) => {
+        process.stderr.write(`scrybe error: ${err}\n`);
+        process.exit(1);
+      });
+  }
 }

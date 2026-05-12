@@ -15,6 +15,7 @@ import { getWatcherHealth } from "./watcher.js";
 import { getGitWatcherHealth, getCachedBranch } from "./git-watcher.js";
 import { listJobRows, getJobRow, getQueueStatus } from "../jobs-store.js";
 import { cancelJob } from "../jobs.js";
+import { handleMcpRoute } from "./mcp-rpc.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -564,6 +565,9 @@ async function handle(
       throw e;
     }
   }
+
+  // ── MCP-over-HTTP routes ───────────────────────────────────────────────
+  if (await handleMcpRoute(req, res)) return;
 
   jsonRes(res, 404, { error: "Not found" });
 }

@@ -14,10 +14,11 @@ function debugEnabled(): boolean {
  * Emit a structured event to daemon-log.jsonl.
  *
  * Volume policy (Decision 9):
- *   - indexer.scan.completed  — always written to daemon log
- *   - indexer.embed.batch     — only when SCRYBE_DEBUG_INDEXER=1
- *   - indexer.write.completed — only when SCRYBE_DEBUG_INDEXER=1
- *   - indexer.job.summary     — always written to daemon log
+ *   - indexer.scan.completed         — always written to daemon log
+ *   - indexer.embed.batch            — only when SCRYBE_DEBUG_INDEXER=1
+ *   - indexer.write.completed        — only when SCRYBE_DEBUG_INDEXER=1
+ *   - indexer.flush.intra_batch_dedup — always written (regression signal; should never fire under scheme-2)
+ *   - indexer.job.summary            — always written to daemon log
  *   - process.uncaughtException / process.unhandledRejection — always written
  */
 export function diagEmit(record: Record<string, unknown>): void {

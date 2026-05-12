@@ -1,28 +1,64 @@
 /**
- * Dimension mismatch detection test.
- * Configures a project source with wrong dimensions (1024) while the sidecar
- * returns 384d. Expects the embedder to throw a typed dimension-mismatch error.
+ * Dimension handling tests for the preset-resolver-based embedding path.
+ *
+ * In the preset world, embedding dimensions come from the provider catalog
+ * (or from the preset's own `dim` field for custom presets). The old
+ * `source.embedding.dimensions` field is no longer read by the registry.
+ *
+ * The "mismatch" detection scenario (stale table indexed with a different model
+ * than the current preset) is now surfaced via the `model_mismatch` flag on
+ * `scrybe ps --json` — tested separately in plan23-slice2.test.ts.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import { cloneFixture, type FixtureHandle } from "./helpers/fixtures.js";
 import { runIndex } from "./helpers/index-wait.js";
-import { sidecar } from "./helpers/sidecar.js";
 
-describe("dimension mismatch detection", () => {
+describe("dimension handling via preset resolver", () => {
   let fixture: FixtureHandle | null = null;
+  let dir: string;
+  let savedDataDir: string | undefined;
 
   afterEach(async () => {
     await fixture?.cleanup();
     fixture = null;
+    if (savedDataDir === undefined) delete process.env.SCRYBE_DATA_DIR;
+    else process.env.SCRYBE_DATA_DIR = savedDataDir;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
-  it("throws a dimension mismatch error when source dims differ from model output", async () => {
+  it("indexing succeeds when the preset's dim matches the local embedder output", async () => {
     fixture = await cloneFixture("sample-repo");
 
-    // Register project with WRONG dimensions (1024) but sidecar returns 384
+    dir = mkdtempSync(join(tmpdir(), "scrybe-dimmatch-test-"));
+    savedDataDir = process.env.SCRYBE_DATA_DIR;
+    process.env.SCRYBE_DATA_DIR = dir;
+
+    // Write a config.json that uses the local provider (dim=384, matches local embedder)
+    const cfg = {
+      schema_version: 1,
+      embedding_presets: {
+        "local-code": {
+          provider: "local",
+          model: "Xenova/multilingual-e5-small",
+        },
+        "local-text": {
+          provider: "local",
+          model: "Xenova/multilingual-e5-small",
+        },
+      },
+      assignments: {
+        code_preset: "local-code",
+        text_preset: "local-text",
+      },
+    };
+    writeFileSync(join(dir, "config.json"), JSON.stringify(cfg, null, 2) + "\n", "utf8");
+
     const { addProject, addSource } = await import("../src/registry.js");
-    const projectId = "test-dim-mismatch";
-    addProject({ id: projectId, description: "dim mismatch test" });
+    const projectId = "test-dim-match";
+    addProject({ id: projectId, description: "dim match test" });
     addSource(projectId, {
       source_id: "primary",
       source_config: {
@@ -30,16 +66,11 @@ describe("dimension mismatch detection", () => {
         root_path: fixture.path,
         languages: ["ts"],
       },
-      embedding: {
-        base_url: sidecar.baseUrl,
-        model: sidecar.model,
-        dimensions: 1024, // wrong — sidecar returns 384
-        api_key_env: "SCRYBE_CODE_EMBEDDING_API_KEY",
-      },
     });
 
-    await expect(
-      runIndex(projectId, "primary", "full")
-    ).rejects.toThrow(/384|1024|dimension/i);
+    // Index should succeed — local embedder returns 384d and preset expects 384d
+    const result = await runIndex(projectId, "primary", "full");
+    expect(result.status).toBe("ok");
+    expect(result.chunks_prepared).toBeGreaterThan(0);
   });
 });

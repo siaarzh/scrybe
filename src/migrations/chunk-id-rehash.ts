@@ -47,6 +47,8 @@ function defaultDbPath(): string {
 interface TableMeta {
   chunk_id_scheme: number | string;
   chunk_id_scheme_introduced_in?: string;
+  dedup_done?: boolean;
+  item_path_rewrite_done?: boolean;
 }
 
 function tableMetaPath(dbPath: string, tableName: string): string {
@@ -251,6 +253,35 @@ function rewriteBranchTags(
   }
 }
 
+// ─── Path-rewrite helper (Plan 48, Slice 4) ──────────────────────────────────
+
+/**
+ * Rewrite a legacy ticket item_path from the pre-Plan-43 "tickets/N" schema
+ * to the current "issues/N" (ticket body) or "issues/N#note_M" (ticket comment).
+ *
+ * Returns the new path, or the original path unchanged when no rewrite applies
+ * (already on new schema, unknown item_type, or malformed item_url).
+ *
+ * `itemUrl` is required to extract the comment note ID for ticket_comment rows.
+ */
+function rewriteTicketPath(
+  itemPath: string,
+  itemUrl: string,
+  itemType: string,
+): string {
+  if (!itemPath.startsWith("tickets/")) return itemPath;
+  // Extract N from "tickets/N" (N may be any non-empty suffix)
+  const N = itemPath.slice("tickets/".length);
+  if (!N) return itemPath;
+  if (itemType === "ticket") return `issues/${N}`;
+  if (itemType === "ticket_comment") {
+    const m = itemUrl.match(/#note_(\d+)$/);
+    if (!m) return itemPath; // malformed URL — keep old path; warn at call site
+    return `issues/${N}#note_${m[1]}`;
+  }
+  return itemPath; // unknown item_type — leave unchanged defensively
+}
+
 // ─── Main migration ───────────────────────────────────────────────────────────
 
 export async function migrateTable(
@@ -400,6 +431,7 @@ export async function migrateTable(
   const newRows: Array<Record<string, unknown>> = [];
   const idMap = new Map<string, string>();
   let rowsRehashed = 0;
+  let rowsPathRewritten = 0;
 
   for (let i = 0; i < allRows.length; i++) {
     const row = allRows[i];
@@ -415,10 +447,27 @@ export async function migrateTable(
       itemPath = String(row["item_path"] ?? row["source_path"] ?? "");
       itemUrl = String(row["item_url"] ?? row["source_url"] ?? "");
       itemType = String(row["item_type"] ?? row["source_type"] ?? "ticket");
+
+      // Path rewrite (Plan 48 decision 17): rewrite stale "tickets/N" paths to the
+      // Plan-43 schema ("issues/N" / "issues/N#note_M") before recomputing chunk_id.
+      // This must happen before makeNewChunkIdV2 so the rewritten path is hashed.
+      const rewrittenPath = rewriteTicketPath(itemPath, itemUrl, itemType);
+      if (rewrittenPath !== itemPath) {
+        rowsPathRewritten++;
+        itemPath = rewrittenPath;
+      } else if (itemPath.startsWith("tickets/") && itemType === "ticket_comment") {
+        // Warn: stale path but note_M could not be extracted from itemUrl
+        daemonLog({
+          event: "migration.path_rewrite_skipped",
+          tableName, projectId, sourceId,
+          reason: `ticket_comment row has stale tickets/ path but no #note_M in item_url: ${itemUrl}`,
+        });
+      }
     } else {
       itemPath = String(row["item_path"] ?? row["file_path"] ?? "");
       itemUrl = "";
       itemType = "code";
+      // Code rows never have tickets/ prefix — path rewrite is a no-op for code.
     }
 
     const oldChunkId = String(row["chunk_id"] ?? "");
@@ -456,6 +505,22 @@ export async function migrateTable(
     opts.onProgress?.(rowsRehashed, total);
   }
 
+  // Dedup pass (Plan 48 decision 14): collapse newRows by newChunkId — first-seen wins.
+  // Pre-v0.31.0 mergeInsert source-side dedup gap could allow N rows to share one chunk_id;
+  // we don't want to preserve that bloat through migration.
+  const dedupedRows: Array<Record<string, unknown>> = [];
+  const seenChunkIds = new Set<string>();
+  let rowsCollapsed = 0;
+  for (const newRow of newRows) {
+    const id = String(newRow["chunk_id"] ?? "");
+    if (seenChunkIds.has(id)) {
+      rowsCollapsed++;
+      continue;
+    }
+    seenChunkIds.add(id);
+    dedupedRows.push(newRow);
+  }
+
   // Steps 4–6: Drop old table, recreate with new schema, bulk-insert.
   // RISK: if the process crashes between drop (step 4) and recreate (step 6),
   // data is permanently lost for this table. The sidecar still says "1→2-migrating"
@@ -464,6 +529,9 @@ export async function migrateTable(
   daemonLog({
     event: "migration.pre_drop",
     tableName, projectId, sourceId, rows: total,
+    rows_after_dedup: dedupedRows.length,
+    rows_collapsed: rowsCollapsed,
+    rows_path_rewritten: rowsPathRewritten,
     warning: "Data loss window: crash between drop and recreate requires reindex --full to recover.",
   });
 
@@ -478,8 +546,8 @@ export async function migrateTable(
     };
   }
 
-  // Detect vector dimensions from the materialised Float32Array in the first new row.
-  const firstVec = newRows[0]?.["vector"] as Float32Array | undefined;
+  // Detect vector dimensions from the materialised Float32Array in the first deduped row.
+  const firstVec = dedupedRows[0]?.["vector"] as Float32Array | undefined;
   const dimensions: number = firstVec?.length ?? 1536;
 
   const schema = profile === "knowledge"
@@ -487,7 +555,7 @@ export async function migrateTable(
     : makeSchema(dimensions);
 
   try {
-    const newTable = await db.createTable(tableName, newRows as any, { schema });
+    const newTable = await db.createTable(tableName, dedupedRows as any, { schema });
     // Verify creation succeeded
     await newTable.countRows();
   } catch (err) {
@@ -520,16 +588,20 @@ export async function migrateTable(
     };
   }
 
-  // Step 8: Stamp scheme 2
+  // Step 8: Stamp scheme 2 + forensic markers for dedup and path-rewrite passes.
   writeTableMetaAt(dbPath, tableName, {
     chunk_id_scheme: CURRENT_CHUNK_ID_SCHEME,
     chunk_id_scheme_introduced_in: CURRENT_CHUNK_ID_SCHEME_VERSION,
+    dedup_done: true,
+    item_path_rewrite_done: true,
   });
 
   daemonLog({
     event: "migration.completed",
     tableName, projectId, sourceId,
     rows_rehashed: rowsRehashed,
+    rows_path_rewritten: rowsPathRewritten,
+    rows_collapsed: rowsCollapsed,
     branch_tags_updated: branchTagsUpdated,
   });
 

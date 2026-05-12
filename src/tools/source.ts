@@ -9,7 +9,7 @@ import {
   isSearchable,
 } from "../registry.js";
 import { validateGitlabToken } from "../plugins/gitlab-issues.js";
-import type { Source, SourceConfig, EmbeddingConfig } from "../types.js";
+import type { Source, SourceConfig } from "../types.js";
 import type { Tool } from "./types.js";
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
@@ -38,27 +38,6 @@ function buildSourceConfig(
   return { type: sourceType };
 }
 
-function buildEmbedding(
-  f: {
-    embeddingBaseUrl?: string; embeddingModel?: string;
-    embeddingDimensions?: string; embeddingApiKeyEnv?: string;
-    embedding_base_url?: string; embedding_model?: string;
-    embedding_dimensions?: number; embedding_api_key_env?: string;
-  }
-): EmbeddingConfig | undefined {
-  const bu = f.embeddingBaseUrl ?? f.embedding_base_url;
-  const mo = f.embeddingModel ?? f.embedding_model;
-  const di = f.embeddingDimensions ? parseInt(String(f.embeddingDimensions), 10) : f.embedding_dimensions;
-  const ak = f.embeddingApiKeyEnv ?? f.embedding_api_key_env;
-  if (!bu && !mo && !di && !ak) return undefined;
-  return {
-    base_url: bu ?? "",
-    model: mo ?? "",
-    dimensions: di ?? 1536,
-    api_key_env: ak ?? "SCRYBE_CODE_EMBEDDING_API_KEY",
-  };
-}
-
 function applySourceAddOptions(cmd: Command): Command {
   return cmd
     .requiredOption("-P, --project-id <id>", "Project ID")
@@ -69,10 +48,6 @@ function applySourceAddOptions(cmd: Command): Command {
     .option("--gitlab-url <url>", "GitLab instance base URL (required for type=ticket)")
     .option("--gitlab-project-id <id>", "GitLab project ID or path (required for type=ticket)")
     .option("--gitlab-token <token>", "GitLab personal access token (required for type=ticket)")
-    .option("--embedding-base-url <url>", "Override embedding base URL")
-    .option("--embedding-model <model>", "Override embedding model")
-    .option("--embedding-dimensions <n>", "Override embedding dimensions")
-    .option("--embedding-api-key-env <var>", "Env var NAME holding API key")
     .addHelpText(
       "after",
       "\nExamples:\n  scrybe source add -P myrepo -S code --type code --root /path/to/repo --languages ts,vue" +
@@ -89,10 +64,6 @@ function applySourceUpdateOptions(cmd: Command): Command {
     .option("--gitlab-project-id <id>", "GitLab project ID or path")
     .option("--root <path>", "Absolute path to repo root")
     .option("--languages <langs>", "Comma-separated language hints")
-    .option("--embedding-base-url <url>", "Override embedding base URL")
-    .option("--embedding-model <model>", "Override embedding model")
-    .option("--embedding-dimensions <n>", "Override embedding dimensions")
-    .option("--embedding-api-key-env <var>", "Env var NAME holding API key")
     .addHelpText("after", "\nExample:\n  scrybe source update -P myrepo -S tickets --gitlab-token $NEW_TOKEN");
 }
 
@@ -146,8 +117,6 @@ export const addSourceTool: Tool<
     project_id: string; source_id: string; source_type: string;
     root_path?: string; languages?: string;
     gitlab_url?: string; gitlab_project_id?: string; gitlab_token?: string;
-    embedding_base_url?: string; embedding_model?: string;
-    embedding_dimensions?: number; embedding_api_key_env?: string;
   },
   { ok: boolean; project_id: string; source_id: string }
 > = {
@@ -166,10 +135,6 @@ export const addSourceTool: Tool<
         gitlab_url: { type: "string", description: "GitLab instance base URL (required for type=ticket)" },
         gitlab_project_id: { type: "string", description: "GitLab project ID or path (required for type=ticket)" },
         gitlab_token: { type: "string", description: "GitLab personal access token (required for type=ticket)" },
-        embedding_base_url: { type: "string" },
-        embedding_model: { type: "string" },
-        embedding_dimensions: { type: "number" },
-        embedding_api_key_env: { type: "string", description: "Env var NAME holding the API key" },
       },
       required: ["project_id", "source_id", "source_type"],
     },
@@ -189,16 +154,9 @@ export const addSourceTool: Tool<
       gitlab_token: input.gitlab_token,
     });
     await validateGitlabToken(sc);
-    const emb = buildEmbedding({
-      embedding_base_url: input.embedding_base_url,
-      embedding_model: input.embedding_model,
-      embedding_dimensions: input.embedding_dimensions,
-      embedding_api_key_env: input.embedding_api_key_env,
-    });
     const src: Omit<Source, "table_name" | "last_indexed"> = {
       source_id,
       source_config: sc,
-      ...(emb && { embedding: emb }),
     };
     addSource(project_id, src);
     return { ok: true, project_id, source_id };
@@ -212,10 +170,6 @@ export const addSourceTool: Tool<
     gitlab_url: opts.gitlabUrl ? String(opts.gitlabUrl) : undefined,
     gitlab_project_id: opts.gitlabProjectId ? String(opts.gitlabProjectId) : undefined,
     gitlab_token: opts.gitlabToken ? String(opts.gitlabToken) : undefined,
-    embedding_base_url: opts.embeddingBaseUrl ? String(opts.embeddingBaseUrl) : undefined,
-    embedding_model: opts.embeddingModel ? String(opts.embeddingModel) : undefined,
-    embedding_dimensions: opts.embeddingDimensions ? parseInt(String(opts.embeddingDimensions), 10) : undefined,
-    embedding_api_key_env: opts.embeddingApiKeyEnv ? String(opts.embeddingApiKeyEnv) : undefined,
   }),
   formatCli: ({ project_id, source_id }) => `Added source '${source_id}' to project '${project_id}'`,
 };
@@ -225,8 +179,6 @@ export const updateSourceTool: Tool<
     project_id: string; source_id: string;
     gitlab_token?: string; gitlab_url?: string; gitlab_project_id?: string;
     root_path?: string; languages?: string;
-    embedding_base_url?: string; embedding_model?: string;
-    embedding_dimensions?: number; embedding_api_key_env?: string;
   },
   { ok: boolean; project_id: string; source_id: string; updated: boolean }
 > = {
@@ -244,10 +196,6 @@ export const updateSourceTool: Tool<
         gitlab_project_id: { type: "string", description: "GitLab project ID or path" },
         root_path: { type: "string", description: "Absolute path to repo root" },
         languages: { type: "array", items: { type: "string" }, description: "Language hints" },
-        embedding_base_url: { type: "string" },
-        embedding_model: { type: "string" },
-        embedding_dimensions: { type: "number" },
-        embedding_api_key_env: { type: "string", description: "Env var NAME holding the API key" },
       },
       required: ["project_id", "source_id"],
     },
@@ -272,13 +220,6 @@ export const updateSourceTool: Tool<
     if (Object.keys(scPatch).length > 0) {
       fields.source_config = { ...existing.source_config, ...scPatch } as Source["source_config"];
     }
-    const emb = buildEmbedding({
-      embedding_base_url: input.embedding_base_url,
-      embedding_model: input.embedding_model,
-      embedding_dimensions: input.embedding_dimensions,
-      embedding_api_key_env: input.embedding_api_key_env,
-    });
-    if (emb) fields.embedding = emb;
     if (Object.keys(fields).length === 0) {
       return { ok: true, project_id, source_id, updated: false };
     }
@@ -293,10 +234,6 @@ export const updateSourceTool: Tool<
     gitlab_project_id: opts.gitlabProjectId ? String(opts.gitlabProjectId) : undefined,
     root_path: opts.root ? String(opts.root) : undefined,
     languages: opts.languages ? String(opts.languages) : undefined,
-    embedding_base_url: opts.embeddingBaseUrl ? String(opts.embeddingBaseUrl) : undefined,
-    embedding_model: opts.embeddingModel ? String(opts.embeddingModel) : undefined,
-    embedding_dimensions: opts.embeddingDimensions ? parseInt(String(opts.embeddingDimensions), 10) : undefined,
-    embedding_api_key_env: opts.embeddingApiKeyEnv ? String(opts.embeddingApiKeyEnv) : undefined,
   }),
   formatCli: ({ source_id, project_id, updated }) =>
     updated

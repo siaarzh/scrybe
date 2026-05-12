@@ -4,6 +4,19 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Known Vulnerabilities](https://snyk.io/test/github/siaarzh/scrybe/badge.svg)](https://snyk.io/test/github/siaarzh/scrybe)
 
+> ## Upgrading from v0.33.x to v0.34.0
+>
+> v0.34.0 upgrades lancedb (vector store). The running daemon must be restarted
+> to pick up the new binary. **Required steps:**
+>
+> 1. `scrybe daemon stop`
+> 2. Close all Claude Code / IDE sessions (they hold the daemon's lancedb binary).
+> 3. `npm install -g scrybe-cli@latest`  *(or wait for the next cold MCP probe if using `npx -y`)*
+> 4. `scrybe daemon start`
+>
+> Existing data is preserved — lancedb 0.27 reads 0.14-written tables transparently.
+> Skip these steps and you'll likely see `EPERM` on Windows or a confused daemon on Linux.
+
 **No API key required. Works fully offline.**
 
 Self-hosted code memory with semantic search. Index your repos and knowledge sources into a local vector database and search them by natural language — from the CLI or directly inside Claude Code via MCP.
@@ -101,6 +114,20 @@ The wizard handles everything: picks an embedding provider, validates your API k
 
 ### Manual setup
 
+> **Linux users:** if your Node.js came from `apt`/`dnf`/`snap`, the global npm
+> prefix is usually root-owned (`/usr/lib/node_modules`), so `npm install -g`
+> fails with `EACCES`. Fix it first by pointing npm at a user-writable location:
+>
+> ```bash
+> mkdir -p ~/.npm-global
+> npm config set prefix ~/.npm-global
+> echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+> source ~/.bashrc
+> ```
+>
+> Then proceed with the install below. `scrybe doctor` will warn you if the
+> prefix is still not writable after installation.
+
 ```bash
 # 1. Install globally
 npm install -g scrybe-cli
@@ -130,7 +157,29 @@ scrybe doctor --json   # machine-readable output
 
 ## MCP server (Claude Code integration)
 
-The recommended setup uses `npx` — no global install needed:
+**Recommended setup** (global install — fastest cold boot, no per-session install delay):
+
+```bash
+# 1. Install globally
+npm install -g scrybe-cli
+
+# 2. Register daemon autostart (starts at login, no admin required)
+scrybe daemon install
+
+# 3. Add to your MCP config (e.g. ~/.claude.json, ~/.cursor/mcp.json)
+```
+
+```json
+"scrybe": {
+  "type": "stdio",
+  "command": "scrybe",
+  "args": ["mcp"]
+}
+```
+
+Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`). Run `scrybe init` to configure everything interactively.
+
+**Alternative (npx — no global install required):** if you prefer not to install globally, you can use:
 
 ```json
 "scrybe": {
@@ -140,17 +189,9 @@ The recommended setup uses `npx` — no global install needed:
 }
 ```
 
-Add to `~/.claude.json` under `mcpServers`. Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
+Note: the first invocation via `npx` takes ~10 seconds to install. Claude Code's MCP probe may time out during this first install, leaving the cache in an incomplete state. If this happens, run `npx -y scrybe-cli@latest --version` once in a terminal (without a parent timeout), then reconnect.
 
-If you installed globally (`npm install -g scrybe-cli`):
-
-```json
-"scrybe": {
-  "type": "stdio",
-  "command": "scrybe",
-  "args": ["mcp"]
-}
-```
+> **If Claude Code shows an `scrybe (install incomplete)` MCP server** with a `scrybe_install_incomplete` tool, run `scrybe doctor --repair` (or follow the command in the tool description) to repair the install automatically.
 
 ### Available tools
 
@@ -165,6 +206,7 @@ If you installed globally (`npm install -g scrybe-cli`):
 | `remove_source` | Remove a source and drop its vector table |
 | `search_code` | Semantic search over indexed code |
 | `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs) |
+| `lookup_symbol` | Exact-symbol lookup by name — deterministic, no embedding cost, no `score` field |
 | `reindex_all` | Incrementally reindex all registered projects in the background |
 | `reindex_project` | Trigger background reindex of all sources in a project |
 | `reindex_source` | Trigger background reindex of a single source |
@@ -328,6 +370,8 @@ npm install -g scrybe-cli
 >
 > The migration rehashes chunk IDs and renames LanceDB columns in place — vectors are preserved, no re-embedding required (~97% of chunks). Until you migrate, `scrybe status` shows `Migrate (chunk-id)` per affected source and search returns `error_type: "needs_migration"` with the exact command to run. See the [v0.31.0 CHANGELOG entry](CHANGELOG.md#0310--2026-05-06) for the full breaking-change list (CLI flag `--source-types` → `--item-types`, MCP arg `source_types` → `item_types`, job-result field `chunks_indexed` → `chunks_prepared` + `chunks_persisted`).
 
+> **After running `scrybe migrate`: restart your MCP server / Claude Code session.** The migration drops and recreates each affected LanceDB table; long-running MCP servers cache table handles in memory and can hit `Not found: ...lance` errors on the next search until restarted. CLI search is unaffected (each invocation is a fresh process).
+
 ## Running as a background service
 
 The daemon **starts automatically** when Claude Code calls any scrybe MCP tool (on-demand mode) and shuts down when there are no active clients. No manual setup required for basic use.
@@ -376,6 +420,71 @@ Wall time on Voyage `voyage-code-3` scales with total token count — network ro
 Sustained ~10–13 K tokens/sec on Voyage. Smaller projects (<500 files) index in under a minute. Local embedder (`Xenova/multilingual-e5-small`, default if no API key) runs ~6× slower — CPU-bound WASM inference, but free.
 
 If you hit rate limits during indexing, tune `SCRYBE_EMBED_BATCH_SIZE` and `SCRYBE_EMBED_BATCH_DELAY_MS` in your `.env`.
+
+<a id="windows-av"></a>
+## Windows + AV
+
+Windows real-time AV scanning (Defender, Malwarebytes, others) can significantly slow scrybe because its I/O profile — many small `.lance` fragment writes, frequent `git status` calls over indexed repos — is worst-case for on-access scanning.
+
+`scrybe doctor` detects AV products and their state, and emits actionable warnings with remediation steps.
+
+### Windows Defender — add DATA_DIR to the exclusion list
+
+Run the following in an **elevated** PowerShell window (right-click → "Run as administrator"):
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\scrybe"
+```
+
+To verify the exclusion was added:
+
+```powershell
+(Get-MpPreference).ExclusionPath
+```
+
+To roll back:
+
+```powershell
+Remove-MpPreference -ExclusionPath "$env:LOCALAPPDATA\scrybe"
+```
+
+> **Note:** If you installed scrybe with a custom `SCRYBE_DATA_DIR`, substitute that path for `$env:LOCALAPPDATA\scrybe` in the commands above.
+
+### Malwarebytes — add DATA_DIR to the allow list
+
+Malwarebytes has no command-line API for allow-list management. Add the folder manually:
+
+1. Open **Malwarebytes**
+2. Go to **Settings** → **Allow List**
+3. Click **Add** → **Allow a Folder**
+4. Browse to your DATA_DIR (`%LOCALAPPDATA%\scrybe` by default) and confirm
+
+Once the allow list is configured, set the following env var to suppress the `scrybe doctor` warning:
+
+```
+SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1
+```
+
+Add this to your `.env` file in the scrybe DATA_DIR, or set it as a system/user environment variable.
+
+### Indexed repo folders — trade-off
+
+AV scanning also applies to your indexed repo directories. Excluding them from AV scanning can speed up `git status` and shell-open times, but it is a **security trade-off** — excluded paths are not scanned by real-time protection.
+
+This is your decision to make. `scrybe doctor` only surfaces an informational tip when AV warnings are present; it does not prescribe what to do. If you choose to exclude repo paths from Defender:
+
+```powershell
+# Replace <path-to-repo> with your actual repo path
+Add-MpPreference -ExclusionPath "C:\path\to\your\repo"
+```
+
+### Known limitations
+
+- **Malwarebytes allow-list**: there is no public API to read the MBAM allow list, so `scrybe doctor` cannot verify that the exclusion is in place. Use `SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1` to acknowledge this manually.
+- **Other AV products** (Norton, Bitdefender, Kaspersky, etc.): not detected. Consult your AV product's documentation for exclusion management.
+- **Corporate EDR / managed endpoints**: detection and exclusion may require IT admin involvement; scrybe cannot automate this.
+
+---
 
 ## Known limitations
 
