@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.35.0] — 2026-05-12
+
 ### Changed
 
 - **`add_source` now auto-enqueues a reindex and returns a `job_id`.** Previously, calling `add_source` registered the source but left it unindexed — agents had to separately call `reindex_source` to start indexing. Now `add_source` fires the reindex automatically and returns `{ job_id, status, queue_position? }` in the same shape as `reindex_source`. Poll with `reindex_status` or `queue_status`. If the daemon is unavailable (spawn-failed / health-timeout), the call fails with `error_type: "daemon_unavailable"` and the source is **not** registered (clean failure, no orphaned entries). In opted-out or container environments, an in-process fallback job is used and the source is registered normally.
@@ -87,24 +91,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.32.1] — 2026-05-09
-
-### Fixed
-
-- **`assign_preset` MCP tool now correctly reports `requires_reindex: true` when the new preset's `(model, dim, provider)` differs from the previously assigned preset, even when no sources are indexed yet.** The triple-comparison check was nested inside a per-source loop; with no projects registered the loop body never executed and the flag stayed `false`. The preset-level triple comparison now runs unconditionally, with the per-source sidecar scan only kicking in to detect drift between the saved config and indexed table stamps. (v0.32.0 was tagged but not published due to this CI test failure.)
-
----
-
 ## Older releases
 
-For releases v0.32.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.32.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.34.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.35.0...HEAD
+[0.35.0]: https://github.com/siaarzh/scrybe/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/siaarzh/scrybe/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/siaarzh/scrybe/compare/v0.32.4...v0.33.0
 [0.32.4]: https://github.com/siaarzh/scrybe/compare/v0.32.3...v0.32.4
 [0.32.3]: https://github.com/siaarzh/scrybe/compare/v0.32.2...v0.32.3
 [0.32.2]: https://github.com/siaarzh/scrybe/compare/v0.32.1...v0.32.2
-[0.32.1]: https://github.com/siaarzh/scrybe/compare/v0.32.0...v0.32.1
