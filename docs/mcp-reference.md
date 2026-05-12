@@ -117,7 +117,7 @@ Assign a named preset to a slot (`code`, `text`, or `rerank`). Returns `requires
 
 ### `add_source`
 
-Add an indexable source to a project. Call `reindex_source` after to index it. Embedding configuration is set globally via `add_embedding_preset` / `assign_preset` — see [Model tools](#model-tools).
+Add an indexable source to a project and automatically enqueue an initial reindex. Returns a `job_id` you can poll with `reindex_status` or `queue_status` — no separate `reindex_source` call is needed. Embedding configuration is set globally via `add_embedding_preset` / `assign_preset` — see [Model tools](#model-tools).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -139,6 +139,17 @@ Add an indexable source to a project. Call `reindex_source` after to index it. E
 | `gitlab_url` | string | ✓ | GitLab instance base URL |
 | `gitlab_project_id` | string | ✓ | GitLab project ID or path |
 | `gitlab_token` | string | ✓ | GitLab personal access token (validated against the API before saving) |
+
+**Returns:** `{ ok: true, project_id, source_id, job_id, status: "queued"|"running"|"started", queue_position?, duplicate_of_pending? }`
+
+The returned `job_id` appears in `queue_status` and `reindex_status` immediately. Poll `reindex_status` with this ID to track indexing progress.
+
+**Errors:**
+
+| `error_type` | When |
+|---|---|
+| `daemon_unavailable` | The scrybe daemon failed to start or timed out during health check. Run `scrybe doctor` to diagnose, then retry. |
+| *(plain error)* | Embedding not configured (`scrybe init` required), or GitLab token validation failed. |
 
 ---
 

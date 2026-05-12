@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Changed
+
+- **`add_source` now auto-enqueues a reindex and returns a `job_id`.** Previously, calling `add_source` registered the source but left it unindexed — agents had to separately call `reindex_source` to start indexing. Now `add_source` fires the reindex automatically and returns `{ job_id, status, queue_position? }` in the same shape as `reindex_source`. Poll with `reindex_status` or `queue_status`. If the daemon is unavailable (spawn-failed / health-timeout), the call fails with `error_type: "daemon_unavailable"` and the source is **not** registered (clean failure, no orphaned entries). In opted-out or container environments, an in-process fallback job is used and the source is registered normally.
+
 ### Security
 
 - **MCP daemon RPC log injection hardened.** `clientId` and `method` strings (read from request headers / body) are now stripped of CR/LF/control characters before being written to `console.log`, so a malicious MCP client cannot forge fake log lines when logs are pasted in support tickets or issues.

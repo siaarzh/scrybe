@@ -9,6 +9,9 @@ import {
   isSearchable,
 } from "../registry.js";
 import { validateGitlabToken } from "../plugins/gitlab-issues.js";
+import { submitSourceJob } from "../jobs.js";
+import { ensureRunning, DaemonClient } from "../daemon/client.js";
+import { config } from "../config.js";
 import type { Source, SourceConfig } from "../types.js";
 import type { Tool } from "./types.js";
 
@@ -118,12 +121,16 @@ export const addSourceTool: Tool<
     root_path?: string; languages?: string;
     gitlab_url?: string; gitlab_project_id?: string; gitlab_token?: string;
   },
-  { ok: boolean; project_id: string; source_id: string }
+  {
+    ok: boolean; project_id: string; source_id: string;
+    job_id: string; status: string;
+    queue_position?: number; duplicate_of_pending?: boolean;
+  }
 > = {
   spec: {
     name: "add_source",
     cliName: "source add",
-    description: "Add an indexable source to a project (code repo, GitLab issues, etc.). Then call index to index it.",
+    description: "Add an indexable source to a project (code repo, GitLab issues, etc.) and auto-enqueue a reindex. Returns a job_id to poll with reindex_status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -143,6 +150,11 @@ export const addSourceTool: Tool<
   },
   handler: async (input) => {
     const { project_id, source_id, source_type } = input;
+
+    // D5 — gate on embedding config before any side effect
+    const embErr = config.embeddingConfigError;
+    if (embErr) throw new Error(embErr);
+
     const langStr = Array.isArray((input as any).languages)
       ? (input as any).languages.join(",")
       : (input.languages ?? "");
@@ -154,12 +166,53 @@ export const addSourceTool: Tool<
       gitlab_token: input.gitlab_token,
     });
     await validateGitlabToken(sc);
+
+    // D6 — decide daemon path BEFORE registry write so spawn-failed doesn't
+    // leave a registered-but-never-indexed source behind
+    const daemon = await ensureRunning();
+    if (!daemon.ok && (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout")) {
+      throw Object.assign(new Error(
+        "The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\n" +
+        "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
+      ), { error_type: "daemon_unavailable" });
+    }
+
+    // Register the source
     const src: Omit<Source, "table_name" | "last_indexed"> = {
       source_id,
       source_config: sc,
     };
     addSource(project_id, src);
-    return { ok: true, project_id, source_id };
+
+    // D3 — auto-enqueue via daemon when available
+    if (daemon.ok) {
+      const client = DaemonClient.fromPidfile();
+      if (client) {
+        const resp = await client.submitReindex({
+          projectId: project_id,
+          sourceId: source_id,
+          mode: "incremental",
+        });
+        const job = resp.jobs[0];
+        if (!job) throw new Error("Daemon returned no job");
+        return {
+          ok: true,
+          project_id,
+          source_id,
+          job_id: job.jobId,
+          status: job.status ?? "started",
+          ...(job.queuePosition != null && { queue_position: job.queuePosition }),
+          ...(job.duplicateOfPending && { duplicate_of_pending: true }),
+        };
+      }
+    }
+
+    // D6 opt-out path — in-process fallback (container / SCRYBE_NO_AUTO_DAEMON)
+    const jobResult = submitSourceJob(project_id, source_id, "incremental");
+    if (typeof jobResult === "object" && "error" in jobResult) {
+      throw new Error(`A reindex job is already running for this project (job: ${jobResult.job_id})`);
+    }
+    return { ok: true, project_id, source_id, job_id: jobResult, status: "started" };
   },
   cliOpts: ([opts]) => ({
     project_id: String(opts.projectId),
@@ -171,7 +224,8 @@ export const addSourceTool: Tool<
     gitlab_project_id: opts.gitlabProjectId ? String(opts.gitlabProjectId) : undefined,
     gitlab_token: opts.gitlabToken ? String(opts.gitlabToken) : undefined,
   }),
-  formatCli: ({ project_id, source_id }) => `Added source '${source_id}' to project '${project_id}'`,
+  formatCli: ({ project_id, source_id, job_id }) =>
+    `Added source '${source_id}' to project '${project_id}' — reindex job: ${job_id}`,
 };
 
 export const updateSourceTool: Tool<
