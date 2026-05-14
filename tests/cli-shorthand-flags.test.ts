@@ -118,7 +118,7 @@ describe("ps alias for status", () => {
     const r1 = run(["ps"]);
     const r2 = run(["status"]);
     expect(r1.stdout).toBe(r2.stdout);
-  });
+  }, 60_000);
 });
 
 describe("search code -P flag (Fix 3 — no parent collision)", () => {

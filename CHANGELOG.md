@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.36.1] — 2026-05-14
+
+### Fixed
+
+- **CI publish workflow gate.** A test in `tests/cli-shorthand-flags.test.ts` runs the `scrybe` CLI twice serially to compare `scrybe ps` and `scrybe status` output. On cold CI runners each invocation can take 10-15s, pushing the test past vitest's 30s default timeout. Bumped that test's timeout to 60s. v0.35.0 and v0.36.0 were tagged but never reached npm due to this same failure; v0.36.1 is the first npm-published release since v0.34.0 — it bundles everything from v0.35.0 and v0.36.0.
+
+---
+
 ## [0.36.0] — 2026-05-14
 
 ### Added
@@ -86,25 +94,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.32.3] — 2026-05-10
-
-### Added
-
-- **`env.npm_prefix_writable` doctor check.** Warns when npm's global install dir (`<npm config get prefix>/lib/node_modules`) isn't writable by the current user, with the canonical `~/.npm-global` prefix workaround in the remedy. Skips on Windows (ACL semantics differ in ways `accessSync` can't detect cleanly) and when `npm` isn't on PATH. Catches the case where `npm install -g scrybe-cli` fails with EACCES on Linux installs that use the system-managed Node from apt/yum (root-owned `/usr/lib/`).
-- **README "Manual setup" Linux first-install caveat.** Surfaces the same `~/.npm-global` workaround before the `npm install -g` line, so users hit the guidance pre-fail rather than only post-fail via doctor.
-
----
-
 ## Older releases
 
-For releases v0.32.2 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.32.3 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.1...HEAD
+[0.36.1]: https://github.com/siaarzh/scrybe/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/siaarzh/scrybe/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/siaarzh/scrybe/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/siaarzh/scrybe/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/siaarzh/scrybe/compare/v0.32.4...v0.33.0
 [0.32.4]: https://github.com/siaarzh/scrybe/compare/v0.32.3...v0.32.4
-[0.32.3]: https://github.com/siaarzh/scrybe/compare/v0.32.2...v0.32.3
