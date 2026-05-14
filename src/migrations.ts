@@ -218,7 +218,7 @@ export function synthesizeMigrationConfig(
 
     const preset: EmbeddingPreset = {
       provider,
-      model: knowledgeModel ?? (provider === "voyage" ? "voyage-3" : "text-embedding-3-small"),
+      model: knowledgeModel ?? (provider === "voyage" ? "voyage-4" : "text-embedding-3-small"),
       credentials: "${SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY}",
     };
     if (provider === "custom" && effectiveBaseUrl) preset.base_url = effectiveBaseUrl;
@@ -474,6 +474,34 @@ const MIGRATIONS: Migration[] = [
     id: "init-config-v0.32.0",
     async run() {
       await migrateToConfigJson();
+    },
+  },
+  {
+    // Plan 72: Auto-upgrade the text embedding preset from voyage-3 to voyage-4
+    // for users who got voyage-3 as the auto-default. Users who explicitly chose
+    // any model (including voyage-3) via 'scrybe model preset' are left untouched
+    // by the heuristic (text_preset model === "voyage-3" exactly).
+    id: "upgrade-voyage-text-default-v0.36.0",
+    async run() {
+      const { readScrybeConfig, writeScrybeConfig } = await import("./config.js");
+      const cfg = readScrybeConfig();
+      if (!cfg) return; // no config.json yet — nothing to upgrade
+
+      const textPresetName = cfg.assignments?.text_preset;
+      if (!textPresetName) return;
+
+      const textPreset = cfg.embedding_presets?.[textPresetName];
+      if (!textPreset) return;
+
+      if (textPreset.model !== "voyage-3") return;
+
+      // Upgrade: rewrite model in place, preserve all other fields
+      cfg.embedding_presets[textPresetName] = { ...textPreset, model: "voyage-4" };
+      writeScrybeConfig(cfg);
+      process.stderr.write(
+        "[scrybe] migration: upgraded text embedding preset from voyage-3 to voyage-4. " +
+        "Run 'scrybe model switch --source-type text' to reindex knowledge sources.\n"
+      );
     },
   },
 ];

@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.36.0] — 2026-05-14
+
+### Added
+
+- **Voyage AI model catalog expanded.** `voyage-3.5`, `voyage-3.5-lite`, `voyage-4`, `voyage-4-lite`, and `voyage-4-large` are now first-class entries in the provider catalog — visible in `scrybe model list`, accepted by `scrybe model preset add`, and validated on assignment. All five support flexible output dimensions (256 / 512 / 1024 / 2048). Previously `voyage-4` was referenced internally as a default but absent from the validated catalog, so attempting to assign it explicitly would fail validation.
+
+### Changed
+
+- **Default text embedding model for new Voyage AI setups is now `voyage-4`.** When Scrybe synthesizes a starter config from a Voyage API key (first-run wizard or `scrybe init`), the text/knowledge preset now defaults to `voyage-4` instead of `voyage-3`.
+- **Auto-upgrade migration for existing Voyage AI installs.** On first startup after this update, if your text embedding preset was auto-defaulted to `voyage-3`, Scrybe upgrades it to `voyage-4` automatically. A stderr message confirms the change and prompts you to run `scrybe model switch --source-type text` to reindex knowledge sources. Presets set explicitly — including an explicit `voyage-3` choice — are left untouched.
+
+---
+
 ## [0.35.0] — 2026-05-12
 
 ### Changed
@@ -82,25 +95,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.32.2] — 2026-05-09
-
-### Fixed
-
-- **Migration no longer assigns the code preset to the text slot when only `SCRYBE_CODE_EMBEDDING_*` env vars are set.** When the migration ran on installs that only had code-embedding env vars configured (no `SCRYBE_KNOWLEDGE_EMBEDDING_*`), the synthesized config wrote `text_preset = "migrated-code"`. That's a profile mismatch: code-profile models like `voyage-code-3` are rejected when assigned to a text slot, so any subsequent `scrybe index` against ticket / knowledge sources failed with `preset uses model X with profile "code", but it is assigned to slot "text_preset" which requires profile "text"`. The asymmetric branch now falls back to a `local-default-text` preset (in-process embedder, no network), matching the no-env case. Existing installs hit by this in v0.32.1 can fix manually with `scrybe model preset add` + `scrybe model assign --text <new-preset>`, or delete `config.json` and re-run `scrybe init`.
-- **`scrybe doctor`'s `config.well_formed` no longer false-positives on a correctly-configured rerank slot.** The check looked up every assignment slot in `embedding_presets`, including `rerank_preset` — but rerank presets live in `reranker_presets`. A valid migrated config with `rerank_preset = "migrated-rerank"` produced `Unresolved preset references: rerank_preset: "migrated-rerank"` even though the preset existed. The check now routes `rerank_preset` to `reranker_presets` and only the embedding slots to `embedding_presets`.
-
----
-
 ## Older releases
 
-For releases v0.32.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.32.2 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/siaarzh/scrybe/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/siaarzh/scrybe/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/siaarzh/scrybe/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/siaarzh/scrybe/compare/v0.32.4...v0.33.0
 [0.32.4]: https://github.com/siaarzh/scrybe/compare/v0.32.3...v0.32.4
 [0.32.3]: https://github.com/siaarzh/scrybe/compare/v0.32.2...v0.32.3
-[0.32.2]: https://github.com/siaarzh/scrybe/compare/v0.32.1...v0.32.2
