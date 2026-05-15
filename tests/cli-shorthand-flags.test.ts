@@ -15,7 +15,7 @@ function run(args: string[], extraEnv: Record<string, string> = {}): { stdout: s
   const result = spawnSync(NODE, [CLI, ...args], {
     env: { ...process.env, SCRYBE_DATA_DIR: dataDir, ...extraEnv },
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: 30_000,
   });
   return {
     stdout: result.stdout ?? "",

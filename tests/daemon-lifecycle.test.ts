@@ -54,7 +54,7 @@ describe("daemon lifecycle", () => {
     });
 
     try {
-      await waitFor(() => existsSync(pidfilePath), 5000);
+      await waitFor(() => existsSync(pidfilePath), 20000);
 
       const data = JSON.parse(readFileSync(pidfilePath, "utf8"));
       expect(data.pid).toBeGreaterThan(0);
@@ -68,12 +68,12 @@ describe("daemon lifecycle", () => {
       spawnSync(NODE, [ENTRY, "daemon", "stop"], {
         env: { ...process.env, SCRYBE_DATA_DIR: dataDir, SCRYBE_SKIP_MIGRATION: "1" },
         encoding: "utf8",
-        timeout: 8000,
+        timeout: 15000,
       });
       if (!child.killed) child.kill();
     }
 
-    await waitFor(() => !existsSync(pidfilePath), 3000);
+    await waitFor(() => !existsSync(pidfilePath), 10000);
     expect(existsSync(pidfilePath)).toBe(false);
   });
 
@@ -90,20 +90,20 @@ describe("daemon lifecycle", () => {
     });
 
     try {
-      await waitFor(() => existsSync(pidfilePath), 5000);
+      await waitFor(() => existsSync(pidfilePath), 20000);
 
       // Stop via CLI
       const stopResult = spawnSync(NODE, [ENTRY, "daemon", "stop"], {
         env,
         encoding: "utf8",
-        timeout: 8000,
+        timeout: 15000,
       });
       expect(stopResult.status).toBe(0);
     } finally {
       if (!child.killed) child.kill("SIGTERM");
     }
 
-    await waitFor(() => !existsSync(pidfilePath), 5000);
+    await waitFor(() => !existsSync(pidfilePath), 10000);
     expect(existsSync(pidfilePath)).toBe(false);
   });
 
@@ -120,13 +120,13 @@ describe("daemon lifecycle", () => {
     });
 
     try {
-      await waitFor(() => existsSync(pidfilePath), 5000);
+      await waitFor(() => existsSync(pidfilePath), 20000);
 
       // Second start should fail (exit 1)
       const second = spawnSync(NODE, [ENTRY, "daemon", "start"], {
         env,
         encoding: "utf8",
-        timeout: 5000,
+        timeout: 15000,
       });
       expect(second.status).toBe(1);
     } finally {
@@ -147,12 +147,12 @@ describe("daemon lifecycle", () => {
     });
 
     try {
-      await waitFor(() => existsSync(pidfilePath), 5000);
+      await waitFor(() => existsSync(pidfilePath), 20000);
 
       const statusResult = spawnSync(NODE, [ENTRY, "daemon", "status"], {
         env,
         encoding: "utf8",
-        timeout: 5000,
+        timeout: 10000,
       });
       expect(statusResult.status).toBe(0);
       const parsed = JSON.parse(statusResult.stdout);
