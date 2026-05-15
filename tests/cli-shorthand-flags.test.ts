@@ -108,6 +108,8 @@ describe("Global plural shortcuts (no deprecation warning)", () => {
 });
 
 describe("ps alias for status", () => {
+  beforeAll(() => { run(["daemon", "stop"]); }); // drain any daemon left by earlier tests
+
   it("scrybe ps exits 0 without deprecation warning", () => {
     const r = run(["ps"], {}, 30_000);
     expect(r.status).toBe(0);
