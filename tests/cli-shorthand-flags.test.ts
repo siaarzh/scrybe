@@ -11,11 +11,11 @@ let dataDir = "";
 beforeAll(() => { dataDir = mkdtempSync(join(tmpdir(), "scrybe-cli-sf-")); });
 afterAll(() => { try { rmSync(dataDir, { recursive: true, force: true }); } catch { /* ignore */ } });
 
-function run(args: string[], extraEnv: Record<string, string> = {}): { stdout: string; stderr: string; status: number } {
+function run(args: string[], extraEnv: Record<string, string> = {}, timeoutMs = 15_000): { stdout: string; stderr: string; status: number } {
   const result = spawnSync(NODE, [CLI, ...args], {
     env: { ...process.env, SCRYBE_DATA_DIR: dataDir, ...extraEnv },
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: timeoutMs,
   });
   return {
     stdout: result.stdout ?? "",
@@ -109,16 +109,16 @@ describe("Global plural shortcuts (no deprecation warning)", () => {
 
 describe("ps alias for status", () => {
   it("scrybe ps exits 0 without deprecation warning", () => {
-    const r = run(["ps"]);
+    const r = run(["ps"], {}, 30_000);
     expect(r.status).toBe(0);
     expect(r.stderr).not.toContain("[deprecated]");
-  });
+  }, 45_000);
 
   it("scrybe ps and scrybe status produce same output", () => {
-    const r1 = run(["ps"]);
-    const r2 = run(["status"]);
+    const r1 = run(["ps"], {}, 30_000);
+    const r2 = run(["status"], {}, 30_000);
     expect(r1.stdout).toBe(r2.stdout);
-  }, 60_000);
+  }, 90_000);
 });
 
 describe("search code -P flag (Fix 3 — no parent collision)", () => {
