@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.36.2] — 2026-05-20
+
+### Fixed
+
+- **MCP shim no longer serves only 1 tool after a cold boot.** When Claude Code (or another MCP client) launched the shim before the daemon was reachable, the shim latched onto the `scrybe_daemon_unavailable` placeholder and never re-checked — leaving the client stuck with one tool until manual reconnect. The shim now polls for daemon readiness for up to 15 seconds at startup (configurable via `SCRYBE_MCP_COLD_START_WAIT_MS`) before falling back, so the full tool manifest is served as soon as the daemon comes up.
+- **Console windows no longer flash on Windows during normal use.** Daemon `git fetch` / `git rev-parse` invocations from the per-project fetch poller were spawned without `windowsHide: true`, causing a brief CMD window flash on every poll cycle (every few seconds per project). All git invocations now spawn hidden. Install-time `spawnSync` / `spawn` calls got the same treatment for consistency.
+
+---
+
 ## [0.36.1] — 2026-05-14
 
 ### Fixed
@@ -79,31 +88,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.32.4] — 2026-05-10
-
-### Added
-
-- **Self-healing for half-extracted `npx -y scrybe-cli` installs.** When Claude Code's MCP probe times out during a cold `npx` install, npm aborts mid-extract and leaves a `~/.npm/_npx/<hash>` tree with empty package directories. Subsequent invocations silently fail with `Failed to connect` because Node can't resolve required dependencies. The MCP entrypoint now detects this state via a `createRequire` landmark check across heavy deps (`@xenova/transformers`, `sharp`, `@lancedb/lancedb`, `apache-arrow`, `@modelcontextprotocol/sdk`, `@parcel/watcher`, `tree-sitter`) and, on a broken install, completes the MCP `initialize` handshake and registers a structured `scrybe_install_incomplete` tool whose description starts with the recovery command. Claude Code's MCP UI then shows the actionable command in the tool list preview instead of an opaque connection failure.
-- **`scrybe doctor --repair`** — runs `npm install` inside the half-extracted npx workspace, then re-execs the original command so the user's invocation completes against the now-clean install. Sentinel file + env-var guard against recursion if repair itself fails. Restricted to npx caches (path-walks for an `_npx` ancestor); a no-op on global installs.
-- **`env.install_integrity` doctor row** — checks the same landmarks as the MCP entrypoint, surfaced as the first Environment-section check. Warns when one or more landmarks are missing, with a remedy pointing at `scrybe doctor --repair`.
-
-### Changed
-
-- **MCP setup README pivot.** The bare `"command": "npx", "args": ["-y", "scrybe-cli@latest", "mcp"]` snippet has been demoted from the primary example to a "no-config alternative" with a cold-install caveat. `"command": "scrybe"` (assuming a global install via `npm install -g scrybe-cli`) is now the recommended path; the `npx scrybe-cli@latest init` wizard remains the canonical first-step setup. Existing configs continue to work — but on first install, if interrupted, they will now show the `scrybe (install incomplete)` MCP server with a clear recovery command instead of failing silently.
-- **`src/index.ts` rewritten to lazy-import the heavy modules (`./mcp-server`, `./cli`, `./jobs`).** Only `node:*` builtins and the new `./install-doctor.js` module are static-imported at process entry, so the install-integrity check can run before any potentially-missing dependency is touched. Without this change, a half-extracted tree would crash Node at module-resolution time before any pre-flight check could fire.
-
----
-
 ## Older releases
 
-For releases v0.32.3 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.32.4 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.2...HEAD
+[0.36.2]: https://github.com/siaarzh/scrybe/compare/v0.36.1...v0.36.2
 [0.36.1]: https://github.com/siaarzh/scrybe/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/siaarzh/scrybe/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/siaarzh/scrybe/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/siaarzh/scrybe/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/siaarzh/scrybe/compare/v0.32.4...v0.33.0
-[0.32.4]: https://github.com/siaarzh/scrybe/compare/v0.32.3...v0.32.4

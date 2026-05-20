@@ -292,8 +292,38 @@ function serveUnavailableServer(unavailable: DaemonUnavailableState): void {
 
 // ─── Main shim entrypoint ─────────────────────────────────────────────────────
 
+/**
+ * Poll detectDaemonUnavailable() until it returns null (daemon ready) or the
+ * deadline expires. Used at shim startup so MCP clients get the full tool
+ * manifest as soon as the daemon comes up, instead of latching onto the
+ * 1-tool placeholder served during cold-boot (gh#41).
+ */
+async function waitForDaemonReady(opts: { timeoutMs: number; pollMs?: number }): Promise<DaemonUnavailableState | null> {
+  const pollMs = opts.pollMs ?? 500;
+  const deadline = Date.now() + opts.timeoutMs;
+  let last: DaemonUnavailableState | null = null;
+  while (Date.now() < deadline) {
+    last = await detectDaemonUnavailable();
+    if (last === null) return null;
+    await new Promise<void>((r) => setTimeout(r, pollMs));
+  }
+  return last;
+}
+
+const COLD_START_WAIT_MS = (() => {
+  const raw = parseInt(process.env["SCRYBE_MCP_COLD_START_WAIT_MS"] ?? "", 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 15_000;
+})();
+
 export async function runMcpShim(): Promise<void> {
-  const unavailable = await detectDaemonUnavailable();
+  let unavailable = await detectDaemonUnavailable();
+  if (unavailable && COLD_START_WAIT_MS > 0) {
+    // Daemon may still be cold-starting (esp. on Windows where Defender + native
+    // binding loads pin startup at 5–10s). Retry briefly so the shim serves the
+    // real tool set instead of latching to the 1-tool placeholder.
+    process.stderr.write(`[scrybe-mcp] daemon not ready (${unavailable.variant}) — waiting up to ${COLD_START_WAIT_MS}ms\n`);
+    unavailable = await waitForDaemonReady({ timeoutMs: COLD_START_WAIT_MS });
+  }
   if (unavailable) {
     serveUnavailableServer(unavailable);
     return;

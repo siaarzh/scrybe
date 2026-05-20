@@ -217,6 +217,7 @@ export function attemptSelfRepair(b: BrokenInstall): boolean {
       timeout: 120_000,
       stdio: "inherit",
       shell: process.platform === "win32",
+      windowsHide: true,
     },
   );
 
@@ -241,6 +242,7 @@ export function attemptSelfRepair(b: BrokenInstall): boolean {
   const child = spawn(process.execPath, process.argv.slice(1), {
     stdio: "inherit",
     env: { ...process.env, SCRYBE_SELF_REPAIR_ATTEMPTED: "1" },
+    windowsHide: true,
   });
 
   child.on("close", (code) => {

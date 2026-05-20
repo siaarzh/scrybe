@@ -20,6 +20,7 @@ export function gitExec(args: string[], opts: GitExecOpts): string | null {
       cwd: opts.cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
       ...(opts.maxBuffer !== undefined ? { maxBuffer: opts.maxBuffer } : {}),
       ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
     });
