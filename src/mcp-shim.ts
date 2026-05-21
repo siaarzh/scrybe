@@ -6,7 +6,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { VERSION } from "./config.js";
-import { DaemonClient } from "./daemon/client.js";
+import { DaemonClient, ensureRunning } from "./daemon/client.js";
 import { readPidfile } from "./daemon/pidfile.js";
 import { KNOWN_TOOL_NAMES } from "./tools/tool-names.js";
 import { compareSemVer, getMajorVersion } from "./util/semver-compare.js";
@@ -292,24 +292,6 @@ function serveUnavailableServer(unavailable: DaemonUnavailableState): void {
 
 // ─── Main shim entrypoint ─────────────────────────────────────────────────────
 
-/**
- * Poll detectDaemonUnavailable() until it returns null (daemon ready) or the
- * deadline expires. Used at shim startup so MCP clients get the full tool
- * manifest as soon as the daemon comes up, instead of latching onto the
- * 1-tool placeholder served during cold-boot (gh#41).
- */
-async function waitForDaemonReady(opts: { timeoutMs: number; pollMs?: number }): Promise<DaemonUnavailableState | null> {
-  const pollMs = opts.pollMs ?? 500;
-  const deadline = Date.now() + opts.timeoutMs;
-  let last: DaemonUnavailableState | null = null;
-  while (Date.now() < deadline) {
-    last = await detectDaemonUnavailable();
-    if (last === null) return null;
-    await new Promise<void>((r) => setTimeout(r, pollMs));
-  }
-  return last;
-}
-
 const COLD_START_WAIT_MS = (() => {
   const raw = parseInt(process.env["SCRYBE_MCP_COLD_START_WAIT_MS"] ?? "", 10);
   return Number.isFinite(raw) && raw >= 0 ? raw : 15_000;
@@ -318,11 +300,22 @@ const COLD_START_WAIT_MS = (() => {
 export async function runMcpShim(): Promise<void> {
   let unavailable = await detectDaemonUnavailable();
   if (unavailable && COLD_START_WAIT_MS > 0) {
-    // Daemon may still be cold-starting (esp. on Windows where Defender + native
-    // binding loads pin startup at 5–10s). Retry briefly so the shim serves the
-    // real tool set instead of latching to the 1-tool placeholder.
-    process.stderr.write(`[scrybe-mcp] daemon not ready (${unavailable.variant}) — waiting up to ${COLD_START_WAIT_MS}ms\n`);
-    unavailable = await waitForDaemonReady({ timeoutMs: COLD_START_WAIT_MS });
+    // On a true cold start (PC reboot, no autostart installed), the daemon won't
+    // be running at all — polling alone would just time out and serve the 1-tool
+    // placeholder. ensureRunning() reuses the CLI's auto-spawn path: it checks
+    // liveness, spawns the daemon via spawnDaemonDetached (VBS launcher on
+    // Windows → no console flash), and polls /health until ready or deadline.
+    // Honours SCRYBE_NO_AUTO_DAEMON / containerised environments by returning
+    // immediately with a non-spawn reason.
+    process.stderr.write(`[scrybe-mcp] daemon not ready (${unavailable.variant}) — attempting auto-start (up to ${COLD_START_WAIT_MS}ms)\n`);
+    const ensureResult = await ensureRunning(COLD_START_WAIT_MS);
+    if (ensureResult.ok) {
+      unavailable = null;
+    } else {
+      // Re-probe so the placeholder server's recovery message matches the
+      // current state (e.g. spawn-failed → daemon-dead variant).
+      unavailable = await detectDaemonUnavailable();
+    }
   }
   if (unavailable) {
     serveUnavailableServer(unavailable);

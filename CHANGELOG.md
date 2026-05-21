@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.36.3] — 2026-05-21
+
+### Fixed
+
+- **MCP shim now auto-starts the daemon on a true cold boot.** v0.36.2 added a 15-second wait at shim startup, but if the daemon wasn't already starting (no autostart installed, no manual `scrybe daemon up`), the shim just waited until the deadline expired and then served the 1-tool placeholder. The shim now uses the same daemon-spawn path as the CLI — it spawns the daemon via a hidden Windows launcher and polls `/health` until ready, then fetches the real manifest. MCP clients get the full tool set on first connect after reboot, with no console flash. Falls back to the placeholder server only when the spawn itself fails (e.g. `SCRYBE_NO_AUTO_DAEMON=1`, containers, missing binary).
+
+---
+
 ## [0.36.2] — 2026-05-20
 
 ### Fixed
@@ -69,35 +77,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.33.0] — 2026-05-10
-
-### Added
-
-- **MCP shim mode.** `scrybe mcp` now connects to the long-running daemon over HTTP instead of loading the embedder, lancedb, tree-sitter, and sharp in-process on every probe. Cold MCP boot drops from ~8.5 s to <500 ms — install latency is permanently off the Claude Code MCP probe path. Daemon owns all heavy modules; the shim's runtime dependency surface is just the MCP SDK plus a small HTTP client. The daemon must be installed (`scrybe daemon install`) and running for the shim to work; if the daemon is unavailable, the shim returns a structured-error tool whose description front-loads the recovery command (`scrybe daemon install`, `scrybe daemon start`, or `scrybe daemon restart` depending on the variant — no pidfile, daemon process dead, or mid-restart).
-- **Daemon HTTP surface for MCP traffic.** New `GET /mcp/manifest` returns `{daemon_version, tools}` derived from the existing tool registry. New `POST /mcp/rpc` dispatches tool calls with body `{id, method, params}` and JSON-RPC-style error codes (`-32600` invalid request, `-32601` method not found, `-32603` internal error). An optional `X-Scrybe-Client-Id` header is propagated from the shim heartbeat for per-client logging.
-- **Version handshake at MCP `initialize`.** Shim and daemon versions are SemVer-compared. MAJOR mismatch refuses with a single `scrybe_daemon_unavailable` tool whose description points at `scrybe daemon restart`. MINOR / PATCH mismatch logs a stderr warning and exposes the intersection of tools the shim was built knowing about with what the daemon's manifest reports — so a stale daemon doesn't surface tools the shim can't reach, and a newer daemon doesn't surface tools the shim wasn't tested against.
-- **`daemon.installed` and `daemon.running` doctor rows.** `daemon.installed` checks whether autostart is configured for the current platform (yellow with a `run scrybe daemon install` hint if not). `daemon.running` checks pidfile presence and `/health` 200 (green when running, yellow / red with a `run scrybe daemon start` or `run scrybe daemon restart` hint when something's off).
-
-### Changed
-
-- **README MCP setup pivot.** The recommended path is now `npm install -g scrybe-cli` → `scrybe daemon install` → MCP config with `"command": "scrybe", "args": ["mcp"]`. The `npx -y scrybe-cli@latest mcp` form still works (and continues to benefit from v0.32.4's install-doctor self-heal) but is documented as a secondary quick-start.
-
-### Deprecated
-
-- **In-process MCP mode (`scrybe mcp --legacy-in-process`)** prints a stderr warning at boot and is scheduled for removal in v0.34.0. Existing setups that relied on the in-process path continue to work for one minor cycle while users migrate to `scrybe daemon install`.
-
----
-
 ## Older releases
 
-For releases v0.32.4 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.33.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.2...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.3...HEAD
+[0.36.3]: https://github.com/siaarzh/scrybe/compare/v0.36.2...v0.36.3
 [0.36.2]: https://github.com/siaarzh/scrybe/compare/v0.36.1...v0.36.2
 [0.36.1]: https://github.com/siaarzh/scrybe/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/siaarzh/scrybe/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/siaarzh/scrybe/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/siaarzh/scrybe/compare/v0.33.0...v0.34.0
-[0.33.0]: https://github.com/siaarzh/scrybe/compare/v0.32.4...v0.33.0
