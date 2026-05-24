@@ -4,6 +4,7 @@
  * Pipeline instances are cached per model ID after first load.
  */
 import type { FeatureExtractionPipeline } from "@xenova/transformers";
+import { getTransformers } from "./util/transformers-loader.js";
 
 export interface LocalEmbedderOptions {
   modelId: string;
@@ -29,7 +30,7 @@ const _pipelines = new Map<string, FeatureExtractionPipeline>();
 async function getPipeline(modelId: string): Promise<FeatureExtractionPipeline> {
   const cached = _pipelines.get(modelId);
   if (cached) return cached;
-  const { pipeline } = await import("@xenova/transformers");
+  const { pipeline } = await getTransformers();
   const p = await pipeline("feature-extraction", modelId, { revision: "main" });
   _pipelines.set(modelId, p);
   return p;

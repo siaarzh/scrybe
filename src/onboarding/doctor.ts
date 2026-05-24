@@ -118,7 +118,16 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   checks.push(ok("env.scrybe_version", SEC_ENV, "Scrybe version", `v${VERSION}`));
 
-  // ── 1b. Windows AV check ─────────────────────────────────────────────────────
+  // ── 1b. Model cache path ────────────────────────────────────────────────────
+  {
+    const { resolveModelCacheDir } = await import("../util/transformers-loader.js");
+    const modelCacheDir = resolveModelCacheDir();
+    checks.push(ok("env.model_cache", SEC_ENV, "Model cache",
+      modelCacheDir,
+      { path: modelCacheDir }));
+  }
+
+  // ── 1c. Windows AV check ─────────────────────────────────────────────────────
   if (process.platform === "win32") {
     const { detectWindowsAv, AV_README_ANCHOR } = await import("./windows-av.js");
     const avReport = await detectWindowsAv(dataDir);
@@ -219,7 +228,7 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
-  // ── 1c. npm global prefix writability ───────────────────────────────────────
+  // ── 1d. npm global prefix writability ───────────────────────────────────────
   // Windows ACL semantics differ from POSIX — accessSync may report writable on
   // dirs that practically aren't (e.g. UNC paths, junction points). Skip on Win32
   // to avoid false positives; the EACCES failure mode is a Linux/macOS concern.

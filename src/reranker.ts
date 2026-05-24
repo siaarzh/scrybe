@@ -15,6 +15,7 @@
  */
 
 import { config } from "./config.js";
+import { getTransformers } from "./util/transformers-loader.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -52,7 +53,7 @@ async function getLocalPipeline(modelId: string): Promise<CrossEncoderPipeline> 
   const cached = _crossEncoderPipelines.get(modelId);
   if (cached) return cached;
 
-  const { pipeline } = await import("@xenova/transformers");
+  const { pipeline } = await getTransformers();
   // text-classification loads the model + tokenizer.
   // We use the underlying tokenizer/model directly so we can pass text_pair,
   // which the TextClassificationPipeline._call() does not expose in its signature.
@@ -315,7 +316,12 @@ export async function rerank<T extends { content: string; score: number }>(
 
   if (config.rerankProviderType === "local") {
     const modelId = config.rerankModel || "Xenova/ms-marco-MiniLM-L-6-v2";
-    return rerankLocal(query, candidates, topK, modelId, blendTop3, blendTail);
+    try {
+      return await rerankLocal(query, candidates, topK, modelId, blendTop3, blendTail);
+    } catch {
+      console.error(`[scrybe] reranker model unavailable (${modelId}); returning non-reranked order`);
+      return candidates.slice(0, topK);
+    }
   }
 
   return rerankHttp(query, candidates, topK, blendTop3, blendTail);

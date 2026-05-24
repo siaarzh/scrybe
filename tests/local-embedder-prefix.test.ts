@@ -21,6 +21,9 @@ vi.mock("@xenova/transformers", () => {
   });
   return {
     pipeline: vi.fn().mockResolvedValue(mockPipelineInstance),
+    // env.cacheDir is set by getTransformers() (Plan 66); include the env stub
+    // so the loader doesn't throw "No 'env' export is defined on the mock".
+    env: { cacheDir: "" },
   };
 });
 

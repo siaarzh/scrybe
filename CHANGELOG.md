@@ -7,6 +7,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Model weights now survive reinstalls and npx cache wipes.** Local model weights (embedder + reranker) are stored in `${DATA_DIR}/models/` instead of inside the `@xenova/transformers` package tree. Existing caches are migrated automatically on first daemon start after upgrade — no action needed. Set `SCRYBE_MODEL_CACHE_DIR` to store weights elsewhere (e.g. a shared cache).
+
+### Fixed
+
+- **Reranker no longer silently returns unranked results when its model is unavailable.** When the local cross-encoder model cannot be loaded, scrybe now logs a warning (`[scrybe] reranker model unavailable …; returning non-reranked order`) instead of failing silently.
+
 ---
 
 ## [0.37.0] — 2026-05-24

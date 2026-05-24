@@ -91,7 +91,8 @@ export async function validateProvider(spec: ProviderSpec): Promise<ValidateResu
 export async function validateLocal(modelId: string): Promise<ValidateResult> {
   const t0 = Date.now();
   try {
-    const { pipeline } = await import("@xenova/transformers");
+    const { getTransformers } = await import("../util/transformers-loader.js");
+    const { pipeline } = await getTransformers();
     const extractor = await pipeline("feature-extraction", modelId, { revision: "main" });
     const output: any = await extractor(["ping"], { pooling: "mean", normalize: true });
     const dims = (output[0].data as Float32Array).length;

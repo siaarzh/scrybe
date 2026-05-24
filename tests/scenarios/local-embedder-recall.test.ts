@@ -354,7 +354,7 @@ describe("Scenario 20 — local-embedder MRR@10 + recall@1 baseline (Plan 77)", 
         ["project", "add", "--id", projectId, "--desc", "Plan-77 recall baseline"],
         env,
         LOCAL_EMBEDDER_ENV,
-        30_000
+        120_000
       );
       expect(addProj.exit, `project add failed:\n${addProj.stderr}`).toBe(0);
 
@@ -370,7 +370,7 @@ describe("Scenario 20 — local-embedder MRR@10 + recall@1 baseline (Plan 77)", 
         ],
         env,
         LOCAL_EMBEDDER_ENV,
-        30_000
+        120_000
       );
       expect(addSrc.exit, `source add failed:\n${addSrc.stderr}`).toBe(0);
 

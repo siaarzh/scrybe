@@ -20,6 +20,15 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.os }}
 
+    env:
+      # Suppress any .env files from bleeding into CI.
+      SCRYBE_RERANK: "false"
+      NO_UPDATE_NOTIFIER: "1"
+      # Pin all local HF model weights to one stable, cacheable directory shared by
+      # every step and every spawned CLI / sidecar (scenario tests use per-test temp
+      # DATA_DIRs, so DATA_DIR/models can't be cached). getTransformers() honors this.
+      SCRYBE_MODEL_CACHE_DIR: ${{ github.workspace }}/.model-cache
+
     steps:
       - uses: actions/checkout@v6
 
@@ -28,13 +37,15 @@ jobs:
           node-version: "22"
           cache: "npm"
 
-      - name: Cache HuggingFace model
+      - name: Cache local model weights
         uses: actions/cache@v5
         with:
-          path: ~/.cache/huggingface
-          key: hf-all-MiniLM-L6-v2-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          # Must match SCRYBE_MODEL_CACHE_DIR. Covers both models scrybe loads:
+          # Xenova/multilingual-e5-small (embedder) + Xenova/ms-marco-MiniLM-L-6-v2 (reranker).
+          path: ${{ github.workspace }}/.model-cache
+          key: scrybe-models-e5small-minilm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: |
-            hf-all-MiniLM-L6-v2-${{ runner.os }}-
+            scrybe-models-e5small-minilm-${{ runner.os }}-
 
       - name: Configure git for tests (Windows)
         if: runner.os == 'Windows'
@@ -51,15 +62,6 @@ jobs:
 
       - name: Test
         run: npm test
-        env:
-          # Suppress any .env files from bleeding into CI
-          SCRYBE_RERANK: "false"
-          # Explicit cache dir so all platforms write to the same path
-          HF_HOME: ~/.cache/huggingface
 
       - name: Scenario tests
         run: npm run test:scenarios
-        env:
-          SCRYBE_RERANK: "false"
-          HF_HOME: ~/.cache/huggingface
-          NO_UPDATE_NOTIFIER: "1"

@@ -109,7 +109,7 @@ describe("q06 rerank promotion — local MiniLM cross-encoder (Plan 77 Step 5.1)
         ["project", "add", "--id", projectId, "--desc", "q06 rerank promotion test"],
         env,
         RERANK_OFF_ENV,
-        30_000
+        120_000
       );
       expect(addProj.exit, `project add failed:\n${addProj.stderr}`).toBe(0);
 
@@ -125,7 +125,7 @@ describe("q06 rerank promotion — local MiniLM cross-encoder (Plan 77 Step 5.1)
         ],
         env,
         RERANK_OFF_ENV,
-        30_000
+        120_000
       );
       expect(addSrc.exit, `source add failed:\n${addSrc.stderr}`).toBe(0);
 

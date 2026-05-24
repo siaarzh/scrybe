@@ -19,6 +19,7 @@ import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
 import { initAutoGc, evaluateRatioTrigger } from "./auto-gc.js";
 import { warmupLocalEmbedder } from "../local-embedder.js";
+import { migrateModelsCache } from "./migrate-models-cache.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
 let shutdownCalled = false;
@@ -132,6 +133,10 @@ export async function runDaemon(): Promise<void> {
   });
 
   await checkAndMigrate();
+
+  // Move old in-package @xenova/transformers model cache to DATA_DIR/models/ (Plan 66).
+  // Best-effort: absent old cache is a silent no-op; failures are logged and non-fatal.
+  await migrateModelsCache(config.dataDir, daemonLog);
 
   // Warn about old env var names that can't be rewritten by the .env migration
   // (they came from OS env or MCP server config).
