@@ -887,10 +887,13 @@ All variables are read from `<DATA_DIR>/.env` (lower priority) or from the OS en
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCRYBE_RERANK` | — | Set `true` to enable reranking. Auto-enabled when Voyage AI is the embedding provider |
-| `SCRYBE_RERANK_API_KEY` | — | API key for the reranker. Required when reranking is enabled |
+| `SCRYBE_RERANK_PROVIDER` | `http` | `http` (Voyage / custom endpoint) or `local` (in-process cross-encoder, no API key) |
+| `SCRYBE_RERANK_API_KEY` | — | API key for the reranker. Required for `http` reranking; not needed for `local` |
 | `SCRYBE_RERANK_BASE_URL` | auto | Base URL for the reranking API (default: Voyage AI when auto-detected) |
-| `SCRYBE_RERANK_MODEL` | `rerank-2.5` | Reranker model name |
+| `SCRYBE_RERANK_MODEL` | `rerank-2.5` | Reranker model name (local default: `Xenova/ms-marco-MiniLM-L-6-v2`) |
 | `SCRYBE_RERANK_FETCH_MULTIPLIER` | `5` | Fetch this many extra results for reranking |
+| `SCRYBE_RERANK_BLEND_TOP3` | `0.75,0.25` | Retrieval,rerank blend weights for results at original rank ≤ 3 |
+| `SCRYBE_RERANK_BLEND_TAIL` | `0.40,0.60` | Retrieval,rerank blend weights for results at original rank ≥ 11 |
 
 ### Daemon and auto-gc
 

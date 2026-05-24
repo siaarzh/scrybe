@@ -95,6 +95,8 @@ Add a new named embedding preset. Catalog providers (`voyage`, `openai`, `local`
 | `credentials_from` | string | | Reuse credentials from another named preset (useful for rerank presets that share an embedding key) |
 | `base_url` | string | custom only | API base URL |
 | `dim` | number | custom only | Embedding dimensions |
+| `prompt_template` | object | | Asymmetric `{ query, passage }` prefixes prepended before embedding (e.g. `{ "query": "query: ", "passage": "passage: " }` for e5-family models) |
+| `max_input_tokens` | number | | Cap input to the model's context window (e.g. `512` for `multilingual-e5-small`); the chunker fits chunks to this budget so content is not truncated at the model boundary |
 
 **Returns:** `{ ok: boolean, preset_name: string, error?: string }`
 
@@ -367,7 +369,7 @@ Check what is currently running or queued in the reindex queue. Use this before 
 |-----------|------|----------|-------------|
 | `project_id` | string | | Filter to a specific project (omit for all projects) |
 
-**Returns:** `{ running: [...], queued: [...] }` — each entry has `job_id`, `project_id`, `source_id`, `mode`, `started_at`/`queued_at`.
+**Returns:** `{ running: [...], queued: [...], awaiting_migration: [...] }` — each `running`/`queued` entry has `job_id`, `project_id`, `source_id`, `mode`, `started_at`/`queued_at`. `awaiting_migration` lists large local-embedder sources that need a manual full reindex after an embedding-config upgrade (small sources are auto-enqueued instead).
 
 ---
 

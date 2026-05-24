@@ -121,17 +121,20 @@ tests/fixtures/
 
 ## Reranking
 
-Optional post-retrieval re-scoring. Requires a reranking-capable provider (e.g. Voyage AI `rerank-2.5`).
+Optional post-retrieval re-scoring. Use a reranking-capable HTTP provider (e.g. Voyage AI `rerank-2.5`) or the in-process local cross-encoder.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCRYBE_RERANK` | `false` | Set to `true` to enable reranking. |
-| `SCRYBE_RERANK_MODEL` | `rerank-2.5` | Reranker model. Auto-detected for Voyage AI. |
-| `SCRYBE_RERANK_BASE_URL` | — | Reranker endpoint for non-Voyage providers. |
-| `SCRYBE_RERANK_API_KEY` | `EMBEDDING_API_KEY` | API key for reranking. |
+| `SCRYBE_RERANK_PROVIDER` | `http` | `http` (Voyage / custom endpoint) or `local` (in-process cross-encoder, no API key). |
+| `SCRYBE_RERANK_MODEL` | `rerank-2.5` / `Xenova/ms-marco-MiniLM-L-6-v2` | Reranker model. Default depends on provider; auto-detected for Voyage AI. |
+| `SCRYBE_RERANK_BASE_URL` | — | Reranker endpoint for non-Voyage HTTP providers. |
+| `SCRYBE_RERANK_API_KEY` | `EMBEDDING_API_KEY` | API key for HTTP reranking (not needed for `local`). |
 | `SCRYBE_RERANK_FETCH_MULTIPLIER` | `5` | Candidate pool = `top_k × multiplier` before reranking. |
+| `SCRYBE_RERANK_BLEND_TOP3` | `0.75,0.25` | Retrieval,rerank weight blend for results at original rank ≤ 3. |
+| `SCRYBE_RERANK_BLEND_TAIL` | `0.40,0.60` | Retrieval,rerank weight blend for results at original rank ≥ 11. |
 
-When using Voyage AI, set only `SCRYBE_RERANK=true` — endpoint and model are auto-detected from `EMBEDDING_BASE_URL`.
+When using Voyage AI, set only `SCRYBE_RERANK=true` — endpoint and model are auto-detected from `EMBEDDING_BASE_URL`. For a free, no-API-key option on any provider, set `SCRYBE_RERANK=true` and `SCRYBE_RERANK_PROVIDER=local` (downloads `Xenova/ms-marco-MiniLM-L-6-v2`, ~22 MB, on first use). Position-aware blending weights the first-stage rank against the reranker score, interpolating between the top-3 and tail weights above.
 
 ---
 

@@ -9,6 +9,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.37.0] — 2026-05-24
+
+### Added
+
+- **Local cross-encoder reranker.** Set `SCRYBE_RERANK=true` with `SCRYBE_RERANK_PROVIDER=local` to rerank results in-process via `Xenova/ms-marco-MiniLM-L-6-v2` (~22 MB, no API key, no sidecar). Previously reranking auto-configured only for Voyage AI; non-Voyage setups now have a free local option. Position-aware blending weights the first-stage rank against the reranker score by position, tunable via `SCRYBE_RERANK_BLEND_TOP3` / `SCRYBE_RERANK_BLEND_TAIL`.
+- **Per-preset `prompt_template`.** Embedding presets can specify asymmetric `query` / `passage` prefixes. The default local presets now apply the `query: ` / `passage: ` prefixes that the bundled e5 model (`multilingual-e5-small`) is trained for.
+- **Per-preset `max_input_tokens`.** Embedding presets can cap input size to the model's context window (default 512 for the local e5 presets). The chunker fits chunks to that budget, so content is no longer silently truncated at the model boundary during embedding.
+
+### Changed
+
+- **Local-embedder users: a one-time reindex is required on upgrade** to apply the new query/passage prefixes and token budget. The daemon auto-enqueues it on next start for sources under 50k chunks; larger sources pause for confirmation (visible via the `queue_status` MCP tool) so you control when the re-embed runs.
+
+---
+
 ## [0.36.3] — 2026-05-21
 
 ### Fixed
@@ -60,33 +74,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.34.0] — 2026-05-11
-
-### Added
-
-- **`@lancedb/lancedb` upgraded 0.14 → 0.27.** Apache Arrow stays pinned at ^17. Existing data is read transparently; no migration required. Because the running daemon holds the old lancedb native binding open, upgrading requires a daemon restart (and on Windows, closing IDE / Claude Code sessions first to release the file lock). See README's "Upgrading from v0.33.x to v0.34.0" block for the required sequence.
-- **`daemon-version-mismatch` MCP variant.** New variant of the existing `scrybe_daemon_unavailable` tool fires when the shim is v0.34.0+ but the running daemon is still on a pre-0.34.0 version. Tool description front-loads `scrybe daemon stop && scrybe daemon start`, so the recovery dance shows up in Claude Code's MCP UI instead of an opaque "daemon broken" state.
-
-### Changed
-
-- **MCP cold-boot measurement clarified.** Shim mode via `npx -y scrybe-cli@latest mcp` is ~900 ms (mostly npx cache-revalidation overhead). The recommended `"command": "scrybe"` config with a global install measures closer to <500 ms. v0.33.0's CHANGELOG quoted the global-install number without noting the npx caveat.
-
-### Deprecated
-
-- **In-process MCP mode (`scrybe mcp --legacy-in-process`)** remains deprecated. Removal target was previously v0.34.0; pushed to a future minor pending wider shim-mode validation on Linux. Continues to print a stderr warning at boot.
-
----
-
 ## Older releases
 
-For releases v0.33.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.34.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.36.3...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/siaarzh/scrybe/compare/v0.36.3...v0.37.0
 [0.36.3]: https://github.com/siaarzh/scrybe/compare/v0.36.2...v0.36.3
 [0.36.2]: https://github.com/siaarzh/scrybe/compare/v0.36.1...v0.36.2
 [0.36.1]: https://github.com/siaarzh/scrybe/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/siaarzh/scrybe/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/siaarzh/scrybe/compare/v0.34.0...v0.35.0
-[0.34.0]: https://github.com/siaarzh/scrybe/compare/v0.33.0...v0.34.0
