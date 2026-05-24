@@ -273,13 +273,14 @@ export const listJobsTool: Tool<
 
 export const queueStatusTool: Tool<
   { project_id?: string },
-  { running: unknown[]; queued: unknown[] }
+  { running: unknown[]; queued: unknown[]; awaiting_migration?: unknown[] }
 > = {
   spec: {
     name: "queue_status",
     description:
       "Check what is currently running or queued in the reindex queue. " +
-      "Before triggering a reindex, call this to see if the daemon already has a pending or in-flight job for the project — polling reindex_status on the existing job is cheaper than submitting a duplicate.",
+      "Before triggering a reindex, call this to see if the daemon already has a pending or in-flight job for the project — polling reindex_status on the existing job is cheaper than submitting a duplicate. " +
+      "The awaiting_migration array lists large local-embedder sources that need a manual full reindex after an embedding-config upgrade.",
     inputSchema: {
       type: "object",
       properties: {
@@ -289,18 +290,18 @@ export const queueStatusTool: Tool<
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
   handler: async ({ project_id }) => {
-    // Prefer daemon's view (includes jobs from all processes)
+    // Prefer daemon's view (includes jobs from all processes and awaiting_migration state)
     const client = DaemonClient.fromPidfile();
     if (client) {
       try {
         return await client.queueStatus(project_id);
       } catch { /* daemon not running */ }
     }
-    // In-process fallback
+    // In-process fallback (daemon not running — awaiting_migration not available out-of-process)
     try {
-      return getQueueStatus(project_id);
+      return { ...getQueueStatus(project_id), awaiting_migration: [] };
     } catch {
-      return { running: [], queued: [] };
+      return { running: [], queued: [], awaiting_migration: [] };
     }
   },
 };

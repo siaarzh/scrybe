@@ -6,6 +6,20 @@ export interface EmbeddingConfig {
   // When absent or "api", uses the OpenAI-compatible HTTP client (existing behaviour).
   // When "local", uses the in-process @xenova/transformers pipeline; base_url and api_key_env are ignored.
   provider_type?: "api" | "local";
+  /**
+   * Optional asymmetric prompt templates (Plan 77 / Plan 70).
+   * Only used when provider_type === "local". When set, prepends `query` to query text
+   * and `passage` to each passage text before passing to the embedding pipeline.
+   */
+  prompt_template?: { query: string; passage: string };
+  /**
+   * Per-preset maximum input token budget (Plan 77).
+   * When set, derives a char cap of `max_input_tokens * 4` (heuristic).
+   * The chunker uses this to prevent oversized chunks; the embedder applies it
+   * as a final safety net via truncation.
+   * Unset = legacy 32_000-char behavior.
+   */
+  max_input_tokens?: number;
 }
 
 export type SourceConfig =
@@ -22,6 +36,14 @@ export interface Source {
   table_name?: string; // assigned at first index, immutable after
   last_indexed?: string;
   pinned_branches?: string[]; // code sources only; daemon indexes these in background
+  /**
+   * Schema version for the embedding vectors stored in this source's table.
+   * Absent or 1 = legacy (pre-prefix, pre-token-cap — Plan 77 Slices 3+4 not yet applied).
+   * 2 = current (prompt_template + max_input_tokens applied — Plan 77).
+   * Stamped by the indexer on every successful full or incremental reindex.
+   * Used by the daemon cold-start migration scan to detect sources that need reindex.
+   */
+  embedding_schema_version?: number;
 }
 
 export interface Project {

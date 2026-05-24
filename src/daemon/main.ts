@@ -304,6 +304,29 @@ export async function runDaemon(): Promise<void> {
     } catch { /* non-fatal */ }
   })();
 
+  // Embedding migration scan: runs once per cold start after queue + watchers are wired.
+  // Auto-enqueues full reindex for local-preset sources with schema version < 2 that
+  // are below the 50k-chunk threshold. Larger sources go into awaiting_user_confirm
+  // (visible via queue_status). Voyage/OpenAI sources are skipped entirely.
+  // Runs in background — never blocks startup.
+  void (async () => {
+    try {
+      const { runEmbeddingMigrationScan } = await import("./embedding-migration-scan.js");
+      const awaiting = await runEmbeddingMigrationScan();
+      if (awaiting.length > 0) {
+        daemonLog(
+          `[scrybe daemon] embedding migration scan: ${awaiting.length} large source(s) need manual reindex ` +
+          `(call mcp__scrybe__reindex_source for each)`
+        );
+      }
+    } catch (err) {
+      // Non-fatal — migration scan must not crash the daemon
+      process.stderr.write(
+        `[scrybe daemon] embedding migration scan failed: ${err instanceof Error ? err.message : String(err)}\n`
+      );
+    }
+  })();
+
   writePidfile({
     pid: process.pid,
     port,

@@ -237,7 +237,8 @@ export function synthesizeWizardConfig(input: WizardInput, priorEnvKeys?: Set<st
     const matchingEmbeddingPreset =
       Object.entries(embeddingPresets).find(([, ep]) => ep.provider === input.rerank!.provider);
     const rerankPreset: RerankerPreset = {
-      provider: input.rerank.provider,
+      // provider omitted → defaults to "http" (wizard always creates HTTP reranker presets;
+      // the catalog name previously stored here was unused at runtime)
       model: input.rerank.model,
     };
     if (matchingEmbeddingPreset) {

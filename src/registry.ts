@@ -297,6 +297,8 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       // The embedder reads process.env[api_key_env]; we inject the resolved value there.
       api_key_env: _injectCredential(presetName, resolved.credentials),
       provider_type: resolved.provider === "local" ? "local" : "api",
+      prompt_template: resolved.prompt_template,
+      max_input_tokens: resolved.max_input_tokens,
     };
   }
 

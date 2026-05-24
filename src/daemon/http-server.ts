@@ -469,8 +469,15 @@ async function handle(
     const projectId = url.searchParams.get("project_id") ?? undefined;
     try {
       const qs = getQueueStatus(projectId);
-      jsonRes(res, 200, qs);
-    } catch { jsonRes(res, 200, { running: [], queued: [] }); }
+      // Augment with awaiting_migration from the cold-start scan (Plan 77 Slice 6).
+      // Lazy import: module may not be loaded if daemon started without the scan.
+      let awaitingMigration: unknown[] = [];
+      try {
+        const { getAwaitingMigration } = await import("./embedding-migration-scan.js");
+        awaitingMigration = getAwaitingMigration(projectId);
+      } catch { /* scan module not loaded — non-fatal */ }
+      jsonRes(res, 200, { ...qs, awaiting_migration: awaitingMigration });
+    } catch { jsonRes(res, 200, { running: [], queued: [], awaiting_migration: [] }); }
     return;
   }
 

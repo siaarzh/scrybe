@@ -67,10 +67,9 @@ describe("detectBrokenInstall", () => {
       return {
         ...actual,
         createRequire: (_url: string) => {
-          // Build a fake require that always throws for these two
+          // Build a fake require that throws for this landmark dep
           const fakeResolve = (id: string): string => {
-            if (id === "sharp/package.json" || id === "sharp" ||
-                id === "@xenova/transformers/package.json" || id === "@xenova/transformers") {
+            if (id === "@xenova/transformers/package.json" || id === "@xenova/transformers") {
               throw new Error(`Cannot find module '${id}'`);
             }
             // Return a dummy path for all others
@@ -87,7 +86,6 @@ describe("detectBrokenInstall", () => {
     const { detectBrokenInstall } = await import("../src/install-doctor.js");
     const result = detectBrokenInstall();
     expect(result).not.toBeNull();
-    expect(result!.missing).toContain("sharp");
     expect(result!.missing).toContain("@xenova/transformers");
   });
 });

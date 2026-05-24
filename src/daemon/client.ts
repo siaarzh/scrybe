@@ -155,7 +155,7 @@ export class DaemonClient {
   }
 
   /** Get running + queued jobs for a project (or all projects). */
-  async queueStatus(projectId?: string): Promise<{ running: unknown[]; queued: unknown[] }> {
+  async queueStatus(projectId?: string): Promise<{ running: unknown[]; queued: unknown[]; awaiting_migration?: unknown[] }> {
     const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return this._get(`/queue-status${qs}`);
   }

@@ -270,7 +270,8 @@ function astChunks(
   source: string,
   langKey: LanguageKey,
   lineOffset: number,
-  parser: TsParser
+  parser: TsParser,
+  maxChars?: number
 ): CodeChunk[] {
   const declTypes = DECLARATION_TYPES[langKey];
   let tree: TsTree;
@@ -288,15 +289,18 @@ function astChunks(
 
   for (const decl of decls) {
     const declLines = decl.endLine - decl.startLine + 1;
-    if (declLines <= config.chunkSize) {
-      const content = decl.content.trim();
+    const declContent = decl.content.trim();
+    // Split if the declaration exceeds line-count limit OR char cap
+    const fitsInOneLine = declLines <= config.chunkSize &&
+      (maxChars === undefined || declContent.length <= maxChars);
+    if (fitsInOneLine) {
       chunks.push(stampChunkId({
         project_id: projectId,
         source_id: sourceId,
         item_path: relPath,
         item_url: "",
         item_type: "code",
-        content,
+        content: declContent,
         start_line: decl.startLine + 1,
         end_line: decl.endLine + 1,
         language: langKey,
@@ -306,7 +310,7 @@ function astChunks(
       // Too large — split with sliding window, keep symbol_name on first sub-chunk
       const declLineSlice = lines.slice(decl.startLine, decl.endLine + 1);
       let first = true;
-      for (const window of chunkLines(declLineSlice, decl.startLine)) {
+      for (const window of chunkLines(declLineSlice, decl.startLine, maxChars)) {
         chunks.push(stampChunkId({
           project_id: projectId,
           source_id: sourceId,
@@ -334,11 +338,12 @@ function slidingWindowChunks(
   sourceId: string,
   relPath: string,
   source: string,
-  language: string
+  language: string,
+  maxChars?: number
 ): CodeChunk[] {
   const lines = source.split(/^/m);
   const chunks: CodeChunk[] = [];
-  for (const { start, end, content } of chunkLines(lines)) {
+  for (const { start, end, content } of chunkLines(lines, 0, maxChars)) {
     chunks.push(stampChunkId({
       project_id: projectId,
       source_id: sourceId,
@@ -499,7 +504,8 @@ export function chunkFileContent(
   sourceId: string,
   relPath: string,
   source: string,
-  language: string
+  language: string,
+  maxChars?: number
 ): CodeChunk[] {
   tryInitTreeSitter();
   // Vue: extract <script> block, parse as TypeScript
@@ -508,21 +514,21 @@ export function chunkFileContent(
     if (extracted) {
       const parser = getParser("typescript");
       if (parser) {
-        const chunks = astChunks(projectId, sourceId, relPath, extracted.code, "typescript", extracted.lineOffset, parser);
+        const chunks = astChunks(projectId, sourceId, relPath, extracted.code, "typescript", extracted.lineOffset, parser, maxChars);
         if (chunks.length > 0) return chunks;
       }
     }
-    return slidingWindowChunks(projectId, sourceId, relPath, source, language);
+    return slidingWindowChunks(projectId, sourceId, relPath, source, language, maxChars);
   }
 
   const langKey = LANGUAGE_TO_KEY[language];
   if (langKey) {
     const parser = getParser(language);
     if (parser) {
-      const chunks = astChunks(projectId, sourceId, relPath, source, langKey, 0, parser);
+      const chunks = astChunks(projectId, sourceId, relPath, source, langKey, 0, parser, maxChars);
       if (chunks.length > 0) return chunks;
     }
   }
 
-  return slidingWindowChunks(projectId, sourceId, relPath, source, language);
+  return slidingWindowChunks(projectId, sourceId, relPath, source, language, maxChars);
 }

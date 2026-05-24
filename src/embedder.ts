@@ -2,8 +2,21 @@ import OpenAI from "openai";
 import type { EmbeddingConfig } from "./types.js";
 import { embedLocalBatched, embedLocalQuery } from "./local-embedder.js";
 
-// Character limit proxy for token truncation (~4 chars/token, 8000 tokens)
-const MAX_CHARS = 32_000;
+// Default character limit proxy for token truncation (~4 chars/token, 8000 tokens).
+// Used for API providers (Voyage, OpenAI) that have large context windows.
+const DEFAULT_MAX_CHARS = 32_000;
+
+/**
+ * Derive the character cap for a given embedding config.
+ * When max_input_tokens is set, returns max_input_tokens * 4 (the chars/4 heuristic reversed).
+ * Otherwise falls back to the legacy 32_000-char default.
+ */
+export function getCharCap(embConfig: EmbeddingConfig): number {
+  if (embConfig.max_input_tokens !== undefined) {
+    return embConfig.max_input_tokens * 4;
+  }
+  return DEFAULT_MAX_CHARS;
+}
 
 /** Mutable state carried across batch iterations within a single indexing run. */
 export interface HalvingSession {
@@ -12,8 +25,8 @@ export interface HalvingSession {
   halved: boolean;
 }
 
-function truncate(text: string): string {
-  return text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text;
+function truncate(text: string, maxChars: number): string {
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
 }
 
 // Client cache keyed by "{base_url}:{api_key_env}" to avoid recreating on every call
@@ -40,10 +53,11 @@ function getClient(embConfig: EmbeddingConfig): OpenAI {
 
 async function embedTextsOnce(texts: string[], embConfig: EmbeddingConfig): Promise<number[][]> {
   const client = getClient(embConfig);
+  const maxChars = getCharCap(embConfig);
 
   const response = await client.embeddings.create({
     model: embConfig.model,
-    input: texts.map(truncate),
+    input: texts.map((t) => truncate(t, maxChars)),
   });
   const sorted = response.data
     .sort((a, b) => a.index - b.index)
@@ -133,7 +147,7 @@ export async function embedBatched(
   session?: HalvingSession
 ): Promise<number[][]> {
   if (embConfig.provider_type === "local") {
-    return embedLocalBatched(texts, { modelId: embConfig.model, dimensions: embConfig.dimensions }, batchSize);
+    return embedLocalBatched(texts, { modelId: embConfig.model, dimensions: embConfig.dimensions, prompt_template: embConfig.prompt_template, maxChars: embConfig.max_input_tokens !== undefined ? embConfig.max_input_tokens * 4 : undefined }, batchSize);
   }
   const results: number[][] = [];
   for (let i = 0; i < texts.length; ) {
@@ -154,7 +168,7 @@ export async function embedBatched(
 
 export async function embedQuery(query: string, embConfig: EmbeddingConfig): Promise<number[]> {
   if (embConfig.provider_type === "local") {
-    return embedLocalQuery(query, { modelId: embConfig.model, dimensions: embConfig.dimensions });
+    return embedLocalQuery(query, { modelId: embConfig.model, dimensions: embConfig.dimensions, prompt_template: embConfig.prompt_template });
   }
   const [embedding] = await embedTexts([query], embConfig);
   return embedding;

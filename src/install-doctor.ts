@@ -19,7 +19,6 @@ import { spawnSync, spawn } from "node:child_process";
 // Most likely to be left half-extracted when npm is SIGTERM'd.
 const LANDMARK_DEPS = [
   "@xenova/transformers",
-  "sharp",
   "@lancedb/lancedb",
   "apache-arrow",
   "@modelcontextprotocol/sdk",

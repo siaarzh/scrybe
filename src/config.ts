@@ -210,6 +210,58 @@ function buildEmbeddingConfig() {
   return { baseUrl, model, dimensions, configError, providerType: "api" as const };
 }
 
+/**
+ * Parse a blend weight pair from an env-var string like "0.75,0.25".
+ * Returns [w_retrieval, w_rerank] or throws with a descriptive error.
+ * Rules: exactly 2 comma-separated floats, sum within ±0.01 of 1.0.
+ */
+export function parseBlendWeights(raw: string, envVarName: string): [number, number] {
+  const parts = raw.split(",");
+  if (parts.length !== 2) {
+    throw new Error(
+      `${envVarName}="${raw}" is invalid: expected exactly 2 comma-separated floats (e.g. "0.75,0.25")`
+    );
+  }
+  const w0 = parseFloat(parts[0]!);
+  const w1 = parseFloat(parts[1]!);
+  if (!isFinite(w0) || !isFinite(w1)) {
+    throw new Error(
+      `${envVarName}="${raw}" is invalid: values must be finite numbers`
+    );
+  }
+  const sum = w0 + w1;
+  if (Math.abs(sum - 1.0) > 0.01) {
+    throw new Error(
+      `${envVarName}="${raw}" is invalid: weights must sum to 1.0 (±0.01), got ${sum.toFixed(4)}`
+    );
+  }
+  return [w0, w1];
+}
+
+function buildRerankBlendConfig() {
+  const top3Raw = process.env.SCRYBE_RERANK_BLEND_TOP3 ?? "0.75,0.25";
+  const tailRaw = process.env.SCRYBE_RERANK_BLEND_TAIL ?? "0.40,0.60";
+
+  let rerankBlendTop3: [number, number];
+  let rerankBlendTail: [number, number];
+
+  try {
+    rerankBlendTop3 = parseBlendWeights(top3Raw, "SCRYBE_RERANK_BLEND_TOP3");
+  } catch (e) {
+    console.error(`[scrybe] ${e instanceof Error ? e.message : String(e)}. Using default "0.75,0.25".`);
+    rerankBlendTop3 = [0.75, 0.25];
+  }
+
+  try {
+    rerankBlendTail = parseBlendWeights(tailRaw, "SCRYBE_RERANK_BLEND_TAIL");
+  } catch (e) {
+    console.error(`[scrybe] ${e instanceof Error ? e.message : String(e)}. Using default "0.40,0.60".`);
+    rerankBlendTail = [0.40, 0.60];
+  }
+
+  return { rerankBlendTop3, rerankBlendTail };
+}
+
 function buildRerankConfig() {
   const enabled = process.env.SCRYBE_RERANK === "true";
   const apiKey = process.env.SCRYBE_RERANK_API_KEY ?? "";
@@ -217,20 +269,36 @@ function buildRerankConfig() {
     process.env.SCRYBE_RERANK_FETCH_MULTIPLIER ?? "5",
     10
   );
+  const blend = buildRerankBlendConfig();
 
   if (!enabled) {
-    return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+    return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier, rerankProviderType: "http" as const, ...blend };
   }
 
-  // Explicit custom provider
+  // Local cross-encoder: SCRYBE_RERANK_PROVIDER=local (Plan 77 Slice 5)
+  const rerankProviderEnv = process.env.SCRYBE_RERANK_PROVIDER;
+  if (rerankProviderEnv === "local") {
+    const model = process.env.SCRYBE_RERANK_MODEL ?? "Xenova/ms-marco-MiniLM-L-6-v2";
+    return {
+      rerankEnabled: true,
+      rerankBaseUrl: "",
+      rerankModel: model,
+      rerankApiKey: apiKey,
+      rerankFetchMultiplier: fetchMultiplier,
+      rerankProviderType: "local" as const,
+      ...blend,
+    };
+  }
+
+  // Explicit custom HTTP provider
   const explicitUrl = process.env.SCRYBE_RERANK_BASE_URL;
   if (explicitUrl) {
     const model = process.env.SCRYBE_RERANK_MODEL ?? "";
     if (!model) {
       console.error("[scrybe] SCRYBE_RERANK_BASE_URL is set but SCRYBE_RERANK_MODEL is missing. Reranking disabled.");
-      return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+      return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier, rerankProviderType: "http" as const, ...blend };
     }
-    return { rerankEnabled: true, rerankBaseUrl: explicitUrl, rerankModel: model, rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+    return { rerankEnabled: true, rerankBaseUrl: explicitUrl, rerankModel: model, rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier, rerankProviderType: "http" as const, ...blend };
   }
 
   // Auto-detect Voyage from embedding provider — keep rerank-on-Voyage convenience,
@@ -244,15 +312,19 @@ function buildRerankConfig() {
       rerankModel: process.env.SCRYBE_RERANK_MODEL ?? "rerank-2.5",
       rerankApiKey: apiKey,  // SCRYBE_RERANK_API_KEY only; no fallback to embedding key
       rerankFetchMultiplier: fetchMultiplier,
+      rerankProviderType: "http" as const,
+      ...blend,
     };
   }
 
   console.error(
-    "[scrybe] SCRYBE_RERANK=true is set but your embedding provider does not support auto-configured reranking " +
-    "(only Voyage AI is supported). Reranking is DISABLED. " +
-    "Either remove SCRYBE_RERANK=true, switch to Voyage AI, or set SCRYBE_RERANK_BASE_URL + SCRYBE_RERANK_MODEL explicitly."
+    "[scrybe] SCRYBE_RERANK=true is set but your embedding provider does not support auto-configured reranking. " +
+    "Options: set SCRYBE_RERANK_PROVIDER=local for in-process cross-encoder (no API key needed), " +
+    "switch to Voyage AI for auto-configured HTTP reranking, or " +
+    "set SCRYBE_RERANK_BASE_URL + SCRYBE_RERANK_MODEL for a custom HTTP reranker. " +
+    "Reranking is DISABLED."
   );
-  return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier };
+  return { rerankEnabled: false, rerankBaseUrl: "", rerankModel: "", rerankApiKey: apiKey, rerankFetchMultiplier: fetchMultiplier, rerankProviderType: "http" as const, ...blend };
 }
 
 function buildKnowledgeEmbeddingConfig() {
@@ -374,10 +446,33 @@ export interface EmbeddingPreset {
   base_url?: string;
   /** Custom-provider only: embedding dimensions (not in catalog). */
   dim?: number;
+  /**
+   * Per-preset asymmetric prompt templates (Plan 77 / Plan 70).
+   * When set, the query string is prepended with `query` before embedding,
+   * and each passage is prepended with `passage` before embedding.
+   * Required for e5-family models (e.g. multilingual-e5-small) which are
+   * trained with asymmetric query/passage geometry.
+   * Example: { query: "query: ", passage: "passage: " }
+   */
+  prompt_template?: { query: string; passage: string };
+  /**
+   * Per-preset maximum input token budget (Plan 77).
+   * When set, the chunker enforces a char cap of `max_input_tokens * 4` (heuristic)
+   * so no single chunk silently truncates at the ONNX/API boundary.
+   * The embedder also applies this cap as a final safety net.
+   * Default for local e5-small: 512. Unset = retain legacy 32_000-char behavior.
+   */
+  max_input_tokens?: number;
 }
 
 export interface RerankerPreset {
-  provider: string;
+  /**
+   * Reranker backend (Plan 77 Slice 5).
+   * - "http": HTTP endpoint (OpenAI-compatible rerank API). Requires baseUrl (via env or config).
+   * - "local": In-process cross-encoder via @xenova/transformers. No API key required.
+   * Default: "http" (backward-compatible with existing Voyage AI / custom HTTP setups).
+   */
+  provider?: "local" | "http";
   model: string;
   /** Reuse credentials from a named embedding preset (avoids duplicate paste). */
   credentials_from?: string;
@@ -410,6 +505,22 @@ function validateScrybeConfig(obj: unknown): string | null {
     const p = preset as Record<string, unknown>;
     if (typeof p["provider"] !== "string") return `config.json: embedding_presets.${name}.provider missing`;
     if (typeof p["model"] !== "string") return `config.json: embedding_presets.${name}.model missing`;
+    if (p["prompt_template"] !== undefined) {
+      const pt = p["prompt_template"];
+      if (typeof pt !== "object" || pt === null) {
+        return `config.json: embedding_presets.${name}.prompt_template must be an object`;
+      }
+      const ptObj = pt as Record<string, unknown>;
+      if (typeof ptObj["query"] !== "string") {
+        return `config.json: embedding_presets.${name}.prompt_template.query must be a string`;
+      }
+      if (typeof ptObj["passage"] !== "string") {
+        return `config.json: embedding_presets.${name}.prompt_template.passage must be a string`;
+      }
+    }
+    if (p["max_input_tokens"] !== undefined && typeof p["max_input_tokens"] !== "number") {
+      return `config.json: embedding_presets.${name}.max_input_tokens must be a number`;
+    }
   }
   if (typeof c["assignments"] !== "object" || c["assignments"] === null) {
     return "config.json: missing assignments";

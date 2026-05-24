@@ -2,6 +2,9 @@
  * Unit tests for src/local-embedder.ts — in-process WASM/ONNX embedder.
  * Uses the all-MiniLM-L6-v2 model (already cached from test sidecar) to keep tests fast.
  * Does NOT test production model accuracy — that is covered by the benchmark harness.
+ *
+ * prompt_template prefix tests live in local-embedder-prefix.test.ts (separate file
+ * to allow vi.mock("@xenova/transformers") hoisting before module import).
  */
 import { describe, it, expect, afterAll } from "vitest";
 import {

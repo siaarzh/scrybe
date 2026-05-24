@@ -17,6 +17,18 @@ export interface ResolvedEmbedding {
   /** Resolved credential value (not an env-var ref). May be empty for auth:none providers. */
   credentials: string;
   profile: "code" | "text";
+  /**
+   * Optional asymmetric prompt templates (Plan 77 / Plan 70).
+   * Only meaningful for local provider. When set, prepend `query` to query text
+   * and `passage` to each passage text before embedding.
+   */
+  prompt_template?: { query: string; passage: string };
+  /**
+   * Per-preset maximum input token budget (Plan 77).
+   * When set, the chunker enforces a char cap of `max_input_tokens * 4` (heuristic).
+   * Unset = retain legacy 32_000-char behavior.
+   */
+  max_input_tokens?: number;
 }
 
 /**
@@ -116,5 +128,5 @@ export function resolvePreset(
     credentials = resolveEnvRef(preset.credentials);
   }
 
-  return { provider, model, dim, base_url, credentials, profile };
+  return { provider, model, dim, base_url, credentials, profile, prompt_template: preset.prompt_template, max_input_tokens: preset.max_input_tokens };
 }

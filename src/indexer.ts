@@ -2,7 +2,7 @@ import { getProject, getSource, updateSource, assignTableName, resolveEmbeddingC
 import { loadCursor, saveCursor, deleteCursor } from "./cursors.js";
 import { getPlugin } from "./plugins/index.js";
 import type { AnyChunk } from "./plugins/base.js";
-import { embedBatched, type HalvingSession } from "./embedder.js";
+import { embedBatched, getCharCap, type HalvingSession } from "./embedder.js";
 import { readEntry, writeEntry, computeProbeSize } from "./embed-batch-state.js";
 import {
   upsert,
@@ -21,13 +21,14 @@ import {
 import { listManifestsSorted, isManifestClean, getExpectedDimensions } from "./health-probe.js";
 import { createHash } from "node:crypto";
 import { gitExec, gitExecOrThrow } from "./util/git-exec.js";
-import { appendFileSync, existsSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
 import { withBranchSession, resolveBranchForPath, setLastIndexedSha, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
-import { getLanguage } from "./chunker.js";
+import { getLanguage, walkRepoFiles } from "./chunker.js";
+import { normalizeContent } from "./normalize.js";
 import { diagEmit } from "./daemon/events.js";
 
 // ─── Indexer debug mode ───────────────────────────────────────────────────────
@@ -459,9 +460,12 @@ export async function indexSource(
 
       let currentKey: string | null = null;
 
+      const maxChars = isCode ? getCharCap(embConfig) : undefined;
       const chunkIter = isNonHeadBranch
-        ? fetchChunksFromRef(projectId, sourceId, toReindex, nonHeadContentCache)
-        : plugin.fetchChunks(project, source, toReindex);
+        ? fetchChunksFromRef(projectId, sourceId, toReindex, nonHeadContentCache, maxChars)
+        : isCode
+          ? fetchChunksFromWorkingTree(projectId, sourceId, rootPath, toReindex, maxChars)
+          : plugin.fetchChunks(project, source, toReindex);
 
       for await (const chunk of chunkIter) {
         checkAbort(signal);
@@ -516,7 +520,9 @@ export async function indexSource(
       }
 
       const now = new Date().toISOString();
-      updateSource(projectId, sourceId, { last_indexed: now });
+      // Stamp embedding_schema_version=2 on every successful reindex so the
+      // cold-start migration scan can skip up-to-date sources (Plan 77 Slice 6).
+      updateSource(projectId, sourceId, { last_indexed: now, embedding_schema_version: 2 });
       if (!isNonHeadBranch) {
         saveCursor(projectId, sourceId, now);
       }
@@ -641,13 +647,34 @@ async function* fetchChunksFromRef(
   projectId: string,
   sourceId: string,
   toReindex: Set<string>,
-  contentCache: Map<string, string>
+  contentCache: Map<string, string>,
+  maxChars?: number
 ): AsyncGenerator<AnyChunk> {
   for (const relPath of toReindex) {
     const content = contentCache.get(relPath);
     if (content == null) continue;
     const lang = getLanguage(basename(relPath)) ?? "";
-    yield* chunkFileContent(projectId, sourceId, relPath, content, lang) as AnyChunk[];
+    yield* chunkFileContent(projectId, sourceId, relPath, content, lang, maxChars) as AnyChunk[];
+  }
+}
+
+async function* fetchChunksFromWorkingTree(
+  projectId: string,
+  sourceId: string,
+  rootPath: string,
+  toReindex: Set<string>,
+  maxChars?: number
+): AsyncGenerator<AnyChunk> {
+  for (const { relPath, absPath } of walkRepoFiles(rootPath, projectId, sourceId)) {
+    if (!toReindex.has(relPath)) continue;
+    let content: string;
+    try {
+      content = normalizeContent(readFileSync(absPath, "utf8"));
+    } catch {
+      continue;
+    }
+    const lang = getLanguage(basename(relPath)) ?? "";
+    yield* chunkFileContent(projectId, sourceId, relPath, content, lang, maxChars) as AnyChunk[];
   }
 }
 

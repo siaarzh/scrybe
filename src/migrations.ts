@@ -200,6 +200,8 @@ export function synthesizeMigrationConfig(
     embeddingPresets[codePresetName] = {
       provider: "local",
       model: "Xenova/multilingual-e5-small",
+      prompt_template: { query: "query: ", passage: "passage: " },
+      max_input_tokens: 512,
     };
   }
 
@@ -230,6 +232,8 @@ export function synthesizeMigrationConfig(
     embeddingPresets[textPresetName] = {
       provider: "local",
       model: "Xenova/multilingual-e5-small",
+      prompt_template: { query: "query: ", passage: "passage: " },
+      max_input_tokens: 512,
     };
   } else {
     // Code is set but knowledge is not — fall back to local default for text.
@@ -239,6 +243,8 @@ export function synthesizeMigrationConfig(
     embeddingPresets[textPresetName] = {
       provider: "local",
       model: "Xenova/multilingual-e5-small",
+      prompt_template: { query: "query: ", passage: "passage: " },
+      max_input_tokens: 512,
     };
   }
 
@@ -266,7 +272,8 @@ export function synthesizeMigrationConfig(
         const defaultRerankModel = Object.keys(providerSpec.rerank_models!)[0]!;
         cfg.reranker_presets = {
           [rerankPresetName]: {
-            provider: codePreset.provider,
+            // provider omitted → defaults to "http" (HTTP reranker; catalog name
+            // was previously stored here but was unused at runtime)
             model: defaultRerankModel,
             credentials_from: codePresetName,
           },
@@ -474,6 +481,84 @@ const MIGRATIONS: Migration[] = [
     id: "init-config-v0.32.0",
     async run() {
       await migrateToConfigJson();
+    },
+  },
+  {
+    // Plan 77 / Plan 70: Auto-add prompt_template to existing local-default-* e5 presets
+    // that were created before this field existed. Only adds the template when ALL of:
+    //   1. preset name starts with "local-default-" (user-defined presets are left alone)
+    //   2. preset provider is "local"
+    //   3. preset model contains "e5" (only e5-family models need these prefixes)
+    //   4. prompt_template is not already set (idempotent)
+    // Non-e5 local models (e.g. BGE, all-MiniLM) are NOT touched.
+    id: "add-e5-prompt-template-v0.37.0",
+    async run() {
+      const { readScrybeConfig, writeScrybeConfig } = await import("./config.js");
+      const cfg = readScrybeConfig();
+      if (!cfg) return; // no config.json yet — nothing to upgrade
+
+      let changed = false;
+      for (const [name, preset] of Object.entries(cfg.embedding_presets)) {
+        if (
+          name.startsWith("local-default-") &&
+          preset.provider === "local" &&
+          /e5/i.test(preset.model) &&
+          preset.prompt_template === undefined
+        ) {
+          cfg.embedding_presets[name] = {
+            ...preset,
+            prompt_template: { query: "query: ", passage: "passage: " },
+          };
+          changed = true;
+          process.stderr.write(
+            `[scrybe] migration: added prompt_template to local e5 preset "${name}" ` +
+            `(model: ${preset.model}). A full reindex is recommended for local-embedder sources.\n`
+          );
+        }
+      }
+
+      if (changed) {
+        writeScrybeConfig(cfg);
+      }
+    },
+  },
+  {
+    // Plan 77: Auto-add max_input_tokens to existing local-default-* e5 presets
+    // that were created before this field existed. Only adds the field when ALL of:
+    //   1. preset name starts with "local-default-"
+    //   2. preset provider is "local"
+    //   3. preset model contains "e5" (only e5-family models need the 512-token cap)
+    //   4. max_input_tokens is not already set (idempotent)
+    // Non-e5 local models are NOT touched.
+    id: "add-e5-max-input-tokens-v0.37.0",
+    async run() {
+      const { readScrybeConfig, writeScrybeConfig } = await import("./config.js");
+      const cfg = readScrybeConfig();
+      if (!cfg) return; // no config.json yet — nothing to upgrade
+
+      let changed = false;
+      for (const [name, preset] of Object.entries(cfg.embedding_presets)) {
+        if (
+          name.startsWith("local-default-") &&
+          preset.provider === "local" &&
+          /e5/i.test(preset.model) &&
+          preset.max_input_tokens === undefined
+        ) {
+          cfg.embedding_presets[name] = {
+            ...preset,
+            max_input_tokens: 512,
+          };
+          changed = true;
+          process.stderr.write(
+            `[scrybe] migration: added max_input_tokens=512 to local e5 preset "${name}" ` +
+            `(model: ${preset.model}). A full reindex is recommended for local-embedder sources.\n`
+          );
+        }
+      }
+
+      if (changed) {
+        writeScrybeConfig(cfg);
+      }
     },
   },
   {

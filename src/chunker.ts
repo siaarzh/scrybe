@@ -117,9 +117,46 @@ export function getLanguage(filename: string): string | null {
   return EXTENSION_TO_LANGUAGE[ext] ?? null;
 }
 
+/**
+ * Truncation floor for an over-budget line-window (Plan 77 Slice 7).
+ *
+ * Keeps the leading lines that fit within maxChars and drops the tail, cutting
+ * at a line boundary. Truncating the tail (rather than sub-splitting) keeps each
+ * window a single semantic unit and retains its head — which, for the first
+ * window of an AST declaration, carries the signature. The dropped tail is
+ * already covered by the next overlapping window, so little is lost.
+ *
+ * Replaces the former `splitChunkByCharCap`, whose line-overlap step collapsed
+ * to 1 on long-line files and exploded the chunk count ~5x (see plan
+ * `## Smoke-test findings 2026-05-24`).
+ *
+ * If even the first line alone exceeds maxChars (e.g. a minified one-liner),
+ * the content is hard-cut at maxChars as a final backstop.
+ */
+function truncateToCharCap(
+  lines: string[],
+  maxChars: number
+): { content: string; linesUsed: number } {
+  let charCount = 0;
+  let linesUsed = 0;
+  for (const line of lines) {
+    if (linesUsed > 0 && charCount + line.length > maxChars) break;
+    charCount += line.length;
+    linesUsed++;
+  }
+  if (linesUsed === 0) linesUsed = 1; // always keep at least one line
+
+  let content = lines.slice(0, linesUsed).join("");
+  if (content.length > maxChars) {
+    content = content.slice(0, maxChars); // single oversized line — hard backstop
+  }
+  return { content: content.trim(), linesUsed };
+}
+
 export function chunkLines(
   lines: string[],
-  startOffset = 0
+  startOffset = 0,
+  maxChars?: number
 ): Array<{ start: number; end: number; content: string }> {
   const size = config.chunkSize;
   const overlap = config.chunkOverlap;
@@ -130,11 +167,24 @@ export function chunkLines(
     const slice = lines.slice(i, i + size);
     const content = slice.join("").trim();
     if (content) {
-      result.push({
-        start: startOffset + i + 1,
-        end: startOffset + i + slice.length,
-        content,
-      });
+      // If a char cap is set and the window exceeds it, truncate at a line
+      // boundary to one chunk (keeping the head). One window = one chunk.
+      if (maxChars !== undefined && content.length > maxChars) {
+        const { content: capped, linesUsed } = truncateToCharCap(slice, maxChars);
+        if (capped) {
+          result.push({
+            start: startOffset + i + 1,
+            end: startOffset + i + linesUsed,
+            content: capped,
+          });
+        }
+      } else {
+        result.push({
+          start: startOffset + i + 1,
+          end: startOffset + i + slice.length,
+          content,
+        });
+      }
     }
     i += step;
   }

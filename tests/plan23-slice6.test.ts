@@ -178,7 +178,9 @@ describe("synthesizeMigrationConfig — SCRYBE_RERANK=true + voyage → migrated
 
     const rerankPreset = cfg.reranker_presets?.["migrated-rerank"];
     expect(rerankPreset).toBeDefined();
-    expect(rerankPreset?.provider).toBe("voyage");
+    // provider is omitted now (defaults to "http"); the vendor name was unused at
+    // runtime — Voyage rerank is auto-detected from the embedding provider.
+    expect(rerankPreset?.provider).toBeUndefined();
     expect(rerankPreset?.credentials_from).toBe("migrated-code");
     // No separate credentials field — reuses the embedding preset's
     expect(rerankPreset?.credentials).toBeUndefined();
