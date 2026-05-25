@@ -46,8 +46,9 @@ When no `EMBEDDING_*` or `OPENAI_API_KEY` env vars are set, Scrybe uses an in-pr
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCRYBE_LOCAL_EMBEDDER` | `Xenova/multilingual-e5-small` | HuggingFace model ID for the local embedder. Set by `scrybe init`. Override to use a different ONNX-compatible model. |
+| `SCRYBE_MODEL_CACHE_DIR` | `${DATA_DIR}/models` | Where local model weights (embedder + reranker) are stored. Override to relocate or share the cache (e.g. across CI runs). |
 
-The model is downloaded on first use (~120 MB) and cached in `~/.cache/huggingface/hub/`. Subsequent runs load from cache.
+The model is downloaded on first use (~120 MB) and cached under `${DATA_DIR}/models/` (overridable via `SCRYBE_MODEL_CACHE_DIR`). Weights survive reinstalls and npx cache wipes; subsequent runs load from cache.
 
 ---
 
