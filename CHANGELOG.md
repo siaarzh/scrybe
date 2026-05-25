@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- **Vector-search similarity scores now reflect true cosine similarity (previously inflated).** Vector queries use cosine distance; displayed score = `1 - cosine_distance` for all embedding providers, and ranking is now correct even for unnormalized custom-provider vectors. Note: in the default hybrid (vector + keyword) path the displayed score is the rank-based fusion score and is unchanged; the corrected cosine score surfaces in vector-only search and when keyword search returns no matches.
+
 ---
 
 ## [0.37.1] — 2026-05-25

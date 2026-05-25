@@ -194,6 +194,28 @@ Remove a source from a project and drop its vector table.
 
 ## Search tools
 
+### How search works & what `score` means
+
+By default scrybe runs **hybrid search**: for each query it fetches candidates from two retrievers in parallel — a **vector** (semantic) retriever and a **keyword** (BM25) retriever — then fuses them with Reciprocal Rank Fusion (RRF) and returns the top `top_k`.
+
+**Candidate flow** (per source, `top_k = 10` example):
+
+| Stage | Count |
+|-------|-------|
+| Each retriever fetches | `top_k` (10) — or `top_k × SCRYBE_RERANK_FETCH_MULTIPLIER` when reranking is on |
+| Fused candidate pool | up to `2 × fetched` (minus chunks found by both retrievers) |
+| Returned to you | `top_k` |
+
+**What the `score` field means depends on the active mode:**
+
+- **Hybrid (default):** `score` is the **RRF fusion score** — a small, rank-based number (e.g. `~0.03`). It reflects *agreement and rank position* across the two retrievers, not a raw similarity. Compare scores **within one result set** (higher = better); do not read them as a similarity percentage.
+- **Reranking on** (`SCRYBE_RERANK=true`): `score` is a position-aware blend of the retrieval rank and the reranker's relevance score.
+- **Vector-only** (`SCRYBE_HYBRID=false`): `score` is **true cosine similarity** (`1 − cosine_distance`), typically `~0.7–0.9` for good matches, comparable across queries.
+
+Tuning knobs (`SCRYBE_HYBRID`, `SCRYBE_RRF_K`, `SCRYBE_RERANK*`) are documented in [configuration.md](configuration.md). For exact-name lookup without ranking, use [`lookup_symbol`](#lookup_symbol).
+
+---
+
 ### `search_code`
 
 Semantic search over indexed code sources in a project.

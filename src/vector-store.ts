@@ -265,15 +265,15 @@ export async function search(
     const ids = chunkIdIn.map((id) => `'${escapeSql(id)}'`).join(", ");
     where += ` AND chunk_id IN (${ids})`;
   }
-  const rows = await table
-    .search(Float32Array.from(queryVector))
+  const rows = await (table.search(Float32Array.from(queryVector)) as lancedb.VectorQuery)
+    .distanceType("cosine")
     .where(where)
     .limit(topK)
     .toArray();
 
   return rows.map((row) => ({
     chunk_id: String(row.chunk_id),
-    score: 1 - (Number(row._distance ?? 0) ** 2) / 2,
+    score: 1 - Number(row._distance ?? 0),
     project_id: String(row.project_id),
     source_id: "",   // threaded in by search.ts fan-out
     item_path: String(row.item_path),
@@ -409,14 +409,14 @@ export async function searchKnowledge(
   dimensions: number
 ): Promise<KnowledgeSearchResult[]> {
   const table = await getProjectTable(tableName, dimensions, "knowledge");
-  const rows = await table
-    .search(Float32Array.from(queryVector))
+  const rows = await (table.search(Float32Array.from(queryVector)) as lancedb.VectorQuery)
+    .distanceType("cosine")
     .where(`project_id = '${escapeSql(projectId)}'`)
     .limit(topK)
     .toArray();
 
   return rows.map((row) => ({
-    score: 1 - (Number(row._distance ?? 0) ** 2) / 2,
+    score: 1 - Number(row._distance ?? 0),
     project_id: String(row.project_id),
     source_id: String(row.source_id ?? ""),
     item_path: String(row.item_path),
