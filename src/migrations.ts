@@ -121,8 +121,6 @@ async function cancelZombieJobs(): Promise<void> {
  * project is marked `interrupted`. Distinct from `cancelled` (removed-project case in
  * cancelZombieJobs). Reads true: the daemon was killed mid-flight; incremental reindex
  * self-heals data on the next trigger. Idempotent.
- *
- * Plan 80 — Decision 3.
  */
 async function reconcileInterruptedJobs(): Promise<void> {
   const { getDB } = await import("./branch-state.js");
@@ -598,7 +596,7 @@ const MIGRATIONS: Migration[] = [
     },
   },
   {
-    // Plan 80: On cold start, mark any pre-boot running/queued jobs for VALID projects
+    // On cold start, mark any pre-boot running/queued jobs for VALID projects
     // as `interrupted` (not cancelled — those remain for removed-project zombies from
     // cancelZombieJobs above). Closes the ghost-job symptom in GitHub #33.
     id: "reconcile-interrupted-jobs-v0.38.0",
