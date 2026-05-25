@@ -132,6 +132,14 @@ export function getLanguage(filename: string): string | null {
  *
  * If even the first line alone exceeds maxChars (e.g. a minified one-liner),
  * the content is hard-cut at maxChars as a final backstop.
+ *
+ * NOTE (known limitation): for genuine "monster" declarations (>~1024 tokens,
+ * up to ~27K chars — almost always generated/data files), logic in the dropped
+ * tail can become unsearchable when the next window doesn't re-cover it. This is
+ * a documented, accepted limitation (<0.5% of declarations, no observed real
+ * miss). Long-context handling (AST sub-split / signature-anchoring) was
+ * considered and deferred. Reopen only if a real query miss is traced to a
+ * truncated tail, or genuine long hand-written functions dominate the class.
  */
 function truncateToCharCap(
   lines: string[],
