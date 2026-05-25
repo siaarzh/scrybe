@@ -1,4 +1,4 @@
-import { createWriteStream, existsSync, writeSync } from "fs";
+import { appendFileSync, createWriteStream, existsSync, writeSync } from "fs";
 import { mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -8,7 +8,7 @@ import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config, warnOldEnvVars } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
-import { initQueue, submitToQueue, stopQueue, onQueueJobEvent } from "./queue.js";
+import { initQueue, submitToQueue, stopQueue, onQueueJobEvent, getActiveReindexCount } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
@@ -32,6 +32,62 @@ function daemonLog(msg: string): void {
   _logWrite?.(line);
 }
 
+/**
+ * Shutdown drain loop — exported for unit testing.
+ *
+ * While a reindex job is active the drain defers (re-checks every `pollMs`)
+ * rather than force-exiting at a fixed 30s cap. Non-reindex active jobs are
+ * allowed up to `nonReindexCapMs` (legacy 30s intent). The hard cap
+ * `maxWaitMs` (SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS, default 30min) bounds the
+ * total defer for reindex jobs; past it the function returns and the caller
+ * force-exits (the orphaned job is reconciled to `interrupted` on next boot).
+ *
+ * Returns true if drained cleanly (active === 0), false if capped out.
+ */
+export async function runShutdownDrain(opts: {
+  getActiveReindexCount: () => number;
+  getQueueStats: () => { active: number };
+  maxWaitMs: number;
+  nonReindexCapMs?: number;
+  pollMs?: number;
+  onForceExit?: (activeJobs: number) => void;
+}): Promise<boolean> {
+  const {
+    getActiveReindexCount,
+    getQueueStats,
+    maxWaitMs,
+    nonReindexCapMs = 30_000,
+    pollMs = 200,
+    onForceExit,
+  } = opts;
+
+  const drainStart = Date.now();
+
+  while (true) {
+    const stats = getQueueStats();
+    if (stats.active === 0) return true;
+
+    const elapsed = Date.now() - drainStart;
+    const reindexActive = getActiveReindexCount() > 0;
+
+    if (reindexActive) {
+      // Defer up to the hard cap
+      if (elapsed >= maxWaitMs) {
+        onForceExit?.(stats.active);
+        return false;
+      }
+    } else {
+      // Non-reindex active work: original 30s cap applies
+      if (elapsed >= nonReindexCapMs) {
+        onForceExit?.(stats.active);
+        return false;
+      }
+    }
+
+    await new Promise<void>((r) => setTimeout(r, pollMs));
+  }
+}
+
 async function shutdown(signal: string): Promise<void> {
   if (shutdownCalled) return;
   shutdownCalled = true;
@@ -42,29 +98,28 @@ async function shutdown(signal: string): Promise<void> {
   await stopGitWatcher();
   stopFetchPoller();
 
-  // Bounded shutdown drain: wait up to 30s for in-flight gc jobs to finish
-  // before stopping the queue. Reduces (but doesn't eliminate) the gc-killed-mid-write class.
-  const GC_DRAIN_TIMEOUT_MS = 30_000;
   try {
     const { getQueueStats } = await import("./queue.js");
-    const drainStart = Date.now();
-    while (Date.now() - drainStart < GC_DRAIN_TIMEOUT_MS) {
-      const stats = getQueueStats();
-      if (stats.active === 0) break;
-      await new Promise<void>((r) => setTimeout(r, 200));
-    }
-    const stats = getQueueStats();
-    if (stats.active > 0) {
-      daemonLog(`[scrybe daemon] gc drain timeout — ${stats.active} job(s) still active, force-stopping`);
-      const { appendFileSync } = await import("fs");
-      const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl");
-      try {
-        appendFileSync(
-          logPath,
-          JSON.stringify({ ts: new Date().toISOString(), event: "gc.force-killed", detail: { activeJobs: stats.active } }) + "\n",
-          "utf8"
-        );
-      } catch { /* ignore */ }
+    const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl");
+
+    const drained = await runShutdownDrain({
+      getActiveReindexCount,
+      getQueueStats,
+      maxWaitMs: config.daemonShutdownMaxWaitMs,
+      onForceExit: (activeJobs) => {
+        daemonLog(`[scrybe daemon] shutdown cap hit — ${activeJobs} job(s) still active, force-stopping`);
+        try {
+          appendFileSync(
+            logPath,
+            JSON.stringify({ ts: new Date().toISOString(), event: "gc.force-killed", detail: { activeJobs } }) + "\n",
+            "utf8"
+          );
+        } catch { /* ignore */ }
+      },
+    });
+
+    if (!drained) {
+      // force-exit path already logged above
     }
   } catch { /* non-fatal — drain must not block exit */ }
 
@@ -188,7 +243,7 @@ export async function runDaemon(): Promise<void> {
   const logStream = createWriteStream(logPath, { flags: "a" });
   _logWrite = (line) => { try { logStream.write(line); } catch { /* ignore */ } };
 
-  const lifecycle = new LifecycleManager();
+  const lifecycle = new LifecycleManager({ getActiveReindexCount });
   _lifecycle = lifecycle;
 
   const startedAt = new Date();

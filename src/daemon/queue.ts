@@ -112,6 +112,19 @@ export function getQueueStats(): { active: number; pending: number; maxConcurren
   return { active: _active.size, pending: _pending.length, maxConcurrent: MAX_CONCURRENT };
 }
 
+/**
+ * Returns the count of currently active jobs whose type is "reindex".
+ * gc and other job types are explicitly excluded.
+ * Used by LifecycleManager to veto idle-shutdown while a reindex is in flight.
+ */
+export function getActiveReindexCount(): number {
+  let count = 0;
+  for (const entry of _active.values()) {
+    if ((entry.type ?? "reindex") === "reindex") count++;
+  }
+  return count;
+}
+
 export interface SubmitResult {
   jobId: string;
   status: "queued" | "running";

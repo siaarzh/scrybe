@@ -8,7 +8,7 @@ import { getDB } from "./branch-state.js";
 import type { IndexMode, JobState } from "./types.js";
 
 export type JobOrigin = "daemon" | "mcp" | "cli";
-export type PersistentJobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+export type PersistentJobStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
 export type JobType = "reindex" | "gc";
 
 export interface JobRow {
@@ -168,11 +168,11 @@ export function pruneOldJobs(): void {
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   db.prepare(`
     DELETE FROM jobs
-    WHERE status IN ('done','failed','cancelled')
+    WHERE status IN ('done','failed','cancelled','interrupted')
       AND finished_at < ?
       AND job_id NOT IN (
         SELECT job_id FROM jobs
-        WHERE status IN ('done','failed','cancelled')
+        WHERE status IN ('done','failed','cancelled','interrupted')
         ORDER BY queued_at DESC LIMIT 1000
       )
   `).run(sevenDaysAgo);

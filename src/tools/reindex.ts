@@ -235,7 +235,7 @@ export const listJobsTool: Tool<
     inputSchema: {
       type: "object",
       properties: {
-        status: { type: "string", enum: ["queued", "running", "done", "failed", "cancelled"], description: "Filter by status (omit for all jobs)" },
+        status: { type: "string", enum: ["queued", "running", "done", "failed", "cancelled", "interrupted"], description: "Filter by status (omit for all jobs)" },
       },
     },
     annotations: { readOnlyHint: true, openWorldHint: false },

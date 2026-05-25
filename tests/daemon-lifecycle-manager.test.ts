@@ -174,4 +174,110 @@ describe("LifecycleManager", () => {
 
     lc.stop();
   });
+
+  // ─── Active-reindex-count veto tests ──────────────────────────────────────
+
+  it("no-client-ever timer re-arms (not shutdown) while active reindex count > 0", () => {
+    let activeReindex = 1;
+    const lc = new LifecycleManager({ getActiveReindexCount: () => activeReindex });
+    const handler = vi.fn();
+    lc.on("shutdown", handler);
+    lc.start();
+
+    // Advance to just after the no-client-ever timeout fires
+    vi.advanceTimersByTime(301);
+    // Should NOT have emitted shutdown — reindex is active
+    expect(handler).not.toHaveBeenCalled();
+
+    // Advance another full interval — still active
+    vi.advanceTimersByTime(300);
+    expect(handler).not.toHaveBeenCalled();
+
+    // Now let the reindex finish and advance past the re-arm interval
+    activeReindex = 0;
+    vi.advanceTimersByTime(301);
+    expect(handler).toHaveBeenCalledWith("no-client-ever");
+
+    lc.stop();
+  });
+
+  it("grace timer re-arms (not shutdown) while active reindex count > 0", () => {
+    let activeReindex = 1;
+    const lc = new LifecycleManager({ getActiveReindexCount: () => activeReindex });
+    const handler = vi.fn();
+    lc.on("shutdown", handler);
+    lc.start();
+
+    lc.registerOrUpdate({ clientId: "c1", pid: 1 });
+    lc.unregister("c1"); // triggers grace timer
+
+    // Advance past grace period — reindex still active
+    vi.advanceTimersByTime(201);
+    expect(handler).not.toHaveBeenCalled();
+
+    // Advance another grace interval — still active
+    vi.advanceTimersByTime(200);
+    expect(handler).not.toHaveBeenCalled();
+
+    // Reindex finishes — next fire should emit shutdown
+    activeReindex = 0;
+    vi.advanceTimersByTime(201);
+    expect(handler).toHaveBeenCalledWith("grace");
+
+    lc.stop();
+  });
+
+  it("no-client-ever timer emits shutdown immediately when active reindex count is 0", () => {
+    const lc = new LifecycleManager({ getActiveReindexCount: () => 0 });
+    const handler = vi.fn();
+    lc.on("shutdown", handler);
+    lc.start();
+
+    vi.advanceTimersByTime(301);
+    expect(handler).toHaveBeenCalledWith("no-client-ever");
+
+    lc.stop();
+  });
+
+  it("grace timer emits shutdown immediately when active reindex count is 0", () => {
+    const lc = new LifecycleManager({ getActiveReindexCount: () => 0 });
+    const handler = vi.fn();
+    lc.on("shutdown", handler);
+    lc.start();
+
+    lc.registerOrUpdate({ clientId: "c1", pid: 1 });
+    lc.unregister("c1");
+
+    vi.advanceTimersByTime(201);
+    expect(handler).toHaveBeenCalledWith("grace");
+
+    lc.stop();
+  });
+
+  it("gc-typed active job does not veto shutdown (only reindex-typed jobs do)", () => {
+    // This test exercises the contract: getActiveReindexCount should return 0 for gc
+    // jobs. We simulate that by passing a count of 0 (as queue.ts would return for gc-only).
+    const lc = new LifecycleManager({ getActiveReindexCount: () => 0 });
+    const handler = vi.fn();
+    lc.on("shutdown", handler);
+    lc.start();
+
+    vi.advanceTimersByTime(301);
+    expect(handler).toHaveBeenCalledWith("no-client-ever");
+
+    lc.stop();
+  });
+
+  it("KEEP_ALIVE=1 still suppresses shutdown even with active reindex", () => {
+    process.env["SCRYBE_DAEMON_KEEP_ALIVE"] = "1";
+    const lc = new LifecycleManager({ getActiveReindexCount: () => 1 });
+    const handler = vi.fn();
+    lc.on("shutdown", handler);
+    lc.start();
+
+    vi.advanceTimersByTime(1000);
+    expect(handler).not.toHaveBeenCalled();
+
+    lc.stop();
+  });
 });

@@ -9,6 +9,8 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ### Fixed
 
+- **Long reindexes are no longer killed mid-job.** A daemon started by a CLI command (with no editor/MCP client attached) used to self-terminate on its idle timeout even while a reindex was running, and a graceful shutdown would force-exit after 30s — corrupting a long index. The daemon now keeps running while a reindex is active, and a graceful shutdown waits for it to finish (up to `SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS`, default 30min).
+- **Stuck jobs are cleaned up on restart.** A reindex interrupted by a crash or hard kill no longer stays `running`/`queued` forever (which blocked future reindexes). On the next daemon start such jobs are marked `interrupted`, and the next incremental reindex self-heals the data.
 - **Vector-search similarity scores now reflect true cosine similarity (previously inflated).** Vector queries use cosine distance; displayed score = `1 - cosine_distance` for all embedding providers, and ranking is now correct even for unnormalized custom-provider vectors. Note: in the default hybrid (vector + keyword) path the displayed score is the rank-based fusion score and is unchanged; the corrected cosine score surfaces in vector-only search and when keyword search returns no matches.
 
 ---

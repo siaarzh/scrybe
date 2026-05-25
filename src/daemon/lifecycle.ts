@@ -19,12 +19,14 @@ export declare interface LifecycleManager {
  * State machine (when KEEP_ALIVE is unset):
  *   [waiting-for-first-client]
  *     → heartbeat received → cancel no-client-ever timer → [serving-clients]
- *     → no-client-ever timer fires → emit "shutdown"
+ *     → no-client-ever timer fires (and no active reindex) → emit "shutdown"
+ *     → no-client-ever timer fires (active reindex) → re-arm timer
  *   [serving-clients]
  *     → clients drop to 0 → start grace timer → [grace]
  *     → heartbeat re-arrives → cancel grace timer → [serving-clients]
  *   [grace]
- *     → grace timer fires → emit "shutdown"
+ *     → grace timer fires (and no active reindex) → emit "shutdown"
+ *     → grace timer fires (active reindex) → re-arm timer
  *     → heartbeat re-arrives → cancel grace timer → [serving-clients]
  *   [always-on] (KEEP_ALIVE=1): no timers, no shutdown events.
  */
@@ -33,6 +35,7 @@ export class LifecycleManager extends EventEmitter {
   private readonly heartbeatStaleMs: number;
   private readonly graceMs: number;
   private readonly noClientMs: number;
+  private readonly getActiveReindexCount: () => number;
 
   private readonly clients = new Map<string, ClientRegistration>();
   private graceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -41,20 +44,19 @@ export class LifecycleManager extends EventEmitter {
   private pruneInterval: ReturnType<typeof setInterval> | null = null;
   private hadClientEver = false;
 
-  constructor() {
+  constructor(opts?: { getActiveReindexCount?: () => number }) {
     super();
-    this.keepAlive        = process.env["SCRYBE_DAEMON_KEEP_ALIVE"] === "1";
-    this.heartbeatStaleMs = parseInt(process.env["SCRYBE_DAEMON_HEARTBEAT_STALE_MS"] ?? "60000", 10);
-    this.graceMs          = parseInt(process.env["SCRYBE_DAEMON_IDLE_GRACE_MS"] ?? "600000", 10);
-    this.noClientMs       = parseInt(process.env["SCRYBE_DAEMON_NO_CLIENT_TIMEOUT_MS"] ?? "900000", 10);
+    this.keepAlive              = process.env["SCRYBE_DAEMON_KEEP_ALIVE"] === "1";
+    this.heartbeatStaleMs       = parseInt(process.env["SCRYBE_DAEMON_HEARTBEAT_STALE_MS"] ?? "60000", 10);
+    this.graceMs                = parseInt(process.env["SCRYBE_DAEMON_IDLE_GRACE_MS"] ?? "600000", 10);
+    this.noClientMs             = parseInt(process.env["SCRYBE_DAEMON_NO_CLIENT_TIMEOUT_MS"] ?? "900000", 10);
+    this.getActiveReindexCount  = opts?.getActiveReindexCount ?? (() => 0);
   }
 
   start(): void {
     if (this.keepAlive) return;
 
-    this.noClientTimer = setTimeout(() => {
-      if (!this.hadClientEver) this.emit("shutdown", "no-client-ever");
-    }, this.noClientMs);
+    this.noClientTimer = setTimeout(() => this._onNoClientTimerFired(), this.noClientMs);
     this.noClientTimer.unref?.();
 
     this.pruneInterval = setInterval(() => this.pruneStaleClients(), 30_000);
@@ -132,16 +134,40 @@ export class LifecycleManager extends EventEmitter {
     this.pruneInterval = null;
   }
 
+  private _onNoClientTimerFired(): void {
+    if (!this.hadClientEver) {
+      if (this.getActiveReindexCount() > 0) {
+        // Reindex in flight — re-arm and check again after the same interval
+        this.noClientTimer = setTimeout(() => this._onNoClientTimerFired(), this.noClientMs);
+        this.noClientTimer.unref?.();
+      } else {
+        this.noClientTimer = null;
+        this.emit("shutdown", "no-client-ever");
+      }
+    }
+  }
+
   private _checkEmpty(): void {
     if (this.keepAlive) return;
     if (this.clients.size === 0 && this.hadClientEver && !this.graceTimer) {
       this.graceStartedAt = Date.now();
-      this.graceTimer = setTimeout(() => {
-        this.graceTimer = null;
-        this.graceStartedAt = null;
-        if (this.clients.size === 0) this.emit("shutdown", "grace");
-      }, this.graceMs);
+      this.graceTimer = setTimeout(() => this._onGraceTimerFired(), this.graceMs);
       this.graceTimer.unref?.();
+    }
+  }
+
+  private _onGraceTimerFired(): void {
+    this.graceTimer = null;
+    this.graceStartedAt = null;
+    if (this.clients.size === 0) {
+      if (this.getActiveReindexCount() > 0) {
+        // Reindex in flight — re-arm and check again after the same interval
+        this.graceStartedAt = Date.now();
+        this.graceTimer = setTimeout(() => this._onGraceTimerFired(), this.graceMs);
+        this.graceTimer.unref?.();
+      } else {
+        this.emit("shutdown", "grace");
+      }
     }
   }
 }

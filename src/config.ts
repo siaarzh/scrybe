@@ -410,6 +410,15 @@ export const config = {
 
   // Hybrid search (BM25 + vector, on by default)
   ...hybrid,
+
+  // Daemon shutdown: hard cap on defer-while-reindex-active wait (ms).
+  // Past this cap the daemon force-exits even with a reindex in flight;
+  // the orphaned job is reconciled to `interrupted` on next cold start.
+  // Default: 30 minutes.
+  daemonShutdownMaxWaitMs: parseInt(
+    process.env["SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS"] ?? "1800000",
+    10
+  ),
 } as const;
 
 if (config.chunkOverlap >= config.chunkSize) {

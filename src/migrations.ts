@@ -116,6 +116,42 @@ async function cancelZombieJobs(): Promise<void> {
   );
 }
 
+/**
+ * Cold-start reconcile: any pre-boot running/queued job for a VALID (still-registered)
+ * project is marked `interrupted`. Distinct from `cancelled` (removed-project case in
+ * cancelZombieJobs). Reads true: the daemon was killed mid-flight; incremental reindex
+ * self-heals data on the next trigger. Idempotent.
+ *
+ * Plan 80 — Decision 3.
+ */
+async function reconcileInterruptedJobs(): Promise<void> {
+  const { getDB } = await import("./branch-state.js");
+  const db = getDB();
+
+  const projects = listProjects();
+  const validIds = new Set(projects.map((p) => p.id));
+
+  const candidates = db.prepare(
+    "SELECT job_id, project_id FROM jobs WHERE status IN ('queued', 'running')"
+  ).all() as Array<{ job_id: string; project_id: string }>;
+
+  // Only valid-project pre-boot jobs — removed-project jobs are handled by cancelZombieJobs.
+  const preBootJobs = candidates.filter((j) => validIds.has(j.project_id));
+  if (preBootJobs.length === 0) return;
+
+  const now = Date.now();
+  const update = db.prepare(
+    "UPDATE jobs SET status='interrupted', error_message='interrupted by daemon restart', finished_at=? WHERE job_id=?"
+  );
+  for (const j of preBootJobs) {
+    try { update.run(now, j.job_id); } catch { /* non-fatal */ }
+  }
+
+  process.stderr.write(
+    `[scrybe] migration: marked ${preBootJobs.length} pre-boot job(s) as interrupted (daemon restart)\n`
+  );
+}
+
 // ─── Plan 23 migration helpers ────────────────────────────────────────────────
 
 /**
@@ -559,6 +595,15 @@ const MIGRATIONS: Migration[] = [
       if (changed) {
         writeScrybeConfig(cfg);
       }
+    },
+  },
+  {
+    // Plan 80: On cold start, mark any pre-boot running/queued jobs for VALID projects
+    // as `interrupted` (not cancelled — those remain for removed-project zombies from
+    // cancelZombieJobs above). Closes the ghost-job symptom in GitHub #33.
+    id: "reconcile-interrupted-jobs-v0.38.0",
+    async run() {
+      await reconcileInterruptedJobs();
     },
   },
   {

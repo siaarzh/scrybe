@@ -103,6 +103,7 @@ describe("migration registry (Fix 6)", () => {
       "rename-env-vars-v0.29.0",
       "add-rerank-key-v0.29.1",
       "cleanup-zombie-jobs-v0.29.3",
+      "reconcile-interrupted-jobs-v0.38.0",
       "init-config-v0.32.0",
       "upgrade-voyage-text-default-v0.36.0",
       "add-e5-prompt-template-v0.37.0",
@@ -207,7 +208,7 @@ describe("Plan 33 — cleanup-zombie-jobs-v0.29.3 migration", () => {
     expect(r?.error_message).toContain("zombie cleanup");
   });
 
-  it("does not cancel jobs for valid projects", async () => {
+  it("does not cancel jobs for valid projects (cancelled = removed-project only)", async () => {
     const dir = dataDir();
     mkdirSync(dir, { recursive: true });
 
@@ -248,7 +249,10 @@ describe("Plan 33 — cleanup-zombie-jobs-v0.29.3 migration", () => {
     ]);
 
     const row = db.prepare("SELECT status FROM jobs WHERE job_id=?").get("valid-q-001") as { status: string } | undefined;
-    expect(row?.status).toBe("queued"); // untouched
+    // Valid-project jobs are NOT cancelled (cancelled = removed-project only).
+    // The reconcile-interrupted-jobs-v0.38.0 migration marks them interrupted; it runs
+    // in the full migration chain but is not in the applied list above, so it runs here too.
+    expect(row?.status).not.toBe("cancelled");
   });
 
   it("is idempotent — second run is a no-op", async () => {
@@ -287,6 +291,134 @@ describe("Plan 33 — cleanup-zombie-jobs-v0.29.3 migration", () => {
     // Run again — already applied, skipped
     const second = await runPendingMigrations(first);
     expect(second).toEqual(first);
+  });
+});
+
+describe("Plan 80 — reconcile-interrupted-jobs-v0.38.0 migration", () => {
+  function seedJobsTable(dbPath: string): import("node:sqlite").DatabaseSync {
+    const db = new DatabaseSync(dbPath);
+    db.exec(`CREATE TABLE IF NOT EXISTS jobs (
+      job_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      source_id TEXT,
+      branch TEXT,
+      mode TEXT NOT NULL DEFAULT 'incremental',
+      status TEXT NOT NULL,
+      phase TEXT,
+      queued_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER,
+      error_message TEXT,
+      origin TEXT NOT NULL DEFAULT 'daemon',
+      type TEXT NOT NULL DEFAULT 'reindex',
+      result TEXT
+    )`);
+    return db;
+  }
+
+  it("marks running/queued jobs for VALID projects as interrupted (not cancelled/failed)", async () => {
+    const dir = dataDir();
+    mkdirSync(dir, { recursive: true });
+
+    const db = seedJobsTable(join(dir, "branch-tags.db"));
+
+    // Valid-project jobs (running and queued)
+    db.prepare(
+      "INSERT INTO jobs (job_id, project_id, mode, status, queued_at, origin, type) VALUES (?,?,?,?,?,?,?)"
+    ).run("valid-run-001", "live-project", "incremental", "running", Date.now(), "daemon", "reindex");
+    db.prepare(
+      "INSERT INTO jobs (job_id, project_id, mode, status, queued_at, origin, type) VALUES (?,?,?,?,?,?,?)"
+    ).run("valid-q-002", "live-project", "full", "queued", Date.now(), "daemon", "reindex");
+
+    // projects.json contains 'live-project'
+    writeFileSync(
+      join(dir, "projects.json"),
+      JSON.stringify([{ id: "live-project", description: "", sources: [] }]),
+      "utf8"
+    );
+
+    const { runPendingMigrations } = await import("../src/migrations.js");
+    const result = await runPendingMigrations([
+      "compact-tables-v0.23.2",
+      "rename-env-vars-v0.29.0",
+      "add-rerank-key-v0.29.1",
+      "cleanup-zombie-jobs-v0.29.3",
+    ]);
+
+    expect(result).toContain("reconcile-interrupted-jobs-v0.38.0");
+
+    const run = db.prepare("SELECT status, error_message FROM jobs WHERE job_id=?").get("valid-run-001") as { status: string; error_message: string } | undefined;
+    const queued = db.prepare("SELECT status, error_message FROM jobs WHERE job_id=?").get("valid-q-002") as { status: string; error_message: string } | undefined;
+
+    expect(run?.status).toBe("interrupted");
+    expect(run?.error_message).toContain("daemon restart");
+    expect(queued?.status).toBe("interrupted");
+    expect(queued?.error_message).toContain("daemon restart");
+  });
+
+  it("running job for a REMOVED project still becomes cancelled (cancelZombieJobs path)", async () => {
+    const dir = dataDir();
+    mkdirSync(dir, { recursive: true });
+
+    const db = seedJobsTable(join(dir, "branch-tags.db"));
+
+    // Ghost-project job (project not in projects.json)
+    db.prepare(
+      "INSERT INTO jobs (job_id, project_id, mode, status, queued_at, origin, type) VALUES (?,?,?,?,?,?,?)"
+    ).run("ghost-run-001", "ghost-project", "incremental", "running", Date.now(), "daemon", "reindex");
+
+    // projects.json does NOT contain 'ghost-project'
+    writeFileSync(
+      join(dir, "projects.json"),
+      JSON.stringify([]),
+      "utf8"
+    );
+
+    const { runPendingMigrations } = await import("../src/migrations.js");
+    await runPendingMigrations([
+      "compact-tables-v0.23.2",
+      "rename-env-vars-v0.29.0",
+      "add-rerank-key-v0.29.1",
+    ]);
+
+    const row = db.prepare("SELECT status, error_message FROM jobs WHERE job_id=?").get("ghost-run-001") as { status: string; error_message: string } | undefined;
+    expect(row?.status).toBe("cancelled");
+    expect(row?.error_message).toContain("zombie cleanup");
+  });
+
+  it("is idempotent — second run finds no running/queued rows", async () => {
+    const dir = dataDir();
+    mkdirSync(dir, { recursive: true });
+
+    const db = seedJobsTable(join(dir, "branch-tags.db"));
+
+    db.prepare(
+      "INSERT INTO jobs (job_id, project_id, mode, status, queued_at, origin, type) VALUES (?,?,?,?,?,?,?)"
+    ).run("idem-run-001", "my-proj", "incremental", "running", Date.now(), "daemon", "reindex");
+
+    writeFileSync(
+      join(dir, "projects.json"),
+      JSON.stringify([{ id: "my-proj", description: "", sources: [] }]),
+      "utf8"
+    );
+
+    const { runPendingMigrations } = await import("../src/migrations.js");
+
+    const first = await runPendingMigrations([
+      "compact-tables-v0.23.2",
+      "rename-env-vars-v0.29.0",
+      "add-rerank-key-v0.29.1",
+      "cleanup-zombie-jobs-v0.29.3",
+    ]);
+    expect(first).toContain("reconcile-interrupted-jobs-v0.38.0");
+
+    // Run again — migration already applied, no changes
+    const second = await runPendingMigrations(first);
+    expect(second).toEqual(first);
+
+    // Row still interrupted from first run
+    const row = db.prepare("SELECT status FROM jobs WHERE job_id=?").get("idem-run-001") as { status: string } | undefined;
+    expect(row?.status).toBe("interrupted");
   });
 });
 

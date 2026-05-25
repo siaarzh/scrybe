@@ -161,7 +161,7 @@ export interface JobState {
   /** Set on single-source reindex jobs */
   source_id?: string;
   mode: IndexMode;
-  status: "queued" | "running" | "done" | "cancelled" | "failed";
+  status: "queued" | "running" | "done" | "cancelled" | "failed" | "interrupted";
   tasks: SourceTask[];
   started_at: number;
   finished_at: number | null;
