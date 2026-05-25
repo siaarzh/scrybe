@@ -340,7 +340,10 @@ const LOCAL_EMBEDDER_ENV: Record<string, string> = {
   SCRYBE_HYBRID: "false",
 };
 
-describe("Scenario 20 — local-embedder MRR@10 + recall@1 baseline (Plan 77)", () => {
+// Recall benchmark: downloads the e5 model + indexes 30 files. Too heavy/slow to
+// gate CI across 3 OSes (cold model download blows per-command timeouts / starves
+// runners). Runs locally by default; skipped on CI. Run manually to re-verify recall.
+describe.skipIf(!!process.env.CI)("Scenario 20 — local-embedder MRR@10 + recall@1 baseline (Plan 77)", () => {
   it(
     "indexes the recall fixture and evaluates MRR@10 + recall@1 for all golden queries",
     async () => {
