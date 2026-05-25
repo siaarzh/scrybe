@@ -377,7 +377,7 @@ Get the status of a background reindex job. Checks the in-process job map first,
 
 Each entry in `tasks` has: `{ source_id, mode, status, phase, files_scanned, chunks_prepared, started_at, finished_at, error }`
 
-`status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`
+`status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`, `"interrupted"` (job was running when the daemon stopped/crashed; reconciled to this terminal state on the next start — rerun to recover)
 
 Task `status` values: `"pending"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`
 
@@ -403,7 +403,7 @@ List background reindex jobs from the durable SQLite store. Cross-process: shows
 |-----------|--------|----------|---------------------------------|
 | `status`  | string |          | Filter by job status (optional) |
 
-Accepted `status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`. Omit to return all jobs.
+Accepted `status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`, `"interrupted"`. Omit to return all jobs.
 
 **Returns:** `{ jobs[], count }`
 

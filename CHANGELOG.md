@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.38.0] — 2026-05-25
+
 ### Fixed
 
 - **Long reindexes are no longer killed mid-job.** A daemon started by a CLI command (with no editor/MCP client attached) used to self-terminate on its idle timeout even while a reindex was running, and a graceful shutdown would force-exit after 30s — corrupting a long index. The daemon now keeps running while a reindex is active, and a graceful shutdown waits for it to finish (up to `SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS`, default 30min).
@@ -66,29 +70,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.36.0] — 2026-05-14
-
-### Added
-
-- **Voyage AI model catalog expanded.** `voyage-3.5`, `voyage-3.5-lite`, `voyage-4`, `voyage-4-lite`, and `voyage-4-large` are now first-class entries in the provider catalog — visible in `scrybe model list`, accepted by `scrybe model preset add`, and validated on assignment. All five support flexible output dimensions (256 / 512 / 1024 / 2048). Previously `voyage-4` was referenced internally as a default but absent from the validated catalog, so attempting to assign it explicitly would fail validation.
-
-### Changed
-
-- **Default text embedding model for new Voyage AI setups is now `voyage-4`.** When Scrybe synthesizes a starter config from a Voyage API key (first-run wizard or `scrybe init`), the text/knowledge preset now defaults to `voyage-4` instead of `voyage-3`.
-- **Auto-upgrade migration for existing Voyage AI installs.** On first startup after this update, if your text embedding preset was auto-defaulted to `voyage-3`, Scrybe upgrades it to `voyage-4` automatically. A stderr message confirms the change and prompts you to run `scrybe model switch --source-type text` to reindex knowledge sources. Presets set explicitly — including an explicit `voyage-3` choice — are left untouched.
-
----
-
 ## Older releases
 
-For releases v0.35.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.36.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.37.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/siaarzh/scrybe/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/siaarzh/scrybe/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/siaarzh/scrybe/compare/v0.36.3...v0.37.0
 [0.36.3]: https://github.com/siaarzh/scrybe/compare/v0.36.2...v0.36.3
 [0.36.2]: https://github.com/siaarzh/scrybe/compare/v0.36.1...v0.36.2
 [0.36.1]: https://github.com/siaarzh/scrybe/compare/v0.36.0...v0.36.1
-[0.36.0]: https://github.com/siaarzh/scrybe/compare/v0.35.0...v0.36.0
