@@ -1,6 +1,6 @@
 {
   "name": "scrybe-cli",
-  "version": "0.38.0",
+  "version": "0.39.0",
   "description": "Self-hosted semantic code search with MCP",
   "author": "Serzhan Akhmetov",
   "license": "MIT",

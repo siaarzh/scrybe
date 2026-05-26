@@ -9,6 +9,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.39.0] — 2026-05-27
+
+### Added
+
+- **Guided setup over MCP — new `init`, `doctor`, and `status` tools.** Configure scrybe's embedding provider, run a full health check, and inspect status entirely from your MCP client — no terminal required. `init` writes config and enqueues an initial index; `doctor` returns structured checks with remediation hints; `status` is a lightweight snapshot. When the daemon is unavailable, the MCP shim now serves these three troubleshooting tools (instead of a single placeholder), so an MCP-only user can diagnose and recover a stuck setup.
+- **Visible model-download progress.** The first-run local model download now surfaces as a `downloading-model` job phase with a 0–100 `percent`, pollable via `reindex_status` — instead of a silent call that looked hung. The daemon no longer downloads the model eagerly on startup.
+
+### Fixed
+
+- **`init` no longer blocks on the local model download.** API providers are verified synchronously (fast key + dimension check); the local model download is deferred into the reindex job, so `init` returns promptly and progress shows up via `reindex_status`. A failed local model load surfaces a friendly, classified error on the job instead of a raw stack trace.
+- **A cold search no longer silently downloads the model.** Searching before any model is present now fails fast with guidance to run an index (or `init`) first, rather than hanging on a background download.
+
+---
+
 ## [0.38.0] — 2026-05-25
 
 ### Fixed
@@ -62,24 +76,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.36.1] — 2026-05-14
-
-### Fixed
-
-- **CI publish workflow gate.** A test in `tests/cli-shorthand-flags.test.ts` runs the `scrybe` CLI twice serially to compare `scrybe ps` and `scrybe status` output. On cold CI runners each invocation can take 10-15s, pushing the test past vitest's 30s default timeout. Bumped that test's timeout to 60s. v0.35.0 and v0.36.0 were tagged but never reached npm due to this same failure; v0.36.1 is the first npm-published release since v0.34.0 — it bundles everything from v0.35.0 and v0.36.0.
-
----
-
 ## Older releases
 
-For releases v0.36.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.36.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.38.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.39.0...HEAD
+[0.39.0]: https://github.com/siaarzh/scrybe/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/siaarzh/scrybe/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/siaarzh/scrybe/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/siaarzh/scrybe/compare/v0.36.3...v0.37.0
 [0.36.3]: https://github.com/siaarzh/scrybe/compare/v0.36.2...v0.36.3
 [0.36.2]: https://github.com/siaarzh/scrybe/compare/v0.36.1...v0.36.2
-[0.36.1]: https://github.com/siaarzh/scrybe/compare/v0.36.0...v0.36.1
