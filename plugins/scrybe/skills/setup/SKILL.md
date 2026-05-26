@@ -128,7 +128,9 @@ A successful `init` returns:
 
 If there are already registered projects, `indexed_projects` > 0 and `job_id` is set — proceed to Step 4 to track progress. If `indexed_projects: 0`, setup is complete (no projects registered yet — the user can add one with `add_project` / `add_source`).
 
-Validation failure returns `"ok": false, "status": "validation_failed"` with a `validation` field containing `errorType` (`auth` | `dimensions_unknown` | `network` | `dns` | `bad_url` | `other`). Surface the `validation.message` to the user.
+Validation is **per provider**. For **API** providers (`voyage`/`openai`/`custom`), `init` verifies the key + dimensions synchronously — a bad key returns `"ok": false, "status": "validation_failed"` with a `validation` field containing `errorType` (`auth` | `dimensions_unknown` | `network` | `dns` | `bad_url` | `other`); surface `validation.message` to the user.
+
+For the **local** provider, `init` returns immediately **without** downloading or verifying the model — the download + load are deferred into the reindex job. So a local model problem (no internet on first run, bad custom model id) does **not** appear as `validation_failed`; it surfaces in Step 4 as a `"failed"` job with a friendly message in `error`. Always proceed to Step 4 to poll when a `job_id` is returned.
 
 ---
 

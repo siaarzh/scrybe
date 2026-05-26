@@ -3,9 +3,15 @@
  *
  * Surfaces the existing CLI wizard's verify+index flow over MCP.
  * Accepts provider/model selections as structured input, writes config via
- * synthesizeWizardConfig + writeEnvFile, verifies via validateLocal /
- * validateProvider, then enqueues an initial reindex job via the same daemon
- * submit path that add_source uses.
+ * synthesizeWizardConfig + writeEnvFile, then enqueues an initial reindex job
+ * via the same daemon submit path that add_source uses.
+ *
+ * Validation is per-provider: API providers are verified synchronously
+ * (cheap network round-trip → typed validation_failed). Local providers are
+ * NOT validated synchronously — the model download + load is deferred into the
+ * reindex job, which reports progress via the downloading-model phase and
+ * surfaces a friendly classified error on failure. This keeps init from
+ * blocking on a multi-MB model download.
  *
  * Out of scope: model switching (that's a separate future tool). This tool
  * is first-run init only.
@@ -21,7 +27,6 @@ import {
 } from "../onboarding/wizard.js";
 import {
   validateProvider,
-  validateLocal,
   type ValidateResult,
 } from "../onboarding/validate-provider.js";
 import { PROVIDERS } from "../providers.js";
@@ -187,9 +192,14 @@ function resolveTextSelection(input: InitInput, codeSel: ProviderSelection): Pro
 
 // ─── Validate provider selections ─────────────────────────────────────────────
 
-async function verifySelection(sel: ProviderSelection): Promise<ValidateResult> {
+/**
+ * Synchronously validates an API-typed provider selection (key validity + dimension probe).
+ * Returns null for local-typed providers — those are deferred to the index job, which
+ * emits downloading-model progress via reindex_status instead of blocking init.
+ */
+async function verifyIfApi(sel: ProviderSelection): Promise<ValidateResult | null> {
   if (sel.provider === "local") {
-    return validateLocal(sel.model);
+    return null; // deferred — local model load happens inside the index job
   }
   const provSpec = PROVIDERS[sel.provider];
   const baseUrl = sel.provider === "custom"
@@ -205,8 +215,9 @@ export const initTool: Tool<InitInput, InitOutput> = {
     name: "init",
     description:
       "Configure scrybe embedding providers and enqueue an initial index of all registered projects. " +
-      "Writes config.json and .env, verifies the provider (key validity + dimension probe), " +
-      "then submits a reindex job for every registered project. Returns a job_id to poll with reindex_status. " +
+      "Writes config.json and .env, then submits a reindex job for every registered project and returns a job_id to poll with reindex_status. " +
+      "API providers (voyage, openai, custom) are verified synchronously (key validity + dimension probe) — a bad key returns status 'validation_failed' immediately. " +
+      "The local provider is NOT verified synchronously: its model download and load are deferred into the reindex job (so init returns promptly instead of blocking on a multi-MB download). Poll reindex_status — a cold local model first reports a 'downloading-model' phase, and a load failure surfaces a friendly error on the job. " +
       "If scrybe is already configured, returns status 'already_configured' without overwriting unless reconfigure:true is passed. " +
       "Supported providers: local (default, no key needed), voyage, openai, custom (OpenAI-compatible endpoint).",
     inputSchema: {
@@ -295,9 +306,12 @@ export const initTool: Tool<InitInput, InitOutput> = {
         ? { provider: input.rerank_provider, model: input.rerank_model }
         : undefined;
 
-      // ── Validate provider (key + dimensions probe) ─────────────────────────
-      const codeValidation = await verifySelection(codeSel);
-      if (!codeValidation.ok) {
+      // ── Validate API providers synchronously; skip local ones (deferred to index job) ─
+      // Local providers: model download happens inside the index job, surfaced via
+      // reindex_status (downloading-model phase + percent). Blocking init on the
+      // download defeats Plan 82's progress-visibility goal.
+      const codeValidation = await verifyIfApi(codeSel);
+      if (codeValidation !== null && !codeValidation.ok) {
         return {
           ok: false,
           status: "validation_failed",
@@ -307,11 +321,12 @@ export const initTool: Tool<InitInput, InitOutput> = {
       }
 
       // Only validate text provider separately if it differs from code provider
+      // and is not local (local text provider is also deferred).
       const textProviderDiffers = textSel.provider !== codeSel.provider ||
         (textSel.provider === "custom" && textSel.baseUrl !== codeSel.baseUrl);
       if (textProviderDiffers) {
-        const textValidation = await verifySelection(textSel);
-        if (!textValidation.ok) {
+        const textValidation = await verifyIfApi(textSel);
+        if (textValidation !== null && !textValidation.ok) {
           return {
             ok: false,
             status: "validation_failed",
@@ -336,6 +351,12 @@ export const initTool: Tool<InitInput, InitOutput> = {
 
       // ── Enqueue initial reindex for all registered projects ────────────────
       const projects = listProjects();
+      // Whether any configured provider is local (model download deferred to index job)
+      const hasLocalProvider = codeSel.provider === "local" || textSel.provider === "local";
+      const downloadNote = hasLocalProvider
+        ? " The local embedding model will be downloaded during indexing — poll reindex_status to track download + index progress."
+        : "";
+
       if (projects.length === 0) {
         return {
           ok: true,
@@ -378,7 +399,8 @@ export const initTool: Tool<InitInput, InitOutput> = {
             indexed_projects: indexedProjects,
             message:
               `Configuration written. Enqueued reindex for ${indexedProjects.length} project(s). ` +
-              `Poll reindex_status with job_id "${jobIds[0]}" to track progress.`,
+              `Poll reindex_status with job_id "${jobIds[0]}" to track progress.` +
+              downloadNote,
           };
         }
       }
@@ -404,7 +426,7 @@ export const initTool: Tool<InitInput, InitOutput> = {
         message:
           `Configuration written. Enqueued reindex for ${indexedProjects.length} project(s). ` +
           (jobIds[0]
-            ? `Poll reindex_status with job_id "${jobIds[0]}" to track progress.`
+            ? `Poll reindex_status with job_id "${jobIds[0]}" to track progress.` + downloadNote
             : "Run reindex_all to start indexing."),
       };
     } catch (err: any) {

@@ -85,6 +85,26 @@ export async function validateProvider(spec: ProviderSpec): Promise<ValidateResu
 }
 
 /**
+ * Classifies a local model load error into a friendly { message } object.
+ * Network errors (ENOTFOUND, fetch, network keywords) get a "run once with internet" hint.
+ * All other errors get a generic "local embedder failed to load" message.
+ * Used by both validateLocal (CLI wizard) and the index job's embedding error path.
+ */
+export function classifyLocalLoadError(err: unknown): { message: string } {
+  const msg: string = (err as any)?.message ?? String(err);
+  const isNetwork =
+    msg.includes("ENOTFOUND") ||
+    msg.includes("getaddrinfo") ||
+    msg.includes("fetch") ||
+    msg.includes("network");
+  return {
+    message: isNetwork
+      ? `Model not cached and no network available. Run once with internet access to download the model (~120 MB): ${msg.slice(0, 120)}`
+      : `Local embedder failed to load: ${msg.slice(0, 200)}`,
+  };
+}
+
+/**
  * Validates the local WASM/ONNX embedder by loading the pipeline and running a test inference.
  * No network call if the model is already cached. Returns dimensions and cold-start time.
  */
@@ -99,18 +119,7 @@ export async function validateLocal(modelId: string): Promise<ValidateResult> {
     const coldStartMs = Date.now() - t0;
     return { ok: true, dimensions: dims, model: modelId, coldStartMs };
   } catch (err: any) {
-    const msg: string = err?.message ?? String(err);
-    const isNetwork =
-      msg.includes("ENOTFOUND") ||
-      msg.includes("getaddrinfo") ||
-      msg.includes("fetch") ||
-      msg.includes("network");
-    return {
-      ok: false,
-      errorType: "other",
-      message: isNetwork
-        ? `Model not cached and no network available. Run once with internet access to download the model (~120 MB): ${msg.slice(0, 120)}`
-        : `Local embedder failed to load: ${msg.slice(0, 200)}`,
-    };
+    const { message } = classifyLocalLoadError(err);
+    return { ok: false, errorType: "other", message };
   }
 }

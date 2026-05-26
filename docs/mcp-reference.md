@@ -66,7 +66,9 @@ Each `CheckResult`:
 
 ### `init`
 
-Configure scrybe embedding providers and enqueue an initial index of all registered projects. Writes `config.json` and `.env`, verifies the provider (key validity + dimension probe), then submits a reindex job for every registered project. If scrybe is already configured, returns `status: "already_configured"` without overwriting unless `reconfigure: true` is passed.
+Configure scrybe embedding providers and enqueue an initial index of all registered projects. Writes `config.json` and `.env`, then submits a reindex job for every registered project and returns a `job_id` to poll with `reindex_status`. If scrybe is already configured, returns `status: "already_configured"` without overwriting unless `reconfigure: true` is passed.
+
+**Validation is per provider.** API providers (`voyage`, `openai`, `custom`) are verified synchronously — a bad key returns `status: "validation_failed"` immediately. The `local` provider is **not** verified synchronously: its model download and load are deferred into the reindex job, so `init` returns promptly instead of blocking on a multi-MB download. Poll `reindex_status` — a cold local model first reports a `"downloading-model"` phase, and a load failure surfaces a friendly error on the job rather than a synchronous `validation_failed`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -99,9 +101,10 @@ Configure scrybe embedding providers and enqueue an initial index of all registe
 
 | `error_type` / field | When |
 |---|---|
-| `status: "validation_failed"` with `validation.errorType: "auth"` | API key rejected by the provider |
-| `status: "validation_failed"` with `validation.errorType: "network"` / `"dns"` / `"bad_url"` | Provider endpoint not reachable |
+| `status: "validation_failed"` with `validation.errorType: "auth"` | API key rejected by the provider (API providers only) |
+| `status: "validation_failed"` with `validation.errorType: "network"` / `"dns"` / `"bad_url"` | Provider endpoint not reachable (API providers only) |
 | `ok: false` with `error` string | Unexpected error (e.g. missing required field) |
+| Local model failed to download/load | Not a synchronous `init` error — surfaces on the reindex job: poll `reindex_status` for a `"failed"` status with a friendly message in `error` |
 
 ---
 

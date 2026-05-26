@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { indexProject, indexSource } from "./indexer.js";
 import { listProjects, getProject } from "./registry.js";
 import { insertJob, updateJobStatus, getJobRow, listJobRows, jobRowToState } from "./jobs-store.js";
+import { classifyLocalLoadError } from "./onboarding/validate-provider.js";
 import type { IndexMode, JobState, SourceTask } from "./types.js";
 
 type StoredJob = JobState & {
@@ -21,6 +22,10 @@ function classifyErrorMessage(err: unknown): string {
       "or check your embedding provider's rate limit tier " +
       "(Voyage AI requires a payment method on file to unlock standard limits)."
     );
+  }
+  // Local model load failure (tagged by getPipeline in local-embedder.ts)
+  if ((err as any)?.error_type === "local_model_load") {
+    return classifyLocalLoadError(err).message;
   }
   return message;
 }

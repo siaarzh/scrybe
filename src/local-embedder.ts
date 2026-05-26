@@ -93,7 +93,14 @@ async function getPipeline(
   const pipelineOpts: Record<string, unknown> = { revision: "main" };
   if (progress_callback) pipelineOpts["progress_callback"] = progress_callback;
 
-  const p = await pipeline("feature-extraction", modelId, pipelineOpts as Parameters<typeof pipeline>[2]);
+  let p: FeatureExtractionPipeline;
+  try {
+    p = await pipeline("feature-extraction", modelId, pipelineOpts as Parameters<typeof pipeline>[2]);
+  } catch (err: unknown) {
+    // Tag the error so callers (e.g. jobs.ts) can apply the user-friendly classifier.
+    (err as any).error_type = "local_model_load";
+    throw err;
+  }
   _pipelines.set(modelId, p);
   return p;
 }
