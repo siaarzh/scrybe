@@ -64,6 +64,8 @@ export interface IndexOptions {
   onScanProgress?: (filesScanned: number) => void;
   onEmbedProgress?: (chunksIndexed: number) => void;
   onProgress?: (report: ProgressReport) => void;
+  /** Called during local model download (0-100 percent). Only fires for local provider on first cold load. */
+  onDownloadProgress?: (percent: number) => void;
   signal?: AbortSignal;
   /** Branch to index. Defaults to current HEAD for code sources; "*" for non-code. */
   branch?: string;
@@ -81,7 +83,7 @@ export async function indexSource(
   mode: IndexMode,
   options: IndexOptions = {}
 ): Promise<IndexResult> {
-  const { onScanProgress, onEmbedProgress, onProgress, signal } = options;
+  const { onScanProgress, onEmbedProgress, onProgress, onDownloadProgress, signal } = options;
 
   const project = getProject(projectId);
   if (!project) throw new Error(`Project '${projectId}' not found`);
@@ -327,6 +329,11 @@ export async function indexSource(
       const keyBatches: Array<{ key: string; chunks: AnyChunk[] }> = [];
       let totalPending = 0;
 
+      // Thread download progress callback — only fires during local model first load.
+      const dlProgressCb = onDownloadProgress
+        ? (p: { percent: number }) => onDownloadProgress(p.percent)
+        : undefined;
+
       async function flushBatch(): Promise<void> {
         if (keyBatches.length === 0) return;
 
@@ -338,7 +345,7 @@ export async function indexSource(
         let embedVectors: number[][] = [];
         if (toEmbed.length > 0) {
           const texts = toEmbed.map((c) => c.content);
-          embedVectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs, halvingSession);
+          embedVectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs, halvingSession, dlProgressCb);
         }
 
         const vectorMap = new Map<string, number[]>(

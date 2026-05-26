@@ -2,6 +2,109 @@
 
 All tools are exposed via the `scrybe` MCP server. Call `list_projects` first to confirm what's indexed before searching.
 
+## Setup tools
+
+### `status`
+
+Return a quick scrybe status snapshot: config present, daemon running, embedding provider/model, and API key presence. Lightweight, read-only — does not validate credentials. Use `doctor` for a full health check with remediation advice.
+
+No parameters.
+
+**Returns:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Scrybe version |
+| `config_present` | boolean | `true` when `config.json` exists and is well-formed |
+| `daemon_running` | boolean | `true` when the daemon pidfile exists and the process is alive |
+| `daemon_pid` | number \| null | Daemon PID when running |
+| `daemon_port` | number \| null | Daemon HTTP port when running |
+| `daemon_version` | string \| null | Daemon version reported by `/health`, or `null` when not reachable |
+| `code_provider_type` | string | Embedding provider for code sources: `"local"` or `"api"` |
+| `code_model` | string | Embedding model for code sources |
+| `text_provider_type` | string | Embedding provider for knowledge sources: `"local"` or `"api"` |
+| `text_model` | string | Embedding model for knowledge sources |
+| `api_key_present` | boolean | `true` when an embedding API key is configured |
+| `config_error` | boolean | `true` when the provider is misconfigured |
+| `config_error_message` | string \| null | Error details when `config_error` is `true` |
+
+---
+
+### `doctor`
+
+Run a full scrybe health check and return a structured report. Covers install integrity, Node version, `DATA_DIR`, embedding provider config and auth, data integrity (schema version, LanceDB tables, `branch-tags.db`), registered project freshness, daemon status, git hooks, fetch-poller sync, and MCP config. Each check includes an optional `remedy` field with actionable fix instructions.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `section` | string | | Limit returned checks to a specific category. Examples: `"Daemon"`, `"Embedding Provider"`, `"Data Integrity"`. Omit to return all checks. |
+
+**Returns:** `DoctorReport & { healthy: boolean }`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schemaVersion` | 1 | Report format version |
+| `generatedAt` | string | ISO timestamp |
+| `scrybeVersion` | string | Scrybe version |
+| `platform` | string | OS and Node version string |
+| `checks` | `CheckResult[]` | Ordered list of check results |
+| `summary` | object | `{ ok, warn, fail, skip }` counts |
+| `healthy` | boolean | `true` when there are no `fail`-status checks |
+
+Each `CheckResult`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Stable check identifier |
+| `section` | string | Category the check belongs to |
+| `title` | string | Short check name |
+| `status` | `"ok"` \| `"warn"` \| `"fail"` \| `"skip"` | Result |
+| `message` | string | Human-readable detail |
+| `remedy` | string \| undefined | Actionable fix instructions (present on `warn` and `fail` checks) |
+| `data` | object \| undefined | Additional structured data |
+
+---
+
+### `init`
+
+Configure scrybe embedding providers and enqueue an initial index of all registered projects. Writes `config.json` and `.env`, verifies the provider (key validity + dimension probe), then submits a reindex job for every registered project. If scrybe is already configured, returns `status: "already_configured"` without overwriting unless `reconfigure: true` is passed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `code_provider` | `"local"` \| `"voyage"` \| `"openai"` \| `"custom"` | ✓ | Embedding provider for code sources. `"local"` uses the bundled offline model — no API key required. |
+| `code_model` | string | | Model for code sources. Defaults to the provider's recommended code model when omitted. |
+| `code_api_key` | string | | API key for code provider. Required for `voyage`, `openai`, and `custom`. |
+| `code_base_url` | string | custom only | API base URL (required when `code_provider = "custom"`). |
+| `code_dim` | number | custom only | Embedding dimensions (required when `code_provider = "custom"`). |
+| `text_provider` | `"local"` \| `"voyage"` \| `"openai"` \| `"custom"` | | Provider for text/knowledge sources. Defaults to same as `code_provider`. |
+| `text_model` | string | | Model for text/knowledge sources. Defaults to provider text model. |
+| `text_api_key` | string | | API key for text provider. Only required when `text_provider` differs from `code_provider`. |
+| `text_base_url` | string | | Base URL for custom text provider. |
+| `text_dim` | number | | Dimensions for custom text provider. |
+| `rerank_provider` | string | | Reranker provider. Must match one of the embedding providers above. |
+| `rerank_model` | string | | Reranker model name (required when `rerank_provider` is set). |
+| `reconfigure` | boolean | | When `true`, overwrite existing config even if already configured. Default: `false`. |
+
+**Returns:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | boolean | `true` on success |
+| `status` | `"configured"` \| `"already_configured"` \| `"validation_failed"` | Outcome |
+| `job_id` | string \| undefined | Reindex job ID when projects were enqueued. Poll with `reindex_status`. |
+| `indexed_projects` | string[] \| undefined | Project IDs enqueued for initial indexing |
+| `validation` | object \| undefined | Validation details when `status = "validation_failed"` (fields: `errorType`, `message`) |
+| `message` | string \| undefined | Human-readable description |
+
+**Errors:**
+
+| `error_type` / field | When |
+|---|---|
+| `status: "validation_failed"` with `validation.errorType: "auth"` | API key rejected by the provider |
+| `status: "validation_failed"` with `validation.errorType: "network"` / `"dns"` / `"bad_url"` | Provider endpoint not reachable |
+| `ok: false` with `error` string | Unexpected error (e.g. missing required field) |
+
+---
+
 ## Deployment modes
 
 Scrybe supports two MCP deployment modes:
@@ -375,11 +478,22 @@ Get the status of a background reindex job. Checks the in-process job map first,
 
 **Returns:** `{ job_id, status, tasks[], current_project?, error? }`
 
-Each entry in `tasks` has: `{ source_id, mode, status, phase, files_scanned, chunks_prepared, started_at, finished_at, error }`
+Each entry in `tasks` has: `{ source_id, mode, status, phase, percent, files_scanned, chunks_prepared, started_at, finished_at, error }`
 
 `status` values: `"queued"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`, `"interrupted"` (job was running when the daemon stopped/crashed; reconciled to this terminal state on the next start — rerun to recover)
 
 Task `status` values: `"pending"`, `"running"`, `"done"`, `"failed"`, `"cancelled"`
+
+**Task `phase` values** (progresses in order for local-model indexing):
+
+| `phase` | Meaning |
+|---------|---------|
+| `"downloading-model"` | Local embedding model weights are being downloaded (~130 MB, one-time). `percent` is set to a 0–100 download progress value. |
+| `"scanning"` | Enumerating and hashing files to find changes. |
+| `"embedding"` | Generating vectors and writing chunks to the index. |
+| `"done"` | Source fully indexed. |
+
+`percent` is only populated during the `"downloading-model"` phase; it is `null` or absent in other phases. API-provider sources skip the `"downloading-model"` phase entirely.
 
 ---
 

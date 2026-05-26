@@ -147,7 +147,9 @@ export interface SourceTask {
   source_id: string;
   mode: IndexMode;
   status: "pending" | "running" | "done" | "failed" | "cancelled";
-  phase: "scanning" | "embedding" | "done" | null;
+  phase: "downloading-model" | "scanning" | "embedding" | "done" | null;
+  /** Download progress (0-100). Only set when phase is "downloading-model". */
+  percent?: number;
   files_scanned: number;
   chunks_prepared: number;
   started_at: number | null;

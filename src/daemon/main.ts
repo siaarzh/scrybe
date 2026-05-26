@@ -18,7 +18,6 @@ import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
 import { initAutoGc, evaluateRatioTrigger } from "./auto-gc.js";
-import { warmupLocalEmbedder } from "../local-embedder.js";
 import { migrateModelsCache } from "./migrate-models-cache.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
@@ -206,34 +205,6 @@ export async function runDaemon(): Promise<void> {
       `Move keys to ${config.dataDir}/.env if you want them honoured.\n`
     );
   }
-
-  // Pre-load local embedder model(s) so the first index doesn't pay download/load cost.
-  // Runs in background — a failure here does not block daemon startup.
-  void (async () => {
-    const seenModels = new Set<string>();
-    if (config.embeddingProviderType === "local") {
-      const modelId = config.embeddingModel;
-      if (!seenModels.has(modelId)) {
-        seenModels.add(modelId);
-        try {
-          await warmupLocalEmbedder({ modelId, dimensions: config.embeddingDimensions });
-        } catch (e) {
-          process.stderr.write(`[scrybe] local embedder warmup failed (code embedding): ${e}\n`);
-        }
-      }
-    }
-    if (config.textEmbeddingProviderType === "local") {
-      const modelId = config.textEmbeddingModel;
-      if (!seenModels.has(modelId)) {
-        seenModels.add(modelId);
-        try {
-          await warmupLocalEmbedder({ modelId, dimensions: config.textEmbeddingDimensions });
-        } catch (e) {
-          process.stderr.write(`[scrybe] local embedder warmup failed (knowledge embedding): ${e}\n`);
-        }
-      }
-    }
-  })();
 
   // Set up log file
   const logsDir = join(config.dataDir, "logs");

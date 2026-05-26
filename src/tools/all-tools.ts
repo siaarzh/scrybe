@@ -16,9 +16,16 @@ import { listBranchesTool, listPinnedBranchesTool, pinBranchesTool, unpinBranche
 import { setPrivateIgnoreTool, getPrivateIgnoreTool, listPrivateIgnoresTool } from "./private-ignores.js";
 import { gcTool } from "./gc.js";
 import { addEmbeddingPresetTool, assignPresetTool } from "./model-mcp.js";
+import { initTool } from "./init-mcp.js";
+import { doctorTool } from "./doctor-mcp.js";
+import { statusTool } from "./status-mcp.js";
 
 /** All tools in the registry (MCP + CLI). */
 export const allTools: Tool<any, any>[] = [
+  // Onboarding
+  initTool,
+  doctorTool,
+  statusTool,
   // Project
   listProjectsTool,
   addProjectTool,

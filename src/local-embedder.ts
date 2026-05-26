@@ -3,8 +3,10 @@
  * In-process inference — no API key, no network call after first download.
  * Pipeline instances are cached per model ID after first load.
  */
+import { existsSync } from "fs";
+import { join } from "path";
 import type { FeatureExtractionPipeline } from "@xenova/transformers";
-import { getTransformers } from "./util/transformers-loader.js";
+import { getTransformers, resolveModelCacheDir } from "./util/transformers-loader.js";
 
 export interface LocalEmbedderOptions {
   modelId: string;
@@ -27,11 +29,71 @@ export interface LocalEmbedderOptions {
 // Pipeline cache keyed by modelId — shared across all call sites in the process
 const _pipelines = new Map<string, FeatureExtractionPipeline>();
 
-async function getPipeline(modelId: string): Promise<FeatureExtractionPipeline> {
+/**
+ * Returns true if the model is already loaded in-process OR its files are present
+ * in the on-disk cache (i.e. no network download would be needed).
+ * Used by the search path to fail fast rather than silently trigger a download.
+ */
+export function isLocalModelCached(modelId: string): boolean {
+  if (_pipelines.has(modelId)) return true;
+  // @xenova/transformers stores models at <cacheDir>/<modelId>/config.json.
+  // modelId may contain a "/" (e.g. "Xenova/multilingual-e5-small").
+  const configPath = join(resolveModelCacheDir(), modelId, "config.json");
+  return existsSync(configPath);
+}
+
+/** Progress event fired by @xenova/transformers during model download. */
+export interface ModelDownloadProgress {
+  /** 0-100, aggregated across all files being downloaded. */
+  percent: number;
+}
+
+async function getPipeline(
+  modelId: string,
+  onDownloadProgress?: (progress: ModelDownloadProgress) => void,
+): Promise<FeatureExtractionPipeline> {
   const cached = _pipelines.get(modelId);
   if (cached) return cached;
   const { pipeline } = await getTransformers();
-  const p = await pipeline("feature-extraction", modelId, { revision: "main" });
+
+  // Track per-file byte progress to compute an aggregate percent across the
+  // multi-file model download. @xenova/transformers fires `progress` events
+  // while streaming each file's bytes (with `loaded`/`total`); `done`/`ready`
+  // are lifecycle markers without byte data. We weight by bytes — not by a
+  // mean of per-file ratios — so the multi-MB ONNX weights dominate and tiny
+  // sidecar files (config.json, tokenizer.json) can't pin the percent to 100.
+  // Until the cumulative size crosses a floor we stay silent, so a tiny file
+  // that completes before the weights start downloading doesn't report 100%.
+  const MIN_REPORT_BYTES = 1_000_000;
+  let lastReported = -1;
+  const fileProgress = new Map<string, { loaded: number; total: number }>();
+
+  const progress_callback = onDownloadProgress
+    ? (event: { status: string; file?: string; loaded?: number; total?: number; progress?: number }) => {
+        if (event.status === "progress" && event.file && typeof event.total === "number" && event.total > 0) {
+          fileProgress.set(event.file, { loaded: event.loaded ?? 0, total: event.total });
+          let sumLoaded = 0;
+          let sumTotal = 0;
+          for (const { loaded, total } of fileProgress.values()) {
+            sumLoaded += loaded;
+            sumTotal += total;
+          }
+          if (sumTotal < MIN_REPORT_BYTES) return; // tiny-files-only window — not meaningful yet
+          // Cap at 99 during download; the job flips to the "embedding" phase
+          // (clearing percent) once the model is loaded, which signals 100%.
+          const newPercent = Math.min(99, Math.round((sumLoaded / sumTotal) * 100));
+          if (newPercent !== lastReported) {
+            lastReported = newPercent;
+            onDownloadProgress({ percent: newPercent });
+          }
+        }
+      }
+    : undefined;
+
+  const pipelineOpts: Record<string, unknown> = { revision: "main" };
+  if (progress_callback) pipelineOpts["progress_callback"] = progress_callback;
+
+  const p = await pipeline("feature-extraction", modelId, pipelineOpts as Parameters<typeof pipeline>[2]);
   _pipelines.set(modelId, p);
   return p;
 }
@@ -43,10 +105,11 @@ function toVec(output: any, idx: number): number[] {
 export async function embedLocalBatched(
   texts: string[],
   opts: LocalEmbedderOptions,
-  batchSize = 64
+  batchSize = 64,
+  onDownloadProgress?: (progress: ModelDownloadProgress) => void,
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const extractor = await getPipeline(opts.modelId);
+  const extractor = await getPipeline(opts.modelId, onDownloadProgress);
   const passagePrefix = opts.prompt_template?.passage ?? "";
   const maxChars = opts.maxChars;
   const results: number[][] = [];

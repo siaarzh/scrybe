@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { EmbeddingConfig } from "./types.js";
-import { embedLocalBatched, embedLocalQuery } from "./local-embedder.js";
+import { embedLocalBatched, embedLocalQuery, isLocalModelCached, type ModelDownloadProgress } from "./local-embedder.js";
 
 // Default character limit proxy for token truncation (~4 chars/token, 8000 tokens).
 // Used for API providers (Voyage, OpenAI) that have large context windows.
@@ -144,10 +144,11 @@ export async function embedBatched(
   embConfig: EmbeddingConfig,
   batchSize: number,
   batchDelayMs: number,
-  session?: HalvingSession
+  session?: HalvingSession,
+  onDownloadProgress?: (progress: ModelDownloadProgress) => void,
 ): Promise<number[][]> {
   if (embConfig.provider_type === "local") {
-    return embedLocalBatched(texts, { modelId: embConfig.model, dimensions: embConfig.dimensions, prompt_template: embConfig.prompt_template, maxChars: embConfig.max_input_tokens !== undefined ? embConfig.max_input_tokens * 4 : undefined }, batchSize);
+    return embedLocalBatched(texts, { modelId: embConfig.model, dimensions: embConfig.dimensions, prompt_template: embConfig.prompt_template, maxChars: embConfig.max_input_tokens !== undefined ? embConfig.max_input_tokens * 4 : undefined }, batchSize, onDownloadProgress);
   }
   const results: number[][] = [];
   for (let i = 0; i < texts.length; ) {
@@ -168,6 +169,16 @@ export async function embedBatched(
 
 export async function embedQuery(query: string, embConfig: EmbeddingConfig): Promise<number[]> {
   if (embConfig.provider_type === "local") {
+    // Fail fast if the local model is not yet downloaded — avoids a silent ~130 MB network
+    // pull at search time. The model is downloaded during the first index (or via `init`).
+    if (!isLocalModelCached(embConfig.model)) {
+      const err = new Error(
+        `LOCAL_MODEL_NOT_READY: Local embedding model "${embConfig.model}" is not downloaded yet. ` +
+        `Run an index first (scrybe index -P <project-id>) or use the MCP \`init\` tool to set up and download the model.`
+      ) as Error & { error_type: string };
+      err.error_type = "local_model_not_ready";
+      throw err;
+    }
     return embedLocalQuery(query, { modelId: embConfig.model, dimensions: embConfig.dimensions, prompt_template: embConfig.prompt_template });
   }
   const [embedding] = await embedTexts([query], embConfig);

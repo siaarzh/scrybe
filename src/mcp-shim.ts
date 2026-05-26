@@ -5,7 +5,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { VERSION } from "./config.js";
+import { VERSION, readScrybeConfig } from "./config.js";
 import { DaemonClient, ensureRunning } from "./daemon/client.js";
 import { readPidfile } from "./daemon/pidfile.js";
 import { KNOWN_TOOL_NAMES } from "./tools/tool-names.js";
@@ -263,23 +263,200 @@ async function detectDaemonUnavailable(): Promise<DaemonUnavailableState | null>
   return null;
 }
 
+// ─── Degraded-mode tool implementations (shim-native, no daemon required) ────
+
+/**
+ * Shim-native `status` — computes state locally when the daemon is unavailable.
+ * Returns config_present, daemon_running:false, and provider info from config.
+ */
+async function degradedStatus(): Promise<unknown> {
+  const { config, VERSION: ver, readScrybeConfig } = await import("./config.js");
+  const configObj = readScrybeConfig();
+  return {
+    version: ver,
+    config_present: configObj !== null,
+    daemon_running: false,
+    daemon_pid: null,
+    daemon_port: null,
+    daemon_version: null,
+    code_provider_type: config.embeddingProviderType,
+    code_model: config.embeddingModel,
+    text_provider_type: config.textEmbeddingProviderType,
+    text_model: config.textEmbeddingModel,
+    api_key_present: !!config.embeddingApiKey,
+    config_error: !!config.embeddingConfigError,
+    config_error_message: config.embeddingConfigError ?? null,
+    setup_guide: "Run the scrybe 'setup' skill for a guided first-run walkthrough (status -> doctor -> init -> poll reindex_status). Non-skill clients: follow each tool's `remedy` output.",
+  };
+}
+
+/**
+ * Shim-native `doctor` — runs runDoctor() in-process (pure, no daemon needed).
+ * The daemon checks will naturally surface daemon_not_running/stale-pidfile.
+ */
+async function degradedDoctor(section?: string): Promise<unknown> {
+  const { runDoctor } = await import("./onboarding/doctor.js");
+  const report = await runDoctor();
+  const checks = section
+    ? report.checks.filter((c) => c.section === section)
+    : report.checks;
+  const summary = section
+    ? checks.reduce(
+        (acc, c) => { acc[c.status]++; return acc; },
+        { ok: 0, warn: 0, fail: 0, skip: 0 }
+      )
+    : report.summary;
+  return { ...report, checks, summary, healthy: summary.fail === 0 };
+}
+
+/**
+ * Shim-native `init` (degraded path):
+ * 1. Tries to spawn the daemon via ensureRunning().
+ * 2. If daemon starts, reports success + advises the user to reconnect.
+ * 3. If daemon can't start, reports guidance distinguishing config-missing vs
+ *    daemon-dead cases.
+ *
+ * A full provider-credential init requires a running daemon to submit jobs.
+ * This degraded variant handles the startup gate only.
+ */
+async function degradedInit(configPresent: boolean): Promise<unknown> {
+  try {
+    process.stderr.write("[scrybe-mcp] degraded init: attempting ensureRunning\n");
+    const result = await ensureRunning(30_000);
+    if (result.ok) {
+      return {
+        ok: true,
+        status: "daemon_started",
+        message:
+          "The scrybe daemon has been started. " +
+          "Reconnect Claude Code (or your MCP client) to get the full tool surface. " +
+          "Then call `init` again with your provider settings to complete configuration.",
+      };
+    }
+  } catch { /* fall through to guidance */ }
+
+  if (!configPresent) {
+    return {
+      ok: false,
+      status: "config_missing",
+      message:
+        "Scrybe is not configured yet. " +
+        "Run `scrybe init` from the command line to walk through provider setup, " +
+        "then start the daemon with `scrybe daemon start` and reconnect.",
+    };
+  }
+
+  return {
+    ok: false,
+    status: "daemon_unavailable",
+    message:
+      "Scrybe is configured but the daemon could not be started automatically. " +
+      "Run `scrybe daemon start` from the command line, then reconnect to get the full tool surface.",
+  };
+}
+
+// ─── Degraded tool specs (used in serveUnavailableServer) ─────────────────────
+
+function buildDegradedTools(configPresent: boolean) {
+  const statusDesc = configPresent
+    ? "Return a quick scrybe status snapshot. The daemon is currently unavailable — " +
+      "this shim-local snapshot shows config_present:true with daemon_running:false. " +
+      "To restore full tool access, run `scrybe daemon start` and reconnect."
+    : "Return a quick scrybe status snapshot. Scrybe is not yet configured — " +
+      "run `scrybe init` from the command line to set up a provider, then reconnect.";
+
+  return [
+    {
+      name: "status",
+      description: statusDesc,
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+    {
+      name: "doctor",
+      description:
+        "Run a full scrybe health check in-process (no daemon needed). " +
+        "Reports configuration state, embedding provider validity, data integrity, " +
+        "and daemon status. Each check includes an optional `remedy` field. " +
+        "Use `section` to filter (e.g. 'Daemon', 'Embedding Provider').",
+      inputSchema: {
+        type: "object",
+        properties: {
+          section: {
+            type: "string",
+            description: "Optional section filter (e.g. 'Daemon', 'Embedding Provider').",
+          },
+        },
+        required: [],
+      },
+    },
+    {
+      name: "init",
+      description: configPresent
+        ? "Attempt to start the scrybe daemon and guide reconnection. " +
+          "Scrybe is configured but the daemon is not running. " +
+          "Calling this tool will try to auto-start the daemon. " +
+          "If successful, reconnect Claude Code to get the full tool surface."
+        : "Guide scrybe initial setup. " +
+          "Scrybe is not yet configured — this tool returns setup instructions. " +
+          "Run `scrybe init` from the command line, then restart the daemon and reconnect.",
+      inputSchema: { type: "object", properties: {}, required: [] },
+    },
+  ] as const;
+}
+
 function serveUnavailableServer(unavailable: DaemonUnavailableState): void {
+  // Compute config-present once at server-construction time (synchronous).
+  // We need it to differentiate status/init descriptions.
+  let configPresent = false;
+  try {
+    // readScrybeConfig is synchronous; statically imported (ESM — no require()).
+    configPresent = readScrybeConfig() !== null;
+  } catch { /* best-effort; defaults to false */ }
+
+  const degradedTools = buildDegradedTools(configPresent);
+
   const server = new Server(
     { name: "scrybe (daemon unavailable)", version: VERSION },
     { capabilities: { tools: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
-      {
-        name: "scrybe_daemon_unavailable",
-        description: unavailable.description,
-        inputSchema: { type: "object", properties: {}, required: [] },
-      },
-    ],
+    tools: degradedTools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      inputSchema: t.inputSchema as { type: string; properties?: Record<string, unknown> },
+    })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async () => {
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    const params = (args ?? {}) as Record<string, unknown>;
+
+    if (name === "status") {
+      try {
+        return jsonResult(await degradedStatus());
+      } catch (err) {
+        return jsonResult({ error: `status failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+
+    if (name === "doctor") {
+      try {
+        return jsonResult(await degradedDoctor(params["section"] as string | undefined));
+      } catch (err) {
+        return jsonResult({ error: `doctor failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+
+    if (name === "init") {
+      try {
+        return jsonResult(await degradedInit(configPresent));
+      } catch (err) {
+        return jsonResult({ error: `init failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+
+    // Fallback for any unexpected tool name
     return jsonResult({
       error: unavailable.description,
     });

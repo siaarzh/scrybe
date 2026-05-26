@@ -102,7 +102,24 @@ Then add to `~/.claude.json` under `mcpServers`:
 
 Restart Claude Code. The `mcp__scrybe__*` tools become available in all projects. `scrybe mcp` runs as a thin shim that talks HTTP to the daemon — heavy modules (embedder, lancedb, tree-sitter) load once on the daemon side, so cold MCP boot is sub-second.
 
-If the daemon isn't installed or isn't running, the MCP server will surface a single `scrybe_daemon_unavailable` tool whose description includes the exact recovery command (`scrybe daemon install`, `scrybe daemon start`, or `scrybe daemon restart`).
+### LLM-guided first-run setup over MCP
+
+If you prefer to configure scrybe entirely from within Claude Code (no terminal), the MCP tools support a guided setup flow. On a fresh install or when the daemon is unavailable, the MCP shim serves three lightweight tools (`status`, `doctor`, `init`) even before the daemon is running. You can ask Claude Code to set up scrybe, and it will walk you through the following steps:
+
+1. **`status`** — check whether scrybe is already configured and whether the daemon is running.
+2. **`doctor`** — run a full health check and surface any `fail`-status checks with their `remedy` instructions.
+3. **`init`** — configure the embedding provider and enqueue an initial index. The simplest call uses the built-in local model (no API key required):
+   ```json
+   { "code_provider": "local" }
+   ```
+   For Voyage AI (recommended — code-optimized):
+   ```json
+   { "code_provider": "voyage", "code_api_key": "<your key>" }
+   ```
+4. **`reindex_status`** — poll progress using the `job_id` returned by `init`. If the local model hasn't been downloaded before, the task `phase` will start at `"downloading-model"` with a `percent` field (0–100) showing download progress. This is a one-time ~130 MB download. Phases then progress through `"scanning"` → `"embedding"` → `"done"`.
+5. After `phase: "done"`, call `status` once more to confirm setup is complete.
+
+If setup was completed while the daemon was unavailable (the 3-tool degraded state), reconnect your MCP client after the daemon starts to load the full tool surface.
 
 ## Day-to-day workflow
 

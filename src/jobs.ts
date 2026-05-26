@@ -104,6 +104,13 @@ async function runTasks(jobId: string): Promise<void> {
       const result = await indexSource(job.project_id, task.source_id, task.mode, {
         signal: taskController.signal,
         branch: job.branch,
+        onDownloadProgress(percent) {
+          if (task.phase !== "downloading-model") {
+            task.phase = "downloading-model";
+            try { updateJobStatus(jobId, { phase: "downloading-model" }); } catch { /* non-fatal */ }
+          }
+          task.percent = percent;
+        },
         onScanProgress(n) {
           task.files_scanned = n;
           task.phase = "scanning";
@@ -112,6 +119,7 @@ async function runTasks(jobId: string): Promise<void> {
           task.chunks_prepared = n;
           if (task.phase !== "embedding") {
             task.phase = "embedding";
+            task.percent = undefined;
             try { updateJobStatus(jobId, { phase: "embedding" }); } catch { /* non-fatal */ }
           }
         },
