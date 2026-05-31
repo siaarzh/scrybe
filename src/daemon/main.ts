@@ -12,6 +12,7 @@ import { initQueue, submitToQueue, stopQueue, onQueueJobEvent, getActiveReindexC
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
+import { initTicketPoller, startTicketPoller, stopTicketPoller, ticketPollerOnHot } from "./ticket-poller.js";
 import { onStateChange } from "./idle-state.js";
 import { diagEmit } from "./events.js";
 import { listProjects, onProjectRemoved } from "../registry.js";
@@ -96,6 +97,7 @@ async function shutdown(signal: string): Promise<void> {
   await stopWatcher();
   await stopGitWatcher();
   stopFetchPoller();
+  stopTicketPoller();
 
   try {
     const { getQueueStats } = await import("./queue.js");
@@ -261,13 +263,18 @@ export async function runDaemon(): Promise<void> {
     }
   });
 
-  // Wire FS + git watchers + fetch poller → SSE + queue
+  // Wire FS + git watchers + fetch poller + ticket poller → SSE + queue
   initWatcher({ pushEvent });
   initGitWatcher({ pushEvent });
   initFetchPoller({ pushEvent });
+  initTicketPoller({ pushEvent });
 
-  // Mirror idle-state HOT/COLD transitions to HTTP /status
-  onStateChange((s) => setDaemonState(s));
+  // Mirror idle-state HOT/COLD transitions to HTTP /status;
+  // also fire a catch-up poll for ticket sources on cold→hot.
+  onStateChange((s) => {
+    setDaemonState(s);
+    if (s === "hot") ticketPollerOnHot();
+  });
 
   // Start per-project FS + git watchers + fetch pollers (code sources only)
   const projects = listProjects();
@@ -282,6 +289,7 @@ export async function runDaemon(): Promise<void> {
     }
   }
   startFetchPoller(projects);
+  startTicketPoller(projects);
 
   // Startup health probe: runs in parallel across all sources, pre-populates the
   // health cache, and emits a health.corrupt event for any flagged sources.

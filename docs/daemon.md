@@ -332,6 +332,9 @@ client.close(); // abort any open SSE stream
 | `SCRYBE_DAEMON_FETCH_ACTIVE_MS` | `300000` | Fetch interval when HOT (5 min) |
 | `SCRYBE_DAEMON_FETCH_IDLE_MS` | `1800000` | Fetch interval when COLD (30 min) |
 | `SCRYBE_DAEMON_NO_FETCH` | — | Set to `1` to disable the fetch poller entirely |
+| `SCRYBE_DAEMON_TICKET_ACTIVE_MS` | `900000` | Ticket-source poll interval when HOT (15 min) |
+| `SCRYBE_DAEMON_TICKET_IDLE_MS` | `3600000` | Ticket-source poll interval when COLD (60 min) |
+| `SCRYBE_DAEMON_NO_TICKET_FETCH` | — | Set to `1` to disable the ticket poller entirely |
 | `SCRYBE_DAEMON_LOG_LEVEL` | `info` | `debug | info | warn | error` |
 | `SCRYBE_DAEMON_FS_DEBOUNCE_MS` | `1500` | FS event debounce (HOT state) |
 | `SCRYBE_DAEMON_GIT_DEBOUNCE_MS` | `300` | Git ref debounce |

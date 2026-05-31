@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Ticket/issue sources now refresh automatically while the daemon is running.** The daemon polls each ticket source on a configurable cadence (15 min HOT / 60 min COLD by default) so issue data stays fresh without manual `scrybe index` commands. A catch-up poll fires immediately when a client reconnects after an idle period. Disable with `SCRYBE_DAEMON_NO_TICKET_FETCH=1`; adjust cadence via `SCRYBE_DAEMON_TICKET_ACTIVE_MS` / `SCRYBE_DAEMON_TICKET_IDLE_MS`.
+
 ---
 
 ## [0.39.0] — 2026-05-27
