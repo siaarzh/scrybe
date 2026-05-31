@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.40.0] — 2026-05-31
+
 ### Added
 
 - **Ticket/issue sources now refresh automatically while the daemon is running.** The daemon polls each ticket source on a configurable cadence (15 min HOT / 60 min COLD by default) so issue data stays fresh without manual `scrybe index` commands. A catch-up poll fires immediately when a client reconnects after an idle period. Disable with `SCRYBE_DAEMON_NO_TICKET_FETCH=1`; adjust cadence via `SCRYBE_DAEMON_TICKET_ACTIVE_MS` / `SCRYBE_DAEMON_TICKET_IDLE_MS`.
@@ -86,7 +90,8 @@ For releases v0.36.1 and earlier, see [GitHub Releases](https://github.com/siaar
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/siaarzh/scrybe/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/siaarzh/scrybe/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/siaarzh/scrybe/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/siaarzh/scrybe/compare/v0.37.0...v0.37.1
