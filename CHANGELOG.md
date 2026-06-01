@@ -7,9 +7,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.41.0] — 2026-06-01
+
 ### Added
 
-- **Search results for issues and tickets now include metadata.** Each result row now includes the issue's state (`open` / `closed`), labels, assigned users, milestone, and confidentiality flag — no extra API calls needed. Comments inherit metadata from their parent issue. The metadata arrives as structured fields, so callers can filter, deduplicate, or collapse results programmatically.
+- **Search results for issues and tickets now include metadata.** Each result row now includes the issue's state (`open` / `closed`), labels, assigned users, milestone, and confidentiality flag — no extra API calls needed. Comments inherit metadata from their parent issue. The metadata arrives as structured fields, so callers can filter, deduplicate, or collapse results programmatically. Existing ticket indexes are backfilled automatically on upgrade.
 
 ---
 
@@ -71,34 +75,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.36.3] — 2026-05-21
-
-### Fixed
-
-- **MCP shim now auto-starts the daemon on a true cold boot.** v0.36.2 added a 15-second wait at shim startup, but if the daemon wasn't already starting (no autostart installed, no manual `scrybe daemon up`), the shim just waited until the deadline expired and then served the 1-tool placeholder. The shim now uses the same daemon-spawn path as the CLI — it spawns the daemon via a hidden Windows launcher and polls `/health` until ready, then fetches the real manifest. MCP clients get the full tool set on first connect after reboot, with no console flash. Falls back to the placeholder server only when the spawn itself fails (e.g. `SCRYBE_NO_AUTO_DAEMON=1`, containers, missing binary).
-
----
-
-## [0.36.2] — 2026-05-20
-
-### Fixed
-
-- **MCP shim no longer serves only 1 tool after a cold boot.** When Claude Code (or another MCP client) launched the shim before the daemon was reachable, the shim latched onto the `scrybe_daemon_unavailable` placeholder and never re-checked — leaving the client stuck with one tool until manual reconnect. The shim now polls for daemon readiness for up to 15 seconds at startup (configurable via `SCRYBE_MCP_COLD_START_WAIT_MS`) before falling back, so the full tool manifest is served as soon as the daemon comes up.
-- **Console windows no longer flash on Windows during normal use.** Daemon `git fetch` / `git rev-parse` invocations from the per-project fetch poller were spawned without `windowsHide: true`, causing a brief CMD window flash on every poll cycle (every few seconds per project). All git invocations now spawn hidden. Install-time `spawnSync` / `spawn` calls got the same treatment for consistency.
-
----
-
 ## Older releases
 
-For releases v0.36.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.36.3 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.40.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/siaarzh/scrybe/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/siaarzh/scrybe/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/siaarzh/scrybe/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/siaarzh/scrybe/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/siaarzh/scrybe/compare/v0.37.0...v0.37.1
 [0.37.0]: https://github.com/siaarzh/scrybe/compare/v0.36.3...v0.37.0
-[0.36.3]: https://github.com/siaarzh/scrybe/compare/v0.36.2...v0.36.3
-[0.36.2]: https://github.com/siaarzh/scrybe/compare/v0.36.1...v0.36.2
