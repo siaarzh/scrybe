@@ -8,6 +8,86 @@ import { getExpectedDimensions } from "../health-probe.js";
 import { getProject, resolveEmbeddingConfig, assignTableName } from "../registry.js";
 import { getPlugin } from "../plugins/index.js";
 
+// ─── Ticket metadata helpers (Plan 42) ───────────────────────────────────────
+
+/** Parsed metadata fields returned alongside every knowledge result. */
+export interface KnowledgeResultMetadata {
+  state: string | null;
+  labels: string[];
+  assignees: string[];
+  milestone: { title?: string; due_date?: string | null; [key: string]: unknown } | null;
+  confidential: boolean;
+}
+
+/**
+ * Knowledge search result with metadata parsed to structured values.
+ * This is the shape returned by the MCP `search_knowledge` tool and the CLI formatter.
+ */
+export interface ParsedKnowledgeSearchResult {
+  score: number;
+  project_id: string;
+  source_id: string;
+  item_path: string;
+  item_url: string;
+  item_type: string;
+  author: string;
+  timestamp: string;
+  content: string;
+  state: string | null;
+  labels: string[];
+  assignees: string[];
+  milestone: { title?: string; due_date?: string | null; [key: string]: unknown } | null;
+  confidential: boolean;
+}
+
+/**
+ * Parse the raw JSON-string metadata fields from a `KnowledgeSearchResult` into
+ * structured values. Guards every `JSON.parse` call so a malformed stored string
+ * never throws — it defaults to `[]` / `null` instead.
+ */
+export function parseKnowledgeMetadata(r: KnowledgeSearchResult): KnowledgeResultMetadata {
+  let labels: string[] = [];
+  try { labels = JSON.parse(r.labels || "[]"); } catch { /* default */ }
+  if (!Array.isArray(labels)) labels = [];
+
+  let assignees: string[] = [];
+  try { assignees = JSON.parse(r.assignees || "[]"); } catch { /* default */ }
+  if (!Array.isArray(assignees)) assignees = [];
+
+  let milestone: KnowledgeResultMetadata["milestone"] = null;
+  if (r.milestone) {
+    try {
+      const parsed = JSON.parse(r.milestone);
+      milestone = parsed != null && typeof parsed === "object" ? parsed : null;
+    } catch { /* default null */ }
+  }
+
+  const state = r.state || null;
+  const confidential = r.confidential === "true";
+
+  return { state, labels, assignees, milestone, confidential };
+}
+
+/**
+ * Combine base result fields with parsed metadata into a `ParsedKnowledgeSearchResult`.
+ * Called at the MCP/CLI output boundary — never earlier.
+ */
+function toParsed(r: KnowledgeSearchResult): ParsedKnowledgeSearchResult {
+  const meta = parseKnowledgeMetadata(r);
+  return {
+    score: r.score,
+    project_id: r.project_id,
+    source_id: r.source_id,
+    item_path: r.item_path,
+    item_url: r.item_url,
+    item_type: r.item_type,
+    author: r.author,
+    timestamp: r.timestamp,
+    content: r.content,
+    ...meta,
+  };
+}
+
 // Re-export so callers can invalidate from outside this module if needed.
 export { _invalidateHealthCache };
 
@@ -155,7 +235,7 @@ export const searchCodeTool: Tool<
 
 export const searchKnowledgeTool: Tool<
   { project_id: string; query: string; top_k?: number; source_id?: string; item_types?: string[] },
-  KnowledgeSearchResult[]
+  ParsedKnowledgeSearchResult[]
 > = {
   spec: {
     name: "search_knowledge",
@@ -197,7 +277,7 @@ export const searchKnowledgeTool: Tool<
       throw err;
     }
     const results = await searchKnowledge(query, project_id, top_k ?? 10, source_id, item_types);
-    return results;
+    return results.map(toParsed);
   },
   cliOpts: ([query, opts]) => ({
     project_id: String(opts.projectId),
@@ -208,6 +288,18 @@ export const searchKnowledgeTool: Tool<
   }),
   formatCli: (results) => results.map((r) => {
     const authorLine = r.author ? `\n  Author: ${r.author}  ${r.timestamp}` : "";
-    return `\n[${r.score.toFixed(3)}] ${r.item_url || r.item_path} (${r.item_type})${authorLine}\n${r.content.slice(0, 300)}`;
+    const metaParts: string[] = [];
+    if (r.state) metaParts.push(`state:${r.state}`);
+    if (r.labels.length > 0) metaParts.push(`labels:[${r.labels.join(",")}]`);
+    if (r.assignees.length > 0) metaParts.push(`assignees:[${r.assignees.join(",")}]`);
+    if (r.milestone) {
+      const ms = r.milestone.title
+        ? (r.milestone.due_date ? `${r.milestone.title} (due ${r.milestone.due_date})` : r.milestone.title)
+        : JSON.stringify(r.milestone);
+      metaParts.push(`milestone:${ms}`);
+    }
+    if (r.confidential) metaParts.push("confidential");
+    const metaLine = metaParts.length > 0 ? `\n  ${metaParts.join("  ")}` : "";
+    return `\n[${r.score.toFixed(3)}] ${r.item_url || r.item_path} (${r.item_type})${authorLine}${metaLine}\n${r.content.slice(0, 300)}`;
   }).join(""),
 };

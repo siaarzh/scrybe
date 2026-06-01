@@ -622,6 +622,17 @@ scrybe search knowledge --project-id myrepo --item-types ticket "login error"
 scrybe search knowledge --project-id myrepo --item-types ticket_comment "architectural decision"
 ```
 
+**Output format:** each result prints a header line with score, URL, and item type, followed by optional metadata and a content excerpt:
+
+```
+[0.832] https://gitlab.example.com/project/-/issues/123 (ticket)
+  Author: alice  2024-06-01T10:00:00Z
+  state:open  labels:[bug,frontend]  assignees:[alice]  milestone:26.4 (due 2026-07-01)
+The password reset flow fails when...
+```
+
+The metadata line is omitted when no metadata is available (e.g. non-ticket sources). `confidential` appears as a plain marker when the issue was marked confidential. There are **no new input flags** — metadata is returned passthrough for every result.
+
 ---
 
 ## Daemon commands

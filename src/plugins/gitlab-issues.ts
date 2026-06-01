@@ -10,6 +10,21 @@ interface GitLabIssue {
   author: { username: string };
   updated_at: string;
   web_url: string;
+  // Plan 42 metadata fields — present on both list and single-issue endpoints
+  state: "opened" | "closed";
+  labels: string[];
+  milestone: { title: string; due_date: string | null } | null;
+  assignees: Array<{ username: string }>;
+  confidential: boolean;
+}
+
+/** Serialized (D3) metadata to thread onto every chunk for a given issue. */
+interface IssueMetadata {
+  state: string;         // normalized: "open" | "closed"
+  labels: string;        // JSON array string, e.g. '["Bug","Search"]'
+  assignees: string;     // JSON array string of usernames, e.g. '["alice"]'
+  milestone: string;     // JSON object string or '' if no milestone
+  confidential: string;  // "true" | "false"
 }
 
 interface GitLabNote {
@@ -63,6 +78,21 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Normalize GitLab state and serialize issue metadata to D3 (JSON strings).
+ * D4: GitLab "opened" → canonical "open"; "closed" stays "closed".
+ */
+function serializeIssueMetadata(issue: GitLabIssue): IssueMetadata {
+  const state = issue.state === "opened" ? "open" : "closed";
+  const labels = JSON.stringify(issue.labels ?? []);
+  const assignees = JSON.stringify((issue.assignees ?? []).map((a) => a.username));
+  const milestone = issue.milestone
+    ? JSON.stringify({ title: issue.milestone.title, due_date: issue.milestone.due_date ?? null })
+    : "";
+  const confidential = issue.confidential ? "true" : "false";
+  return { state, labels, assignees, milestone, confidential };
+}
+
 export async function validateGitlabToken(cfg: SourceConfig): Promise<void> {
   if (cfg.type !== "ticket") return;
   const c = cfg as TicketConfig;
@@ -108,6 +138,8 @@ export class GitLabIssuesPlugin implements SourcePlugin {
           fetchAllPages<GitLabNote>(notesUrl, cfg.token, project.id),
         ]);
 
+        const meta = serializeIssueMetadata(issue);
+
         const emit = function* (
           itemPath: string,
           content: string,
@@ -129,6 +161,13 @@ export class GitLabIssuesPlugin implements SourcePlugin {
               author,
               timestamp,
               content: chunk.content,
+              // Plan 42: issue-level metadata threaded onto every chunk (D5).
+              // Comment chunks inherit the parent issue's metadata but keep their own author.
+              state: meta.state,
+              labels: meta.labels,
+              assignees: meta.assignees,
+              milestone: meta.milestone,
+              confidential: meta.confidential,
             } satisfies RawKnowledgeChunk) as KnowledgeChunk;
           }
         };

@@ -78,6 +78,15 @@ export interface RawKnowledgeChunk {
   author: string;
   timestamp: string;    // ISO date string, empty string if unknown
   content: string;
+  // ─── Ticket metadata (Plan 42) ────────────────────────────────────────────
+  // Optional passthrough metadata; not included in chunk_id hash (D1).
+  // Multi-value fields (labels, assignees, milestone) are JSON-encoded strings (D3).
+  // confidential stored as string "true"/"false" to match all-Utf8 table schema (D3).
+  state?: string;         // e.g. "opened" | "closed"
+  labels?: string;        // JSON-encoded string array, e.g. '["bug","frontend"]'
+  assignees?: string;     // JSON-encoded string array of usernames
+  milestone?: string;     // JSON-encoded object or empty string
+  confidential?: string;  // "true" | "false" | ""
 }
 
 export type RawChunk = RawCodeChunk | RawKnowledgeChunk;
@@ -117,6 +126,13 @@ export interface KnowledgeSearchResult {
   author: string;
   timestamp: string;
   content: string;
+  // ─── Ticket metadata (Plan 42) ────────────────────────────────────────────
+  // JSON strings — Slice 4 parses these at the MCP/CLI boundary.
+  state: string;        // "open" | "closed" | ""
+  labels: string;       // JSON array string, e.g. '["bug","frontend"]'
+  assignees: string;    // JSON array string of usernames
+  milestone: string;    // JSON object string or ""
+  confidential: string; // "true" | "false" | ""
 }
 
 export type IndexMode = "full" | "incremental";

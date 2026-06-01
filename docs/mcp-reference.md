@@ -355,13 +355,27 @@ Semantic search over indexed knowledge sources (GitLab issues, etc.).
 | `source_id` | string | | Limit to a specific source |
 | `item_types` | string[] | | Filter by item type. Known values: `"ticket"` (GitLab issue body), `"ticket_comment"` (individual issue comment). Example: `["ticket"]` returns only issue bodies; `["ticket_comment"]` returns only comments; omit to return both. |
 
-**Returns:** array of `{ project_id, source_id, item_path, item_url, item_type, author, timestamp, content, score }`
+**Returns:** array of `{ project_id, source_id, item_path, item_url, item_type, author, timestamp, content, score, state, labels, assignees, milestone, confidential }`
 
 - `item_path` — provider slug identifying the chunk, e.g. `"issues/123"` (issue body) or `"issues/123#note_456"` (comment).
 - `item_url` — deep link back to the original in the provider (ref-less).
 - `item_type` — `"ticket"` (issue body) or `"ticket_comment"` (individual comment).
 
 For `item_type: "ticket_comment"`, `author` is the commenter's username, `timestamp` is the comment's `created_at`, and `item_url` includes a `#note_{id}` anchor linking to the specific comment.
+
+**Ticket metadata fields** (present on every result; populated for GitLab issue and comment chunks; empty/null for other item types):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `state` | `string \| null` | Issue state: `"open"` or `"closed"`. `null` for non-ticket sources. |
+| `labels` | `string[]` | Issue labels (e.g. `["bug", "frontend"]`). Empty array when none. |
+| `assignees` | `string[]` | Assignee usernames (e.g. `["alice"]`). Empty array when none. |
+| `milestone` | `{ title: string; due_date: string \| null } \| null` | Milestone title and due date, or `null` when unset. |
+| `confidential` | `boolean` | `true` when the issue was marked confidential in GitLab. Note: confidential issue text flows into the local index by design — this flag lets the caller decide how to handle it. |
+
+Comment chunks (`item_type: "ticket_comment"`) inherit the parent issue's metadata but keep their own `author` (the commenter).
+
+**No new input arguments.** The metadata is returned passthrough for every result — there are no filter parameters for these fields. The caller reasons from the returned values directly.
 
 **Structured errors:** When a source needs migration, search returns `{ error_type: "needs_migration", error: "...", details: { migrate_command: "scrybe migrate ..." } }` instead of results. Run the indicated command to upgrade the source.
 

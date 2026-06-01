@@ -108,6 +108,7 @@ describe("migration registry (Fix 6)", () => {
       "upgrade-voyage-text-default-v0.36.0",
       "add-e5-prompt-template-v0.37.0",
       "add-e5-max-input-tokens-v0.37.0",
+      "knowledge-metadata-columns-v0.41.0",
     ];
     writeFileSync(
       join(dataDir(), "schema.json"),

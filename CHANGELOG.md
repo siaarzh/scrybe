@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Search results for issues and tickets now include metadata.** Each result row now includes the issue's state (`open` / `closed`), labels, assigned users, milestone, and confidentiality flag — no extra API calls needed. Comments inherit metadata from their parent issue. The metadata arrives as structured fields, so callers can filter, deduplicate, or collapse results programmatically.
+
 ---
 
 ## [0.40.0] — 2026-05-31

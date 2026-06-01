@@ -11,7 +11,15 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkS
 import { join, dirname } from "path";
 import { config } from "./config.js";
 import { listProjects } from "./registry.js";
-import { compactTable, readTableMeta, writeTableMeta } from "./vector-store.js";
+import {
+  compactTable,
+  readTableMeta,
+  writeTableMeta,
+  knowledgeTableHasMetadataColumns,
+  makeKnowledgeSchema,
+  CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+  CURRENT_KNOWLEDGE_SCHEMA_VERSION_INTRODUCED_IN,
+} from "./vector-store.js";
 
 export interface Migration {
   id: string;
@@ -462,6 +470,153 @@ async function migrateToConfigJson(): Promise<void> {
   }
 }
 
+// ─── Plan 42 migration — backfill knowledge tables with metadata columns ──────
+//
+// Tables indexed before v0.41.0 lack the five Plan-42 metadata columns
+// (state, labels, assignees, milestone, confidential). The fix is:
+//   1. Read vector dimensions from the existing table's schema.
+//   2. Drop and recreate the table with the current makeKnowledgeSchema() (empty).
+//   3. Delete the source cursor so the next incremental fetch becomes a full
+//      re-fetch (no cursor = fetch all issues from the beginning).
+//   4. Wipe branch_tags rows for this source (now dangling — table is empty).
+//   5. Stamp knowledge_schema_version: 2 in the sidecar.
+//
+// After migration the table is empty. The daemon ticket-poller (or manual
+// `scrybe index --full`) will re-fetch everything and populate the new columns.
+//
+// Injectable dependencies allow unit-testing without touching the real LanceDB
+// or branch-tags DB. The production codepath uses defaults that import lazily.
+
+export interface KnowledgeMigrationSourceResult {
+  status: "ok" | "skipped" | "failed";
+  projectId: string;
+  sourceId: string;
+  reason?: string;
+}
+
+export async function migrateKnowledgeTablesForPlan42(opts?: {
+  /** @internal — inject the LanceDB path (tests only). */
+  _lanceDbPath?: string;
+  /** @internal — inject projects list (tests only). */
+  _projects?: Array<{ id: string; sources: Array<{ source_id: string; source_config: { type: string }; table_name?: string }> }>;
+  /** @internal — inject the metadata-columns check (tests only). */
+  _hasMetadataColumns?: (tableName: string) => boolean;
+  /** @internal — inject dropAndRecreate (tests only). */
+  _dropAndRecreate?: (tableName: string, schema: import("apache-arrow").Schema, sidecarFields: Record<string, unknown>) => Promise<void>;
+  /** @internal — inject deleteCursor (tests only). */
+  _deleteCursor?: (projectId: string, sourceId: string) => void;
+  /** @internal — inject wipeSource (tests only). */
+  _wipeSource?: (projectId: string, sourceId: string) => void;
+}): Promise<KnowledgeMigrationSourceResult[]> {
+  const results: KnowledgeMigrationSourceResult[] = [];
+  const projects = opts?._projects ?? listProjects();
+  const hasMetadataColumns = opts?._hasMetadataColumns ?? knowledgeTableHasMetadataColumns;
+
+  for (const project of projects) {
+    for (const source of project.sources) {
+      const sourceType = (source.source_config as { type: string }).type ?? "code";
+      // Only migrate ticket (knowledge) sources.
+      if (sourceType !== "ticket") continue;
+
+      const tableName = source.table_name;
+      if (!tableName) {
+        // Source registered but never indexed — nothing to migrate.
+        results.push({ status: "skipped", projectId: project.id, sourceId: source.source_id, reason: "no table_name (not yet indexed)" });
+        continue;
+      }
+
+      // Fast sidecar-first detection — skip if already on schema v2.
+      if (hasMetadataColumns(tableName)) {
+        results.push({ status: "skipped", projectId: project.id, sourceId: source.source_id, reason: "already has metadata columns" });
+        continue;
+      }
+
+      // Table exists but lacks metadata columns. Read dimensions from the existing
+      // table schema before dropping (needed to recreate with the same vector size).
+      let dimensions = 1536; // fallback default
+      try {
+        const lancedb = await import("@lancedb/lancedb");
+        const dbPath = opts?._lanceDbPath ?? join(config.dataDir, "lancedb");
+        const db = await lancedb.connect(dbPath);
+        const tableNames = await db.tableNames();
+        if (tableNames.includes(tableName)) {
+          const t = await db.openTable(tableName);
+          const schema = await t.schema();
+          const vecField = schema.fields.find((f) => f.name === "vector");
+          if (vecField != null) {
+            const listType = vecField.type as { listSize?: number };
+            if (typeof listType.listSize === "number" && listType.listSize > 0) {
+              dimensions = listType.listSize;
+            }
+          }
+        }
+      } catch (err) {
+        // Non-fatal: dimensions fallback to 1536; migration proceeds.
+        process.stderr.write(
+          `[scrybe] migration: could not read vector dimensions for ${project.id}/${source.source_id} ` +
+          `(${err instanceof Error ? err.message : String(err)}); using fallback ${dimensions}\n`
+        );
+      }
+
+      try {
+        // Step 1: Drop and recreate with current knowledge schema (empty table).
+        if (opts?._dropAndRecreate) {
+          await opts._dropAndRecreate(tableName, makeKnowledgeSchema(dimensions), {
+            knowledge_schema_version: CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+            knowledge_schema_version_introduced_in: CURRENT_KNOWLEDGE_SCHEMA_VERSION_INTRODUCED_IN,
+          });
+        } else {
+          const { dropAndRecreateTable } = await import("./vector-store.js");
+          await dropAndRecreateTable(tableName, makeKnowledgeSchema(dimensions), {
+            knowledge_schema_version: CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+            knowledge_schema_version_introduced_in: CURRENT_KNOWLEDGE_SCHEMA_VERSION_INTRODUCED_IN,
+          });
+        }
+
+        // Step 2: Delete the cursor so the next incremental fetch is a full re-fetch.
+        if (opts?._deleteCursor) {
+          opts._deleteCursor(project.id, source.source_id);
+        } else {
+          const { deleteCursor } = await import("./cursors.js");
+          deleteCursor(project.id, source.source_id);
+        }
+
+        // Step 3: Wipe branch_tags rows for this source (now dangling).
+        if (opts?._wipeSource) {
+          opts._wipeSource(project.id, source.source_id);
+        } else {
+          try {
+            const { wipeSource } = await import("./branch-state.js");
+            wipeSource(project.id, source.source_id);
+          } catch {
+            // branch-tags DB may not exist on fresh installs — non-fatal.
+          }
+        }
+
+        process.stderr.write(
+          `[scrybe] migration: dropped and recreated knowledge table for ${project.id}/${source.source_id} ` +
+          `(dimensions=${dimensions}). A full reindex will run on next daemon start or manual 'scrybe index'.\n`
+        );
+
+        results.push({ status: "ok", projectId: project.id, sourceId: source.source_id });
+      } catch (err) {
+        process.stderr.write(
+          `[scrybe] migration: failed to migrate knowledge table ${project.id}/${source.source_id}: ` +
+          `${err instanceof Error ? err.message : String(err)}\n`
+        );
+        results.push({
+          status: "failed",
+          projectId: project.id,
+          sourceId: source.source_id,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
 const MIGRATIONS: Migration[] = [
   {
     id: "compact-tables-v0.23.2",
@@ -630,6 +785,17 @@ const MIGRATIONS: Migration[] = [
         "[scrybe] migration: upgraded text embedding preset from voyage-3 to voyage-4. " +
         "Run 'scrybe model switch --source-type text' to reindex knowledge sources.\n"
       );
+    },
+  },
+  {
+    // Plan 42: Drop-recreate knowledge (ticket) tables that predate the five
+    // metadata columns (state, labels, assignees, milestone, confidential).
+    // The table is recreated empty; cursors are cleared so the next incremental
+    // fetch becomes a full re-fetch. The daemon ticket-poller or a manual
+    // `scrybe index` will repopulate the table with all columns stamped.
+    id: "knowledge-metadata-columns-v0.41.0",
+    async run() {
+      await migrateKnowledgeTablesForPlan42();
     },
   },
 ];

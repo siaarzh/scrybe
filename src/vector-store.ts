@@ -15,6 +15,14 @@ export const CURRENT_CHUNK_ID_SCHEME = 2;
 export const CURRENT_CHUNK_ID_SCHEME_VERSION = "0.31.0";
 
 /**
+ * Current knowledge (ticket) table schema version.
+ * Version 2 = Plan 42 metadata columns added (state, labels, assignees, milestone, confidential).
+ * Tables created before v0.41.0 will be missing these columns and need drop-recreate + reindex.
+ */
+export const CURRENT_KNOWLEDGE_SCHEMA_VERSION = 2;
+export const CURRENT_KNOWLEDGE_SCHEMA_VERSION_INTRODUCED_IN = "0.41.0";
+
+/**
  * Per-table sidecar shape. Plan 47 fields are required; all other plans add
  * optional fields additively. The index signature lets callers merge arbitrary
  * fields without casting.
@@ -60,6 +68,20 @@ export function needsMigration(tableName: string): boolean {
   return scheme < CURRENT_CHUNK_ID_SCHEME;
 }
 
+/**
+ * Returns true when the sidecar indicates the knowledge table already has the
+ * Plan-42 metadata columns (state, labels, assignees, milestone, confidential).
+ * Detection is sidecar-first (fast, no DB open); schema-shape is used only as
+ * fallback when the sidecar lacks the field (e.g. table predates v0.41.0).
+ */
+export function knowledgeTableHasMetadataColumns(tableName: string): boolean {
+  const meta = readTableMeta(tableName);
+  if (meta === null) return false; // no sidecar = pre-v0.41.0 table
+  const v = meta["knowledge_schema_version"];
+  if (typeof v === "number") return v >= CURRENT_KNOWLEDGE_SCHEMA_VERSION;
+  return false; // absent = pre-Plan-42
+}
+
 export function makeSchema(dimensions: number): Schema {
   return new Schema([
     new Field("chunk_id", new Utf8(), false),
@@ -89,6 +111,12 @@ export function makeKnowledgeSchema(dimensions: number): Schema {
     new Field("author", new Utf8(), false),
     new Field("timestamp", new Utf8(), false),
     new Field("content", new Utf8(), false),
+    // ─── Ticket metadata columns (Plan 42) ────────────────────────────────────
+    new Field("state", new Utf8(), false),
+    new Field("labels", new Utf8(), false),
+    new Field("assignees", new Utf8(), false),
+    new Field("milestone", new Utf8(), false),
+    new Field("confidential", new Utf8(), false),
     new Field(
       "vector",
       new FixedSizeList(dimensions, new Field("item", new Float32(), false)),
@@ -193,10 +221,18 @@ async function getProjectTable(
         : makeKnowledgeSchema(dimensions);
     table = await db.createEmptyTable(tableName, schema);
     // Stamp scheme 2 on new tables — they were created with the new hash contract.
-    writeTableMeta(tableName, {
+    // Knowledge tables also stamp the metadata-schema version so a freshly-created
+    // table isn't false-positive flagged for the Plan 42 backfill migration (which
+    // treats an absent knowledge_schema_version as a pre-v0.41.0 table to drop-recreate).
+    const meta: Partial<TableMeta> = {
       chunk_id_scheme: CURRENT_CHUNK_ID_SCHEME,
       chunk_id_scheme_introduced_in: CURRENT_CHUNK_ID_SCHEME_VERSION,
-    });
+    };
+    if (profile === "knowledge") {
+      meta.knowledge_schema_version = CURRENT_KNOWLEDGE_SCHEMA_VERSION;
+      meta.knowledge_schema_version_introduced_in = CURRENT_KNOWLEDGE_SCHEMA_VERSION_INTRODUCED_IN;
+    }
+    writeTableMeta(tableName, meta);
   }
   _tableCache.set(tableName, table);
   return table;
@@ -390,6 +426,12 @@ export async function upsertKnowledge(
     author: chunk.author,
     timestamp: chunk.timestamp,
     content: chunk.content,
+    // ─── Ticket metadata (Plan 42) — default '' for non-ticket chunks ─────────
+    state: chunk.state ?? "",
+    labels: chunk.labels ?? "",
+    assignees: chunk.assignees ?? "",
+    milestone: chunk.milestone ?? "",
+    confidential: chunk.confidential ?? "",
     vector: Array.from(vectors[i]),
   }));
   // Same schema-typing approach as upsert() — see comment there.
@@ -425,6 +467,12 @@ export async function searchKnowledge(
     author: String(row.author),
     timestamp: String(row.timestamp),
     content: String(row.content),
+    // ─── Ticket metadata (Plan 42) ─────────────────────────────────────────────
+    state: String(row.state ?? ""),
+    labels: String(row.labels ?? ""),
+    assignees: String(row.assignees ?? ""),
+    milestone: String(row.milestone ?? ""),
+    confidential: String(row.confidential ?? ""),
   }));
 }
 
@@ -450,6 +498,12 @@ export async function ftsSearchKnowledge(
     author: String(row.author),
     timestamp: String(row.timestamp),
     content: String(row.content),
+    // ─── Ticket metadata (Plan 42) ─────────────────────────────────────────────
+    state: String(row.state ?? ""),
+    labels: String(row.labels ?? ""),
+    assignees: String(row.assignees ?? ""),
+    milestone: String(row.milestone ?? ""),
+    confidential: String(row.confidential ?? ""),
   }));
 }
 
