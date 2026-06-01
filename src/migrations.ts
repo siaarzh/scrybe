@@ -15,7 +15,7 @@ import {
   compactTable,
   readTableMeta,
   writeTableMeta,
-  knowledgeTableHasMetadataColumns,
+  knowledgeTableMetadataUpToDate,
   makeKnowledgeSchema,
   CURRENT_KNOWLEDGE_SCHEMA_VERSION,
   CURRENT_KNOWLEDGE_SCHEMA_VERSION_INTRODUCED_IN,
@@ -499,8 +499,8 @@ export async function migrateKnowledgeTablesForPlan42(opts?: {
   _lanceDbPath?: string;
   /** @internal — inject projects list (tests only). */
   _projects?: Array<{ id: string; sources: Array<{ source_id: string; source_config: { type: string }; table_name?: string }> }>;
-  /** @internal — inject the metadata-columns check (tests only). */
-  _hasMetadataColumns?: (tableName: string) => boolean;
+  /** @internal — inject the metadata-schema-version check (tests only). */
+  _metadataUpToDate?: (tableName: string) => boolean;
   /** @internal — inject dropAndRecreate (tests only). */
   _dropAndRecreate?: (tableName: string, schema: import("apache-arrow").Schema, sidecarFields: Record<string, unknown>) => Promise<void>;
   /** @internal — inject deleteCursor (tests only). */
@@ -510,7 +510,7 @@ export async function migrateKnowledgeTablesForPlan42(opts?: {
 }): Promise<KnowledgeMigrationSourceResult[]> {
   const results: KnowledgeMigrationSourceResult[] = [];
   const projects = opts?._projects ?? listProjects();
-  const hasMetadataColumns = opts?._hasMetadataColumns ?? knowledgeTableHasMetadataColumns;
+  const metadataUpToDate = opts?._metadataUpToDate ?? knowledgeTableMetadataUpToDate;
 
   for (const project of projects) {
     for (const source of project.sources) {
@@ -525,9 +525,9 @@ export async function migrateKnowledgeTablesForPlan42(opts?: {
         continue;
       }
 
-      // Fast sidecar-first detection — skip if already on schema v2.
-      if (hasMetadataColumns(tableName)) {
-        results.push({ status: "skipped", projectId: project.id, sourceId: source.source_id, reason: "already has metadata columns" });
+      // Fast sidecar-version detection — skip if already on the current schema.
+      if (metadataUpToDate(tableName)) {
+        results.push({ status: "skipped", projectId: project.id, sourceId: source.source_id, reason: "already at current metadata schema" });
         continue;
       }
 

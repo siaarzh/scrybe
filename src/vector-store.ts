@@ -74,12 +74,18 @@ export function needsMigration(tableName: string): boolean {
  * Detection is sidecar-first (fast, no DB open); schema-shape is used only as
  * fallback when the sidecar lacks the field (e.g. table predates v0.41.0).
  */
-export function knowledgeTableHasMetadataColumns(tableName: string): boolean {
+/**
+ * Whether a knowledge table is already at the current metadata-schema version.
+ * Reads the `knowledge_schema_version` field from the table's sidecar — it does
+ * NOT inspect the Arrow columns. Absent/older sidecar = needs the backfill migration.
+ * (Fresh tables stamp the version at creation; see getProjectTable.)
+ */
+export function knowledgeTableMetadataUpToDate(tableName: string): boolean {
   const meta = readTableMeta(tableName);
   if (meta === null) return false; // no sidecar = pre-v0.41.0 table
   const v = meta["knowledge_schema_version"];
   if (typeof v === "number") return v >= CURRENT_KNOWLEDGE_SCHEMA_VERSION;
-  return false; // absent = pre-Plan-42
+  return false; // absent = pre-v0.41.0
 }
 
 export function makeSchema(dimensions: number): Schema {

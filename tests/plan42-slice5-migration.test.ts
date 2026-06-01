@@ -9,7 +9,7 @@
  *   D. Source with no table_name → skipped (not yet indexed).
  *
  * The tests use SCRYBE_DATA_DIR (set per-test by tests/isolate.ts) so that
- * knowledgeTableHasMetadataColumns() reads sidecars from the same path that
+ * knowledgeTableMetadataUpToDate() reads sidecars from the same path that
  * the mocked _dropAndRecreate writes them to.
  */
 
@@ -129,12 +129,12 @@ function writeSidecar(tableName: string, fields: Record<string, unknown>): void 
 }
 
 /**
- * Injectable replacement for knowledgeTableHasMetadataColumns that reads
+ * Injectable replacement for knowledgeTableMetadataUpToDate that reads
  * sidecars from the test's lancedb path rather than from the module-level DB_PATH
  * constant (which captures SCRYBE_DATA_DIR at module load time, before isolate.ts
  * sets the per-test value).
  */
-function makeHasMetadataColumns(knowledgeSchemaVersion: number) {
+function makeMetadataUpToDate(knowledgeSchemaVersion: number) {
   return (tableName: string): boolean => {
     const meta = readSidecar(tableName);
     if (meta === null) return false;
@@ -226,7 +226,7 @@ describe("Plan42-A — old-schema knowledge table gets migrated", () => {
           table_name: tableName,
         }],
       }],
-      _hasMetadataColumns: makeHasMetadataColumns(CURRENT_KNOWLEDGE_SCHEMA_VERSION),
+      _metadataUpToDate: makeMetadataUpToDate(CURRENT_KNOWLEDGE_SCHEMA_VERSION),
       _dropAndRecreate: makeMockDropAndRecreate(),
       _deleteCursor: (projectId, sourceId) => {
         const p = join(getCursorsDir(), `${projectId}__${sourceId}.json`);
@@ -338,7 +338,7 @@ describe("Plan42-B — code table is left untouched", () => {
           },
         ],
       }],
-      _hasMetadataColumns: makeHasMetadataColumns(CURRENT_KNOWLEDGE_SCHEMA_VERSION),
+      _metadataUpToDate: makeMetadataUpToDate(CURRENT_KNOWLEDGE_SCHEMA_VERSION),
       _dropAndRecreate: async (tn, schema, sidecarFields) => {
         if (tn === codeTableName) codeTableTouched = true;
         const db2 = await lancedb.connect(dbPath);
@@ -403,13 +403,13 @@ describe("Plan42-C — idempotency: second run is skipped", () => {
     }];
 
     const dropAndRecreate = makeMockDropAndRecreate();
-    const hasMetadataColumns = makeHasMetadataColumns(CURRENT_KNOWLEDGE_SCHEMA_VERSION);
+    const metadataUpToDate = makeMetadataUpToDate(CURRENT_KNOWLEDGE_SCHEMA_VERSION);
 
     // First run — migrates
     const first = await migrateKnowledgeTablesForPlan42({
       _lanceDbPath: dbPath,
       _projects: projectsList,
-      _hasMetadataColumns: hasMetadataColumns,
+      _metadataUpToDate: metadataUpToDate,
       _dropAndRecreate: dropAndRecreate,
       _deleteCursor: () => {},
       _wipeSource: () => {},
@@ -425,14 +425,14 @@ describe("Plan42-C — idempotency: second run is skipped", () => {
     const second = await migrateKnowledgeTablesForPlan42({
       _lanceDbPath: dbPath,
       _projects: projectsList,
-      _hasMetadataColumns: hasMetadataColumns,
+      _metadataUpToDate: metadataUpToDate,
       _dropAndRecreate: async () => { dropCalledOnSecondRun = true; },
       _deleteCursor: () => {},
       _wipeSource: () => {},
     });
 
     expect(second[0]!.status).toBe("skipped");
-    expect(second[0]!.reason).toMatch(/already has metadata columns/);
+    expect(second[0]!.reason).toMatch(/already at current metadata schema/);
     expect(dropCalledOnSecondRun).toBe(false);
   });
 });
@@ -451,7 +451,7 @@ describe("Plan42-D — source without table_name is skipped", () => {
           // no table_name
         }],
       }],
-      _hasMetadataColumns: makeHasMetadataColumns(CURRENT_KNOWLEDGE_SCHEMA_VERSION),
+      _metadataUpToDate: makeMetadataUpToDate(CURRENT_KNOWLEDGE_SCHEMA_VERSION),
       _dropAndRecreate: async () => { throw new Error("should not be called"); },
       _deleteCursor: () => {},
       _wipeSource: () => {},

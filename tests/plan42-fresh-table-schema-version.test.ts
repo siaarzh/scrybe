@@ -7,11 +7,11 @@
  * drop-recreate, a brand-new knowledge table built under v0.41.0 would be false-positive
  * migrated (wiped + re-fetched) on the next `scrybe migrate` / `doctor --repair`.
  *
- * Slice 5's migration test missed this because it injected a fake `_hasMetadataColumns`
+ * Slice 5's migration test missed this because it injected a fake `_metadataUpToDate`
  * detector and never exercised the real sidecar written by the real creation path.
  *
  * These tests drive the REAL creation path (via upsert/upsertKnowledge) and assert the
- * REAL knowledgeTableHasMetadataColumns reads a correctly-stamped sidecar.
+ * REAL knowledgeTableMetadataUpToDate reads a correctly-stamped sidecar.
  *
  * Harness mirrors plan42-slice3-metadata-roundtrip.test.ts.
  */
@@ -48,7 +48,7 @@ afterEach(async () => {
 
 describe("Plan 42 — fresh knowledge table stamps knowledge_schema_version", () => {
   it("a freshly-created knowledge table is NOT flagged for the backfill migration", async () => {
-    const { upsertKnowledge, knowledgeTableHasMetadataColumns, readTableMeta, CURRENT_KNOWLEDGE_SCHEMA_VERSION } =
+    const { upsertKnowledge, knowledgeTableMetadataUpToDate, readTableMeta, CURRENT_KNOWLEDGE_SCHEMA_VERSION } =
       await import("../src/vector-store.js");
 
     const TABLE_NAME = `p42-sv-know-${Date.now()}`;
@@ -72,7 +72,7 @@ describe("Plan 42 — fresh knowledge table stamps knowledge_schema_version", ()
     await upsertKnowledge([chunk], [[1, 0, 0]], TABLE_NAME, DIMS);
 
     // The real detector the migration uses must report this table as up-to-date.
-    expect(knowledgeTableHasMetadataColumns(TABLE_NAME)).toBe(true);
+    expect(knowledgeTableMetadataUpToDate(TABLE_NAME)).toBe(true);
 
     // And the sidecar should carry the version (not just chunk_id_scheme).
     const meta = readTableMeta(TABLE_NAME);
@@ -82,7 +82,7 @@ describe("Plan 42 — fresh knowledge table stamps knowledge_schema_version", ()
   });
 
   it("a freshly-created CODE table does NOT get a knowledge_schema_version stamp", async () => {
-    const { upsert, knowledgeTableHasMetadataColumns, readTableMeta } =
+    const { upsert, knowledgeTableMetadataUpToDate, readTableMeta } =
       await import("../src/vector-store.js");
 
     const TABLE_NAME = `p42-sv-code-${Date.now()}`;
@@ -106,6 +106,6 @@ describe("Plan 42 — fresh knowledge table stamps knowledge_schema_version", ()
     expect(meta).not.toBeNull();
     expect(meta!["chunk_id_scheme"]).toBe(2);
     expect(meta!["knowledge_schema_version"]).toBeUndefined();
-    expect(knowledgeTableHasMetadataColumns(TABLE_NAME)).toBe(false);
+    expect(knowledgeTableMetadataUpToDate(TABLE_NAME)).toBe(false);
   });
 });
