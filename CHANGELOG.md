@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.41.1] — 2026-06-10
+
 ### Fixed
 
 - **MCP clients now survive daemon restarts and port changes.** The MCP shim re-resolves the daemon address from the pidfile and safely retries when the connection is refused, instead of failing every call until the client reconnects. The daemon also keeps its previous port across restarts where possible, so running clients rarely notice a restart at all.
@@ -65,30 +69,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.37.0] — 2026-05-24
-
-### Added
-
-- **Local cross-encoder reranker.** Set `SCRYBE_RERANK=true` with `SCRYBE_RERANK_PROVIDER=local` to rerank results in-process via `Xenova/ms-marco-MiniLM-L-6-v2` (~22 MB, no API key, no sidecar). Previously reranking auto-configured only for Voyage AI; non-Voyage setups now have a free local option. Position-aware blending weights the first-stage rank against the reranker score by position, tunable via `SCRYBE_RERANK_BLEND_TOP3` / `SCRYBE_RERANK_BLEND_TAIL`.
-- **Per-preset `prompt_template`.** Embedding presets can specify asymmetric `query` / `passage` prefixes. The default local presets now apply the `query: ` / `passage: ` prefixes that the bundled e5 model (`multilingual-e5-small`) is trained for.
-- **Per-preset `max_input_tokens`.** Embedding presets can cap input size to the model's context window (default 512 for the local e5 presets). The chunker fits chunks to that budget, so content is no longer silently truncated at the model boundary during embedding.
-
-### Changed
-
-- **Local-embedder users: a one-time reindex is required on upgrade** to apply the new query/passage prefixes and token budget. The daemon auto-enqueues it on next start for sources under 50k chunks; larger sources pause for confirmation (visible via the `queue_status` MCP tool) so you control when the re-embed runs.
-
----
-
 ## Older releases
 
-For releases v0.36.3 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.37.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.41.1...HEAD
+[0.41.1]: https://github.com/siaarzh/scrybe/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/siaarzh/scrybe/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/siaarzh/scrybe/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/siaarzh/scrybe/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/siaarzh/scrybe/compare/v0.37.1...v0.38.0
 [0.37.1]: https://github.com/siaarzh/scrybe/compare/v0.37.0...v0.37.1
-[0.37.0]: https://github.com/siaarzh/scrybe/compare/v0.36.3...v0.37.0

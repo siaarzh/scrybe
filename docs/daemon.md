@@ -325,7 +325,7 @@ client.close(); // abort any open SSE stream
 
 | Variable | Default | Description |
 |---|---|---|
-| `SCRYBE_DAEMON_PORT` | `58451` | Preferred HTTP port; falls back to ephemeral if busy |
+| `SCRYBE_DAEMON_PORT` | `58451` | Exact HTTP port to bind (no fallback). When unset, the daemon reuses its previous port from the pidfile, then the default, then an ephemeral port |
 | `SCRYBE_DAEMON_PIDFILE` | `<DATA_DIR>/daemon.pid` | Override pidfile location |
 | `SCRYBE_DAEMON_HOT_MS` | `60000` | HOT window duration in ms |
 | `SCRYBE_DAEMON_COLD_MULTIPLIER` | `5` | Debounce multiplier in COLD state |
