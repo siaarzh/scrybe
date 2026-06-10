@@ -56,6 +56,27 @@ interface RpcError {
   error: { code: number; message: string };
 }
 
+// ─── Mutable base URL (D1 — resolves per-call, refreshed on failure + heartbeat) ─
+
+let _baseUrl = "";
+
+/**
+ * Re-reads the pidfile and updates `_baseUrl` if a valid port is found.
+ * Returns the resolved URL, or the last-known value if the pidfile is missing
+ * or unparseable (never overwrites with empty — guard against mid-restart window).
+ */
+function resolveBaseUrl(): string {
+  const pidData = readPidfile();
+  if (pidData?.port) {
+    _baseUrl = `http://127.0.0.1:${pidData.port}`;
+  }
+  return _baseUrl;
+}
+
+// ─── Module-level version skew state (recomputed after successful re-resolve) ──
+
+let _currentSkew: VersionSkewState | null = null;
+
 // ─── Heartbeat (mirrors mcp-server.ts pattern) ────────────────────────────────
 
 const _clientId = `${hostname()}:${process.pid}:${Date.now()}`;
@@ -64,11 +85,16 @@ let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let _unregisterCalled = false;
 
 async function _sendHeartbeat(): Promise<void> {
+  // D2: opportunistically update _baseUrl from pidfile on every heartbeat tick
   const pidData = readPidfile();
-  if (!pidData?.port) return;
+  if (pidData?.port) {
+    _baseUrl = `http://127.0.0.1:${pidData.port}`;
+  }
+  const url = _baseUrl;
+  if (!url) return;
   try {
     // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
-    await fetch(`http://127.0.0.1:${pidData.port}/clients/heartbeat`, {
+    await fetch(`${url}/clients/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ clientId: _clientId, pid: process.pid }),
@@ -121,14 +147,26 @@ function jsonResult(data: unknown) {
   return textResult(JSON.stringify(data, null, 2));
 }
 
-async function callRpc(
-  baseUrl: string,
-  method: string,
-  params: Record<string, unknown>
-): Promise<unknown> {
+/** D3 — connect-class error codes that justify a retry (request never reached daemon). */
+const CONNECT_CLASS_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"]);
+
+/**
+ * Returns true when the error is a connection-class failure (request never
+ * reached the daemon, so retrying is safe even for non-idempotent RPCs).
+ */
+function isConnectClassError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause && typeof cause === "object" && "code" in cause) {
+    return CONNECT_CLASS_CODES.has((cause as { code: string }).code);
+  }
+  return false;
+}
+
+async function _singleRpc(url: string, method: string, params: Record<string, unknown>): Promise<unknown> {
   const id = Math.random().toString(36).slice(2);
   // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
-  const res = await fetch(`${baseUrl}/mcp/rpc`, {
+  const res = await fetch(`${url}/mcp/rpc`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -162,18 +200,83 @@ async function callRpc(
   return result;
 }
 
+/**
+ * After a successful re-resolve to a new port, fetch /health and recompute
+ * version skew state (D4). Stored in _currentSkew for subsequent calls.
+ * If the health check fails or yields a major-skew, _currentSkew is updated
+ * accordingly — callers check _currentSkew after calling this.
+ */
+async function _recomputeSkewFromHealth(url: string): Promise<void> {
+  try {
+    // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+    const healthRes = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
+    if (healthRes.ok) {
+      const health = (await healthRes.json()) as { version?: string };
+      const daemonVersion = health.version ?? "";
+      _currentSkew = analyzeVersionSkew(daemonVersion, VERSION);
+    }
+  } catch { /* health fetch failed — keep existing skew state */ }
+}
+
+async function callRpc(
+  method: string,
+  params: Record<string, unknown>
+): Promise<unknown> {
+  const url = _baseUrl || resolveBaseUrl();
+
+  try {
+    return await _singleRpc(url, method, params);
+  } catch (firstErr) {
+    // D3: only retry for connect-class errors (request never reached daemon)
+    if (!isConnectClassError(firstErr)) throw firstErr;
+
+    // Re-resolve from pidfile
+    const newUrl = resolveBaseUrl();
+    const portChanged = newUrl !== url && !!newUrl;
+
+    if (portChanged) {
+      // Retry against new port
+      try {
+        const result = await _singleRpc(newUrl, method, params);
+        // Successful — recompute skew from new daemon's health (D4)
+        await _recomputeSkewFromHealth(newUrl);
+        return result;
+      } catch (_retryErr) {
+        // New port also failed — fall through to ensureRunning
+      }
+    }
+
+    // Port unchanged or retry failed: try ensureRunning (5s per D3)
+    try {
+      const spawnResult = await ensureRunning(5000);
+      if (spawnResult.ok) {
+        // Re-resolve one more time after spawn
+        const spawnUrl = resolveBaseUrl();
+        if (spawnUrl) {
+          const result = await _singleRpc(spawnUrl, method, params);
+          await _recomputeSkewFromHealth(spawnUrl);
+          return result;
+        }
+      }
+    } catch { /* spawn failed — fall through to error */ }
+
+    throw firstErr;
+  }
+}
+
 // ─── Version skew helpers ────────────────────────────────────────────────────
 
 interface VersionSkewState {
   isMajorSkew: boolean;
   isMinorOrPatchSkew: boolean;
+  isPreUpgradeBoundary: boolean;
   allowedTools: Set<string>;
 }
 
 function analyzeVersionSkew(daemonVersion: string, shimVersion: string): VersionSkewState {
   const cmp = compareSemVer(daemonVersion, shimVersion);
   if (cmp === null) {
-    return { isMajorSkew: false, isMinorOrPatchSkew: false, allowedTools: new Set(KNOWN_TOOL_NAMES) };
+    return { isMajorSkew: false, isMinorOrPatchSkew: false, isPreUpgradeBoundary: false, allowedTools: new Set(KNOWN_TOOL_NAMES) };
   }
 
   const daemonMajor = getMajorVersion(daemonVersion);
@@ -181,10 +284,12 @@ function analyzeVersionSkew(daemonVersion: string, shimVersion: string): Version
 
   const isMajorSkew = daemonMajor !== null && shimMajor !== null && daemonMajor !== shimMajor;
   const isMinorOrPatchSkew = !isMajorSkew && cmp !== 0;
+  const isPreUpgradeBoundary = isShimPostUpgrade(shimVersion) && isDaemonPreUpgrade(daemonVersion);
 
   return {
     isMajorSkew,
     isMinorOrPatchSkew,
+    isPreUpgradeBoundary,
     allowedTools: new Set(KNOWN_TOOL_NAMES),
   };
 }
@@ -501,10 +606,11 @@ export async function runMcpShim(): Promise<void> {
 
   const pidData = readPidfile();
   const port = pidData!.port;
-  const baseUrl = `http://127.0.0.1:${port}`;
+  // D1: initialise module-level _baseUrl from the pidfile port at startup
+  _baseUrl = `http://127.0.0.1:${port}`;
 
   // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
-  const manifestRes = await fetch(`${baseUrl}/mcp/manifest`, {
+  const manifestRes = await fetch(`${_baseUrl}/mcp/manifest`, {
     signal: AbortSignal.timeout(5000),
   });
 
@@ -533,9 +639,10 @@ export async function runMcpShim(): Promise<void> {
     return;
   }
 
-  const skew = analyzeVersionSkew(daemonVersion, VERSION);
+  // D4: store initial skew in module-level state; callRpc may refresh it after re-resolve
+  _currentSkew = analyzeVersionSkew(daemonVersion, VERSION);
 
-  if (skew.isMajorSkew) {
+  if (_currentSkew.isMajorSkew) {
     const server = new Server(
       { name: "scrybe (daemon out of date)", version: VERSION },
       { capabilities: { tools: {} } }
@@ -565,7 +672,7 @@ export async function runMcpShim(): Promise<void> {
     return;
   }
 
-  if (skew.isMinorOrPatchSkew) {
+  if (_currentSkew.isMinorOrPatchSkew) {
     console.warn(
       `[scrybe] daemon version ${daemonVersion} differs from shim ${VERSION} (minor/patch) — restart daemon to refresh tool surface`
     );
@@ -576,7 +683,7 @@ export async function runMcpShim(): Promise<void> {
     { capabilities: { tools: {} } }
   );
 
-  const filteredTools = manifest.tools.filter((t) => skew.allowedTools.has(t.name));
+  const filteredTools = manifest.tools.filter((t) => _currentSkew!.allowedTools.has(t.name));
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: filteredTools.map((t) => ({
@@ -591,14 +698,39 @@ export async function runMcpShim(): Promise<void> {
     const { name, arguments: args } = request.params;
     const params = (args ?? {}) as Record<string, unknown>;
 
+    // D4: check current skew state (may have been refreshed by callRpc after re-resolve)
+    const skew = _currentSkew!;
+
     if (!skew.allowedTools.has(name)) {
       return jsonResult({
         error: `method not found, restart daemon to expose tool ${name}`,
       });
     }
 
+    // D4: if re-resolve landed on a major-skewed or pre-upgrade-boundary daemon, surface per-call error
+    if (skew.isMajorSkew) {
+      return jsonResult({
+        error: `daemon version mismatch after port change — restart to update: scrybe daemon restart`,
+      });
+    }
+
+    if (skew.isPreUpgradeBoundary) {
+      return jsonResult({
+        error:
+          `Run: scrybe daemon stop && scrybe daemon start   (then reconnect)\n` +
+          `\n` +
+          `scrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\n` +
+          `and cannot use the new on-disk format helpers. Stop + start refreshes the daemon\n` +
+          `with the new lancedb binary. Existing data is preserved (lancedb 0.27 reads\n` +
+          `0.14-written tables transparently).\n` +
+          `\n` +
+          `If the stop command fails with EPERM on Windows, close all Claude Code / IDE\n` +
+          `sessions first — they hold the lancedb native binding open.`,
+      });
+    }
+
     try {
-      const result = await callRpc(baseUrl, name, params);
+      const result = await callRpc(name, params);
       return jsonResult(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -611,3 +743,23 @@ export async function runMcpShim(): Promise<void> {
 
   _startHeartbeatLoop();
 }
+
+// ─── Testing seams (exported for unit tests, not part of public API) ──────────
+
+/** @internal */
+export const __testing = {
+  /** Read the current module-level base URL. */
+  getBaseUrl: () => _baseUrl,
+  /** Overwrite the module-level base URL (allows tests to inject a port). */
+  setBaseUrl: (url: string) => { _baseUrl = url; },
+  /** Check whether an error is a connect-class error (D3 classifier). */
+  isConnectClassError,
+  /** Invoke callRpc directly with injected state. */
+  callRpc,
+  /** Trigger a heartbeat tick (for heartbeat-update tests). */
+  sendHeartbeat: _sendHeartbeat,
+  /** Get current skew state. */
+  getSkew: () => _currentSkew,
+  /** Set skew state (for test injection). */
+  setSkew: (s: VersionSkewState | null) => { _currentSkew = s; },
+};

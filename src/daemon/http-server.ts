@@ -16,6 +16,7 @@ import { getGitWatcherHealth, getCachedBranch } from "./git-watcher.js";
 import { listJobRows, getJobRow, getQueueStatus } from "../jobs-store.js";
 import { cancelJob } from "../jobs.js";
 import { handleMcpRoute } from "./mcp-rpc.js";
+import { readPidfile } from "./pidfile.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -188,8 +189,13 @@ export async function startHttpServer(opts: {
   });
 
   const portEnv = process.env["SCRYBE_DAEMON_PORT"];
-  const desired = portEnv != null ? parseInt(portEnv, 10) : DEFAULT_PORT;
-  _port = await bindTo(desired);
+  if (portEnv != null) {
+    // SCRYBE_DAEMON_PORT set → exact bind, no pidfile preference (D5)
+    _port = await bindTo(parseInt(portEnv, 10));
+  } else {
+    // D5: no env override — try stale pidfile port first, then DEFAULT_PORT, then ephemeral
+    _port = await bindSticky();
+  }
   return { port: _port };
 }
 
@@ -209,31 +215,60 @@ export function stopHttpServer(): Promise<void> {
 
 // ─── Internal ──────────────────────────────────────────────────────────────
 
-async function bindTo(desired: number): Promise<number> {
-  const tryBind = (port: number): Promise<number> =>
-    new Promise((resolve, reject) => {
-      const onError = (err: Error) => {
-        _server!.removeListener("error", onError);
-        reject(err);
-      };
-      _server!.once("error", onError);
-      _server!.listen(port, "127.0.0.1", () => {
-        _server!.removeListener("error", onError);
-        resolve((_server!.address() as { port: number }).port);
-      });
+function tryBind(port: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (err: Error) => {
+      _server!.removeListener("error", onError);
+      reject(err);
+    };
+    _server!.once("error", onError);
+    _server!.listen(port, "127.0.0.1", () => {
+      _server!.removeListener("error", onError);
+      resolve((_server!.address() as { port: number }).port);
     });
+  });
+}
 
-  if (desired === DEFAULT_PORT) {
+async function bindTo(desired: number): Promise<number> {
+  return tryBind(desired);
+}
+
+/**
+ * D5 — Sticky port binding (when SCRYBE_DAEMON_PORT is unset).
+ * Attempt order: stale pidfile port → DEFAULT_PORT → ephemeral (0).
+ * Missing/corrupt pidfile falls through cleanly to DEFAULT_PORT.
+ * EADDRINUSE on any candidate falls through to the next candidate.
+ */
+async function bindSticky(): Promise<number> {
+  // Read stale pidfile port (the current process hasn't written its own pidfile yet)
+  let stalePort: number | null = null;
+  try {
+    const stale = readPidfile();
+    if (stale?.port && stale.port > 0 && stale.port !== DEFAULT_PORT) {
+      stalePort = stale.port;
+    }
+  } catch { /* corrupt pidfile — ignore */ }
+
+  // 1. Try stale port (if any and different from DEFAULT_PORT)
+  if (stalePort !== null) {
     try {
-      return await tryBind(DEFAULT_PORT);
+      return await tryBind(stalePort);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "EADDRINUSE") {
-        return await tryBind(0);
-      }
-      throw e;
+      if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
+      // EADDRINUSE — fall through to DEFAULT_PORT
     }
   }
-  return await tryBind(desired);
+
+  // 2. Try DEFAULT_PORT
+  try {
+    return await tryBind(DEFAULT_PORT);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
+    // EADDRINUSE — fall through to ephemeral
+  }
+
+  // 3. Ephemeral
+  return tryBind(0);
 }
 
 function jsonRes(res: http.ServerResponse, status: number, body: unknown): void {
@@ -577,4 +612,47 @@ async function handle(
   if (await handleMcpRoute(req, res)) return;
 
   jsonRes(res, 404, { error: "Not found" });
+}
+
+// ─── Testing seams ─────────────────────────────────────────────────────────────
+
+/**
+ * Testable variant of bindSticky that accepts injected tryBind + readPidfile fns.
+ * Allows tests to verify bind order without touching real sockets or pidfiles.
+ * @internal
+ */
+export async function __testingBindSticky(
+  opts: {
+    tryBind: (port: number) => Promise<number>;
+    readPidfilePort: () => number | null;
+  }
+): Promise<number> {
+  const { tryBind: tb, readPidfilePort } = opts;
+
+  let stalePort: number | null = null;
+  try {
+    const port = readPidfilePort();
+    if (port && port > 0 && port !== DEFAULT_PORT) {
+      stalePort = port;
+    }
+  } catch { /* corrupt — ignore */ }
+
+  // 1. Try stale port
+  if (stalePort !== null) {
+    try {
+      return await tb(stalePort);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
+    }
+  }
+
+  // 2. Try DEFAULT_PORT
+  try {
+    return await tb(DEFAULT_PORT);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
+  }
+
+  // 3. Ephemeral
+  return tb(0);
 }

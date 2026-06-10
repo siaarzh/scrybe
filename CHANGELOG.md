@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP clients now survive daemon restarts and port changes.** The MCP shim re-resolves the daemon address from the pidfile and safely retries when the connection is refused, instead of failing every call until the client reconnects. The daemon also keeps its previous port across restarts where possible, so running clients rarely notice a restart at all.
+
 ---
 
 ## [0.41.0] — 2026-06-01
