@@ -1,2 +1,7 @@
 paths-ignore:
   - tests/**/*.test.ts
+  # Scenario fixtures are intentionally-realistic sample corpora used to
+  # exercise indexing/recall. Their "vulnerabilities" (e.g. Math.random
+  # session tokens, partial escaping) are deliberate sample code, not scrybe
+  # source, so scanning them only produces noise.
+  - tests/scenarios/fixtures/**
