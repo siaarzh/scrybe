@@ -29,7 +29,7 @@ MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.
 
 ### `doctor`
 
-One-shot diagnostics. Checks: install integrity (landmark deps resolvable), DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, and MCP configuration for Claude Code and Cursor.
+One-shot diagnostics. Checks: install integrity (landmark deps resolvable), DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, ticket-source token health (env-var resolution and authenticated probe), and MCP configuration for Claude Code and Cursor.
 
 | Flag | Description |
 |------|-------------|
@@ -418,20 +418,50 @@ Add an indexable source to a project. Embedding configuration is set globally vi
 | `--root <path>` | ✓ | Absolute path to repo root |
 | `--languages <langs>` | | Comma-separated language hints, e.g. `ts,vue` |
 
-**For `--type ticket`:**
+**For `--type ticket` (generic fields — recommended):**
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--gitlab-url <url>` | ✓ | GitLab instance base URL |
-| `--gitlab-project-id <id>` | ✓ | GitLab project ID or path |
-| `--gitlab-token <token>` | ✓ | GitLab personal access token (validated against the API before saving) |
+| `--provider <provider>` | | `gitlab` (default) or `github` |
+| `--url <url>` | depends | API instance URL. Required for GitLab; optional for GitHub (default: `https://api.github.com`). |
+| `--project <id>` | ✓ | Provider identifier: GitLab numeric ID or path; GitHub `owner/repo` |
+| `--token <token>` | ✓ | Personal access token (literal or `${VAR}` for env-referenced). Validated before saving. |
+
+**For `--type ticket` (deprecated GitLab aliases — still work with a warning):**
+
+| Flag | Deprecated | Use instead |
+|------|----------|-------------|
+| `--gitlab-url <url>` | Yes | `--provider gitlab --url <url>` |
+| `--gitlab-project-id <id>` | Yes | `--provider gitlab --project <id>` |
+| `--gitlab-token <token>` | Yes | `--provider gitlab --token <token>` |
+
+**Token env-variable pattern:**
+
+Tokens can be passed as a literal string or referenced from an environment variable using `${VAR}` syntax. The variable is resolved at fetch/validate time, not at configuration time. Recommended env var names:
+- GitLab: `SCRYBE_GITLAB_TOKEN`
+- GitHub: `SCRYBE_GITHUB_TOKEN`
 
 ```bash
 # Code source
 scrybe source add --project-id myrepo --source-id code \
   --type code --root /path/to/repo --languages ts,vue
 
-# GitLab issues source
+# GitLab issues source (generic fields)
+scrybe source add --project-id myrepo --source-id gitlab-issues \
+  --type ticket \
+  --provider gitlab \
+  --url https://gitlab.example.com \
+  --project 42 \
+  --token '${SCRYBE_GITLAB_TOKEN}'
+
+# GitHub issues source
+scrybe source add --project-id myrepo --source-id github-issues \
+  --type ticket \
+  --provider github \
+  --project owner/repo \
+  --token '${SCRYBE_GITHUB_TOKEN}'
+
+# GitLab with literal token (deprecated style; warns once at daemon start)
 scrybe source add --project-id myrepo --source-id gitlab-issues \
   --type ticket \
   --gitlab-url https://gitlab.example.com \
@@ -454,9 +484,12 @@ Update an existing source's config. Only the flags you provide are changed — e
 
 | Flag | Description |
 |------|-------------|
-| `--gitlab-token <token>` | Rotate the GitLab personal access token |
-| `--gitlab-url <url>` | Change the GitLab instance base URL |
-| `--gitlab-project-id <id>` | Change the GitLab project ID or path |
+| `--url <url>` | Change the API instance base URL |
+| `--project <id>` | Change the provider project ID or path |
+| `--token <token>` | Rotate the personal access token (literal or `${VAR}`) |
+| `--gitlab-token <token>` | (deprecated) Rotate GitLab token — use `--token` instead |
+| `--gitlab-url <url>` | (deprecated) Change GitLab URL — use `--url` instead |
+| `--gitlab-project-id <id>` | (deprecated) Change GitLab project — use `--project` instead |
 
 **For `--type code` sources:**
 
@@ -466,7 +499,11 @@ Update an existing source's config. Only the flags you provide are changed — e
 | `--languages <langs>` | Change comma-separated language hints |
 
 ```bash
-# Rotate a GitLab token
+# Rotate a token (generic syntax)
+scrybe source update --project-id myrepo --source-id github-issues \
+  --token '${SCRYBE_GITHUB_TOKEN}'
+
+# Rotate a GitLab token (deprecated)
 scrybe source update --project-id myrepo --source-id gitlab-issues \
   --gitlab-token glpat-newtoken
 ```

@@ -1,5 +1,6 @@
 import { chunkLines, stampChunkId } from "../chunker.js";
 import { normalizeContent } from "../normalize.js";
+import { resolveEnvRef } from "../config.js";
 import type { KnowledgeChunk, RawKnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { AnyChunk, SourcePlugin } from "./base.js";
 
@@ -96,8 +97,20 @@ function serializeIssueMetadata(issue: GitLabIssue): IssueMetadata {
 export async function validateGitlabToken(cfg: SourceConfig): Promise<void> {
   if (cfg.type !== "ticket") return;
   const c = cfg as TicketConfig;
+  let token: string;
+  try {
+    token = resolveEnvRef(c.token);
+  } catch {
+    // Extract variable name from the ${VAR} pattern for a more actionable error.
+    const varMatch = c.token.match(/\$\{([A-Z_][A-Z0-9_]*)\}/);
+    const varName = varMatch ? varMatch[1] : c.token;
+    throw new Error(
+      `Token for GitLab source "${c.project_id}" references env var ${varName} which is not set. ` +
+      `Set it in your environment or in <DATA_DIR>/.env: ${varName}=<your-token>`
+    );
+  }
   const encodedId = encodeURIComponent(c.project_id);
-  await gitlabFetch(`${c.base_url}/api/v4/projects/${encodedId}`, c.token, c.project_id);
+  await gitlabFetch(`${c.base_url}/api/v4/projects/${encodedId}`, token, c.project_id);
 }
 
 export class GitLabIssuesPlugin implements SourcePlugin {
@@ -106,6 +119,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
 
   async scanSources(project: Project, source: Source, cursor?: string | null): Promise<Record<string, string>> {
     const cfg = ticketConfig(source);
+    const token = resolveEnvRef(cfg.token);
     const encodedId = encodeURIComponent(cfg.project_id);
     // 60s safety margin to handle clock skew between client and GitLab server
     const since = cursor
@@ -115,7 +129,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
       ? `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all&updated_after=${encodeURIComponent(since)}`
       : `${cfg.base_url}/api/v4/projects/${encodedId}/issues?state=all`;
 
-    const issues = await fetchAllPages<GitLabIssue>(url, cfg.token, project.id);
+    const issues = await fetchAllPages<GitLabIssue>(url, token, project.id);
     const map: Record<string, string> = {};
     for (const issue of issues) {
       map[`issues/${issue.iid}`] = issue.updated_at;
@@ -125,6 +139,7 @@ export class GitLabIssuesPlugin implements SourcePlugin {
 
   async *fetchChunks(project: Project, source: Source, changed: Set<string>): AsyncGenerator<AnyChunk> {
     const cfg = ticketConfig(source);
+    const token = resolveEnvRef(cfg.token);
     const encodedId = encodeURIComponent(cfg.project_id);
 
     for (const key of changed) {
@@ -134,8 +149,8 @@ export class GitLabIssuesPlugin implements SourcePlugin {
 
       try {
         const [issue, notes] = await Promise.all([
-          gitlabFetch<GitLabIssue>(issueUrl, cfg.token, project.id),
-          fetchAllPages<GitLabNote>(notesUrl, cfg.token, project.id),
+          gitlabFetch<GitLabIssue>(issueUrl, token, project.id),
+          fetchAllPages<GitLabNote>(notesUrl, token, project.id),
         ]);
 
         const meta = serializeIssueMetadata(issue);

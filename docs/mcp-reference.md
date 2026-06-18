@@ -32,7 +32,7 @@ No parameters.
 
 ### `doctor`
 
-Run a full scrybe health check and return a structured report. Covers install integrity, Node version, `DATA_DIR`, embedding provider config and auth, data integrity (schema version, LanceDB tables, `branch-tags.db`), registered project freshness, daemon status, git hooks, fetch-poller sync, and MCP config. Each check includes an optional `remedy` field with actionable fix instructions.
+Run a full scrybe health check and return a structured report. Covers install integrity, Node version, `DATA_DIR`, embedding provider config and auth, data integrity (schema version, LanceDB tables, `branch-tags.db`), registered project freshness, daemon status, git hooks, ticket-source token health (env-var resolution and authenticated probe), fetch-poller sync, and MCP config. Each check includes an optional `remedy` field with actionable fix instructions.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -240,13 +240,28 @@ Add an indexable source to a project and automatically enqueue an initial reinde
 | `root_path` | string | ✓ | Absolute path to repo root |
 | `languages` | string[] | | Language hints, e.g. `["ts", "vue"]` |
 
-**For `source_type: "ticket"`:**
+**For `source_type: "ticket"` (generic fields — recommended):**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `gitlab_url` | string | ✓ | GitLab instance base URL |
-| `gitlab_project_id` | string | ✓ | GitLab project ID or path |
-| `gitlab_token` | string | ✓ | GitLab personal access token (validated against the API before saving) |
+| `provider` | string | | `"gitlab"` (default) or `"github"` |
+| `url` | string | depends | API instance URL. Required for GitLab; optional for GitHub (default: `https://api.github.com`). |
+| `project` | string | ✓ | Provider identifier: GitLab numeric ID or path; GitHub `owner/repo` |
+| `token` | string | ✓ | Personal access token (literal or `${VAR}` for env-referenced). Validated before saving. |
+
+**For `source_type: "ticket"` (deprecated GitLab aliases — still accepted):**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `gitlab_url` | string | (deprecated) GitLab instance base URL — use `provider: "gitlab", url` instead |
+| `gitlab_project_id` | string | (deprecated) GitLab project ID or path — use `project` instead |
+| `gitlab_token` | string | (deprecated) GitLab token — use `token` instead (literal or `${VAR}`) |
+
+**Token env-variable pattern:**
+
+Tokens can be passed as a literal string or referenced from an environment variable using `${VAR}` syntax. The variable is resolved at fetch/validate time, not at configuration time. Recommended env var names:
+- GitLab: `SCRYBE_GITLAB_TOKEN`
+- GitHub: `SCRYBE_GITHUB_TOKEN`
 
 **Returns:** `{ ok: true, project_id, source_id, job_id, status: "queued"|"running"|"started", queue_position?, duplicate_of_pending? }`
 
@@ -274,9 +289,12 @@ Update an existing source's config. Only the fields you provide are changed — 
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `gitlab_token` | string | Rotate the GitLab personal access token |
-| `gitlab_url` | string | Change the GitLab instance base URL |
-| `gitlab_project_id` | string | Change the GitLab project ID or path |
+| `url` | string | Change the API instance base URL |
+| `project` | string | Change the provider project ID or path |
+| `token` | string | Rotate the personal access token (literal or `${VAR}`) |
+| `gitlab_token` | string | (deprecated) Rotate GitLab token — use `token` instead |
+| `gitlab_url` | string | (deprecated) Change GitLab URL — use `url` instead |
+| `gitlab_project_id` | string | (deprecated) Change GitLab project — use `project` instead |
 
 **For `source_type: "code"` sources:**
 

@@ -13,6 +13,8 @@
 import http from "node:http";
 import { VERSION } from "../config.js";
 import { mcpTools } from "../tools/all-tools.js";
+import { diagEmit } from "./events.js";
+import { sampleNow } from "./mem-sampler.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -160,10 +162,16 @@ async function handleRpc(
 
   console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod}`);
 
+  // Activity span telemetry — capture start RSS and emit span record on completion.
+  const spanStart = Date.now();
+  const startSample = sampleNow();
+  let spanOutcome: "ok" | "error" = "ok";
+
   try {
     const result = await tool.handler(params);
     jsonRes(res, 200, { id, result } satisfies RpcSuccess);
   } catch (err) {
+    spanOutcome = "error";
     const message = err instanceof Error ? err.message : String(err);
     console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(message)}`);
     jsonRes(res, 200, {
@@ -173,6 +181,23 @@ async function handleRpc(
         message: EXPOSE_INTERNAL_ERRORS ? message : "internal error",
       },
     } satisfies RpcError);
+  } finally {
+    const endSample = sampleNow();
+    diagEmit({
+      event: "activity-span",
+      level: "info",
+      spanType: "mcp-call",
+      method: safeMethod,
+      clientId: safeClientId,
+      durationMs: Date.now() - spanStart,
+      outcome: spanOutcome,
+      startRssBytes: startSample.rssBytes,
+      peakRssBytes: Math.max(startSample.rssBytes, endSample.rssBytes),
+      endRssBytes: endSample.rssBytes,
+      // provider tag: not source-specific at the RPC layer; set to undefined here.
+      // Per-source provider info is tagged in the reindex activity span (queue.ts).
+      provider: undefined,
+    });
   }
 }
 

@@ -139,6 +139,21 @@ When using Voyage AI, set only `SCRYBE_RERANK=true` — endpoint and model are a
 
 ---
 
+## Ticket source authentication
+
+Tokens for ticket sources (GitLab, GitHub, etc.) can be stored as environment variables and referenced at fetch time using the `${VAR}` syntax. Recommended naming convention:
+
+| Token type | Recommended env var | Example |
+|----------|----------|---------|
+| GitLab personal access token | `SCRYBE_GITLAB_TOKEN` | `scrybe source add --token '${SCRYBE_GITLAB_TOKEN}'` |
+| GitHub personal access token | `SCRYBE_GITHUB_TOKEN` | `scrybe source add --token '${SCRYBE_GITHUB_TOKEN}'` |
+
+Any environment variable name works (`GITLAB_PAT`, `GH_TOKEN`, etc.); these are just conventions. The variable is resolved at index/validate time, not at configuration time. Unset variables fail fast with an actionable error message naming the variable.
+
+Literal tokens also work but trigger a one-time daemon-start warning — using env vars is recommended.
+
+---
+
 ## Daemon lifecycle
 
 | Variable | Default | Description |

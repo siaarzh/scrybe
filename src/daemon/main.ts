@@ -12,9 +12,11 @@ import { initQueue, submitToQueue, stopQueue, onQueueJobEvent, getActiveReindexC
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
 import { initFetchPoller, startFetchPoller, stopFetchPoller } from "./fetch-poller.js";
-import { initTicketPoller, startTicketPoller, stopTicketPoller, ticketPollerOnHot } from "./ticket-poller.js";
+import { initTicketPoller, startTicketPoller, stopTicketPoller, ticketPollerOnHot, ticketPollerOnJobEvent } from "./ticket-poller.js";
 import { onStateChange } from "./idle-state.js";
 import { diagEmit } from "./events.js";
+import { startMemSampler, stopMemSampler, MEM_SAMPLE_INTERVAL_MS } from "./mem-sampler.js";
+import { startRssGuard, stopRssGuard } from "./rss-guard.js";
 import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
@@ -92,6 +94,8 @@ async function shutdown(signal: string): Promise<void> {
   if (shutdownCalled) return;
   shutdownCalled = true;
   _lifecycle?.stop();
+  stopRssGuard();
+  stopMemSampler();
   daemonLog(`[scrybe daemon] ${signal} — shutting down`);
   await stopHttpServer();
   await stopWatcher();
@@ -263,6 +267,11 @@ export async function runDaemon(): Promise<void> {
     }
   });
 
+  // D2 hook 1: reconcile ticket pollers when a reindex job is submitted for a ticket source.
+  // This ensures a source added via add_source (which always enqueues immediately) is picked
+  // up by the poller within the same second, without waiting for a daemon restart.
+  onQueueJobEvent(ticketPollerOnJobEvent);
+
   // Wire FS + git watchers + fetch poller + ticket poller → SSE + queue
   initWatcher({ pushEvent });
   initGitWatcher({ pushEvent });
@@ -379,6 +388,30 @@ export async function runDaemon(): Promise<void> {
   process.on("SIGINT", () => { shutdown("SIGINT").catch(() => {}); });
 
   daemonLog(`[scrybe daemon] started pid=${process.pid} port=${port} dataDir=${config.dataDir}`);
+
+  // Arm periodic RSS+heap sampler (Plan 92 Phase 1).
+  // Timer is .unref()-ed inside startMemSampler so it does not keep the process alive.
+  // Interval: SCRYBE_DAEMON_MEM_SAMPLE_MS (default 60000 ms).
+  startMemSampler();
+
+  // Arm RSS-threshold self-restart guard (Plan 92 Phase 2).
+  // Evaluated on the same cadence as the mem-sampler.
+  // Soft ceiling: SCRYBE_DAEMON_MAX_RSS_MB (default 1536 MB) — idle-gated.
+  // Hard ceiling: SCRYBE_DAEMON_MAX_RSS_HARD_MB (default 3072 MB) — unconditional.
+  {
+    const { getQueueStats } = await import("./queue.js");
+    const { spawnDaemonDetached } = await import("./spawn-detached.js");
+    startRssGuard(MEM_SAMPLE_INTERVAL_MS, {
+      getQueueStats,
+      doRestart: (reason) => {
+        daemonLog(`[scrybe daemon] rss-guard triggering self-restart (${reason})`);
+        try { spawnDaemonDetached({}); } catch (err) {
+          daemonLog(`[scrybe daemon] rss-guard spawn failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        shutdown(`rss-guard:${reason}`).catch(() => {});
+      },
+    });
+  }
 
   // Never resolves — HTTP server + queue keep event loop alive until signal/shutdown
   await new Promise<never>(() => {});

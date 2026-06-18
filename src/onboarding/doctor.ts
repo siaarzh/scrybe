@@ -506,6 +506,100 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
+  // ── 4b. Ticket source token health ──────────────────────────────────────────
+  // For every registered ticket source: (1) token ref resolves, (2) authenticated probe.
+  // Reuses validateGitlabToken / validateGithubToken — no probe logic duplication (D8).
+  {
+    const SEC_TICKET = "Ticket Sources";
+    const ticketSources: Array<{ project: typeof projects[0]; source: typeof projects[0]["sources"][0] }> = [];
+    for (const project of projects) {
+      for (const source of project.sources) {
+        if (source.source_config.type === "ticket") {
+          ticketSources.push({ project, source });
+        }
+      }
+    }
+
+    if (ticketSources.length > 0) {
+      const { validateGitlabToken } = await import("../plugins/gitlab-issues.js");
+      const { validateGithubToken } = await import("../plugins/github-issues.js");
+
+      for (const { project, source } of ticketSources) {
+        const cfg = source.source_config as Extract<typeof source.source_config, { type: "ticket" }>;
+        const checkIdBase = `ticket.${project.id}.${source.source_id}`;
+        const title = `${project.id}/${source.source_id} (${cfg.provider ?? "gitlab"})`;
+
+        // (1) Token ref resolves
+        let tokenResolved = false;
+        const tokenStr: string = (cfg as any).token ?? "";
+        const varMatch = tokenStr.match(/\$\{([A-Z_][A-Z0-9_]*)\}/);
+        if (varMatch) {
+          const varName = varMatch[1]!;
+          if (!process.env[varName]) {
+            checks.push(fail(
+              `${checkIdBase}.token_resolve`,
+              SEC_TICKET,
+              `${title} — token`,
+              `Token references unset env var \${${varName}}`,
+              `Export ${varName} in your shell or add ${varName}=<your-token> to ${join(dataDir, ".env")}`,
+              { source_id: source.source_id, project_id: project.id, var: varName },
+            ));
+            checks.push(skip(
+              `${checkIdBase}.token_probe`,
+              SEC_TICKET,
+              `${title} — auth probe`,
+              `Skipped: token env var \${${varName}} is not set`,
+            ));
+            continue;
+          } else {
+            tokenResolved = true;
+          }
+        } else {
+          // Literal token — resolveEnvRef will pass through; always resolves
+          tokenResolved = true;
+        }
+
+        if (tokenResolved) {
+          checks.push(ok(
+            `${checkIdBase}.token_resolve`,
+            SEC_TICKET,
+            `${title} — token`,
+            varMatch ? `\${${varMatch[1]}} resolves` : "Literal token set",
+            { source_id: source.source_id, project_id: project.id },
+          ));
+        }
+
+        // (2) Authenticated probe — best-effort, timeout-guarded
+        const provider = (cfg as any).provider ?? "gitlab";
+        try {
+          if (provider === "github") {
+            await validateGithubToken(cfg);
+          } else {
+            await validateGitlabToken(cfg);
+          }
+          checks.push(ok(
+            `${checkIdBase}.token_probe`,
+            SEC_TICKET,
+            `${title} — auth probe`,
+            "Token accepted",
+            { source_id: source.source_id, project_id: project.id, provider },
+          ));
+        } catch (e: any) {
+          checks.push(fail(
+            `${checkIdBase}.token_probe`,
+            SEC_TICKET,
+            `${title} — auth probe`,
+            e?.message ?? String(e),
+            provider === "github"
+              ? `Ensure GITHUB token has Issues: Read-only and Metadata: Read-only (fine-grained) or repo/public_repo (classic PAT) scopes`
+              : `Ensure GITLAB token has read_api scope and is not expired`,
+            { source_id: source.source_id, project_id: project.id, provider },
+          ));
+        }
+      }
+    }
+  }
+
   // ── 5. Daemon ────────────────────────────────────────────────────────────────
   const SEC_DAEMON = "Daemon";
 

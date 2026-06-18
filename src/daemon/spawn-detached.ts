@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { config } from "../config.js";
+import { diagEmit } from "./events.js";
 
 /**
  * Spawns `scrybe daemon start` as a detached, fully independent process.
@@ -33,6 +34,25 @@ export function spawnDaemonDetached(opts: {
       windowsHide: true,
       env,
     });
+    diagEmit({
+      event: "child-process.spawn",
+      level: "info",
+      pid: child.pid ?? null,
+      ppid: process.pid,
+      command: "wscript.exe",
+      args: [vbs, node, script],
+      detached: true,
+    });
+    child.once("exit", (code, signal) => {
+      diagEmit({
+        event: "child-process.exit",
+        level: "info",
+        pid: child.pid ?? null,
+        ppid: process.pid,
+        exitCode: code,
+        signal: signal ?? null,
+      });
+    });
     child.unref();
     return;
   }
@@ -42,6 +62,25 @@ export function spawnDaemonDetached(opts: {
     stdio: "ignore",
     windowsHide: true,
     env,
+  });
+  diagEmit({
+    event: "child-process.spawn",
+    level: "info",
+    pid: child.pid ?? null,
+    ppid: process.pid,
+    command: node,
+    args: [script, "daemon", "start"],
+    detached: true,
+  });
+  child.once("exit", (code, signal) => {
+    diagEmit({
+      event: "child-process.exit",
+      level: "info",
+      pid: child.pid ?? null,
+      ppid: process.pid,
+      exitCode: code,
+      signal: signal ?? null,
+    });
   });
   child.unref();
 }

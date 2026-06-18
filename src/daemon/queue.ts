@@ -16,7 +16,9 @@ import { join } from "node:path";
 import { config } from "../config.js";
 import { submitJob, submitSourceJob, getJobStatus } from "../jobs.js";
 import { insertJob, updateJobStatus, cancelPendingGcJobs } from "../jobs-store.js";
-import { getProject } from "../registry.js";
+import { getProject, getSource, resolveEmbeddingConfig } from "../registry.js";
+import { diagEmit } from "./events.js";
+import { sampleNow } from "./mem-sampler.js";
 import type { DaemonEvent } from "./http-server.js";
 import type { IndexMode } from "../types.js";
 import type { JobType } from "../jobs-store.js";
@@ -26,6 +28,11 @@ import type { JobType } from "../jobs-store.js";
 const MAX_CONCURRENT = (() => {
   const env = parseInt(process.env["SCRYBE_DAEMON_MAX_CONCURRENT"] ?? "", 10);
   return env > 0 ? env : Math.max(1, Math.floor(cpus().length / 2));
+})();
+
+const MAX_QUEUE_DEPTH = (() => {
+  const env = parseInt(process.env["SCRYBE_DAEMON_MAX_QUEUE_DEPTH"] ?? "", 10);
+  return env > 0 ? env : 1000; // default 1000 pending jobs; 0 = disabled
 })();
 
 const MAX_LOG_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -51,6 +58,10 @@ interface ActiveEntry extends QueueRequest {
   jobId: string;
   startedAt: string;
   timer: ReturnType<typeof setInterval>;
+  /** RSS at the moment the job was dequeued (for activity-span peakRssBytes). */
+  startRssBytes?: number;
+  /** Active embedding provider type for this job's primary source. */
+  providerType?: "local" | "api";
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────
@@ -127,16 +138,36 @@ export function getActiveReindexCount(): number {
 
 export interface SubmitResult {
   jobId: string;
-  status: "queued" | "running";
+  status: "queued" | "running" | "rejected";
   queuePosition?: number;
   duplicateOfPending: boolean;
+  backpressured?: boolean; // true if rejected due to queue depth cap
 }
 
 /**
  * Submit a job to the queue immediately — returns without waiting for the job to start.
  * Use this from HTTP handlers so /kick never hangs.
+ *
+ * Returns status "rejected" if the queue depth cap is exceeded.
  */
 export function submitToQueue(req: QueueRequest): SubmitResult {
+  // Check queue depth cap before accepting
+  if (MAX_QUEUE_DEPTH > 0 && _pending.length >= MAX_QUEUE_DEPTH) {
+    diagEmit({
+      event: "queue.backpressure",
+      level: "warn",
+      detail: {
+        currentDepth: _pending.length,
+        maxDepth: MAX_QUEUE_DEPTH,
+        projectId: req.projectId,
+        sourceId: req.sourceId ?? null,
+        type: req.type ?? "reindex",
+      },
+    });
+    const rejectJobId = randomBytes(4).toString("hex");
+    return { jobId: rejectJobId, status: "rejected", duplicateOfPending: false, backpressured: true };
+  }
+
   const jobId = randomBytes(4).toString("hex");
   const now = Date.now();
 
@@ -185,8 +216,26 @@ export function submitToQueue(req: QueueRequest): SubmitResult {
  * Resolves with the job_id once the job STARTS (not when it completes).
  * If the project is currently busy or MAX_CONCURRENT is reached, the request
  * waits in the pending list until a slot opens.
+ *
+ * Rejects with an error if the queue depth cap is exceeded.
  */
 export function enqueue(req: QueueRequest): Promise<string> {
+  // Check queue depth cap before accepting
+  if (MAX_QUEUE_DEPTH > 0 && _pending.length >= MAX_QUEUE_DEPTH) {
+    diagEmit({
+      event: "queue.backpressure",
+      level: "warn",
+      detail: {
+        currentDepth: _pending.length,
+        maxDepth: MAX_QUEUE_DEPTH,
+        projectId: req.projectId,
+        sourceId: req.sourceId ?? null,
+        type: req.type ?? "reindex",
+      },
+    });
+    return Promise.reject(new Error(`Queue at capacity (${_pending.length}/${MAX_QUEUE_DEPTH})`));
+  }
+
   const jobId = randomBytes(4).toString("hex");
   return new Promise<string>((resolve, reject) => {
     _pending.push({ ...req, jobId, resolve, reject });
@@ -306,6 +355,11 @@ function drain(): void {
     }
 
     // Reindex job — delegate to jobs.ts
+
+    // Capture start RSS and embedding provider for the activity-span telemetry.
+    const startSample = sampleNow();
+    const providerType = resolveReindexProvider(item.projectId, item.sourceId);
+
     const result = item.sourceId
       ? submitSourceJob(item.projectId, item.sourceId, item.mode ?? "incremental", item.branch, item.jobId)
       : submitJob(item.projectId, item.mode ?? "incremental", undefined, item.branch, item.jobId);
@@ -362,6 +416,26 @@ function drain(): void {
         detail: { jobId },
       });
 
+      // Emit reindex activity span for memory telemetry (Plan 92 Phase 1).
+      const endSample = sampleNow();
+      const activeEntry = _active.get(jobId); // may already be deleted above
+      const spanStartRss = activeEntry?.startRssBytes ?? startSample.rssBytes;
+      diagEmit({
+        event: "activity-span",
+        level: "info",
+        spanType: "reindex",
+        projectId: item.projectId,
+        sourceId: item.sourceId ?? null,
+        jobId,
+        mode: item.mode ?? "incremental",
+        durationMs,
+        outcome: status.status === "done" ? "ok" : status.status === "cancelled" ? "cancelled" : "error",
+        startRssBytes: spanStartRss,
+        peakRssBytes: Math.max(spanStartRss, endSample.rssBytes),
+        endRssBytes: endSample.rssBytes,
+        provider: activeEntry?.providerType ?? providerType ?? null,
+      });
+
       drain();
     }, 200);
 
@@ -370,6 +444,8 @@ function drain(): void {
       jobId,
       startedAt,
       timer,
+      startRssBytes: startSample.rssBytes,
+      providerType,
     });
   }
 }
@@ -503,6 +579,28 @@ function fireJobEventCallbacks(
 ): void {
   for (const cb of _jobEventCallbacks) {
     try { cb(projectId, jobId, eventType, req); } catch { /* non-fatal */ }
+  }
+}
+
+/**
+ * Resolve the embedding provider type for a reindex job's primary source.
+ * Returns "local" | "api" | undefined (undefined = could not determine, e.g. project gone).
+ * Best-effort — must never throw.
+ */
+function resolveReindexProvider(projectId: string, sourceId?: string): "local" | "api" | undefined {
+  try {
+    // Use the first source if no sourceId is specified.
+    const sourceIdToUse = sourceId ?? (() => {
+      const proj = getProject(projectId);
+      return proj?.sources[0]?.source_id;
+    })();
+    if (!sourceIdToUse) return undefined;
+    const src = getSource(projectId, sourceIdToUse);
+    if (!src) return undefined;
+    const emb = resolveEmbeddingConfig(src);
+    return emb.provider_type === "local" ? "local" : "api";
+  } catch {
+    return undefined;
   }
 }
 

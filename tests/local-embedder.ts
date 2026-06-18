@@ -2,6 +2,10 @@
  * Local WASM embedder sidecar — speaks the OpenAI embeddings protocol.
  * Spawn as a child process; reads port from stdout first line JSON.
  * Used by tests only; never imported by production code.
+ *
+ * Sidecar self-exits if parent dies (orphan prevention):
+ * - On exit, emits a trace so we detect it in testing.
+ * - Watches parent PID and exits if parent dies (even on SIGKILL of parent).
  */
 import http from "http";
 import { pipeline, type FeatureExtractionPipeline } from "@xenova/transformers";
@@ -15,6 +19,21 @@ let modelReady = false;
 // 429 injection counter (set via SCRYBE_SIDECAR_INJECT_429=N env var)
 let inject429Count = parseInt(process.env.SCRYBE_SIDECAR_INJECT_429 ?? "0", 10);
 let totalRequests = 0;
+
+// Parent-death watcher: if parent dies (including on SIGKILL), exit gracefully.
+// This prevents orphaning the sidecar if the test harness crashes or is killed.
+const parentPid = process.ppid;
+if (parentPid && parentPid !== 1) {
+  // Check every 1 second if parent is still alive.
+  // When parent dies, process.ppid changes to 1 (init).
+  setInterval(() => {
+    if (process.ppid === 1 && parentPid !== 1) {
+      // Parent died and we were reparented to init.
+      process.stderr.write("[sidecar] Parent died; exiting\n");
+      process.exit(0);
+    }
+  }, 1000).unref(); // unref so this timer doesn't keep the process alive if nothing else is running
+}
 
 async function ensureModel(): Promise<FeatureExtractionPipeline> {
   if (!extractor) {

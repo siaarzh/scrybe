@@ -86,7 +86,7 @@ export interface KickResponse {
     projectId: string;
     sourceId: string;
     branch: string;
-    status?: "queued" | "running";
+    status?: "queued" | "running" | "rejected";
     queuePosition?: number;
     duplicateOfPending?: boolean;
   }>;
@@ -106,7 +106,7 @@ export interface GcResponse {
   jobs: Array<{
     jobId: string;
     projectId: string;
-    status?: "queued" | "running";
+    status?: "queued" | "running" | "rejected";
   }>;
 }
 

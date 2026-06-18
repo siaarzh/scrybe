@@ -9,6 +9,27 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.42.0] — 2026-06-18
+
+### Added
+
+- **GitHub issues knowledge source.** Index issues and comments from GitHub repositories alongside GitLab. Register with `scrybe source add --type ticket --provider github --project owner/repo --token '${SCRYBE_GITHUB_TOKEN}'`. Same metadata passthrough as GitLab (state, labels, assignees, milestone). Auto-refreshes while the daemon runs. Requires a fine-grained PAT with Issues: Read-only + Metadata: Read-only scope (classic `repo`/`public_repo` also works).
+- **Generic provider fields for ticket sources.** New `--provider`, `--url`, `--project`, `--token` flags replace the GitLab-specific `--gitlab-url`, `--gitlab-project-id`, `--gitlab-token`. Old flags still work and warn deprecated. Enables support for multiple providers with a single schema.
+- **Environment-variable token references.** Tokens can now be passed as `${VAR}` (e.g. `${SCRYBE_GITHUB_TOKEN}`) and are resolved at fetch/validate time, not at configuration time. Unset variables fail fast with actionable errors. Recommended env var names: `SCRYBE_GITLAB_TOKEN`, `SCRYBE_GITHUB_TOKEN`.
+- **Per-ticket-source health checks in `doctor`.** Both CLI and MCP `doctor` tools now report token resolution and authenticated probe status per ticket source, with actionable remediation hints.
+
+### Fixed
+
+- **The background daemon no longer grows unbounded into host swap.** Over a long, session-heavy day the daemon's memory could climb until it pushed the host into swap thrash. It now samples its own memory and, when it crosses a configurable threshold while idle, gracefully self-restarts instead of climbing (`SCRYBE_DAEMON_MAX_RSS_MB`, default 1536; hard ceiling `SCRYBE_DAEMON_MAX_RSS_HARD_MB`, default 3072). Adds a job-queue depth cap with backpressure (`SCRYBE_DAEMON_MAX_QUEUE_DEPTH`, default 1000), richer daemon-log telemetry (periodic memory + per-operation activity samples), and hardened test-sidecar teardown so a crashed test/release run can no longer orphan embedder processes.
+- **Ticket sources added while the daemon runs are now picked up by the auto-refresh poller without a restart.** Previously, only sources registered at daemon boot were polled; any source added via `add_source` while the daemon was running was silently ignored until the next restart. Sources removed at runtime now also stop being polled immediately.
+- **Removing a source now clears all of its derived state.** The fetch cursor and embedding batch-tuning entries were previously left behind; re-adding a source under the same name could inherit a stale cursor and index nothing (a silent empty source). Removal now wipes the cursor and batch state alongside the existing branch-tag and hash cleanup.
+
+### Changed
+
+- **Deprecated aliases (GitLab fields) still work but warn.** When `--gitlab-url`, `--gitlab-project-id`, or `--gitlab-token` flags are used, a deprecation warning is printed once at daemon start. Migrate to generic fields (`--provider gitlab --url ... --project ... --token`) at your convenience; no breaking change. Literal (non-`${VAR}`) tokens also warn once at daemon start to encourage migration to env-var references.
+
+---
+
 ## [0.41.1] — 2026-06-10
 
 ### Fixed
@@ -75,7 +96,8 @@ For releases v0.37.0 and earlier, see [GitHub Releases](https://github.com/siaar
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.41.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/siaarzh/scrybe/compare/v0.41.1...v0.42.0
 [0.41.1]: https://github.com/siaarzh/scrybe/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/siaarzh/scrybe/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/siaarzh/scrybe/compare/v0.39.0...v0.40.0

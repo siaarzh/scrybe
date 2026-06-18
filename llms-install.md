@@ -128,13 +128,27 @@ scrybe index --project-id <project-id> --full
 ```bash
 scrybe add-source --project-id <project-id> --source-id gitlab-issues \
   --type ticket \
-  --gitlab-url https://gitlab.example.com \
-  --gitlab-project-id 42 \
-  --gitlab-token glpat-...
+  --provider gitlab \
+  --url https://gitlab.example.com \
+  --project 42 \
+  --token '${SCRYBE_GITLAB_TOKEN}'
 scrybe index --project-id <project-id> --source-id gitlab-issues --full
 ```
 
-Indexed issues are searchable via the `search_knowledge` MCP tool.
+Indexed issues are searchable via the `search_knowledge` MCP tool. Store the token in the env var `SCRYBE_GITLAB_TOKEN` before running the command — it resolves at fetch time.
+
+### Add GitHub issues as a knowledge source
+
+```bash
+scrybe add-source --project-id <project-id> --source-id github-issues \
+  --type ticket \
+  --provider github \
+  --project owner/repo \
+  --token '${SCRYBE_GITHUB_TOKEN}'
+scrybe index --project-id <project-id> --source-id github-issues --full
+```
+
+Create a fine-grained personal access token at [github.com/settings/tokens?type=beta](https://github.com/settings/tokens?type=beta) with **Issues: Read-only** + **Metadata: Read-only** permissions (classic tokens with `repo`/`public_repo` scope also work). Store it in the env var `SCRYBE_GITHUB_TOKEN`.
 
 ## Troubleshooting
 

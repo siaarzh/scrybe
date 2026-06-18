@@ -75,28 +75,45 @@ Knowledge sources can use a separate embedding model — configure via `SCRYBE_K
 
 ### GitLab issues
 
-Add a GitLab issues source to any project:
+Add a GitLab issues source to any project (tokens referenced via env var are recommended):
 
 ```bash
 scrybe source add -P myrepo -S gitlab-issues \
   --type ticket \
-  --gitlab-url https://gitlab.example.com \
-  --gitlab-project-id 42 \
-  --gitlab-token glpat-...
+  --provider gitlab \
+  --url https://gitlab.example.com \
+  --project 42 \
+  --token '${SCRYBE_GITLAB_TOKEN}'
 
 scrybe index -P myrepo -S gitlab-issues --full
 ```
 
 Indexing is cursor-based and incremental — only issues updated since the last run are fetched. Rate-limit safe (50 ms between issues).
 
-To rotate a token, remove and re-add the source:
+To rotate a token:
 
 ```bash
-scrybe source remove -P myrepo -S gitlab-issues
-scrybe source add -P myrepo -S gitlab-issues \
-  --type ticket --gitlab-url https://gitlab.example.com \
-  --gitlab-project-id 42 --gitlab-token glpat-new-token
+scrybe source update -P myrepo -S gitlab-issues \
+  --token '${SCRYBE_GITLAB_TOKEN_NEW}'
 ```
+
+### GitHub issues
+
+Add a GitHub issues source to any project:
+
+```bash
+scrybe source add -P myrepo -S github-issues \
+  --type ticket \
+  --provider github \
+  --project owner/repo \
+  --token '${SCRYBE_GITHUB_TOKEN}'
+
+scrybe index -P myrepo -S github-issues --full
+```
+
+**Token setup:** Create a fine-grained personal access token at [github.com/settings/tokens?type=beta](https://github.com/settings/tokens?type=beta) with **Issues: Read-only** + **Metadata: Read-only** permissions. Classic tokens with `repo` or `public_repo` scope also work. Store the token in an env var (`SCRYBE_GITHUB_TOKEN` recommended) and reference it as `${SCRYBE_GITHUB_TOKEN}` when registering the source.
+
+Issues and comments are indexed incrementally — only updated items are fetched on subsequent runs. Pull requests in the issue feed are filtered out automatically.
 
 ## Requirements
 

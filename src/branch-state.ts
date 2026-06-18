@@ -3,6 +3,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, renameS
 import { join, resolve } from "node:path";
 import { config } from "./config.js";
 import { getSource } from "./registry.js";
+import { deleteCursor } from "./cursors.js";
+import { deleteEntriesForSource } from "./embed-batch-state.js";
 import type { SourceConfig } from "./types.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -317,10 +319,15 @@ export function deleteBranch(projectId: string, sourceId: string, branch: string
 }
 
 /**
- * Delete ALL branch_tags rows + ALL hash files for every branch of a (project, source).
- * Called by removeProject/removeSource before dropping the LanceDB table, so that a
- * subsequent project re-add + --full index starts with a clean slate (no stale
- * knownChunkIds that would cause the skip-embed fast-path to fire on every chunk).
+ * Delete ALL derived index state for a (project, source): branch_tags rows,
+ * branch_state rows, per-branch hash files, the fetch cursor, and embed-batch
+ * tuning entries. Called by removeProject/removeSource before dropping the
+ * LanceDB table, so that a subsequent re-add + index starts from a clean slate.
+ *
+ * The cursor cleanup is load-bearing: a stale `updated_after` cursor left behind
+ * by a removed ticket source makes a re-added same-id source fetch "since last
+ * time" and silently index nothing. Stale branch hashes / batch entries are
+ * untidy rather than harmful, but belong to the same source and go together.
  */
 export function wipeSource(projectId: string, sourceId: string): void {
   getDB().prepare(
@@ -329,6 +336,11 @@ export function wipeSource(projectId: string, sourceId: string): void {
   getDB().prepare(
     "DELETE FROM branch_state WHERE project_id=? AND source_id=?"
   ).run(projectId, sourceId);
+
+  // Derived per-source state outside SQLite. Each is best-effort: a failure to
+  // clean one store must not abort the others or the caller's table drop.
+  try { deleteCursor(projectId, sourceId); } catch { /* ignore */ }
+  try { deleteEntriesForSource(projectId, sourceId); } catch { /* ignore */ }
 
   const dir = hashesDir();
   if (!existsSync(dir)) return;

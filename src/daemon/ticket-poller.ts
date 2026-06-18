@@ -27,12 +27,27 @@
  * surfaced by the indexer worker, not here. See notes_for_next_slice in
  * step-2.json for guidance on slice-3 test strategy.
  */
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { loadCursor } from "../cursors.js";
+import { config } from "../config.js";
 import { getState } from "./idle-state.js";
 import { enqueue } from "./queue.js";
 import { diagEmit } from "./events.js";
+import { listProjects } from "../registry.js";
 import type { DaemonEvent } from "./http-server.js";
-import type { Project } from "../types.js";
+import type { QueueJobEventType, QueueRequest } from "./queue.js";
+import type { Project, Source } from "../types.js";
+
+// ─── Literal-token warning (ADR-0002) ─────────────────────────────────────────
+// Fired once per daemon start per source whose token contains no ${VAR} reference.
+// A module-level Set keeps it deduplicated across restarts-without-process-exit.
+const _warnedLiteralToken = new Set<string>();
+
+/** Returns true if the token string contains at least one ${VAR} reference. */
+function hasEnvRef(token: string): boolean {
+  return /\$\{[A-Z_][A-Z0-9_]*\}/.test(token);
+}
 
 // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -66,6 +81,12 @@ interface TicketPollerState {
    * that we don't spam the daemon log on every poll tick. Cleared on success.
    */
   warnedTokenExpired: boolean;
+  /**
+   * Set when an unset env-var token error has already been warned for this source.
+   * Cleared on success so a subsequent re-arm (e.g. after env var is set) re-warns
+   * if the var goes missing again.
+   */
+  warnedUnsetVar: boolean;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────
@@ -94,38 +115,126 @@ function emit(ev: DaemonEvent): void {
   diagEmit(ev as unknown as Record<string, unknown>);
 }
 
-/** Start per-source ticket pollers. Backfills cursorless sources immediately. */
-export function startTicketPoller(projects: Project[]): void {
+/**
+ * Register a single ticket source into `_pollers`. Shared by boot and reconcile.
+ * Handles literal-token warn-once, cursor-based backfill delay, and hot/cold cadence.
+ */
+function registerTicketSource(project: Project, source: Source): void {
+  const key = `${project.id}:${source.source_id}`;
+
+  // Already registered — skip (reconcile handles updates at the diff level)
+  if (_pollers.has(key)) return;
+
+  // Extract hostname for per-host serialization.
+  const baseUrl = (source.source_config as { type: "ticket"; base_url: string }).base_url;
+  let host: string;
+  try {
+    host = new URL(baseUrl).host;
+  } catch {
+    host = `unknown:${source.source_id}`;
+  }
+
+  // ADR-0002: warn once per daemon start when token is a literal (not ${VAR}).
+  const rawToken = (source.source_config as { type: "ticket"; token: string }).token ?? "";
+  if (!hasEnvRef(rawToken) && rawToken !== "" && !_warnedLiteralToken.has(key)) {
+    _warnedLiteralToken.add(key);
+    emit({
+      ts: new Date().toISOString(),
+      level: "warn",
+      event: "watcher.event",
+      projectId: project.id,
+      detail: {
+        // Use a distinct phase so downstream filters can distinguish this
+        // from auth-failure or unset-var warnings (ADR-0002).
+        phase: "ticket-poller.literal-token",
+        sourceId: source.source_id,
+        literalTokenWarn: true,
+        message: `Source "${source.source_id}" uses a literal token. ` +
+          `Store the token in an env var (e.g. SCRYBE_GITLAB_TOKEN) and reference it as \${SCRYBE_GITLAB_TOKEN} ` +
+          `to avoid exposing credentials in projects.json.`,
+      },
+    });
+  }
+
+  const ps: TicketPollerState = {
+    projectId: project.id,
+    sourceId: source.source_id,
+    host,
+    timer: null,
+    retries: 0,
+    warnedTokenExpired: false,
+    warnedUnsetVar: false,
+  };
+  _pollers.set(key, ps);
+
+  // Backfill: if no cursor exists yet, poll immediately (delay 0); otherwise
+  // start on the normal cadence so startup doesn't hammer every ticket source.
+  const cursor = loadCursor(project.id, source.source_id);
+  schedulePoller(ps, cursor === null ? 0 : (getState() === "hot" ? TICKET_ACTIVE_MS : TICKET_IDLE_MS));
+}
+
+/**
+ * Reconcile running pollers against the current registry state.
+ *
+ * - New ticket sources (not in `_pollers`): registered with same logic as boot
+ *   (literal-token warn-once, backfill: cursor null → delay 0, else hot/cold cadence).
+ * - Vanished sources (in `_pollers` but not in registry): timer cleared, entry removed.
+ *   Removal is only attempted when the registry file is known to exist so that test
+ *   environments without a projects.json do not accidentally clear boot-registered pollers.
+ *
+ * Safe to call at any time while the daemon is running. Reads `listProjects()`
+ * fresh on each call so it sees sources added or removed since the last reconcile.
+ */
+export function reconcileTicketPollers(): void {
   if (SKIP_TICKET_FETCH) return;
+
+  const registryPath = join(config.dataDir, "projects.json");
+  const registryExists = existsSync(registryPath);
+
+  let projects: Project[];
+  try {
+    projects = listProjects();
+  } catch {
+    // Registry read failure — skip reconcile, leave existing pollers intact
+    return;
+  }
+
+  // Build the set of keys that should exist after reconcile
+  const liveKeys = new Set<string>();
   for (const project of projects) {
     for (const source of project.sources) {
       if (source.source_config.type !== "ticket") continue;
-
-      // Extract hostname for per-host serialization. Fall back to a unique key
-      // derived from the source ID if the base_url is somehow malformed.
-      const baseUrl = (source.source_config as { type: "ticket"; base_url: string }).base_url;
-      let host: string;
-      try {
-        host = new URL(baseUrl).host;
-      } catch {
-        host = `unknown:${source.source_id}`;
-      }
-
       const key = `${project.id}:${source.source_id}`;
-      const ps: TicketPollerState = {
-        projectId: project.id,
-        sourceId: source.source_id,
-        host,
-        timer: null,
-        retries: 0,
-        warnedTokenExpired: false,
-      };
-      _pollers.set(key, ps);
+      liveKeys.add(key);
+      // Register new sources (registerTicketSource is a no-op for existing keys)
+      registerTicketSource(project, source);
+    }
+  }
 
-      // Backfill: if no cursor exists yet, poll immediately (delay 0); otherwise
-      // start on the normal cadence so startup doesn't hammer every ticket source.
-      const cursor = loadCursor(project.id, source.source_id);
-      schedulePoller(ps, cursor === null ? 0 : (getState() === "hot" ? TICKET_ACTIVE_MS : TICKET_IDLE_MS));
+  // Remove pollers for vanished sources — only when registry file exists so that
+  // test environments or fresh installs without a projects.json do not wipe pollers
+  // that were registered via startTicketPoller with an explicit project list.
+  if (registryExists) {
+    for (const [key, ps] of _pollers) {
+      if (!liveKeys.has(key)) {
+        if (ps.timer) clearTimeout(ps.timer);
+        _pollers.delete(key);
+        _warnedLiteralToken.delete(key);
+      }
+    }
+  }
+}
+
+/** Start per-source ticket pollers. Backfills cursorless sources immediately. */
+export function startTicketPoller(projects: Project[]): void {
+  if (SKIP_TICKET_FETCH) return;
+  // Boot path: register all ticket sources from the provided snapshot.
+  // Uses registerTicketSource (no-op for already-registered keys) so that if
+  // reconcileTicketPollers() was called before startTicketPoller, no source is double-started.
+  for (const project of projects) {
+    for (const source of project.sources) {
+      if (source.source_config.type !== "ticket") continue;
+      registerTicketSource(project, source);
     }
   }
 }
@@ -143,12 +252,49 @@ export function stopTicketPoller(): void {
 /**
  * Called by main.ts on a cold→hot transition so every ticket source gets an
  * immediate catch-up poll when a client reconnects after an idle period.
+ *
+ * Reconciles the poller map before rescheduling so that sources added or removed
+ * since the last reconcile are swept up on every cold→hot transition (D2 hook 2).
  */
 export function ticketPollerOnHot(): void {
   if (SKIP_TICKET_FETCH) return;
+  reconcileTicketPollers();
   for (const ps of _pollers.values()) {
     schedulePoller(ps, 0);
   }
+}
+
+/**
+ * Handler for queue job events — D2 hook 1.
+ *
+ * When a reindex job is submitted for a ticket-type source, reconcile the poller
+ * map so that a source added via add_source (which always enqueues immediately)
+ * is picked up by the poller within the same second, without waiting for a daemon
+ * restart.
+ *
+ * Intended to be passed directly to `onQueueJobEvent(ticketPollerOnJobEvent)` in
+ * main.ts. Respects the SKIP_TICKET_FETCH guard semantics (reconcileTicketPollers
+ * is a no-op when the guard is set).
+ */
+export function ticketPollerOnJobEvent(
+  projectId: string,
+  _jobId: string,
+  eventType: QueueJobEventType,
+  req: QueueRequest,
+): void {
+  if (eventType !== "submitted") return;
+  if ((req.type ?? "reindex") !== "reindex") return;
+  // Only trigger a registry read when the job is for a ticket-type source.
+  // If no sourceId, skip — a project-wide reindex could be code or anything.
+  if (!req.sourceId) return;
+  try {
+    const project = listProjects().find((p) => p.id === projectId);
+    if (!project) return;
+    const source = project.sources.find((s) => s.source_id === req.sourceId);
+    if (source?.source_config.type === "ticket") {
+      reconcileTicketPollers();
+    }
+  } catch { /* non-fatal — must not interfere with job submission */ }
 }
 
 // ─── Internal ─────────────────────────────────────────────────────────────
@@ -186,8 +332,34 @@ async function runPoller(ps: TicketPollerState): Promise<void> {
     // Success: reset backoff counter and re-arm warnings
     ps.retries = 0;
     ps.warnedTokenExpired = false;
+    ps.warnedUnsetVar = false;
   } catch (err) {
     const msg = String(err);
+
+    // ── Unset env-var token reference — warn once, use idle-cadence retry ─
+    // Pattern comes from resolveEnvRef: "env var VAR not set (referenced in scrybe config)"
+    // or from the plugin's own rethrow: "references env var VAR which is not set"
+    if (msg.includes("not set") && (msg.includes("env var") || msg.includes("references env var"))) {
+      if (!ps.warnedUnsetVar) {
+        emit({
+          ts: new Date().toISOString(),
+          level: "warn",
+          event: "watcher.event",
+          projectId: ps.projectId,
+          detail: {
+            phase: "ticket-poller",
+            sourceId: ps.sourceId,
+            error: msg,
+            hint: `Set the missing env var in your environment or in <DATA_DIR>/.env, ` +
+              `then update the source token with: scrybe update-source --project-id ${ps.projectId} --source-id ${ps.sourceId} --token '\${VAR_NAME}'`,
+          },
+        });
+        ps.warnedUnsetVar = true;
+      }
+      // Unset-var failures won't improve with rapid retry — schedule at idle cadence
+      schedulePoller(ps, TICKET_IDLE_MS);
+      return;
+    }
 
     // ── Auth failure (401 / 403) — warn once per source ───────────────────
     if (msg.includes("expired or invalid")) {

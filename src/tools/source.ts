@@ -9,6 +9,7 @@ import {
   isSearchable,
 } from "../registry.js";
 import { validateGitlabToken } from "../plugins/gitlab-issues.js";
+import { validateGithubToken } from "../plugins/github-issues.js";
 import { submitSourceJob } from "../jobs.js";
 import { ensureRunning, DaemonClient } from "../daemon/client.js";
 import { config } from "../config.js";
@@ -17,10 +18,65 @@ import type { Tool } from "./types.js";
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
+/** Generic ticket input fields (new API) + deprecated gitlab_* aliases. */
+interface TicketFields {
+  // Generic (new)
+  provider?: string;
+  url?: string;
+  project?: string;
+  token?: string;
+  // Deprecated aliases
+  gitlab_url?: string;
+  gitlab_project_id?: string;
+  gitlab_token?: string;
+}
+
+/**
+ * Resolve generic + deprecated-alias ticket fields into a canonical set.
+ * Deprecated aliases map: gitlab_url → url, gitlab_project_id → project, gitlab_token → token.
+ * Emits a deprecation warning when any alias is used.
+ * Returns { provider, url, project, token } with provider defaulting to "gitlab".
+ */
+export function resolveTicketFields(fields: TicketFields, warnFn: (msg: string) => void = console.warn): {
+  provider: string; url: string; project: string; token: string;
+} {
+  let { provider, url, project, token } = fields;
+
+  // Deprecated alias mapping
+  if (fields.gitlab_url !== undefined) {
+    warnFn(
+      "[scrybe] --gitlab-url is deprecated. Use --url instead. The --gitlab-* flags will be removed in a future major version."
+    );
+    url = url ?? fields.gitlab_url;
+  }
+  if (fields.gitlab_project_id !== undefined) {
+    warnFn(
+      "[scrybe] --gitlab-project-id is deprecated. Use --project instead. The --gitlab-* flags will be removed in a future major version."
+    );
+    project = project ?? fields.gitlab_project_id;
+  }
+  if (fields.gitlab_token !== undefined) {
+    warnFn(
+      "[scrybe] --gitlab-token is deprecated. Use --token instead. The --gitlab-* flags will be removed in a future major version."
+    );
+    token = token ?? fields.gitlab_token;
+  }
+
+  return {
+    provider: provider ?? "gitlab",
+    url: url ?? "",
+    project: project ?? "",
+    token: token ?? "",
+  };
+}
+
 function buildSourceConfig(
   sourceType: string,
   fields: {
     root?: string; languages?: string; root_path?: string;
+    // Generic ticket fields (new)
+    provider?: string; url?: string; project?: string; token?: string;
+    // Deprecated aliases
     gitlab_url?: string; gitlab_project_id?: string; gitlab_token?: string;
   }
 ): SourceConfig {
@@ -30,15 +86,28 @@ function buildSourceConfig(
     return { type: "code", root_path: root, languages: langs };
   }
   if (sourceType === "ticket") {
+    const resolved = resolveTicketFields(fields);
     return {
       type: "ticket",
-      provider: "gitlab",
-      base_url: fields.gitlab_url ?? "",
-      project_id: fields.gitlab_project_id ?? "",
-      token: fields.gitlab_token ?? "",
+      provider: resolved.provider,
+      base_url: resolved.url,
+      project_id: resolved.project,
+      token: resolved.token,
     };
   }
   return { type: sourceType };
+}
+
+/** Route to the appropriate token validator based on provider. */
+async function validateToken(sc: SourceConfig): Promise<void> {
+  if (sc.type !== "ticket") return;
+  const c = sc as Extract<SourceConfig, { type: "ticket" }>;
+  if (c.provider === "github") {
+    await validateGithubToken(sc);
+  } else {
+    // Default: gitlab (covers unset provider for back-compat)
+    await validateGitlabToken(sc);
+  }
 }
 
 function applySourceAddOptions(cmd: Command): Command {
@@ -48,13 +117,20 @@ function applySourceAddOptions(cmd: Command): Command {
     .requiredOption("--type <type>", "Source type: code | ticket")
     .option("--root <path>", "Absolute path to repo root (required for type=code)")
     .option("--languages <langs>", "Comma-separated language hints (for type=code)", "")
-    .option("--gitlab-url <url>", "GitLab instance base URL (required for type=ticket)")
-    .option("--gitlab-project-id <id>", "GitLab project ID or path (required for type=ticket)")
-    .option("--gitlab-token <token>", "GitLab personal access token (required for type=ticket)")
+    // Generic ticket fields (new)
+    .option("--provider <provider>", "Ticket provider: gitlab | github (default: gitlab)")
+    .option("--url <url>", "Provider base URL (required for GitLab; optional for GitHub — defaults to https://api.github.com)")
+    .option("--project <id>", "Provider-scoped project identifier: GitLab numeric id or path; GitHub owner/repo")
+    .option("--token <token>", "Personal access token (literal or ${VAR} form)")
+    // Deprecated aliases
+    .option("--gitlab-url <url>", "[deprecated: use --url] GitLab instance base URL")
+    .option("--gitlab-project-id <id>", "[deprecated: use --project] GitLab project ID or path")
+    .option("--gitlab-token <token>", "[deprecated: use --token] GitLab personal access token")
     .addHelpText(
       "after",
       "\nExamples:\n  scrybe source add -P myrepo -S code --type code --root /path/to/repo --languages ts,vue" +
-      "\n  scrybe source add -P myrepo -S tickets --type ticket --gitlab-url https://gitlab.example.com --gitlab-project-id 42 --gitlab-token $TOKEN"
+      "\n  scrybe source add -P myrepo -S tickets --type ticket --provider gitlab --url https://gitlab.example.com --project 42 --token $TOKEN" +
+      "\n  scrybe source add -P myrepo -S gh-issues --type ticket --provider github --project owner/repo --token '${SCRYBE_GITHUB_TOKEN}'"
     );
 }
 
@@ -62,12 +138,17 @@ function applySourceUpdateOptions(cmd: Command): Command {
   return cmd
     .requiredOption("-P, --project-id <id>", "Project ID")
     .requiredOption("-S, --source-id <id>", "Source ID")
-    .option("--gitlab-token <token>", "New GitLab personal access token")
-    .option("--gitlab-url <url>", "GitLab instance base URL")
-    .option("--gitlab-project-id <id>", "GitLab project ID or path")
+    // Generic ticket fields (new)
+    .option("--url <url>", "Provider base URL")
+    .option("--project <id>", "Provider-scoped project identifier")
+    .option("--token <token>", "New personal access token (literal or ${VAR} form)")
+    // Deprecated aliases
+    .option("--gitlab-token <token>", "[deprecated: use --token] New GitLab personal access token")
+    .option("--gitlab-url <url>", "[deprecated: use --url] GitLab instance base URL")
+    .option("--gitlab-project-id <id>", "[deprecated: use --project] GitLab project ID or path")
     .option("--root <path>", "Absolute path to repo root")
     .option("--languages <langs>", "Comma-separated language hints")
-    .addHelpText("after", "\nExample:\n  scrybe source update -P myrepo -S tickets --gitlab-token $NEW_TOKEN");
+    .addHelpText("after", "\nExamples:\n  scrybe source update -P myrepo -S tickets --token $NEW_TOKEN\n  scrybe source update -P myrepo -S tickets --gitlab-token $NEW_TOKEN  # deprecated");
 }
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
@@ -119,6 +200,9 @@ export const addSourceTool: Tool<
   {
     project_id: string; source_id: string; source_type: string;
     root_path?: string; languages?: string;
+    // Generic ticket fields (new)
+    provider?: string; url?: string; project?: string; token?: string;
+    // Deprecated aliases
     gitlab_url?: string; gitlab_project_id?: string; gitlab_token?: string;
   },
   {
@@ -130,7 +214,7 @@ export const addSourceTool: Tool<
   spec: {
     name: "add_source",
     cliName: "source add",
-    description: "Add an indexable source to a project (code repo, GitLab issues, etc.) and auto-enqueue a reindex. Returns a job_id to poll with reindex_status.",
+    description: "Add an indexable source to a project (code repo, GitLab/GitHub issues, etc.) and auto-enqueue a reindex. Returns a job_id to poll with reindex_status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -139,9 +223,15 @@ export const addSourceTool: Tool<
         source_type: { type: "string", enum: ["code", "ticket"], description: "Source type: code | ticket" },
         root_path: { type: "string", description: "Absolute path to repo root (required for type=code)" },
         languages: { type: "array", items: { type: "string" }, description: "Language hints for code source" },
-        gitlab_url: { type: "string", description: "GitLab instance base URL (required for type=ticket)" },
-        gitlab_project_id: { type: "string", description: "GitLab project ID or path (required for type=ticket)" },
-        gitlab_token: { type: "string", description: "GitLab personal access token (required for type=ticket)" },
+        // Generic ticket fields (new)
+        provider: { type: "string", enum: ["gitlab", "github"], description: "Ticket provider (default: gitlab)" },
+        url: { type: "string", description: "Provider base URL. Required for GitLab; optional for GitHub (defaults to https://api.github.com)" },
+        project: { type: "string", description: "Provider-scoped project identifier: GitLab numeric id or path; GitHub owner/repo" },
+        token: { type: "string", description: "Personal access token (literal or ${VAR} form)" },
+        // Deprecated aliases
+        gitlab_url: { type: "string", description: "[deprecated: use url] GitLab instance base URL" },
+        gitlab_project_id: { type: "string", description: "[deprecated: use project] GitLab project ID or path" },
+        gitlab_token: { type: "string", description: "[deprecated: use token] GitLab personal access token" },
       },
       required: ["project_id", "source_id", "source_type"],
     },
@@ -161,11 +251,15 @@ export const addSourceTool: Tool<
     const sc = buildSourceConfig(source_type, {
       root_path: input.root_path,
       languages: langStr,
+      provider: input.provider,
+      url: input.url,
+      project: input.project,
+      token: input.token,
       gitlab_url: input.gitlab_url,
       gitlab_project_id: input.gitlab_project_id,
       gitlab_token: input.gitlab_token,
     });
-    await validateGitlabToken(sc);
+    await validateToken(sc);
 
     // D6 — decide daemon path BEFORE registry write so spawn-failed doesn't
     // leave a registered-but-never-indexed source behind
@@ -220,6 +314,12 @@ export const addSourceTool: Tool<
     source_type: String(opts.type),
     root_path: opts.root ? String(opts.root) : undefined,
     languages: opts.languages ? String(opts.languages) : undefined,
+    // Generic ticket fields
+    provider: opts.provider ? String(opts.provider) : undefined,
+    url: opts.url ? String(opts.url) : undefined,
+    project: opts.project ? String(opts.project) : undefined,
+    token: opts.token ? String(opts.token) : undefined,
+    // Deprecated aliases
     gitlab_url: opts.gitlabUrl ? String(opts.gitlabUrl) : undefined,
     gitlab_project_id: opts.gitlabProjectId ? String(opts.gitlabProjectId) : undefined,
     gitlab_token: opts.gitlabToken ? String(opts.gitlabToken) : undefined,
@@ -231,6 +331,9 @@ export const addSourceTool: Tool<
 export const updateSourceTool: Tool<
   {
     project_id: string; source_id: string;
+    // Generic ticket fields (new)
+    url?: string; project?: string; token?: string;
+    // Deprecated aliases
     gitlab_token?: string; gitlab_url?: string; gitlab_project_id?: string;
     root_path?: string; languages?: string;
   },
@@ -239,15 +342,20 @@ export const updateSourceTool: Tool<
   spec: {
     name: "update_source",
     cliName: "source update",
-    description: "Update an existing source's config — e.g. refresh a GitLab token, change root path, or update language hints. Only the fields you provide are changed.",
+    description: "Update an existing source's config — e.g. refresh a token, change root path, or update language hints. Only the fields you provide are changed.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: { type: "string" },
         source_id: { type: "string" },
-        gitlab_token: { type: "string", description: "New GitLab personal access token" },
-        gitlab_url: { type: "string", description: "GitLab instance base URL" },
-        gitlab_project_id: { type: "string", description: "GitLab project ID or path" },
+        // Generic ticket fields (new)
+        url: { type: "string", description: "Provider base URL" },
+        project: { type: "string", description: "Provider-scoped project identifier" },
+        token: { type: "string", description: "New personal access token (literal or ${VAR} form)" },
+        // Deprecated aliases
+        gitlab_token: { type: "string", description: "[deprecated: use token] New GitLab personal access token" },
+        gitlab_url: { type: "string", description: "[deprecated: use url] GitLab instance base URL" },
+        gitlab_project_id: { type: "string", description: "[deprecated: use project] GitLab project ID or path" },
         root_path: { type: "string", description: "Absolute path to repo root" },
         languages: { type: "array", items: { type: "string" }, description: "Language hints" },
       },
@@ -264,9 +372,18 @@ export const updateSourceTool: Tool<
     const fields: Partial<Source> = {};
     const scPatch: Record<string, unknown> = {};
     if (existing.source_config.type === "ticket") {
-      if (input.gitlab_token) scPatch["token"] = input.gitlab_token;
-      if (input.gitlab_url) scPatch["base_url"] = input.gitlab_url;
-      if (input.gitlab_project_id) scPatch["project_id"] = input.gitlab_project_id;
+      // Resolve generic + deprecated aliases for update (no provider change allowed)
+      const resolved = resolveTicketFields({
+        url: input.url,
+        project: input.project,
+        token: input.token,
+        gitlab_url: input.gitlab_url,
+        gitlab_project_id: input.gitlab_project_id,
+        gitlab_token: input.gitlab_token,
+      });
+      if (input.token || input.gitlab_token) scPatch["token"] = resolved.token;
+      if (input.url || input.gitlab_url) scPatch["base_url"] = resolved.url;
+      if (input.project || input.gitlab_project_id) scPatch["project_id"] = resolved.project;
     } else if (existing.source_config.type === "code") {
       if (input.root_path) scPatch["root_path"] = input.root_path;
       if (input.languages) scPatch["languages"] = input.languages.split(",").map((l) => l.trim());
@@ -283,6 +400,11 @@ export const updateSourceTool: Tool<
   cliOpts: ([opts]) => ({
     project_id: String(opts.projectId),
     source_id: String(opts.sourceId),
+    // Generic ticket fields
+    url: opts.url ? String(opts.url) : undefined,
+    project: opts.project ? String(opts.project) : undefined,
+    token: opts.token ? String(opts.token) : undefined,
+    // Deprecated aliases
     gitlab_token: opts.gitlabToken ? String(opts.gitlabToken) : undefined,
     gitlab_url: opts.gitlabUrl ? String(opts.gitlabUrl) : undefined,
     gitlab_project_id: opts.gitlabProjectId ? String(opts.gitlabProjectId) : undefined,

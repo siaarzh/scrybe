@@ -56,3 +56,39 @@ export function writeEntry(key: string, entry: { lastSuccessful: number; maxFail
     renameSync(tmp, STATE_PATH);
   }
 }
+
+/**
+ * Delete every entry belonging to a source, regardless of provider/model.
+ *
+ * Keys are `${projectId}:${sourceId}:${base_url}:${model}` (see indexer.ts).
+ * At source-removal time we don't know which provider/model the source last
+ * used (it may have changed), so we delete by the `${projectId}:${sourceId}:`
+ * prefix. No-op when the state file is absent or holds no matching entries.
+ */
+export function deleteEntriesForSource(projectId: string, sourceId: string): void {
+  if (!existsSync(STATE_PATH)) return;
+  let state: StateFile;
+  try {
+    state = JSON.parse(readFileSync(STATE_PATH, "utf8")) as StateFile;
+  } catch {
+    return; // unreadable — nothing safe to delete
+  }
+  if (typeof state.entries !== "object" || state.entries === null) return;
+  const prefix = `${projectId}:${sourceId}:`;
+  let removed = false;
+  for (const key of Object.keys(state.entries)) {
+    if (key.startsWith(prefix)) {
+      delete state.entries[key];
+      removed = true;
+    }
+  }
+  if (!removed) return;
+  const tmp = `${STATE_PATH}.tmp-${randomBytes(4).toString("hex")}`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n", "utf8");
+  try {
+    renameSync(tmp, STATE_PATH);
+  } catch {
+    try { unlinkSync(STATE_PATH); } catch { /* ignore */ }
+    renameSync(tmp, STATE_PATH);
+  }
+}
