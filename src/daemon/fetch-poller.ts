@@ -175,22 +175,25 @@ async function pollProject(ps: PollerState): Promise<void> {
       continue;
     }
 
-    const lastIndexedSha = getLastIndexedSha(ps.projectId, ps.sourceId, remoteBranch);
+    // lastIndexedSha is keyed under the logical branch name (D1: label = logical, source = origin/).
+    const lastIndexedSha = getLastIndexedSha(ps.projectId, ps.sourceId, branch);
 
     if (lastIndexedSha === null) {
-      if (indexedBranches.has(remoteBranch)) {
+      if (indexedBranches.has(branch)) {
         // Bootstrap on upgrade: branch has chunks but no branch_state row yet.
         // Write current SHA as baseline; skip enqueue — nothing new to index.
         try {
-          setLastIndexedSha(ps.projectId, ps.sourceId, remoteBranch, shaAfter);
+          setLastIndexedSha(ps.projectId, ps.sourceId, branch, shaAfter);
         } catch { /* non-fatal */ }
         continue;
       }
       // Truly never indexed — preserve neverIndexed semantics.
+      // branch = logical label (e.g. "dev"); contentRef = remote-tracking ref for content reads.
       await enqueue({
         projectId: ps.projectId,
         sourceId: ps.sourceId,
-        branch: remoteBranch,
+        branch,
+        contentRef: remoteBranch,
         mode: "incremental",
       });
       changed.push(branch);
@@ -215,7 +218,8 @@ async function pollProject(ps: PollerState): Promise<void> {
       await enqueue({
         projectId: ps.projectId,
         sourceId: ps.sourceId,
-        branch: remoteBranch,
+        branch,
+        contentRef: remoteBranch,
         mode: "incremental",
       });
       changed.push(branch);

@@ -9,6 +9,8 @@ type StoredJob = JobState & {
   controller: AbortController;
   taskControllers: Map<string, AbortController>;
   branch?: string;
+  /** Git ref for content reads (e.g. "origin/dev"). When present, passed to indexSource as contentRef. */
+  contentRef?: string;
 };
 
 const _jobs = new Map<string, StoredJob>();
@@ -109,6 +111,7 @@ async function runTasks(jobId: string): Promise<void> {
       const result = await indexSource(job.project_id, task.source_id, task.mode, {
         signal: taskController.signal,
         branch: job.branch,
+        contentRef: job.contentRef,
         onDownloadProgress(percent) {
           if (task.phase !== "downloading-model") {
             task.phase = "downloading-model";
@@ -164,7 +167,8 @@ export function submitJob(
   mode: IndexMode,
   sourceIds?: string[],
   branch?: string,
-  preJobId?: string
+  preJobId?: string,
+  contentRef?: string
 ): string | { error: "already_running"; job_id: string } {
   if (mode === "full" && !sourceIds?.length) {
     throw new Error("full reindex requires explicit source_ids");
@@ -205,6 +209,7 @@ export function submitJob(
     controller,
     taskControllers,
     ...(branch && { branch }),
+    ...(contentRef && { contentRef }),
   };
 
   _jobs.set(job.job_id, job);
@@ -254,7 +259,8 @@ export function submitSourceJob(
   sourceId: string,
   mode: IndexMode,
   branch?: string,
-  preJobId?: string
+  preJobId?: string,
+  contentRef?: string
 ): string | { error: "already_running"; job_id: string } {
   const existingJobId = findRunningJobForProject(projectId);
   if (existingJobId) {
@@ -278,6 +284,7 @@ export function submitSourceJob(
     controller,
     taskControllers,
     ...(branch && { branch }),
+    ...(contentRef && { contentRef }),
   };
 
   _jobs.set(job.job_id, job);

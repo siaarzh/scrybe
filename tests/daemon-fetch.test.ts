@@ -77,11 +77,13 @@ describe("fetch poller — backfill", () => {
       { timeout: 5_000, interval: 50 },
     );
 
+    // D1: branch label is the logical name; contentRef carries the remote-tracking ref
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "fp-p1",
         sourceId: "primary",
-        branch: "origin/feat/example",
+        branch: "feat/example",
+        contentRef: "origin/feat/example",
         mode: "incremental",
       })
     );
@@ -92,8 +94,9 @@ describe("fetch poller — SHA delta detection", () => {
   it("queues reindex when a pinned branch advances on the remote", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
-    // Pretend the branch was already indexed with an old SHA — SHA delta should trigger enqueue
-    vi.mocked(listBranches).mockReturnValue(["origin/feat/example"]);
+    // Pretend the branch was already indexed with an old SHA — SHA delta should trigger enqueue.
+    // D1: branch_tags and branch_state use logical names, not origin/-prefixed refs.
+    vi.mocked(listBranches).mockReturnValue(["feat/example"]);
     vi.mocked(getLastIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 
     // Commit to feat/example on the remote BEFORE starting the poller
@@ -124,11 +127,13 @@ describe("fetch poller — SHA delta detection", () => {
       { timeout: 5_000, interval: 50 },
     );
 
+    // D1: branch is the logical label; contentRef is the upstream read ref
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "fp-p2",
         sourceId: "primary",
-        branch: "origin/feat/example",
+        branch: "feat/example",
+        contentRef: "origin/feat/example",
         mode: "incremental",
       })
     );
@@ -205,8 +210,8 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
 
     const { enqueue } = await import("../src/daemon/queue.js");
     const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
-    // Branch is in branch_state with an old SHA
-    vi.mocked(listBranches).mockReturnValue(["origin/feat/example"]);
+    // Branch is in branch_state with an old SHA.  D1: keyed under logical name.
+    vi.mocked(listBranches).mockReturnValue(["feat/example"]);
     vi.mocked(getLastIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 
     const pushedEvents: unknown[] = [];
@@ -229,11 +234,13 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
       { timeout: 5_000, interval: 50 },
     );
 
+    // D1: branch label is logical; contentRef carries the remote-tracking ref
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "fp-oob1",
         sourceId: "primary",
-        branch: "origin/feat/example",
+        branch: "feat/example",
+        contentRef: "origin/feat/example",
         mode: "incremental",
       })
     );
@@ -246,11 +253,12 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     expect(oobEvents.length).toBeGreaterThan(0);
   });
 
-  it("#2 — bootstrap on upgrade: no enqueue, setLastIndexedSha called with current SHA", async () => {
+  it("#2 — bootstrap on upgrade: no enqueue, setLastIndexedSha called with current SHA under logical name", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { listBranches, getLastIndexedSha, setLastIndexedSha } = await import("../src/branch-state.js");
-    // branch_state empty (getLastIndexedSha returns null) but branch_tags has rows
-    vi.mocked(listBranches).mockReturnValue(["origin/feat/example"]);
+    // branch_state empty (getLastIndexedSha returns null) but branch_tags has rows.
+    // D1: branch_tags uses the logical name, not origin/-prefixed.
+    vi.mocked(listBranches).mockReturnValue(["feat/example"]);
     vi.mocked(getLastIndexedSha).mockReturnValue(null);
 
     const { addProject, addSource, updateSource, listProjects } = await import("../src/registry.js");
@@ -271,11 +279,11 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     // No enqueue should have been called (bootstrap skips it)
     expect(enqueue).not.toHaveBeenCalled();
 
-    // setLastIndexedSha should have been called with some SHA string
+    // setLastIndexedSha should be keyed under the logical branch name (D1)
     expect(setLastIndexedSha).toHaveBeenCalledWith(
       "fp-boot2",
       "primary",
-      "origin/feat/example",
+      "feat/example",
       expect.stringMatching(/^[0-9a-f]{40}$/)
     );
   });
@@ -285,8 +293,8 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
 
-    // branch_state has an old SHA
-    vi.mocked(listBranches).mockReturnValue(["origin/feat/example"]);
+    // branch_state has an old SHA.  D1: keyed under logical name.
+    vi.mocked(listBranches).mockReturnValue(["feat/example"]);
     vi.mocked(getLastIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 
     // Advance the remote BEFORE starting the poller, but do NOT pre-fetch locally.
@@ -316,11 +324,13 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
       { timeout: 5_000, interval: 50 },
     );
 
+    // D1: branch label is logical; contentRef carries the remote-tracking ref
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "fp-delta3",
         sourceId: "primary",
-        branch: "origin/feat/example",
+        branch: "feat/example",
+        contentRef: "origin/feat/example",
         mode: "incremental",
       })
     );
@@ -350,11 +360,13 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
       { timeout: 5_000, interval: 50 },
     );
 
+    // D1: branch label is logical; contentRef carries the remote-tracking ref
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         projectId: "fp-new4",
         sourceId: "primary",
-        branch: "origin/feat/example",
+        branch: "feat/example",
+        contentRef: "origin/feat/example",
         mode: "incremental",
       })
     );
@@ -377,7 +389,8 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
     const oldSha = "bbbb000000000000000000000000000000000000";
-    vi.mocked(listBranches).mockReturnValue(["origin/feat/example"]);
+    // D1: branch_tags stores the logical name, not origin/-prefixed
+    vi.mocked(listBranches).mockReturnValue(["feat/example"]);
     vi.mocked(getLastIndexedSha).mockReturnValue(oldSha);
 
     const pushedEvents: unknown[] = [];

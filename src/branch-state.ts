@@ -261,16 +261,28 @@ export function getChunkIdsForBranch(projectId: string, sourceId: string, branch
 /**
  * Resolve a caller-supplied branch value to the form actually stored in branch_tags.
  *
- * Storage is mixed format today:
- *   - HEAD branches are indexed as short names  (`master`, `feat/example`)
- *   - Pinned branches are indexed as qualified refs (`origin/dev`, `origin/beta`)
+ * Storage format (post Plan 93 / v0.43.0):
+ *   - HEAD branches are indexed as short names (`master`, `feat/example`).
+ *   - Pinned branches are ALSO indexed as logical short names (`dev`, `beta`).
+ *     The `origin/<branch>` remote-tracking ref is the **content source only** — it is
+ *     never stored as a label in branch_tags or branch_state.
+ *   - The `relabel-origin-branches-v0.43.0` migration rewrites any pre-v0.43.0
+ *     `origin/<b>` labels to their logical `<b>` equivalents on DB startup.
  *
- * This resolver bridges the gap so callers can pass either form and get hits.
+ * Steps 2/3 below are a **back-compat fallback** for qualified `origin/<b>` labels that
+ * survived migration — e.g. a DB written by an older version on another machine and
+ * copied here before running the daemon, or any future qualified ref added through
+ * an unsupported external path. They cost at most one extra SQLite query on a miss
+ * and are otherwise invisible. They are NOT the primary path: callers that supply
+ * logical names always hit step 1. Do NOT remove them until all production DBs
+ * are confirmed migrated and no external path can produce a qualified label.
  *
  * Algorithm (two-call cap):
  *   1. Try supplied form as-is. Non-empty → return supplied.
- *   2. If empty AND no `origin/` prefix → retry with `origin/<supplied>`. Non-empty → return prefixed.
- *   3. If empty AND has `origin/` prefix → retry with prefix stripped. Non-empty → return stripped.
+ *   2. (back-compat) If step 1 missed AND no `origin/` prefix → retry with `origin/<supplied>`.
+ *      Non-empty → return prefixed.
+ *   3. (back-compat) If step 1 missed AND has `origin/` prefix → retry with prefix stripped.
+ *      Non-empty → return stripped.
  *   4. Still empty → return null (caller should propagate as empty results).
  *
  * Does NOT modify storage. Resolution is query-time only.

@@ -9,6 +9,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.43.0] — 2026-06-26
+
+### Changed
+- Pinned branches are now indexed under their plain name (e.g. `dev`) rather than a qualified `origin/dev` label. The remote-tracking ref is still the content source — it is just no longer used as the stored label — so a pinned branch stays fresh under one consistent name. A one-time migration rewrites any existing qualified labels on startup.
+
+### Fixed
+- Code deleted upstream on a pinned branch no longer lingers in search results: an incremental reindex now removes chunks for files deleted on the remote, so searches can't surface code that no longer exists.
+
+---
+
 ## [0.42.0] — 2026-06-18
 
 ### Added
@@ -96,7 +106,8 @@ For releases v0.37.0 and earlier, see [GitHub Releases](https://github.com/siaar
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/siaarzh/scrybe/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/siaarzh/scrybe/compare/v0.41.1...v0.42.0
 [0.41.1]: https://github.com/siaarzh/scrybe/compare/v0.41.0...v0.41.1
 [0.41.0]: https://github.com/siaarzh/scrybe/compare/v0.40.0...v0.41.0

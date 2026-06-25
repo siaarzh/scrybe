@@ -67,8 +67,15 @@ export interface IndexOptions {
   /** Called during local model download (0-100 percent). Only fires for local provider on first cold load. */
   onDownloadProgress?: (percent: number) => void;
   signal?: AbortSignal;
-  /** Branch to index. Defaults to current HEAD for code sources; "*" for non-code. */
+  /** Branch to index (label stored in branch_tags / branch_state). Defaults to current HEAD for code sources; "*" for non-code. */
   branch?: string;
+  /**
+   * Git ref used to read content (git ls-tree, rev-parse). When absent, falls back to `branch`.
+   * Set this to `origin/<branch>` for pinned branches so the indexer reads from the
+   * remote-tracking ref rather than a local branch that may not exist or may lag upstream.
+   * The stored label in branch_tags and branch_state is always `branch`, never `contentRef`.
+   */
+  contentRef?: string;
 }
 
 function checkAbort(signal?: AbortSignal): void {
@@ -105,29 +112,43 @@ export async function indexSource(
   // Non-code sources always use "*" branch sentinel.
   const effectiveBranchInput = isCode ? options.branch : "*";
 
+  // contentRef is the git ref used to read content (ls-tree, rev-parse).
+  // For pinned branches the poller sets contentRef = "origin/<branch>" so the indexer
+  // reads from the remote-tracking ref; `branch` remains the logical label stored in
+  // branch_tags and branch_state.  When no contentRef is given, fall back to branch.
+  const effectiveContentRef = isCode ? (options.contentRef ?? options.branch) : undefined;
+
   return withBranchSession(
     { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode },
     async (session, branch) => {
       const jobStart = Date.now();
 
+      // The git ref used for content reads (SHA capture, ls-tree). Uses contentRef when
+      // provided (pinned branches read from origin/<branch>); falls back to the label branch.
+      const gitRef = effectiveContentRef ?? branch;
+
       // Capture the SHA at indexer start (code sources only). Used to record the
       // last-indexed SHA in branch_state on successful completion.
       const indexedShaAtStart: string | null = (isCode && rootPath !== "")
-        ? (gitExec(["rev-parse", branch], { cwd: rootPath }) ?? null)
+        ? (gitExec(["rev-parse", gitRef], { cwd: rootPath }) ?? null)
         : null;
 
       // For code sources: detect non-HEAD branch indexing (content from git objects).
       const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
 
-      // Validate that an explicitly supplied branch ref is resolvable before doing any work.
+      // Validate that the content ref is resolvable before doing any work.
       // git ls-tree silently returns nothing on an unknown ref — this catches that early.
-      if (isNonHeadBranch && options.branch !== undefined && rootPath !== "") {
-        try {
-          gitExecOrThrow(["rev-parse", "--verify", options.branch], { cwd: rootPath });
-        } catch {
-          throw new Error(
-            `branch '${options.branch}' not found locally — try 'origin/${options.branch}' or fetch the ref first`
-          );
+      if (isNonHeadBranch && rootPath !== "") {
+        const refToVerify = effectiveContentRef ?? options.branch;
+        if (refToVerify !== undefined) {
+          try {
+            gitExecOrThrow(["rev-parse", "--verify", refToVerify], { cwd: rootPath });
+          } catch {
+            const hint = refToVerify.startsWith("origin/")
+              ? "fetch the ref first"
+              : `try 'origin/${refToVerify}' or fetch the ref first`;
+            throw new Error(`branch '${refToVerify}' not found locally — ${hint}`);
+          }
         }
       }
 
@@ -210,7 +231,9 @@ export async function indexSource(
       let currentSources: Record<string, string>;
       if (isNonHeadBranch) {
         currentSources = {};
-        for await (const entry of scanRef(rootPath, branch, projectId, sourceId)) {
+        // Use gitRef (contentRef ?? branch) so pinned branches read from origin/<branch>
+        // while `branch` (the label) remains the logical name stored in branch_tags.
+        for await (const entry of scanRef(rootPath, gitRef, projectId, sourceId)) {
           const hash = createHash("sha256").update(entry.content).digest("hex");
           currentSources[entry.relPath] = hash;
           nonHeadContentCache.set(entry.relPath, entry.content);

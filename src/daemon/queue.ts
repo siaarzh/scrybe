@@ -43,6 +43,12 @@ export interface QueueRequest {
   projectId: string;
   sourceId?: string;
   branch?: string;
+  /**
+   * Git ref used to read content (git ls-tree / rev-parse).
+   * When present, the indexer reads from this ref while `branch` is the stored label.
+   * Set to `origin/<branch>` for pinned branches so upstream is always the content source.
+   */
+  contentRef?: string;
   mode?: IndexMode;
   type?: JobType;
   gcOptions?: { mode: "grace" | "purge" };
@@ -361,8 +367,8 @@ function drain(): void {
     const providerType = resolveReindexProvider(item.projectId, item.sourceId);
 
     const result = item.sourceId
-      ? submitSourceJob(item.projectId, item.sourceId, item.mode ?? "incremental", item.branch, item.jobId)
-      : submitJob(item.projectId, item.mode ?? "incremental", undefined, item.branch, item.jobId);
+      ? submitSourceJob(item.projectId, item.sourceId, item.mode ?? "incremental", item.branch, item.jobId, item.contentRef)
+      : submitJob(item.projectId, item.mode ?? "incremental", undefined, item.branch, item.jobId, item.contentRef);
 
     if (typeof result !== "string") {
       // jobs.ts says already_running — project added to active via an out-of-band submitJob call;

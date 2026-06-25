@@ -617,6 +617,151 @@ export async function migrateKnowledgeTablesForPlan42(opts?: {
   return results;
 }
 
+// ─── Plan 93 migration — relabel origin/<branch> → <branch> in all derived stores ─
+//
+// Pinned-branch indexing (pre-Plan-93-S1) stored chunks and SHA rows under
+// `origin/<branch>` instead of the logical pin name `<branch>`.
+// This migration does a one-shot in-place relabel for ALL three derived stores:
+//   1. branch_tags   — UPDATE branch="origin/<b>" → "<b>"
+//   2. branch_state  — UPDATE branch="origin/<b>" → "<b>"
+//   3. per-branch hashes file — rename `<proj>__<src>__origin__<b>.json` → `<proj>__<src>__<b>.json`
+//
+// Conflict rule (D3): where a pre-existing `<b>` row already exists,
+// the `origin/<b>` upstream content wins (the local short-name snapshot may be stale).
+// Dedup: any chunk that would be double-tagged after the relabel is dropped (INSERT OR IGNORE).
+//
+// Idempotency: if no `origin/*` rows remain, the migration touches nothing.
+// Keyed as "relabel-origin-branches-v0.43.0" — single-run via migrations_applied.
+//
+// Injectable dependencies allow unit-testing without the live DB.
+
+export interface RelabelOriginBranchesSourceResult {
+  status: "ok" | "skipped" | "failed";
+  projectId: string;
+  sourceId: string;
+  qualifiedBranches: string[];
+  reason?: string;
+}
+
+export async function relabelOriginBranchesForPlan93(opts?: {
+  /** @internal — inject projects list (tests only). */
+  _projects?: Array<{ id: string; sources: Array<{ source_id: string; source_config: { type: string } }> }>;
+  /** @internal — inject getDB replacement (tests only). */
+  _getDB?: () => import("node:sqlite").DatabaseSync;
+  /** @internal — inject hashesDir path (tests only). */
+  _hashesDir?: string;
+}): Promise<RelabelOriginBranchesSourceResult[]> {
+  const results: RelabelOriginBranchesSourceResult[] = [];
+  const projects = opts?._projects ?? listProjects();
+
+  const { getDB: realGetDB } = await import("./branch-state.js");
+  const getDB = opts?._getDB ?? realGetDB;
+
+  const { existsSync, renameSync, unlinkSync } = await import("fs");
+  const { join } = await import("path");
+  const { config: cfg } = await import("./config.js");
+  const hashesDir = opts?._hashesDir ?? join(cfg.dataDir, "hashes");
+
+  for (const project of projects) {
+    for (const source of project.sources) {
+      // Only code sources have branch_tags / branch_state / hash files.
+      const sourceType = source.source_config.type ?? "code";
+      if (sourceType !== "code") continue;
+
+      const projectId = project.id;
+      const sourceId = source.source_id;
+
+      try {
+        const db = getDB();
+
+        // Find all distinct origin/<b> branches for this source in branch_tags.
+        const qualRows = db.prepare(
+          `SELECT DISTINCT branch FROM branch_tags
+           WHERE project_id=? AND source_id=? AND branch LIKE 'origin/%'`
+        ).all(projectId, sourceId) as { branch: string }[];
+
+        const qualifiedBranches = qualRows.map((r) => r.branch);
+
+        if (qualifiedBranches.length === 0) {
+          results.push({ status: "skipped", projectId, sourceId, qualifiedBranches: [], reason: "no origin/ labels found" });
+          continue;
+        }
+
+        for (const qualBranch of qualifiedBranches) {
+          const logicalBranch = qualBranch.slice("origin/".length); // strip "origin/"
+
+          // ── 1. branch_tags relabel ──────────────────────────────────────────
+          // Strategy: upstream (origin/<b>) wins.
+          //   a. Delete any pre-existing rows under the logical name (stale snapshot).
+          //   b. UPDATE all origin/<b> rows to the logical name.
+          // This cleanly handles the conflict without needing per-row dedup.
+          db.prepare(
+            `DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=?`
+          ).run(projectId, sourceId, logicalBranch);
+
+          db.prepare(
+            `UPDATE branch_tags SET branch=? WHERE project_id=? AND source_id=? AND branch=?`
+          ).run(logicalBranch, projectId, sourceId, qualBranch);
+
+          // ── 2. branch_state relabel ─────────────────────────────────────────
+          // If both rows exist: upstream (origin/<b>) wins → delete logical first, then rename.
+          // If only origin/<b> exists: just rename.
+          db.prepare(
+            `DELETE FROM branch_state WHERE project_id=? AND source_id=? AND branch=?`
+          ).run(projectId, sourceId, logicalBranch);
+
+          db.prepare(
+            `UPDATE branch_state SET branch=? WHERE project_id=? AND source_id=? AND branch=?`
+          ).run(logicalBranch, projectId, sourceId, qualBranch);
+
+          // ── 3. Hashes file rename ───────────────────────────────────────────
+          // slugifyBranch: "/" → "__"  →  "origin/dev" → "origin__dev"
+          //                              logical "dev" → "dev"
+          function slugify(b: string): string {
+            if (b === "*") return "_all_";
+            return b.replace(/\//g, "__");
+          }
+          const prefix = `${projectId}__${sourceId}__`;
+          const qualSlug = slugify(qualBranch);       // e.g. "origin__dev"
+          const logicalSlug = slugify(logicalBranch); // e.g. "dev"
+
+          const qualHashFile = join(hashesDir, `${prefix}${qualSlug}.json`);
+          const logicalHashFile = join(hashesDir, `${prefix}${logicalSlug}.json`);
+
+          if (existsSync(qualHashFile)) {
+            // Upstream wins: delete any pre-existing logical hash file first.
+            if (existsSync(logicalHashFile)) {
+              try { unlinkSync(logicalHashFile); } catch { /* ignore */ }
+            }
+            try { renameSync(qualHashFile, logicalHashFile); } catch { /* ignore */ }
+          }
+        }
+
+        process.stderr.write(
+          `[scrybe] migration: relabeled origin/ branches for ${projectId}/${sourceId}: ` +
+          `${qualifiedBranches.join(", ")} → logical names\n`
+        );
+
+        results.push({ status: "ok", projectId, sourceId, qualifiedBranches });
+      } catch (err) {
+        process.stderr.write(
+          `[scrybe] migration: failed to relabel origin/ branches for ${projectId}/${sourceId}: ` +
+          `${err instanceof Error ? err.message : String(err)}\n`
+        );
+        results.push({
+          status: "failed",
+          projectId,
+          sourceId,
+          qualifiedBranches: [],
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
 const MIGRATIONS: Migration[] = [
   {
     id: "compact-tables-v0.23.2",
@@ -796,6 +941,21 @@ const MIGRATIONS: Migration[] = [
     id: "knowledge-metadata-columns-v0.41.0",
     async run() {
       await migrateKnowledgeTablesForPlan42();
+    },
+  },
+  {
+    // Plan 93 S3: Relabel origin/<branch> → <branch> in all three derived stores:
+    // branch_tags, branch_state, and per-branch hashes files.
+    //
+    // Pre-Plan-93-S1 pinned-branch indexing stored chunks under `origin/<branch>`
+    // (e.g. "origin/dev") instead of the logical pin name ("dev"). This left
+    // stale, possibly frozen snapshots for any branches that had also been indexed
+    // directly (by name). Upstream (origin/<b>) wins on conflict; dedup via
+    // DELETE-then-UPDATE (no double-tag risk). Idempotent: a second run finds no
+    // origin/ rows and returns "skipped" for every source.
+    id: "relabel-origin-branches-v0.43.0",
+    async run() {
+      await relabelOriginBranchesForPlan93();
     },
   },
 ];
