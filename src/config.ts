@@ -419,6 +419,17 @@ export const config = {
     process.env["SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS"] ?? "1800000",
     10
   ),
+
+  // Drain cap for RSS-guard-triggered self-restart exit (ms).
+  // The over-budget daemon must release the pidfile promptly so the
+  // replacement (or MCP shim ensureRunning) is not blocked by a stale lock.
+  // Deliberately short — the guard only fires when the queue is idle (soft)
+  // or as a last resort (hard ceiling), so there is nothing worth draining.
+  // Default: 2000 ms.
+  daemonRestartDrainMs: parseInt(
+    process.env["SCRYBE_DAEMON_RESTART_DRAIN_MS"] ?? "2000",
+    10
+  ),
 } as const;
 
 if (config.chunkOverlap >= config.chunkSize) {

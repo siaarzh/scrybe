@@ -3,8 +3,9 @@
  *
  * Evaluates the current RSS on each mem-sampler tick. When RSS exceeds
  * SCRYBE_DAEMON_MAX_RSS_MB AND the daemon is idle (queue empty + no active
- * jobs), it gracefully self-restarts: spawns a fresh daemon via
- * `spawnDaemonDetached`, then calls the registered shutdown callback.
+ * jobs), it triggers a graceful self-restart: calls the registered shutdown
+ * callback which drains briefly, removes the pidfile, and (in always-on mode)
+ * spawns a replacement daemon after the pidfile is gone.
  *
  * A higher hard-ceiling (SCRYBE_DAEMON_MAX_RSS_HARD_MB) overrides the idle
  * requirement — the daemon restarts unconditionally, relying on the existing
@@ -67,9 +68,17 @@ export interface RssGuardOpts {
   /** Returns current active + pending job counts. From queue.ts `getQueueStats`. */
   getQueueStats: () => { active: number; pending: number };
   /**
-   * Called when a restart decision is made. Implementations should:
-   *   1. spawnDaemonDetached() — boot the replacement process
-   *   2. call shutdown() — tear down the current daemon
+   * Called when a restart decision is made. Implementations must:
+   *   1. Call shutdown() with a short drain cap (daemonRestartDrainMs) so the
+   *      over-budget process releases the pidfile promptly.
+   *   2. In always-on mode only: pass spawnAfterRemovePidfile=true so the
+   *      replacement is spawned strictly AFTER removePidfile() — never before.
+   *   3. In on-demand mode: do NOT spawn a replacement; recovery is via the
+   *      MCP shim's ensureRunning on the next tool call.
+   *
+   * No spawn-before-shutdown: the old pattern of calling spawnDaemonDetached()
+   * first caused the replacement to bail "already running" because the pidfile
+   * was still held by the exiting process.
    *
    * Injected for testability — do NOT import spawnDaemonDetached or shutdown
    * directly inside this module (keeps tests side-effect free).

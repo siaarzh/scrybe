@@ -17,6 +17,7 @@ import { onStateChange } from "./idle-state.js";
 import { diagEmit } from "./events.js";
 import { startMemSampler, stopMemSampler, MEM_SAMPLE_INTERVAL_MS } from "./mem-sampler.js";
 import { startRssGuard, stopRssGuard } from "./rss-guard.js";
+import { spawnDaemonDetached } from "./spawn-detached.js";
 import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
@@ -90,7 +91,20 @@ export async function runShutdownDrain(opts: {
   }
 }
 
-async function shutdown(signal: string): Promise<void> {
+async function shutdown(signal: string, opts?: {
+  /**
+   * Override the drain cap for this shutdown.
+   * Defaults to `config.daemonShutdownMaxWaitMs` (30 min) for SIGTERM/SIGINT/user stop.
+   * RSS-guard restart path passes `config.daemonRestartDrainMs` (2 s default) instead.
+   */
+  drainCapMs?: number;
+  /**
+   * When true, spawn a replacement daemon via spawnDaemonDetached() strictly AFTER
+   * removePidfile() and before process.exit(). Used in always-on mode for RSS-guard
+   * restarts so the replacement is never racing the pidfile lock.
+   */
+  spawnAfterRemovePidfile?: boolean;
+}): Promise<void> {
   if (shutdownCalled) return;
   shutdownCalled = true;
   _lifecycle?.stop();
@@ -103,6 +117,8 @@ async function shutdown(signal: string): Promise<void> {
   stopFetchPoller();
   stopTicketPoller();
 
+  const drainCapMs = opts?.drainCapMs ?? config.daemonShutdownMaxWaitMs;
+
   try {
     const { getQueueStats } = await import("./queue.js");
     const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl");
@@ -110,7 +126,7 @@ async function shutdown(signal: string): Promise<void> {
     const drained = await runShutdownDrain({
       getActiveReindexCount,
       getQueueStats,
-      maxWaitMs: config.daemonShutdownMaxWaitMs,
+      maxWaitMs: drainCapMs,
       onForceExit: (activeJobs) => {
         daemonLog(`[scrybe daemon] shutdown cap hit — ${activeJobs} job(s) still active, force-stopping`);
         try {
@@ -132,6 +148,12 @@ async function shutdown(signal: string): Promise<void> {
   cancelAllJobs();
   closeDB();
   removePidfile();
+  if (opts?.spawnAfterRemovePidfile) {
+    // Pidfile is gone — replacement can now acquire the lock cleanly.
+    try { spawnDaemonDetached({}); } catch (err) {
+      daemonLog(`[scrybe daemon] rss-guard respawn failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   process.exit(0);
 }
 
@@ -400,15 +422,17 @@ export async function runDaemon(): Promise<void> {
   // Hard ceiling: SCRYBE_DAEMON_MAX_RSS_HARD_MB (default 3072 MB) — unconditional.
   {
     const { getQueueStats } = await import("./queue.js");
-    const { spawnDaemonDetached } = await import("./spawn-detached.js");
     startRssGuard(MEM_SAMPLE_INTERVAL_MS, {
       getQueueStats,
       doRestart: (reason) => {
         daemonLog(`[scrybe daemon] rss-guard triggering self-restart (${reason})`);
-        try { spawnDaemonDetached({}); } catch (err) {
-          daemonLog(`[scrybe daemon] rss-guard spawn failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        shutdown(`rss-guard:${reason}`).catch(() => {});
+        // Shutdown-first ordering: close HTTP listener, drain briefly, remove
+        // pidfile, then optionally respawn (always-on only). No spawn before
+        // pidfile release — avoids the replacement bailing "already running".
+        shutdown(`rss-guard:${reason}`, {
+          drainCapMs: config.daemonRestartDrainMs,
+          spawnAfterRemovePidfile: _lifecycle?.isAlwaysOn() ?? false,
+        }).catch(() => {});
       },
     });
   }
