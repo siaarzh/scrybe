@@ -76,7 +76,7 @@
     "zod": "^3.0.0"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.0.1",
     "@types/react": "^19.2.14",
     "@types/update-notifier": "^6.0.8",
     "tree-sitter-cli": "^0.26.8",
