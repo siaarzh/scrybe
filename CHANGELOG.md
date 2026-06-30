@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.43.1] — 2026-07-01
+
+### Fixed
+
+- **The background daemon now restarts cleanly after crossing its memory ceiling.** Previously the automatic restart couldn't take over from the old process — leaving search unavailable for minutes, or the daemon stuck until manually killed. A restarting daemon now health-checks the previous one, replaces it promptly if it's unresponsive, and exits without blocking on a long shutdown drain.
+
+---
+
 ## [0.43.0] — 2026-06-26
 
 ### Changed
@@ -88,25 +96,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.37.1] — 2026-05-25
-
-### Added
-
-- **Model weights now survive reinstalls and npx cache wipes.** Local model weights (embedder + reranker) are stored in `${DATA_DIR}/models/` instead of inside the `@xenova/transformers` package tree. Existing caches are migrated automatically on first daemon start after upgrade — no action needed. Set `SCRYBE_MODEL_CACHE_DIR` to store weights elsewhere (e.g. a shared cache).
-
-### Fixed
-
-- **Reranker no longer silently returns unranked results when its model is unavailable.** When the local cross-encoder model cannot be loaded, scrybe now logs a warning (`[scrybe] reranker model unavailable …; returning non-reranked order`) instead of failing silently.
-
----
-
 ## Older releases
 
-For releases v0.37.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.37.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.43.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.43.1...HEAD
+[0.43.1]: https://github.com/siaarzh/scrybe/compare/v0.43.0...v0.43.1
 [0.43.0]: https://github.com/siaarzh/scrybe/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/siaarzh/scrybe/compare/v0.41.1...v0.42.0
 [0.41.1]: https://github.com/siaarzh/scrybe/compare/v0.41.0...v0.41.1
@@ -114,4 +111,3 @@ For releases v0.37.0 and earlier, see [GitHub Releases](https://github.com/siaar
 [0.40.0]: https://github.com/siaarzh/scrybe/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/siaarzh/scrybe/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/siaarzh/scrybe/compare/v0.37.1...v0.38.0
-[0.37.1]: https://github.com/siaarzh/scrybe/compare/v0.37.0...v0.37.1
