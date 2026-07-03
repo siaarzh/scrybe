@@ -10,6 +10,11 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 ### Changed
 
 - Dependency updates. Refreshed the vector-store engine (LanceDB), the daemon HTTP layer (Hono), the terminal UI stack (Ink, Clack prompts), build/test tooling, and CI actions. The LanceDB update stays backward-compatible with existing on-disk indexes — no reindex required.
+- Updated the CLI argument parser (Commander). No change to any command, flag, or output.
+
+### Fixed
+
+- **Corrected the minimum Node.js version to 22.13.0** (previously documented as 22.5.0). scrybe relies on the built-in `node:sqlite` module, which is only available without an experimental flag from Node 22.13.0 onward — so scrybe could not actually run on Node 22.5–22.12. Update Node to 22.13 or newer.
 
 ---
 

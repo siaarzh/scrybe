@@ -8,7 +8,7 @@ Self-hosted semantic code search. Indexes git repos into a local LanceDB vector 
 
 ## Prerequisites
 
-- **Node.js 22.5 or later** (`node --version` must report `v22.5.0+`).
+- **Node.js 22.13 or later** (`node --version` must report `v22.13.0+`).
 - A git repository you want to index.
 
 ## Step 1 — Install globally
@@ -155,7 +155,7 @@ Create a fine-grained personal access token at [github.com/settings/tokens?type=
 | Symptom | Fix |
 |---|---|
 | `scrybe: command not found` | Check `npm bin -g` is on PATH |
-| `scrybe doctor` reports "Node version" fail | Upgrade to Node 22.5 or later |
+| `scrybe doctor` reports "Node version" fail | Upgrade to Node 22.13 or later |
 | MCP tools don't appear in agent | Reload the host agent after editing the MCP settings file |
 | Indexing hangs on first run | Local embedder downloads ~120 MB — wait for network; subsequent runs are instant |
 | Out-of-disk errors | LanceDB grows with index size; ~1 MB per 100 chunks is typical |

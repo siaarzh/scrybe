@@ -117,7 +117,7 @@ Issues and comments are indexed incrementally — only updated items are fetched
 
 ## Requirements
 
-- Node.js 22.5+
+- Node.js 22.13+
 
 ## Setup
 

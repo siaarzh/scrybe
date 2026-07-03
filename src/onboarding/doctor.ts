@@ -56,7 +56,7 @@ function fmtBytes(b: number): string {
 
 function nodeVersionOk(): boolean {
   const [major, minor] = process.versions.node.split(".").map(Number);
-  return (major! > 22) || (major! === 22 && minor! >= 5);
+  return (major! > 22) || (major! === 22 && minor! >= 13);
 }
 
 export async function runDoctor(): Promise<DoctorReport> {
@@ -110,10 +110,10 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   if (!nodeVersionOk()) {
     checks.push(fail("env.node_version", SEC_ENV, "Node version",
-      `Node ${process.versions.node} — need ≥ 22.5.0`,
+      `Node ${process.versions.node} — need ≥ 22.13.0`,
       `Upgrade Node.js: https://nodejs.org`));
   } else {
-    checks.push(ok("env.node_version", SEC_ENV, "Node version", `v${process.versions.node} (≥ 22.5.0)`));
+    checks.push(ok("env.node_version", SEC_ENV, "Node version", `v${process.versions.node} (≥ 22.13.0)`));
   }
 
   checks.push(ok("env.scrybe_version", SEC_ENV, "Scrybe version", `v${VERSION}`));
