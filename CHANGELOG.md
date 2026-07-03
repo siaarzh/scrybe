@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.44.0] — 2026-07-03
+
 ### Changed
 
 - Dependency updates. Refreshed the vector-store engine (LanceDB), the daemon HTTP layer (Hono), the terminal UI stack (Ink, Clack prompts), build/test tooling, and CI actions. The LanceDB update stays backward-compatible with existing on-disk indexes — no reindex required.
