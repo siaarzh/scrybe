@@ -38,7 +38,7 @@ jobs:
           cache: "npm"
 
       - name: Cache local model weights
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           # Must match SCRYBE_MODEL_CACHE_DIR. Covers both models scrybe loads:
           # Xenova/multilingual-e5-small (embedder) + Xenova/ms-marco-MiniLM-L-6-v2 (reranker).
