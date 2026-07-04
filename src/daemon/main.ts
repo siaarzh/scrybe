@@ -22,6 +22,7 @@ import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
 import { initAutoGc, evaluateRatioTrigger } from "./auto-gc.js";
+import { initVectorIndexBackfill } from "./vector-index-backfill.js";
 import { migrateModelsCache } from "./migrate-models-cache.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
@@ -270,9 +271,13 @@ export async function runDaemon(): Promise<void> {
   // Wire auto-gc triggers (must happen after initQueue)
   const autoGcTracker = initAutoGc({ pushEvent });
 
+  // Wire vector-index idle backfill (Plan 95 Phase 3) — same idle-scheduling shape as auto-gc
+  const vectorIndexBackfillTracker = initVectorIndexBackfill({ pushEvent });
+
   // A1/A2: when a project is removed, emit SSE event + cancel its idle-gc timer
   onProjectRemoved((projectId, jobsCancelled) => {
     autoGcTracker.cancel(projectId);
+    vectorIndexBackfillTracker.cancel(projectId);
     pushEvent({
       ts: new Date().toISOString(),
       level: "info",

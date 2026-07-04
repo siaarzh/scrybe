@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.45.0] — 2026-07-04
+
+### Added
+
+- Faster vector search on large indexes via a native quantized ANN index, built and maintained automatically in the background (no re-embedding, no manual step), with recall kept on par with exact search. Kicks in above 10,000 rows per source; set `SCRYBE_VECTOR_INDEX=false` to force exact search everywhere instead.
+
+---
+
 ## [0.44.1] — 2026-07-04
 
 ### Changed

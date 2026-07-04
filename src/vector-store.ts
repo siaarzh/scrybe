@@ -148,6 +148,76 @@ export function invalidateHealthCache(tableName: string): void {
   _healthCache.delete(tableName);
 }
 
+// ─── Vector (ANN) index presence cache ────────────────────────────────────────
+//
+// Mirrors the FTS index-presence check below, but cached: search-mode selection
+// runs on every query, so a listIndices()+countRows() round trip per search would
+// be wasteful. The cache holds a plain boolean per table; callers that build or
+// drop a vector index MUST invalidate it (createVectorIndex does so itself).
+
+const _vectorIndexCache = new Map<string, boolean>();
+
+/**
+ * Invalidate the cached vector-index-presence flag for a table.
+ * Call after building, dropping, or recreating a table's vector index so the
+ * next search recomputes presence instead of trusting a stale cached value.
+ */
+export function invalidateVectorIndexCache(tableName: string): void {
+  _vectorIndexCache.delete(tableName);
+}
+
+/**
+ * Whether `tableName` has a live hnswSq (or other ANN) index on the `vector`
+ * column. Result is cached per table name until invalidated — see
+ * invalidateVectorIndexCache. Same manifest+on-disk-UUID-dir verification
+ * pattern as ftsIndexExists (a manifest entry can outlive its UUID dir after
+ * a version prune).
+ */
+async function vectorIndexPresent(tableName: string, table: lancedb.Table): Promise<boolean> {
+  const cached = _vectorIndexCache.get(tableName);
+  if (cached !== undefined) return cached;
+  const indices = await table.listIndices();
+  const inManifest = indices.some(
+    (idx) => idx.indexType.toUpperCase().includes("HNSW") && idx.columns.includes("vector"),
+  );
+  let exists = false;
+  if (inManifest) {
+    const indicesDir = join(DB_PATH, `${tableName}.lance`, "_indices");
+    exists =
+      existsSync(indicesDir) &&
+      readdirSync(indicesDir, { withFileTypes: true }).some((e) => e.isDirectory());
+  }
+  _vectorIndexCache.set(tableName, exists);
+  return exists;
+}
+
+/**
+ * Apply the search-mode decision to a vector query: exact/flat when the ANN
+ * index feature is disabled (SCRYBE_VECTOR_INDEX=false — the force-exact
+ * escape) or when no vector index exists yet on this table; approximate
+ * (index + refineFactor) when a vector index is present and enabled.
+ *
+ * Calling bypassVectorIndex() is safe even when no index exists at all (LanceDB
+ * just brute-forces either way) — this keeps the "exact" path explicit rather
+ * than relying on absence-of-index as an implicit fallback.
+ */
+async function applySearchMode(
+  query: lancedb.VectorQuery,
+  tableName: string,
+  table: lancedb.Table,
+  topK: number,
+): Promise<lancedb.VectorQuery> {
+  if (!config.vectorIndexEnabled) return query.bypassVectorIndex();
+  const hasIndex = await vectorIndexPresent(tableName, table);
+  if (!hasIndex) return query.bypassVectorIndex();
+  // refineFactor sizes the exact-rescore window; ef sizes the HNSW traversal
+  // beam (the actual recall lever). LanceDB hard-requires ef >= topK*refineFactor,
+  // so floor it there; config.vectorEf lifts it above that floor for tail recall.
+  const refineFactor = config.vectorRefineFactor;
+  const ef = Math.max(config.vectorEf, topK * refineFactor);
+  return query.refineFactor(refineFactor).ef(ef);
+}
+
 /**
  * Get or compute the health of a LanceDB table.
  * Uses an in-memory cache with a 60s TTL (env: SCRYBE_HEALTH_TTL_MS).
@@ -307,11 +377,12 @@ export async function search(
     const ids = chunkIdIn.map((id) => `'${escapeSql(id)}'`).join(", ");
     where += ` AND chunk_id IN (${ids})`;
   }
-  const rows = await (table.search(Float32Array.from(queryVector)) as lancedb.VectorQuery)
+  let query = (table.search(Float32Array.from(queryVector)) as lancedb.VectorQuery)
     .distanceType("cosine")
     .where(where)
-    .limit(topK)
-    .toArray();
+    .limit(topK);
+  query = await applySearchMode(query, tableName, table, topK);
+  const rows = await query.toArray();
 
   return rows.map((row) => ({
     chunk_id: String(row.chunk_id),
@@ -387,6 +458,51 @@ export async function createFtsIndex(tableName: string): Promise<void> {
   });
 }
 
+/**
+ * Build a native LanceDB `hnswSq` (HNSW + int8 scalar quantization) index on the
+ * `vector` column, gated on a row-count threshold (SCRYBE_VECTOR_INDEX_MIN_ROWS,
+ * default 10,000 — small tables stay flat/exact). Skips if a vector index is
+ * already present, unless `opts.force` is set (Plan 95 Phase 4 — rebuild
+ * cadence), in which case the index is rebuilt in place via `replace: true`
+ * (drop + recreate the index only — vectors are never re-embedded, and rows
+ * are never rewritten). MUST be built with `distanceType: "cosine"` — an
+ * L2-metric index is silently ignored by scrybe's cosine queries (LanceDB
+ * warns and falls back to brute-force instead of erroring).
+ *
+ * Callers: `src/daemon/vector-index-backfill.ts` invokes this directly — the
+ * plain (additive) path for the Phase 3 idle backfill, and the `force: true`
+ * path for the Phase 4 rebuild cadence (both funnel through the same
+ * one-at-a-time idle-gated queue there, so two builds for the same table
+ * never run concurrently).
+ */
+export async function createVectorIndex(
+  tableName: string,
+  opts: { force?: boolean } = {}
+): Promise<void> {
+  const table = await openExistingTable(tableName);
+  if (!table) return;
+  if ((await table.countRows()) < config.vectorIndexMinRows) return;
+  if (!opts.force && (await vectorIndexPresent(tableName, table))) return;
+  await writeWithRetry(tableName, async (t) => {
+    await t.createIndex("vector", {
+      // numPartitions:1 = a single HNSW graph, no IVF partition layer to
+      // under-probe (nprobes can't miss a partition that doesn't exist). This
+      // is LanceDB's documented recommendation for HNSW and is the empirical
+      // default at current table sizes; pinning it guards against the default
+      // formula changing at other row counts / LanceDB versions (see ADR-0010).
+      config: lancedb.Index.hnswSq({ distanceType: "cosine", numPartitions: 1 }),
+      replace: true,
+    });
+    await maybeCompact(t);
+  });
+  invalidateVectorIndexCache(tableName);
+  // Evict the cached search handle too: a replace:true (re)build turns over the
+  // index UUID dir, and the recurring rebuild cadence makes this churn ongoing.
+  // A stale pre-rebuild handle can error once the compaction grace prunes the old
+  // dir (see memory architecture-mcp-table-handle-staleness). Cheap insurance.
+  evictTableCache(tableName);
+}
+
 export async function deleteProject(projectId: string, tableName: string): Promise<void> {
   const existing = await openExistingTable(tableName);
   if (!existing) return;
@@ -457,11 +573,12 @@ export async function searchKnowledge(
   dimensions: number
 ): Promise<KnowledgeSearchResult[]> {
   const table = await getProjectTable(tableName, dimensions, "knowledge");
-  const rows = await (table.search(Float32Array.from(queryVector)) as lancedb.VectorQuery)
+  let query = (table.search(Float32Array.from(queryVector)) as lancedb.VectorQuery)
     .distanceType("cosine")
     .where(`project_id = '${escapeSql(projectId)}'`)
-    .limit(topK)
-    .toArray();
+    .limit(topK);
+  query = await applySearchMode(query, tableName, table, topK);
+  const rows = await query.toArray();
 
   return rows.map((row) => ({
     score: 1 - Number(row._distance ?? 0),
@@ -728,6 +845,7 @@ export async function dropTable(tableName: string): Promise<void> {
   }
   _tableCache.delete(tableName);
   _healthCache.delete(tableName);
+  _vectorIndexCache.delete(tableName);
   // Clean up per-table sidecar
   const metaPath = tableMetaPath(tableName);
   if (existsSync(metaPath)) {
@@ -759,6 +877,7 @@ export async function dropAndRecreateTable(
   }
   _tableCache.delete(tableName);
   _healthCache.delete(tableName);
+  _vectorIndexCache.delete(tableName);
   await db.createEmptyTable(tableName, newSchema);
   writeTableMeta(tableName, sidecarFields);
 }

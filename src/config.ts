@@ -363,10 +363,45 @@ function buildHybridConfig() {
   return { hybridEnabled: enabled, rrfK };
 }
 
+/**
+ * Vector (ANN) index config — Plan 95. Plain-behavior env var names only, no
+ * internal labels ("ann"/"track"/plan numbers) per [[feedback-no-internal-labels]].
+ *   - SCRYBE_VECTOR_INDEX: enable/disable using a vector index at query time.
+ *     "false" = force-exact everywhere (the documented force-exact escape).
+ *   - SCRYBE_VECTOR_INDEX_MIN_ROWS: row threshold below which createVectorIndex
+ *     skips building (small tables stay flat/exact — already fast enough).
+ *   - SCRYBE_VECTOR_REFINE_FACTOR: refineFactor applied when a query uses the
+ *     index (over-fetches N× candidates before final exact re-ranking by LanceDB).
+ */
+function buildVectorIndexConfig() {
+  const enabled = process.env.SCRYBE_VECTOR_INDEX !== "false";
+  // Guard against NaN / non-positive misconfig — a bad value here would either
+  // build an index on every table (minRows=NaN → `rows < NaN` always false) or
+  // pass refineFactor(NaN) into the query hot path. Fall back to the default.
+  const posIntEnv = (raw: string | undefined, fallback: number): number => {
+    const n = parseInt(raw ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  const minRows = posIntEnv(process.env.SCRYBE_VECTOR_INDEX_MIN_ROWS, 10000);
+  const refineFactor = posIntEnv(process.env.SCRYBE_VECTOR_REFINE_FACTOR, 10);
+  // ef = HNSW search-beam width at query time. LanceDB's implicit default
+  // (~1.5×topK×refineFactor) is too narrow for tail recall on large indexes;
+  // set it explicitly. Measured: ef=440 was the exact-recall boundary at
+  // topK=10/refineFactor=10 on a 27k-row index, so 600 gives ~1.4× headroom.
+  const ef = posIntEnv(process.env.SCRYBE_VECTOR_EF, 600);
+  return {
+    vectorIndexEnabled: enabled,
+    vectorIndexMinRows: minRows,
+    vectorRefineFactor: refineFactor,
+    vectorEf: ef,
+  };
+}
+
 const embedding = buildEmbeddingConfig();
 const knowledgeEmbedding = buildKnowledgeEmbeddingConfig();
 const rerank = buildRerankConfig();
 const hybrid = buildHybridConfig();
+const vectorIndex = buildVectorIndexConfig();
 
 function readPackageVersion(): string {
   try {
@@ -410,6 +445,9 @@ export const config = {
 
   // Hybrid search (BM25 + vector, on by default)
   ...hybrid,
+
+  // Vector (ANN) index — search-mode selection (Plan 95)
+  ...vectorIndex,
 
   // Daemon shutdown: hard cap on defer-while-reindex-active wait (ms).
   // Past this cap the daemon force-exits even with a reindex in flight;

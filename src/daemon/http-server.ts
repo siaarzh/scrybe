@@ -28,6 +28,7 @@ export interface DaemonEvent {
     | "watcher.event" | "state.changed" | "watcher.unhealthy"
     | "pinned.changed"
     | "auto-gc.scheduled" | "auto-gc.completed" | "auto-gc.failed" | "auto-gc.skipped"
+    | "vector-index.completed" | "vector-index.failed"
     | "project.removed"
     | "health.corrupt" | "health.post-gc-corruption-detected";
   projectId?: string;

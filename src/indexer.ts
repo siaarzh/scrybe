@@ -30,6 +30,7 @@ import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage, walkRepoFiles } from "./chunker.js";
 import { normalizeContent } from "./normalize.js";
 import { diagEmit } from "./daemon/events.js";
+import { recordUpsertForRebuildCadence, markFullReindexForRebuild } from "./daemon/vector-index-backfill.js";
 
 // ─── Indexer debug mode ───────────────────────────────────────────────────────
 // Set SCRYBE_DEBUG_INDEXER=1 to emit high-volume per-batch events to daemon-log.jsonl.
@@ -419,6 +420,11 @@ export async function indexSource(
           const rowsAfter = await countTableRows(tableName).catch(() => 0);
           const actuallyAdded = Math.max(0, rowsAfter - rowsBefore);
           chunksPersisted += actuallyAdded;
+          // Plan 95 Phase 4: report this batch's write to the rebuild-cadence
+          // tracker (src/daemon/vector-index-backfill.ts owns the threshold
+          // decision + idle-gated scheduling; this call is non-blocking and
+          // never triggers a build inline on this hot upsert path).
+          recordUpsertForRebuildCadence(tableName, actuallyAdded, rowsAfter);
           diagEmit({
             event: "indexer.write.completed",
             projectId,
@@ -579,6 +585,14 @@ export async function indexSource(
             debugEmit({ event: "indexer.pruneOrphans", projectId, sourceId, ...pruneResult });
           }
         } catch { /* non-fatal */ }
+      }
+
+      // Plan 95 Phase 4: a full reindex can rewrite/add a large fraction of a
+      // table's rows in one go, so always request an idle-gated rebuild after
+      // one completes rather than waiting for the incremental accumulator
+      // (recordUpsertForRebuildCadence) to cross its threshold.
+      if (didWork && mode === "full") {
+        markFullReindexForRebuild(tableName);
       }
 
       // Invalidate health cache after any successful reindex — state may have changed.

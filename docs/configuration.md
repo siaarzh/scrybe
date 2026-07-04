@@ -139,6 +139,23 @@ When using Voyage AI, set only `SCRYBE_RERANK=true` — endpoint and model are a
 
 ---
 
+## Vector index
+
+Above a row-count threshold, a source's vector column gets a native quantized ANN index instead of an exhaustive scan — several times faster on large tables while keeping recall at parity with an exact search (a wide search beam plus an exact re-score of the top candidates). Small tables (and anyone who disables it) stay on exact/flat search, which is already fast enough below the threshold.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_VECTOR_INDEX` | `true` | Set to `false` to force exact search everywhere — the escape hatch if you want to bypass the index even on tables that have one. |
+| `SCRYBE_VECTOR_INDEX_MIN_ROWS` | `10000` | Row-count threshold. Tables below this stay exact/flat; tables at or above it get an index built. |
+| `SCRYBE_VECTOR_EF` | `600` | Search-beam width for the index (how many graph candidates are explored per query). This is the main recall lever — the default is tuned to give recall on par with an exact search; lower it only to trade recall for a little speed. Floored at `top_k × SCRYBE_VECTOR_REFINE_FACTOR`. |
+| `SCRYBE_VECTOR_REFINE_FACTOR` | `10` | Over-fetch multiplier: how wide a candidate set the index hands back for an exact re-score before returning `top_k`. |
+| `SCRYBE_VECTOR_INDEX_REBUILD_ROWS` | `1000` | Rows accumulated since the last index build (or 20% of the table's current row count, whichever is larger) before a rebuild is queued. |
+| `SCRYBE_VECTOR_INDEX_BACKFILL_IDLE_MS` | `300000` | How long a project must be idle before the daemon checks its tables for a missing or stale vector index and builds/rebuilds one. |
+
+**Mode selection** happens per table, automatically: **exact** below `SCRYBE_VECTOR_INDEX_MIN_ROWS`, **approximate** (index + refine) at or above it, or **force-exact everywhere** with `SCRYBE_VECTOR_INDEX=false`. Index builds and rebuilds are background, idle-triggered daemon work (see [daemon.md](daemon.md)) and are always additive — no re-embedding, no rewriting existing rows. Rows added since a table's last index build are still searched (LanceDB merges them in as an exact scan alongside the index), so freshness never depends on a rebuild having run.
+
+---
+
 ## Ticket source authentication
 
 Tokens for ticket sources (GitLab, GitHub, etc.) can be stored as environment variables and referenced at fetch time using the `${VAR}` syntax. Recommended naming convention:

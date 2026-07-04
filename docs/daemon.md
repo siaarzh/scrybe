@@ -341,6 +341,12 @@ client.close(); // abort any open SSE stream
 
 ---
 
+## Vector index maintenance
+
+For sources whose vector column has grown past the row-count threshold, the daemon builds a native ANN index in the background once the project has gone idle, and later triggers a rebuild the same way once enough new or changed rows have landed since the last build. Both are additive (no re-embedding, no rewriting existing data) and non-blocking — search stays correct throughout: rows that haven't made it into an index yet are still scanned exactly alongside it, so nothing becomes unsearchable while a build is pending. Tuning knobs (enable/disable, row threshold, refine factor, rebuild threshold, idle wait): [configuration.md](configuration.md#vector-index).
+
+---
+
 ## JSONL log (Contract 18)
 
 The daemon appends every job lifecycle event to `<DATA_DIR>/daemon-log.jsonl`. Each line is a `DaemonEvent` JSON object (same shape as `/events` SSE). The file rotates at 10 MB; up to 2 archives are kept (`daemon-log.1.jsonl.gz`, `daemon-log.2.jsonl.gz`).
