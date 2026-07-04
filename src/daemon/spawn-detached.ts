@@ -5,6 +5,23 @@ import { config } from "../config.js";
 import { diagEmit } from "./events.js";
 
 /**
+ * Merges glibc allocator-arena caps into a daemon spawn env, respecting any
+ * value the user has already set. `MALLOC_ARENA_MAX=2` + a lower trim
+ * threshold stop glibc from hoarding freed memory in per-thread arenas —
+ * measured ~793 MB -> ~128 MB retained RSS after sustained vector scans
+ * (see ADR-0009). glibc reads these at process init, so they must be present
+ * in the child's env at spawn time, not set afterward. No-op on
+ * Windows/musl (different allocator) — harmless to set unconditionally.
+ */
+export function daemonSpawnEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    MALLOC_ARENA_MAX: base.MALLOC_ARENA_MAX ?? "2",
+    MALLOC_TRIM_THRESHOLD_: base.MALLOC_TRIM_THRESHOLD_ ?? "131072",
+  };
+}
+
+/**
  * Spawns `scrybe daemon start` as a detached, fully independent process.
  * The spawned process is unref'd immediately so it outlives the parent.
  *
@@ -24,7 +41,7 @@ export function spawnDaemonDetached(opts: {
 }): void {
   const node   = opts.execPath   ?? process.execPath;
   const script = opts.entryScript ?? process.argv[1]!;
-  const env    = opts.env ?? process.env;
+  const env    = daemonSpawnEnv(opts.env ?? process.env);
 
   if (process.platform === "win32") {
     const vbs = ensureWindowsLauncherVbs();

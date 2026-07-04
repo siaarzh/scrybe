@@ -9,6 +9,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.44.1] — 2026-07-04
+
+### Changed
+
+- On Linux, the background daemon now caps glibc malloc arenas, cutting retained memory substantially after sustained search activity. No effect on Windows or musl-based systems; a pre-set `MALLOC_ARENA_MAX` in your environment is always respected.
+
+---
+
 ## [0.44.0] — 2026-07-03
 
 ### Changed

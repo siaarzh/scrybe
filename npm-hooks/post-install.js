@@ -84,6 +84,9 @@ async function main() {
       env: {
         ...process.env,
         SCRYBE_DATA_DIR: dataDir,
+        // No-op on Windows (glibc-only), kept uniform with the POSIX branch below.
+        MALLOC_ARENA_MAX: process.env.MALLOC_ARENA_MAX ?? "2",
+        MALLOC_TRIM_THRESHOLD_: process.env.MALLOC_TRIM_THRESHOLD_ ?? "131072",
       },
     });
     child.unref();
@@ -92,6 +95,11 @@ async function main() {
 
   // POSIX: node spawned with stdio=ignore + detached has no controlling
   // terminal anyway, no flash to worry about.
+  //
+  // MALLOC_ARENA_MAX / MALLOC_TRIM_THRESHOLD_ cap glibc's per-thread arena
+  // hoarding (mirrors daemonSpawnEnv in src/daemon/spawn-detached.ts; inlined
+  // here because this file must stay zero-deps). No-op on Windows/musl.
+  // glibc reads these at process init, so they must be set before spawn.
   const child = spawn(process.execPath, [distEntry, "daemon", "start"], {
     detached: true,
     stdio: "ignore",
@@ -99,6 +107,8 @@ async function main() {
     env: {
       ...process.env,
       SCRYBE_DATA_DIR: dataDir,
+      MALLOC_ARENA_MAX: process.env.MALLOC_ARENA_MAX ?? "2",
+      MALLOC_TRIM_THRESHOLD_: process.env.MALLOC_TRIM_THRESHOLD_ ?? "131072",
     },
   });
   child.unref();

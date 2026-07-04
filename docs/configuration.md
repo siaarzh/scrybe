@@ -165,6 +165,11 @@ Literal tokens also work but trigger a one-time daemon-start warning — using e
 | `SCRYBE_DEBUG_INDEXER` | unset | Set to `1` to emit per-batch embedding and write events (`indexer.embed.batch`, `indexer.write.completed`) to `daemon-log.jsonl`. Use when diagnosing chunk dedup or silent re-embed issues. Scan and job-summary events are always logged regardless of this flag. |
 | `SCRYBE_MCP_COLD_START_WAIT_MS` | `15000` | How long the MCP shim waits for the daemon to become reachable at startup before falling back to the 1-tool placeholder. Set to `0` to disable the wait. Useful when MCP clients launch the shim before the daemon is up (e.g. cold-boot, slow Windows binding loads). |
 
+On Linux (glibc), the daemon caps `MALLOC_ARENA_MAX=2` and `MALLOC_TRIM_THRESHOLD_=131072` in its own
+spawn environment unless you've already set either one — this cuts idle/retained daemon RSS substantially
+after sustained vector scans, at no cost to indexing correctness. No-op on Windows/musl. Set
+`MALLOC_ARENA_MAX` yourself before starting the daemon if you want a different value.
+
 ---
 
 ## Known providers
