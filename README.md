@@ -1,189 +1,48 @@
-# scrybe
+<p align="center">
+  <img src="assets/banner-1536x512.png" alt="scrybe — code memory for AI agents" width="100%">
+</p>
 
-[![npm version](https://img.shields.io/npm/v/scrybe-cli)](https://www.npmjs.com/package/scrybe-cli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Known Vulnerabilities](https://snyk.io/test/github/siaarzh/scrybe/badge.svg)](https://snyk.io/test/github/siaarzh/scrybe)
+<p align="center">
+  <a href="https://www.npmjs.com/package/scrybe-cli"><img src="https://img.shields.io/npm/v/scrybe-cli" alt="npm version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://snyk.io/test/github/siaarzh/scrybe"><img src="https://snyk.io/test/github/siaarzh/scrybe/badge.svg" alt="Known Vulnerabilities"></a>
+</p>
 
-> ## Upgrading from v0.33.x to v0.34.0
->
-> v0.34.0 upgrades lancedb (vector store). The running daemon must be restarted
-> to pick up the new binary. **Required steps:**
->
-> 1. `scrybe daemon stop`
-> 2. Close all Claude Code / IDE sessions (they hold the daemon's lancedb binary).
-> 3. `npm install -g scrybe-cli@latest`  *(or wait for the next cold MCP probe if using `npx -y`)*
-> 4. `scrybe daemon start`
->
-> Existing data is preserved — lancedb 0.27 reads 0.14-written tables transparently.
-> Skip these steps and you'll likely see `EPERM` on Windows or a confused daemon on Linux.
+**Self-hosted code memory with semantic search — no API key required, works fully offline.**
 
-**No API key required. Works fully offline.**
-
-Self-hosted code memory with semantic search. Index your repos and knowledge sources into a local vector database and search them by natural language — from the CLI or directly inside Claude Code via MCP.
-
-A local WASM/ONNX embedder (`Xenova/multilingual-e5-small`, ~120 MB download on first run) is the default provider. To use Voyage AI, OpenAI, or a custom endpoint instead, run `scrybe init` and choose "Use an external provider".
+Index your repos and knowledge sources into a local vector database and search them by natural language —
+from the CLI or directly inside Claude Code via MCP. A local WASM/ONNX embedder
+(`Xenova/multilingual-e5-small`, ~120 MB on first run) is the default; run `scrybe init` to use Voyage AI,
+OpenAI, or a custom endpoint instead. No Docker — LanceDB runs in-process.
 
 ## Why scrybe?
 
 Ask your agent a natural-language question. scrybe returns the right chunks; Grep can't.
 
-**Example** — real session in this repo:
+> **"How does incremental reindex decide which files changed?"**
+>
+> scrybe returns `src/indexer.ts:100-159` at score 0.81 — the exact function that computes `toRemove` and
+> `toReindex` from the cursor + `oldHashes` diff. `grep "files changed"` returns 0 hits — the phrase isn't
+> in the code, only the *concept* is. Semantic search bridges that gap.
 
-> "How does incremental reindex decide which files changed?"
-
-scrybe returns `src/indexer.ts:100-159` at score 0.81 — the exact function body that computes `toRemove` and `toReindex` from the cursor + `oldHashes` diff.
-
-For contrast: `grep "incremental"` returns 34 hits across type declarations, CLI option strings, and tests. `grep "files changed"` returns 0 — the phrase doesn't appear in the code; only the *concept* does. Semantic search bridges that gap.
-
-## How it works
-
-```
-Claude Code (any project)
-    ↕ MCP stdio
-scrybe mcp-server
-    ↕
-LanceDB (embedded, in-process)
-    ├── code_{hash}     ← per-source code tables (search_code)
-    └── knowledge_{hash} ← per-source knowledge tables (search_knowledge)
-```
-
-No Docker. LanceDB runs in-process. All data lives in the OS user data directory:
-
-- **Windows:** `%LOCALAPPDATA%\scrybe\scrybe\`
-- **Linux:** `~/.local/share/scrybe/`
-- **Mac:** `~/Library/Application Support/scrybe/`
-
-> **Platform support:** Windows, Linux, and macOS are all tested in CI on every commit (matrix: `ubuntu-latest`, `windows-latest`, `macos-latest`). All three platforms are fully supported.
-
-## Code chunking
-
-Code files are chunked using Tree-sitter AST parsing, which aligns chunk boundaries with actual function, class, and method definitions. This significantly improves retrieval precision compared to arbitrary sliding-window splits.
-
-**Supported languages (AST chunking):** TypeScript, TSX, JavaScript, JSX, C#, Vue, Python, Go, Ruby, Rust, Java
-
-**Fallback:** unsupported languages and parse failures fall back to sliding-window chunking — no regression on existing indexed repos.
-
-Each code chunk includes a `symbol_name` field (the enclosing function or class name) surfaced in search results.
-
-## Knowledge sources
-
-Scrybe can index non-code sources (GitLab issues, and future: webpages, Telegram) into a separate `knowledge_chunks` table and expose them via `search_knowledge`.
-
-### Separate text embedding profile
-
-Knowledge sources can use a separate embedding model — configure via `SCRYBE_KNOWLEDGE_EMBEDDING_*` vars. See [docs/configuration.md](docs/configuration.md).
-
-### GitLab issues
-
-Add a GitLab issues source to any project (tokens referenced via env var are recommended):
-
-```bash
-scrybe source add -P myrepo -S gitlab-issues \
-  --type ticket \
-  --provider gitlab \
-  --url https://gitlab.example.com \
-  --project 42 \
-  --token '${SCRYBE_GITLAB_TOKEN}'
-
-scrybe index -P myrepo -S gitlab-issues --full
-```
-
-Indexing is cursor-based and incremental — only issues updated since the last run are fetched. Rate-limit safe (50 ms between issues).
-
-To rotate a token:
-
-```bash
-scrybe source update -P myrepo -S gitlab-issues \
-  --token '${SCRYBE_GITLAB_TOKEN_NEW}'
-```
-
-### GitHub issues
-
-Add a GitHub issues source to any project:
-
-```bash
-scrybe source add -P myrepo -S github-issues \
-  --type ticket \
-  --provider github \
-  --project owner/repo \
-  --token '${SCRYBE_GITHUB_TOKEN}'
-
-scrybe index -P myrepo -S github-issues --full
-```
-
-**Token setup:** Create a fine-grained personal access token at [github.com/settings/tokens?type=beta](https://github.com/settings/tokens?type=beta) with **Issues: Read-only** + **Metadata: Read-only** permissions. Classic tokens with `repo` or `public_repo` scope also work. Store the token in an env var (`SCRYBE_GITHUB_TOKEN` recommended) and reference it as `${SCRYBE_GITHUB_TOKEN}` when registering the source.
-
-Issues and comments are indexed incrementally — only updated items are fetched on subsequent runs. Pull requests in the issue feed are filtered out automatically.
-
-## Requirements
-
-- Node.js 22.13+
-
-## Setup
-
-### Quick start (recommended)
+## Quick start
 
 ```bash
 npx scrybe-cli@latest init
 ```
 
-The wizard handles everything: picks an embedding provider, validates your API key, discovers repos, generates `.scrybeignore` files, and auto-registers the MCP server in `~/.claude.json` and `~/.cursor/mcp.json`.
+The wizard picks an embedding provider, validates any API key, discovers repos, generates `.scrybeignore`
+files, and auto-registers the MCP server in `~/.claude.json` / `~/.cursor/mcp.json`.
 
-### Manual setup
+**Requirements:** Node.js 22.13+. Windows, Linux, and macOS are all tested in CI on every commit.
 
-> **Linux users:** if your Node.js came from `apt`/`dnf`/`snap`, the global npm
-> prefix is usually root-owned (`/usr/lib/node_modules`), so `npm install -g`
-> fails with `EACCES`. Fix it first by pointing npm at a user-writable location:
->
-> ```bash
-> mkdir -p ~/.npm-global
-> npm config set prefix ~/.npm-global
-> echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
-> source ~/.bashrc
-> ```
->
-> Then proceed with the install below. `scrybe doctor` will warn you if the
-> prefix is still not writable after installation.
+## Claude Code / MCP integration
+
+Recommended (global install — fastest cold boot):
 
 ```bash
-# 1. Install globally
 npm install -g scrybe-cli
-
-# 2. Register a project
-scrybe project add --id myrepo --desc "My project"
-scrybe source add -P myrepo -S primary \
-  --type code --root /path/to/repo --languages ts,vue
-
-# 3. Configure credentials (one-time)
-#    Create/edit DATA_DIR/.env (printed by `scrybe doctor`)
-SCRYBE_CODE_EMBEDDING_BASE_URL=https://api.voyageai.com/v1
-SCRYBE_CODE_EMBEDDING_API_KEY=your-key-here
-
-# 4. Index
-scrybe index -P myrepo -I
-
-# 5. Register MCP (add to ~/.claude.json manually or use `scrybe init`)
-```
-
-### Diagnose issues
-
-```bash
-scrybe doctor          # check config, auth, indexes, MCP
-scrybe doctor --json   # machine-readable output
-```
-
-## MCP server (Claude Code integration)
-
-**Recommended setup** (global install — fastest cold boot, no per-session install delay):
-
-```bash
-# 1. Install globally
-npm install -g scrybe-cli
-
-# 2. Register daemon autostart (starts at login, no admin required)
-scrybe daemon install
-
-# 3. Add to your MCP config (e.g. ~/.claude.json, ~/.cursor/mcp.json)
+scrybe daemon install     # optional: keep the daemon running at login (no admin needed)
 ```
 
 ```json
@@ -194,228 +53,119 @@ scrybe daemon install
 }
 ```
 
-Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`). Run `scrybe init` to configure everything interactively.
+Prefer no global install? Use `"command": "npx", "args": ["-y", "scrybe-cli@latest", "mcp"]` (first run
+takes ~10s to install). Credentials go in `<DATA_DIR>/.env` (shown by `scrybe doctor`).
 
-**Alternative (npx — no global install required):** if you prefer not to install globally, you can use:
-
-```json
-"scrybe": {
-  "type": "stdio",
-  "command": "npx",
-  "args": ["-y", "scrybe-cli@latest", "mcp"]
-}
-```
-
-Note: the first invocation via `npx` takes ~10 seconds to install. Claude Code's MCP probe may time out during this first install, leaving the cache in an incomplete state. If this happens, run `npx -y scrybe-cli@latest --version` once in a terminal (without a parent timeout), then reconnect.
-
-> **If Claude Code shows an `scrybe (install incomplete)` MCP server** with a `scrybe_install_incomplete` tool, run `scrybe doctor --repair` (or follow the command in the tool description) to repair the install automatically.
-
-### Available tools
+### MCP tools
 
 | Tool | Description |
 | --- | --- |
-| `list_projects` | List all registered projects and their sources |
-| `add_project` | Register a new project container |
-| `update_project` | Update a project's description |
-| `remove_project` | Unregister a project and drop all its source tables |
-| `add_source` | Add an indexable source to a project (code repo, GitLab issues, etc.) |
-| `update_source` | Update an existing source's config (token rotation, root path, languages) |
-| `remove_source` | Remove a source and drop its vector table |
 | `search_code` | Semantic search over indexed code |
-| `search_knowledge` | Semantic search over indexed knowledge sources (issues, docs) |
-| `lookup_symbol` | Exact-symbol lookup by name — deterministic, no embedding cost, no `score` field |
-| `reindex_all` | Incrementally reindex all registered projects in the background |
-| `reindex_project` | Trigger background reindex of all sources in a project |
-| `reindex_source` | Trigger background reindex of a single source |
-| `reindex_status` | Poll a background reindex job |
-| `cancel_reindex` | Cancel a running reindex job |
-| `list_jobs` | List background reindex jobs and their status |
-| `queue_status` | Check what is currently running or queued in the reindex queue |
-| `gc` | Run garbage collection: remove orphan chunks and compact LanceDB tables |
-| `list_branches` | List branches indexed for a project's sources |
-| `list_pinned_branches` | List branches pinned for background daemon indexing |
-| `pin_branches` | Add or replace pinned branches on a code source |
-| `unpin_branches` | Remove branches from the pinned list |
-| `set_private_ignore` | Set or clear private ignore rules for a code source |
-| `get_private_ignore` | Get the current private ignore rules for a source |
-| `list_private_ignores` | List all private ignore rules across projects |
+| `search_knowledge` | Semantic search over indexed knowledge (issues, docs) |
+| `lookup_symbol` | Exact-symbol lookup by name — deterministic, no embedding cost |
+| `list_projects` · `add_project` · `update_project` · `remove_project` | Manage project containers |
+| `add_source` · `update_source` · `remove_source` | Manage indexable sources (code repo, issues) |
+| `reindex_all` · `reindex_project` · `reindex_source` · `reindex_status` · `cancel_reindex` | Background reindexing |
+| `list_jobs` · `queue_status` · `gc` | Job & maintenance ops |
+| `list_branches` · `list_pinned_branches` · `pin_branches` · `unpin_branches` | Branch indexing |
+| `set_private_ignore` · `get_private_ignore` · `list_private_ignores` | Per-source ignore rules |
 
-See [docs/mcp-reference.md](docs/mcp-reference.md) for full parameter documentation.
+Full parameter docs: [docs/mcp-reference.md](docs/mcp-reference.md).
+
+## How it works
+
+```
+Claude Code (any project)
+    ↕ MCP stdio
+scrybe daemon  ──►  LanceDB (embedded, in-process)
+                     ├── code_{hash}       ← search_code
+                     └── knowledge_{hash}  ← search_knowledge
+```
+
+- **AST-aware chunking** — Tree-sitter aligns chunk boundaries to real functions/classes/methods
+  (TypeScript, TSX, JS, JSX, C#, Vue, Python, Go, Ruby, Rust, Java). Each chunk carries its enclosing
+  `symbol_name`. Unsupported languages fall back to sliding-window chunking.
+- **Hybrid search** — BM25 full-text runs alongside vector search, fused with Reciprocal Rank Fusion
+  (on by default). On large indexes the vector side is served by a native quantized ANN index, built and
+  maintained automatically in the background — fast, with recall on par with an exact scan.
+- **Optional reranking** — post-retrieval re-scoring via a reranking provider (e.g. Voyage `rerank-2.5`);
+  set `SCRYBE_RERANK=true`.
+
+Data lives in the OS user data dir (`~/.local/share/scrybe/`, `%LOCALAPPDATA%\scrybe\` on Windows,
+`~/Library/Application Support/scrybe/` on macOS). Tuning knobs: [docs/configuration.md](docs/configuration.md).
+
+## Knowledge sources
+
+Index non-code sources (GitLab / GitHub issues) into `search_knowledge`, incrementally and cursor-based:
+
+```bash
+# GitLab
+scrybe source add -P myrepo -S gitlab-issues --type ticket --provider gitlab \
+  --url https://gitlab.example.com --project 42 --token '${SCRYBE_GITLAB_TOKEN}'
+
+# GitHub (fine-grained PAT: Issues + Metadata read-only)
+scrybe source add -P myrepo -S github-issues --type ticket --provider github \
+  --project owner/repo --token '${SCRYBE_GITHUB_TOKEN}'
+
+scrybe index -P myrepo -S github-issues --full
+```
+
+Tokens are referenced via `${VAR}` and resolved at fetch time. Knowledge sources can use a separate
+embedding model (`SCRYBE_KNOWLEDGE_EMBEDDING_*`). Details: [docs/configuration.md](docs/configuration.md).
 
 ## Embedding providers
 
-Scrybe uses an OpenAI-compatible embeddings API. The following env vars control which provider is used:
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SCRYBE_CODE_EMBEDDING_API_KEY` | — | API key for code embedding. |
-| `SCRYBE_CODE_EMBEDDING_BASE_URL` | local | Base URL for the embeddings endpoint. Defaults to local in-process embedder. |
-| `SCRYBE_CODE_EMBEDDING_MODEL` | auto | Model name. Auto-set for known providers. |
-| `SCRYBE_CODE_EMBEDDING_DIMENSIONS` | auto | Vector dimensions. Auto-set for known providers. |
-| `SCRYBE_EMBED_BATCH_SIZE` | `100` | Chunks per embedding request. Reduce if hitting rate limits. |
-| `SCRYBE_EMBED_BATCH_DELAY_MS` | `0` | Delay in ms between batches. |
-
-**Known providers** (model and dimensions are set automatically when `SCRYBE_CODE_EMBEDDING_BASE_URL` matches):
-OpenAI (`api.openai.com`), Voyage AI (`api.voyageai.com`), Mistral (`api.mistral.ai`).
-
-**Unknown providers:** if `SCRYBE_CODE_EMBEDDING_BASE_URL` points to an unlisted provider and `SCRYBE_CODE_EMBEDDING_MODEL` is not set, scrybe returns an error pointing you to `{base_url}/models` to discover available models.
-
-Set `SCRYBE_CODE_EMBEDDING_API_KEY` explicitly. The old `OPENAI_API_KEY` fallback was removed in v0.29.0.
-
-**Switching providers:** changing the model or dimensions makes all existing indexed data incompatible. Scrybe detects this automatically — `search_code` returns `error_type: "table_corrupt"` with repair instructions. Run `scrybe index -P <id> -S <id> --full` for each affected source, or `scrybe doctor --repair` to fix all corrupt sources in one pass.
-
-### Example: Voyage AI (voyage-code-3)
-
-Code-optimized, free for the first 200M tokens. Requires adding a payment method to unlock standard rate limits (3 RPM without one).
+Scrybe uses an OpenAI-compatible embeddings API. The default is the local offline embedder; point
+`SCRYBE_CODE_EMBEDDING_BASE_URL` at a provider to switch. Model/dimensions are auto-detected for known
+providers (OpenAI, Voyage AI, Mistral).
 
 ```env
+# Example — Voyage AI (voyage-code-3, code-optimized, free first 200M tokens)
 SCRYBE_CODE_EMBEDDING_API_KEY=pa-...
 SCRYBE_CODE_EMBEDDING_BASE_URL=https://api.voyageai.com/v1
 ```
 
-Model and dimensions are set automatically. To override:
-
-```env
-SCRYBE_CODE_EMBEDDING_MODEL=voyage-code-3
-SCRYBE_CODE_EMBEDDING_DIMENSIONS=1024
-```
-
-## Hybrid search
-
-Scrybe runs BM25 full-text search alongside vector search and merges results with Reciprocal Rank Fusion (RRF) — on by default. Configurable via `SCRYBE_HYBRID` and `SCRYBE_RRF_K`. See [docs/configuration.md](docs/configuration.md).
-
-## Reranking
-
-Optional post-retrieval re-scoring. Requires a reranking-capable provider (e.g. Voyage AI `rerank-2.5`).
-
-When using Voyage AI, just set `SCRYBE_RERANK=true` — endpoint and model are auto-detected from `SCRYBE_CODE_EMBEDDING_BASE_URL`.
-
-See [docs/configuration.md](docs/configuration.md) for all options.
+Changing model/dimensions makes existing indexes incompatible — scrybe detects this and returns repair
+instructions (`scrybe doctor --repair`, or `scrybe index -P <id> -S <id> --full`). All embedding vars:
+[docs/configuration.md](docs/configuration.md).
 
 ## CLI
 
-Projects are containers; sources are the actual indexable units (a code repo, GitLab issues, etc.).
+Projects are containers; sources are the indexable units (a code repo, an issues feed).
 
 ```bash
-# Create a project
-scrybe project add --id myrepo --desc "My frontend"
-
-# Add a code source
+scrybe project add --id myrepo --desc "My project"
 scrybe source add -P myrepo -S primary --type code --root /path/to/repo --languages ts,vue
-
-# Add a GitLab issues source
-scrybe source add -P myrepo -S gitlab-issues \
-  --type ticket \
-  --gitlab-url https://gitlab.example.com \
-  --gitlab-project-id 42 \
-  --gitlab-token glpat-...
-
-# Index all sources in a project (full rebuild)
-scrybe index -P myrepo --full
-
-# Index a specific source incrementally
-scrybe index -P myrepo -S code -I
-
-# Search code / knowledge
-scrybe search code -P myrepo "authentication login flow"
-scrybe search knowledge -P myrepo "password reset broken"
-
-# List projects and their sources
-scrybe project list
-
-# Show status of all projects
-scrybe status
-
-# Remove a source or a whole project
-scrybe source remove -P myrepo -S gitlab-issues
-scrybe project remove myrepo
-
-# Background job monitoring
-scrybe jobs
-
-# Manual garbage collection
-scrybe gc
-
-# Check index health and repair corrupt sources
-scrybe doctor
-scrybe doctor --repair
+scrybe index -P myrepo -I                                  # incremental index
+scrybe search code -P myrepo "authentication login flow"   # search
+scrybe status                                              # project/index status
+scrybe doctor [--repair]                                   # health check + repair
 ```
 
-Per-source private ignores stored in DATA_DIR via `scrybe ignore` (or `set_private_ignore` MCP tool) — never committed.
+Full command reference: [docs/cli-reference.md](docs/cli-reference.md).
 
-See [docs/cli-reference.md](docs/cli-reference.md) for the full command reference.
+## Background service
 
-## Uninstalling
-
-To remove scrybe completely:
+The daemon **starts on demand** when Claude Code calls any scrybe MCP tool and shuts down when idle — no
+setup needed for basic use. To keep it running between sessions (auto-indexing new commits in the
+background):
 
 ```bash
-# Remove all indexes, MCP entries, git hook blocks, and DATA_DIR
-scrybe uninstall
-
-# Preview what will be removed without making changes
-scrybe uninstall --dry-run
-
-# Skip the confirmation prompt (for scripts)
-scrybe uninstall --yes
+scrybe daemon install                     # per-user autostart (no admin)
+scrybe hook install -P myrepo             # opt-in: git commit/checkout/merge → instant reindex
+scrybe branch pin -P myrepo main dev      # index branches beyond current HEAD
 ```
 
-`scrybe uninstall` reverses everything scrybe writes outside the binary itself: stops the daemon, removes its entry from every detected AI client config (Claude Code, Cursor, Codex, Cline, Roo Code), strips scrybe blocks from all registered repo git hooks, and deletes the data directory. A timestamped backup is created for every user file before modification.
+Architecture, autostart, and pinned branches: [docs/daemon.md](docs/daemon.md).
 
-After uninstalling:
+## Upgrading & uninstalling
 
-```bash
-npm uninstall -g scrybe-cli   # removes the CLI binary
-```
-
-## Upgrading
-
-**Global install users** (`npm install -g scrybe-cli`): before upgrading, exit Claude Code, stop the daemon, then install:
-
-```sh
-scrybe daemon stop
-npm install -g scrybe-cli
-```
-
-**npx users**: if you configured Claude Code with `npx -y scrybe-cli@latest mcp`, upgrades are automatic — npx fetches the latest version on each new session.
-
-> **Upgrading from any version before 0.31.0:** v0.31.0 changes the chunk-ID hash contract and renames public chunk fields (`source_path`/`source_url`/`source_type`/`file_path` → `item_*`). Existing indexes need a one-time migration. After upgrading, run:
->
-> ```sh
-> scrybe migrate --all
-> ```
->
-> The migration rehashes chunk IDs and renames LanceDB columns in place — vectors are preserved, no re-embedding required (~97% of chunks). Until you migrate, `scrybe status` shows `Migrate (chunk-id)` per affected source and search returns `error_type: "needs_migration"` with the exact command to run. See the [v0.31.0 CHANGELOG entry](CHANGELOG.md#0310--2026-05-06) for the full breaking-change list (CLI flag `--source-types` → `--item-types`, MCP arg `source_types` → `item_types`, job-result field `chunks_indexed` → `chunks_prepared` + `chunks_persisted`).
-
-> **After running `scrybe migrate`: restart your MCP server / Claude Code session.** The migration drops and recreates each affected LanceDB table; long-running MCP servers cache table handles in memory and can hit `Not found: ...lance` errors on the next search until restarted. CLI search is unaffected (each invocation is a fresh process).
-
-## Running as a background service
-
-The daemon **starts automatically** when Claude Code calls any scrybe MCP tool (on-demand mode) and shuts down when there are no active clients. No manual setup required for basic use.
-
-To keep the daemon running between sessions — so it can auto-index new commits in the background without Claude Code open — install it as a per-user service:
-
-```bash
-# Install as a per-user autostart (Windows / macOS / Linux — no admin needed)
-scrybe daemon install
-
-# Watch live status
-scrybe status --watch
-
-# Opt-in git hooks: git commit/checkout/merge → instant reindex
-scrybe hook install -P myrepo
-
-# Pin branches for background indexing beyond current HEAD
-scrybe branch pin -P myrepo main dev staging
-```
-
-Daemon auto-cleans orphan chunks on idle — `scrybe gc` for manual cleanup.
-
-See [docs/daemon.md](docs/daemon.md) for the full architecture, autostart details, and troubleshooting.
+- **Global install:** `scrybe daemon stop && npm install -g scrybe-cli` (exit Claude Code first).
+- **npx users:** upgrades are automatic on each new session.
+- **Uninstall:** `scrybe uninstall` reverses everything scrybe writes outside the binary (daemon, MCP
+  entries, git-hook blocks, DATA_DIR — with timestamped backups), then `npm uninstall -g scrybe-cli`.
 
 ## Documentation
-
-Detailed reference docs live in [`docs/`](docs/):
 
 | Doc | Contents |
 | --- | --- |
@@ -424,90 +174,18 @@ Detailed reference docs live in [`docs/`](docs/):
 | [MCP reference](docs/mcp-reference.md) | All tools, parameters, return values, error types |
 | [Configuration](docs/configuration.md) | All env vars by category |
 | [Daemon](docs/daemon.md) | Background daemon, HTTP API, pinned branches, autostart |
-
-## Indexing time
-
-Wall time on Voyage `voyage-code-3` scales with total token count — network round-trip dominates, not file count. Measured baselines on the Voyage free tier:
-
-| Project | Files | Chunks | Tokens | Wall time |
-| --- | --- | --- | --- | --- |
-| Frontend (Vue/TS) | ~1.4 k | ~8 k | ~1.6 M | **~2 min** |
-| Backend (C#) | ~5.7 k | ~24 k | ~3.5 M | **~6 min** |
-
-Sustained ~10–13 K tokens/sec on Voyage. Smaller projects (<500 files) index in under a minute. Local embedder (`Xenova/multilingual-e5-small`, default if no API key) runs ~6× slower — CPU-bound WASM inference, but free.
-
-If you hit rate limits during indexing, tune `SCRYBE_EMBED_BATCH_SIZE` and `SCRYBE_EMBED_BATCH_DELAY_MS` in your `.env`.
-
-<a id="windows-av"></a>
-## Windows + AV
-
-Windows real-time AV scanning (Defender, Malwarebytes, others) can significantly slow scrybe because its I/O profile — many small `.lance` fragment writes, frequent `git status` calls over indexed repos — is worst-case for on-access scanning.
-
-`scrybe doctor` detects AV products and their state, and emits actionable warnings with remediation steps.
-
-### Windows Defender — add DATA_DIR to the exclusion list
-
-Run the following in an **elevated** PowerShell window (right-click → "Run as administrator"):
-
-```powershell
-Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\scrybe"
-```
-
-To verify the exclusion was added:
-
-```powershell
-(Get-MpPreference).ExclusionPath
-```
-
-To roll back:
-
-```powershell
-Remove-MpPreference -ExclusionPath "$env:LOCALAPPDATA\scrybe"
-```
-
-> **Note:** If you installed scrybe with a custom `SCRYBE_DATA_DIR`, substitute that path for `$env:LOCALAPPDATA\scrybe` in the commands above.
-
-### Malwarebytes — add DATA_DIR to the allow list
-
-Malwarebytes has no command-line API for allow-list management. Add the folder manually:
-
-1. Open **Malwarebytes**
-2. Go to **Settings** → **Allow List**
-3. Click **Add** → **Allow a Folder**
-4. Browse to your DATA_DIR (`%LOCALAPPDATA%\scrybe` by default) and confirm
-
-Once the allow list is configured, set the following env var to suppress the `scrybe doctor` warning:
-
-```
-SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1
-```
-
-Add this to your `.env` file in the scrybe DATA_DIR, or set it as a system/user environment variable.
-
-### Indexed repo folders — trade-off
-
-AV scanning also applies to your indexed repo directories. Excluding them from AV scanning can speed up `git status` and shell-open times, but it is a **security trade-off** — excluded paths are not scanned by real-time protection.
-
-This is your decision to make. `scrybe doctor` only surfaces an informational tip when AV warnings are present; it does not prescribe what to do. If you choose to exclude repo paths from Defender:
-
-```powershell
-# Replace <path-to-repo> with your actual repo path
-Add-MpPreference -ExclusionPath "C:\path\to\your\repo"
-```
-
-### Known limitations
-
-- **Malwarebytes allow-list**: there is no public API to read the MBAM allow list, so `scrybe doctor` cannot verify that the exclusion is in place. Use `SCRYBE_DOCTOR_AV_MBAM_VERIFIED=1` to acknowledge this manually.
-- **Other AV products** (Norton, Bitdefender, Kaspersky, etc.): not detected. Consult your AV product's documentation for exclusion management.
-- **Corporate EDR / managed endpoints**: detection and exclusion may require IT admin involvement; scrybe cannot automate this.
-
----
+| [Troubleshooting](docs/troubleshooting.md) | Windows AV exclusions, Linux npm prefix, MCP repair |
 
 ## Known limitations
 
-- **HTML / CSS / SCSS** use sliding-window chunking. Tree-sitter grammars exist for them but these languages have no function/class declarations, so chunk boundaries are arbitrary rather than semantic. Particularly noticeable for large single-page static sites.
-- **Kotlin, PHP, Swift** fall back to sliding-window. Tree-sitter grammar packages exist but aren't wired up yet (easy to add when needed).
+- **HTML / CSS / SCSS** and **Kotlin / PHP / Swift** fall back to sliding-window chunking — Tree-sitter
+  grammars exist but these have no function/class boundaries wired up, so chunks are positional rather
+  than semantic.
 
 ## Contributing
 
-See [docs/contributing.md](docs/contributing.md) for how to run tests locally and add new tests.
+See [docs/contributing.md](docs/contributing.md) for running tests locally and adding new ones.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
