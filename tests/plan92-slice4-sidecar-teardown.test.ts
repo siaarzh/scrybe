@@ -8,7 +8,7 @@ import { spawn, execSync } from "child_process";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { describe, it, expect } from "vitest";
-import { existsSync, writeFileSync, mkdtempSync, rmSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { platform } from "os";
 
@@ -145,8 +145,19 @@ setInterval(() => {}, 1000);
     // run once per test suite. Instead, we verify that the setup.ts exports
     // a teardown function and that it doesn't throw.
 
-    const { teardown } = await import("./setup.js");
+    const { teardown, SIDECAR_STATE_PATH } = await import("./setup.js");
     expect(typeof teardown).toBe("function");
+
+    // teardown() unlinks the shared sidecar state file that EVERY other test
+    // file reads at collection time (tests/isolate.ts, setupFiles). This test
+    // runs in a worker where the imported module's `sidecarProcess` is null, so
+    // teardown() won't actually kill the real sidecar (owned by the main-process
+    // globalSetup) — but it WILL delete the state file, breaking collection of
+    // every file imported after us (fileParallelism:false → sequential). Back it
+    // up and restore it so downstream files still find the sidecar handle.
+    const backup = existsSync(SIDECAR_STATE_PATH)
+      ? readFileSync(SIDECAR_STATE_PATH, "utf8")
+      : null;
 
     // Call it (sidecar already started by global setup).
     // Since it's idempotent (sidecarProcess will be null after first call),
@@ -157,6 +168,8 @@ setInterval(() => {}, 1000);
       console.log("Teardown called twice without error ✓");
     } catch (err) {
       throw new Error(`Teardown threw: ${err}`);
+    } finally {
+      if (backup !== null) writeFileSync(SIDECAR_STATE_PATH, backup);
     }
   });
 
