@@ -9,9 +9,29 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 // Read sidecar connection info written by globalSetup (tests/setup.ts).
-// This file exists by the time setupFiles run.
+//
+// INVARIANT: this file is process-GLOBAL shared state. globalSetup writes it
+// once before any worker starts, and EVERY test file reads it here at
+// collection time (module import). It must stay on disk for the whole run.
+// A test that deletes it — most easily by importing and calling setup.ts's
+// teardown(), which unlinks this path — pulls it out from under every file
+// imported afterward. Because vitest.config.ts sets fileParallelism:false,
+// those files collect sequentially and fail with a bare ENOENT that points
+// here, not at the culprit. If you touch sidecar teardown from a test, back
+// this file up and restore it. See tests/setup.ts for the writer/teardown pair.
 const SIDECAR_STATE_PATH = join(tmpdir(), "scrybe-test-sidecar.json");
-const sidecar = JSON.parse(readFileSync(SIDECAR_STATE_PATH, "utf8")) as {
+let sidecarRaw: string;
+try {
+  sidecarRaw = readFileSync(SIDECAR_STATE_PATH, "utf8");
+} catch (err) {
+  throw new Error(
+    `Sidecar state file missing at ${SIDECAR_STATE_PATH}. It is written once by ` +
+      `globalSetup (tests/setup.ts) and read by every test file at collection time. ` +
+      `A test almost certainly deleted it mid-run (e.g. by calling teardown() or ` +
+      `unlinking the shared path). Restore it around any such call. Cause: ${String(err)}`
+  );
+}
+const sidecar = JSON.parse(sidecarRaw) as {
   baseUrl: string;
   dimensions: number;
   model: string;
