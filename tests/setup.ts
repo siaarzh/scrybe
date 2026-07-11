@@ -18,6 +18,13 @@ import { platform } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Process-GLOBAL shared state: written once here, read by every test file at
+// collection time (tests/isolate.ts). teardown() below unlinks it. NEVER call
+// teardown() — or unlink this path — from within a test: it deletes the file
+// out from under every file that collects afterward (fileParallelism:false),
+// failing the suite with an ENOENT that points at isolate.ts, not the culprit.
+// A test that must exercise teardown() has to back this file up and restore it
+// (see tests/plan92-slice4-sidecar-teardown.test.ts).
 export const SIDECAR_STATE_PATH = join(tmpdir(), "scrybe-test-sidecar.json");
 
 let sidecarProcess: ChildProcess | null = null;
@@ -128,6 +135,8 @@ export async function setup(): Promise<void> {
 
 export async function teardown(): Promise<void> {
   teardownSidecar();
+  // Deletes process-global shared state — only safe from the real globalSetup
+  // teardown at end-of-run. See the SIDECAR_STATE_PATH invariant above.
   if (existsSync(SIDECAR_STATE_PATH)) {
     unlinkSync(SIDECAR_STATE_PATH);
   }
