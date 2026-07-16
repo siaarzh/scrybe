@@ -67,9 +67,14 @@ describe("Plan 99 Slice 4 — drop_ephemeral", () => {
     const masterStatus = await waitForJobDone(masterJobResult as string);
     expect(masterStatus?.status).toBe("done");
 
-    const { listBranches, getChunkIdsForBranch } = await import("../src/branch-state.js");
-    expect(listBranches(project.projectId, project.sourceId)).toContain("master");
-    const masterChunkIds = getChunkIdsForBranch(project.projectId, project.sourceId, "master");
+    const { listBranches, getChunkIdsForBranch, resolveBranchForPath } = await import("../src/branch-state.js");
+    // The fixture's HEAD is whatever `git init` defaulted to — "master" on older
+    // git / a machine with init.defaultBranch=master, "main" on newer git (e.g.
+    // Windows CI). Resolve it rather than hardcoding, or the assertions below are
+    // platform-dependent.
+    const realBranch = resolveBranchForPath(local!.path);
+    expect(listBranches(project.projectId, project.sourceId)).toContain(realBranch);
+    const masterChunkIds = getChunkIdsForBranch(project.projectId, project.sourceId, realBranch);
     expect(masterChunkIds.size).toBeGreaterThan(0);
 
     // ── 4. index_ephemeral onto feat/example ───────────────────────────────
@@ -93,10 +98,10 @@ describe("Plan 99 Slice 4 — drop_ephemeral", () => {
 
     // ── 5. Refuses to drop a non-'_ephemeral/' label (safety) ──────────────
     await expect(
-      dropEphemeralTool.handler({ project_id: project.projectId, source_id: project.sourceId, label: "master" })
+      dropEphemeralTool.handler({ project_id: project.projectId, source_id: project.sourceId, label: realBranch })
     ).rejects.toThrow(/refuses/);
-    // master untouched by the refused call
-    expect(listBranches(project.projectId, project.sourceId)).toContain("master");
+    // the real branch is untouched by the refused call
+    expect(listBranches(project.projectId, project.sourceId)).toContain(realBranch);
 
     // ── 6. Drop the real ephemeral label ────────────────────────────────────
     const dropResult = await dropEphemeralTool.handler({

@@ -66,10 +66,13 @@ describe("Plan 99 Slice 5 — daemon startup ephemeral sweep", () => {
     const masterStatus = await waitForJobDone(masterJobResult as string);
     expect(masterStatus?.status).toBe("done");
 
-    const { listBranches, getChunkIdsForBranch, listEphemeralBranches, getDB } =
+    const { listBranches, getChunkIdsForBranch, listEphemeralBranches, getDB, resolveBranchForPath } =
       await import("../src/branch-state.js");
-    expect(listBranches(project.projectId, project.sourceId)).toContain("master");
-    const masterChunkIds = getChunkIdsForBranch(project.projectId, project.sourceId, "master");
+    // Fixture HEAD is "master" or "main" depending on git init.defaultBranch
+    // (older git / configured vs newer git like Windows CI) — resolve it.
+    const realBranch = resolveBranchForPath(local!.path);
+    expect(listBranches(project.projectId, project.sourceId)).toContain(realBranch);
+    const masterChunkIds = getChunkIdsForBranch(project.projectId, project.sourceId, realBranch);
     expect(masterChunkIds.size).toBeGreaterThan(0);
 
     // ── 4. index_ephemeral onto feat/example ───────────────────────────────
@@ -103,7 +106,7 @@ describe("Plan 99 Slice 5 — daemon startup ephemeral sweep", () => {
     const enumerated = listEphemeralBranches(project.projectId, project.sourceId);
     expect(enumerated).toEqual([indexResult.label]);
     expect(enumerated).not.toContain(decoyLabel);
-    expect(enumerated).not.toContain("master");
+    expect(enumerated).not.toContain(realBranch);
 
     // ── 7. Run the startup sweep exactly as main.ts would ──────────────────
     const { sweepEphemeralBranches } = await import("../src/daemon/ephemeral-sweep.js");
@@ -120,7 +123,7 @@ describe("Plan 99 Slice 5 — daemon startup ephemeral sweep", () => {
     expect(getChunkIdsForBranch(project.projectId, project.sourceId, indexResult.label).size).toBe(0);
 
     // ── 9. Real branches + the decoy survive untouched ─────────────────────
-    expect(branchesAfter).toContain("master");
+    expect(branchesAfter).toContain(realBranch);
     expect(branchesAfter).toContain(decoyLabel);
 
     // ── 10. Unique chunks reclaimed by gc; shared chunks (still tagged to master) survive ──
