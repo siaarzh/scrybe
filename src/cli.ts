@@ -77,8 +77,9 @@ async function runIndexViaDaemon(
   mode: IndexMode,
   branch: string | undefined,
   detach: boolean,
+  contentRef?: string,
 ): Promise<void> {
-  const resp = await client.submitReindex({ projectId, sourceId, branch, mode });
+  const resp = await client.submitReindex({ projectId, sourceId, branch, mode, contentRef });
   const job = resp.jobs[0];
   if (!job) throw new Error("Daemon returned no job");
 
@@ -409,9 +410,10 @@ export async function runCli(): Promise<void> {
     .option("-f, --full", "Full reindex (clears and rebuilds from scratch)", false)
     .option("-I, --incremental", "Incremental reindex (default)", false)
     .option("--branch <name>", "Branch name to index (default: current HEAD for code sources)")
+    .option("--content-ref <ref>", "Git ref to read content from (e.g. 'origin/dev'). When set, content is read from this ref while --branch remains the stored label. Defaults to --branch.")
     .option("--detach", "Submit to daemon and return immediately (prints job_id, no progress stream)", false)
     .addHelpText("after", "\nExamples:\n  scrybe index -P myrepo\n  scrybe index -P myrepo -S primary,gitlab-issues\n  scrybe index --all\n  scrybe index -P myrepo -f -S primary\n  scrybe index -P myrepo --detach  # submit and exit (CI use)")
-    .action(async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean; branch?: string; detach: boolean }) => {
+    .action(async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean; branch?: string; contentRef?: string; detach: boolean }) => {
       if (config.embeddingConfigError) { console.error(`[scrybe] ${config.embeddingConfigError}`); process.exit(1); }
       if (opts.all) {
         if (opts.projectId) console.warn("Warning: --project-id is ignored when --all is specified");
@@ -453,6 +455,7 @@ export async function runCli(): Promise<void> {
               mode,
               opts.branch,
               opts.detach,
+              opts.contentRef,
             );
           } catch (err: unknown) {
             console.error(`[scrybe] ${err instanceof Error ? err.message : String(err)}`);
@@ -479,6 +482,7 @@ export async function runCli(): Promise<void> {
             onScanProgress(n) { process.stdout.write(`\r  [${sid}] Scanning... ${n} files`); },
             onEmbedProgress(n) { process.stdout.write(`\r  [${sid}] Embedding... ${n} chunks`); },
             ...(opts.branch && { branch: opts.branch }),
+            ...(opts.contentRef && { contentRef: opts.contentRef }),
           });
           console.log(`\n  [${sid}] Done: ${formatIndexResult(result.chunks_prepared, result.files_reindexed, result.files_removed)}`);
           totalChunks += result.chunks_prepared; totalReindexed += result.files_reindexed; totalRemoved += result.files_removed;
@@ -494,6 +498,7 @@ export async function runCli(): Promise<void> {
           onScanProgress(n) { process.stdout.write(`\r  Scanning... ${n} files`); },
           onEmbedProgress(n) { process.stdout.write(`\r  Embedding... ${n} chunks`); },
           ...(opts.branch && { branch: opts.branch }),
+          ...(opts.contentRef && { contentRef: opts.contentRef }),
         });
         const totals = results.reduce((acc, r) => ({ chunks: acc.chunks + r.chunks_prepared, reindexed: acc.reindexed + r.files_reindexed, removed: acc.removed + r.files_removed }), { chunks: 0, reindexed: 0, removed: 0 });
         console.log(`\nDone (${results.length} source(s)): ${formatIndexResult(totals.chunks, totals.reindexed, totals.removed)}`);

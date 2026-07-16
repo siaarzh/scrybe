@@ -7,6 +7,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Temporarily index an unmerged remote branch for review, without pinning it or checking it out.** New `index_ephemeral` MCP tool (and `scrybe index-ephemeral`) fetches an open branch's content into a throwaway index under an `_ephemeral/…` label, so an agent can search a branch's own new code before it merges; `drop_ephemeral` (and `scrybe drop-ephemeral`) then tears it down and reclaims its chunks. The ephemeral index never joins the pinned-branch set and is never refreshed in the background.
+- `scrybe index --content-ref <ref>`: index content read from one git ref while storing it under a different branch label.
+- The background daemon sweeps leaked `_ephemeral/…` indexes on startup, so a review that ends abnormally can't leave a throwaway index behind.
+
+### Fixed
+
+- Source-scoped garbage collection now works through the background daemon (previously only the in-process path honored a specific source).
+
 ---
 
 ## [0.45.0] — 2026-07-04

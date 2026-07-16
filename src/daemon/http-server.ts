@@ -30,7 +30,8 @@ export interface DaemonEvent {
     | "auto-gc.scheduled" | "auto-gc.completed" | "auto-gc.failed" | "auto-gc.skipped"
     | "vector-index.completed" | "vector-index.failed"
     | "project.removed"
-    | "health.corrupt" | "health.post-gc-corruption-detected";
+    | "health.corrupt" | "health.post-gc-corruption-detected"
+    | "ephemeral.swept";
   projectId?: string;
   sourceId?: string;
   branch?: string;
@@ -78,6 +79,11 @@ export interface KickRequest {
   projectId?: string;
   sourceId?: string;
   branch?: string;
+  /**
+   * Git ref used to read content (git ls-tree / rev-parse). When present, the indexer
+   * reads from this ref while `branch` is the stored label in branch_tags/branch_state.
+   */
+  contentRef?: string;
   mode?: "full" | "incremental";
 }
 
@@ -96,6 +102,8 @@ export interface KickResponse {
 export interface GcRequest {
   /** Projects to gc. Empty/missing = all registered code projects. */
   scope?: string[];
+  /** Limit gc to a single source within each project in scope (omit to gc all code sources). */
+  sourceId?: string;
   /** Compaction mode. Manual gc uses "purge"; auto-gc uses "grace". Default: "purge" */
   mode?: "grace" | "purge";
 }
@@ -455,6 +463,7 @@ async function handle(
     const jobs = scope.map((projectId) => {
       const submit = submitToQueue({
         projectId,
+        sourceId: body.sourceId,
         type: "gc",
         gcOptions: { mode },
         mode: "incremental",
