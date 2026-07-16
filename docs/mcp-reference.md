@@ -534,6 +534,43 @@ Task `status` values: `"pending"`, `"running"`, `"done"`, `"failed"`, `"cancelle
 
 ---
 
+### `index_ephemeral`
+
+Index an open MR's remote branch under a throwaway `_ephemeral/` label, so it can be searched without disturbing the project's normally indexed branches. Waits for the index to finish and returns a result (unlike the other reindex tools, it does not return a `job_id` to poll).
+
+scrybe does **not** fetch the branch itself — fetch the ref first (e.g. `git fetch origin <branch>`), then call this tool. If the ref isn't resolvable locally, it fails with the same "not found locally — fetch the ref first" error `reindex_source`/`index` surface.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `branch` | string | ✓ | Already-fetched MR branch name, or a full ref (e.g. `refs/scrybe-ephemeral/mr-42`, `origin/feature-x`) |
+| `source_id` | string | | Source identifier (default: `primary`) |
+| `label` | string | | Override the ephemeral label (still forced under the `_ephemeral/` prefix) |
+
+**Label rule:** defaults to `_ephemeral/mr-<branch>`. If `branch` is already a full ref (starts with `refs/` or `origin/`), it's used as the content source directly and the label is derived from its last path segment (e.g. `origin/feature-x` → `_ephemeral/mr-feature-x`). A caller-supplied `label` is always forced under the `_ephemeral/` prefix.
+
+Never creates a `pin_branches` entry and is invisible to the fetch-poller — call `drop_ephemeral` to remove it once the MR closes.
+
+**Returns:** `{ label, chunks_new, chunks_reused, duration_ms }` — `chunks_new` is the total chunks processed for the branch (embedded + already-existing chunks merely tagged onto it); a finer-grained `chunks_reused` split isn't tracked at this layer today, so it is currently always `0`.
+
+---
+
+### `drop_ephemeral`
+
+Remove an `_ephemeral/` label created by `index_ephemeral`: deletes its `branch_tags`/`branch_state`/hash-cache entries, then runs a source-scoped `gc` to reclaim the chunks that were unique to it. Chunks still shared with another indexed branch (unchanged files) are left alone.
+
+Refuses to drop any label that isn't under the `_ephemeral/` prefix — this verb must never remove a real branch like `dev` or `master`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `project_id` | string | ✓ | Project identifier |
+| `label` | string | ✓ | The `_ephemeral/...` label to drop (as returned by `index_ephemeral`) |
+| `source_id` | string | | Source identifier (default: `primary`) |
+
+**Returns:** `{ label, dropped, orphans_deleted, bytes_freed }` — `dropped` is `false` when the label was already gone (idempotent no-op success), in which case `orphans_deleted`/`bytes_freed` are `0`.
+
+---
+
 ### `queue_status`
 
 Check what is currently running or queued in the reindex queue. Use this before calling `reindex_project` to avoid submitting a duplicate job.

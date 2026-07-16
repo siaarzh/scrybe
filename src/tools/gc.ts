@@ -50,7 +50,7 @@ export const gcTool: Tool<
       const client = DaemonClient.fromPidfile();
       if (client) {
         try {
-          const result = await client.submitGc({ scope, mode: "purge" });
+          const result = await client.submitGc({ scope, sourceId: source_id, mode: "purge" });
           const cancelledHint = result.cancelledPending > 0
             ? ` (${result.cancelledPending} pending auto-gc job(s) preempted)`
             : "";

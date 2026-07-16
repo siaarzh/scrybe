@@ -168,6 +168,7 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
       projectId: p.id,
       sourceId: req.sourceId,
       branch: req.branch,
+      contentRef: req.contentRef,
       mode: req.mode,
     });
     return {
@@ -326,6 +327,32 @@ export async function runDaemon(): Promise<void> {
   }
   startFetchPoller(projects);
   startTicketPoller(projects);
+
+  // Startup ephemeral-branch sweep (Plan 99 Slice 5): reclaims leaked
+  // `_ephemeral/*` labels left behind by a crashed/forgotten drop_ephemeral
+  // caller. Startup-only — never on a timer, never mid-run. Runs in the
+  // background — must not block startup or crash the daemon.
+  void (async () => {
+    try {
+      const { sweepEphemeralBranches } = await import("./ephemeral-sweep.js");
+      const swept = await sweepEphemeralBranches(projects);
+      if (swept.length > 0) {
+        daemonLog(
+          `[scrybe daemon] ephemeral sweep: reclaimed ${swept.length} leaked ` +
+          `'_ephemeral/*' label(s): ${swept.map((s) => `${s.projectId}/${s.sourceId}:${s.label}`).join(", ")}`
+        );
+        pushEvent({
+          ts: new Date().toISOString(),
+          level: "info",
+          event: "ephemeral.swept",
+          detail: { count: swept.length, entries: swept },
+        });
+      }
+    } catch (err) {
+      // non-fatal — the sweep must never crash daemon startup
+      daemonLog(`[scrybe daemon] ephemeral sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  })();
 
   // Startup health probe: runs in parallel across all sources, pre-populates the
   // health cache, and emits a health.corrupt event for any flagged sources.

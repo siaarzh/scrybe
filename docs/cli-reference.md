@@ -564,6 +564,45 @@ scrybe index --project-id myrepo --detach
 
 ---
 
+### `index-ephemeral`
+
+Index an open MR's remote branch under a throwaway `_ephemeral/` label, so it can be searched without disturbing the project's normally indexed branches. Waits for the index to finish before returning.
+
+scrybe does **not** fetch the branch itself — fetch the ref first (e.g. `git fetch origin <branch>`), then run this command. Errors clearly if `<branch>` isn't a resolvable git ref locally.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project identifier |
+| `--branch <name>` | ✓ | Already-fetched MR branch, or a full ref (e.g. `refs/scrybe-ephemeral/mr-42`, `origin/feature-x`) |
+| `--source-id <id>` | | Source identifier (default: `primary`) |
+| `--label <label>` | | Override the ephemeral label (still forced under the `_ephemeral/` prefix) |
+
+Label rule: defaults to `_ephemeral/mr-<branch>`. Never creates a `branch pin` entry and is invisible to the fetch-poller — run `drop-ephemeral` to remove it once the MR closes.
+
+```bash
+scrybe index-ephemeral --project-id myrepo --branch mr-42-feature
+```
+
+---
+
+### `drop-ephemeral`
+
+Remove an `_ephemeral/` label created by `index-ephemeral`: deletes its `branch_tags`/`branch_state`/hash-cache entries, then runs a source-scoped `gc` to reclaim the chunks that were unique to it. Chunks still shared with another indexed branch (unchanged files) are left alone.
+
+Refuses to drop any label that isn't under the `_ephemeral/` prefix — this command must never remove a real branch like `dev` or `master`. Dropping an already-gone label is a no-op success.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--project-id <id>` | ✓ | Project identifier |
+| `--label <label>` | ✓ | The `_ephemeral/...` label to drop |
+| `--source-id <id>` | | Source identifier (default: `primary`) |
+
+```bash
+scrybe drop-ephemeral --project-id myrepo --label _ephemeral/mr-42-feature
+```
+
+---
+
 ### `jobs`
 
 List background reindex jobs from the current process.

@@ -311,6 +311,21 @@ export function resolveBranchForSearch(
   return null;
 }
 
+/**
+ * List every `_ephemeral/*` branch label currently tagged for a (project, source).
+ *
+ * Plan 99 Slice 5 (daemon startup sweep). `_` is a SQL LIKE single-char
+ * wildcard, so an unescaped `_ephemeral/%` pattern would also match e.g.
+ * `Xephemeral/foo` — this query escapes it (`ESCAPE '\'`) so only the literal
+ * `_ephemeral/` prefix matches.
+ */
+export function listEphemeralBranches(projectId: string, sourceId: string): string[] {
+  const rows = getDB().prepare(
+    "SELECT DISTINCT branch FROM branch_tags WHERE project_id=? AND source_id=? AND branch LIKE ? ESCAPE '\\'"
+  ).all(projectId, sourceId, "\\_ephemeral/%") as { branch: string }[];
+  return rows.map((r) => r.branch);
+}
+
 /** Return the set of all chunk IDs tagged for any branch of this (project, source). */
 export function getAllChunkIdsForSource(projectId: string, sourceId: string): Set<string> {
   const rows = getDB().prepare(

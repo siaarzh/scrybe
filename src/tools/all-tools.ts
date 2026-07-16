@@ -11,6 +11,8 @@ import {
   cancelReindexTool,
   listJobsTool,
   queueStatusTool,
+  indexEphemeralTool,
+  dropEphemeralTool,
 } from "./reindex.js";
 import { listBranchesTool, listPinnedBranchesTool, pinBranchesTool, unpinBranchesTool } from "./branch.js";
 import { setPrivateIgnoreTool, getPrivateIgnoreTool, listPrivateIgnoresTool } from "./private-ignores.js";
@@ -48,6 +50,8 @@ export const allTools: Tool<any, any>[] = [
   cancelReindexTool,
   listJobsTool,
   queueStatusTool,
+  indexEphemeralTool,
+  dropEphemeralTool,
   // GC
   gcTool,
   // Branch
