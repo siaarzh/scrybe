@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.46.0] — 2026-07-16
+
 ### Added
 
 - **Temporarily index an unmerged remote branch for review, without pinning it or checking it out.** New `index_ephemeral` MCP tool (and `scrybe index-ephemeral`) fetches an open branch's content into a throwaway index under an `_ephemeral/…` label, so an agent can search a branch's own new code before it merges; `drop_ephemeral` (and `scrybe drop-ephemeral`) then tears it down and reclaims its chunks. The ephemeral index never joins the pinned-branch set and is never refreshed in the background.
@@ -141,7 +145,11 @@ For releases v0.37.1 and earlier, see [GitHub Releases](https://github.com/siaar
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.43.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.0...HEAD
+[0.46.0]: https://github.com/siaarzh/scrybe/compare/v0.45.0...v0.46.0
+[0.45.0]: https://github.com/siaarzh/scrybe/compare/v0.44.1...v0.45.0
+[0.44.1]: https://github.com/siaarzh/scrybe/compare/v0.44.0...v0.44.1
+[0.44.0]: https://github.com/siaarzh/scrybe/compare/v0.43.1...v0.44.0
 [0.43.1]: https://github.com/siaarzh/scrybe/compare/v0.43.0...v0.43.1
 [0.43.0]: https://github.com/siaarzh/scrybe/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/siaarzh/scrybe/compare/v0.41.1...v0.42.0
