@@ -57,3 +57,8 @@ TODO.md
 # Asset-gen scratch
 scripts/
 assets/concepts/
+
+# Test fixture: hook-guard scenarios nest a temp pkgRoot inside the repo so a copied
+# dist/ can still resolve deps via node_modules walk-up. Cleaned in afterEach; ignored
+# so an interrupted run cannot leave a 2MB dist copy stageable by `git add -A`.
+.scrybe-hookfixture-*/

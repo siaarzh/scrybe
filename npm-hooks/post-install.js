@@ -23,6 +23,25 @@ function getDataDir() {
   return join(xdg, "scrybe");
 }
 
+// D1 (Plan 102): `.git` at pkgRoot means this is a dev checkout — a clone, a worktree, CI —
+// not an installed package. npm tarballs never contain `.git`, so a real `npm i -g` / npx
+// install never has one. `existsSync` alone (no isDirectory check) is deliberate: a git
+// worktree's `.git` is a *file* (`gitdir: …`), not a directory, and still must be caught
+// (this is the exact shape of the 2026-07-17 incident). Spike-verified across 5 real install
+// modes — see Plan 102 "Spike results". Bias is to SKIP on ambiguity (D3): a false SKIP just
+// costs a cold daemon start on the next call; a false SPAWN hijacks the user's shared daemon.
+//
+// SCRYBE_HOOK_ASSUME_INSTALL: internal/test-only escape hatch (D4). npm gives a lifecycle
+// hook no channel but the environment to say "this really is an install" — our own hook
+// tests invoke the hook against this repo's own root (which has `.git`) and need to force
+// the real install path. Deliberately undocumented in docs/configuration.md: it is not a
+// knob for end users, only unset in every real install path, and exists solely so the test
+// harness can assert pre-Plan-102 behavior without rebuilding fixtures as fake packages.
+function isDevCheckout(pkgRoot) {
+  if (process.env.SCRYBE_HOOK_ASSUME_INSTALL === "1") return false;
+  return existsSync(join(pkgRoot, ".git"));
+}
+
 function isContainer() {
   // Match src/daemon/container-detect.ts logic
   if (existsSync("/.dockerenv")) return true;
@@ -53,6 +72,12 @@ async function isDaemonAlreadyRunning(dataDir) {
 }
 
 async function main() {
+  // Resolve the package root from this script's location.
+  // This script lives at <pkgRoot>/npm-hooks/post-install.js
+  const scriptPath = fileURLToPath(import.meta.url);
+  const pkgRoot = join(scriptPath, "..", "..");
+
+  if (isDevCheckout(pkgRoot)) return; // dev checkout / worktree — not a real install (D1)
   if (process.env.SCRYBE_NO_AUTO_DAEMON === "1") return;
   if (isContainer()) return;
 
@@ -61,10 +86,6 @@ async function main() {
   // Check if a daemon is already running (e.g. pre-install stop didn't work)
   if (await isDaemonAlreadyRunning(dataDir)) return;
 
-  // Resolve the package dist entry from this script's location.
-  // This script lives at <pkgRoot>/npm-hooks/post-install.js
-  const scriptPath = fileURLToPath(import.meta.url);
-  const pkgRoot = join(scriptPath, "..", "..");
   const distEntry = join(pkgRoot, "dist", "index.js");
 
   if (!existsSync(distEntry)) return; // dist not present — can't spawn

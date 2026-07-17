@@ -60,6 +60,9 @@ function runPostInstall(dataDir: string): { exit: number; stdout: string; stderr
       SCRYBE_CODE_EMBEDDING_DIMENSIONS: String(sidecar.dimensions),
       SCRYBE_CODE_EMBEDDING_API_KEY: "test",
       NO_UPDATE_NOTIFIER: "1",
+      // Plan 102: pkgRoot here is the repo root (join(process.cwd(), ...)), which has `.git` —
+      // without this the dev-checkout guard would skip the spawn this test asserts on (D4).
+      SCRYBE_HOOK_ASSUME_INSTALL: "1",
     },
     encoding: "utf8",
     timeout: 15_000,
