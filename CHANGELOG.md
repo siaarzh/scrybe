@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.46.1] — 2026-07-17
+
 ### Fixed
 
 - **Installing or building scrybe from a source checkout no longer stops or replaces your running daemon.** The install hooks previously could not tell a global install from a working copy, so `npm install` in a clone, worktree or CI checkout would shut down whichever daemon you had running and start a replacement from that checkout — against your real index. They now act only on a genuine install; `npm i -g scrybe-cli` and `npx scrybe-cli` are unaffected.
@@ -65,26 +69,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.43.0] — 2026-06-26
-
-### Changed
-- Pinned branches are now indexed under their plain name (e.g. `dev`) rather than a qualified `origin/dev` label. The remote-tracking ref is still the content source — it is just no longer used as the stored label — so a pinned branch stays fresh under one consistent name. A one-time migration rewrites any existing qualified labels on startup.
-
-### Fixed
-- Code deleted upstream on a pinned branch no longer lingers in search results: an incremental reindex now removes chunks for files deleted on the remote, so searches can't surface code that no longer exists.
-
----
-
 ## Older releases
 
-For releases v0.42.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.43.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.1...HEAD
+[0.46.1]: https://github.com/siaarzh/scrybe/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/siaarzh/scrybe/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/siaarzh/scrybe/compare/v0.44.1...v0.45.0
 [0.44.1]: https://github.com/siaarzh/scrybe/compare/v0.44.0...v0.44.1
 [0.44.0]: https://github.com/siaarzh/scrybe/compare/v0.43.1...v0.44.0
 [0.43.1]: https://github.com/siaarzh/scrybe/compare/v0.43.0...v0.43.1
-[0.43.0]: https://github.com/siaarzh/scrybe/compare/v0.42.0...v0.43.0
