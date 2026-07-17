@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- **A daemon whose own installation was removed underneath it is now detected and replaced automatically.** Previously it stayed up serving `internal error` on every search, status, doctor call and reindex job — while still reporting itself healthy — until someone noticed and restarted it by hand. This could happen when scrybe was installed or reinstalled from a directory that was later deleted (a temporary checkout, a cleared package cache). The daemon now notices its own files are gone and steps aside so the next call starts a working one.
+
 ---
 
 ## [0.46.0] — 2026-07-16

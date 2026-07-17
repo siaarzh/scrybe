@@ -17,6 +17,7 @@ import { onStateChange } from "./idle-state.js";
 import { diagEmit } from "./events.js";
 import { startMemSampler, stopMemSampler, MEM_SAMPLE_INTERVAL_MS } from "./mem-sampler.js";
 import { startRssGuard, stopRssGuard } from "./rss-guard.js";
+import { startBuildIntegrityCheck } from "./build-integrity.js";
 import { spawnDaemonDetached } from "./spawn-detached.js";
 import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
@@ -29,6 +30,7 @@ import type { KickRequest, KickResponse } from "./http-server.js";
 let shutdownCalled = false;
 let _lifecycle: LifecycleManager | null = null;
 let _logWrite: ((line: string) => void) | null = null;
+let _stopBuildIntegrityCheck: (() => void) | null = null;
 
 function daemonLog(msg: string): void {
   const line = `${new Date().toISOString()} ${msg}\n`;
@@ -111,6 +113,7 @@ async function shutdown(signal: string, opts?: {
   _lifecycle?.stop();
   stopRssGuard();
   stopMemSampler();
+  _stopBuildIntegrityCheck?.();
   daemonLog(`[scrybe daemon] ${signal} — shutting down`);
   await stopHttpServer();
   await stopWatcher();
@@ -447,6 +450,11 @@ export async function runDaemon(): Promise<void> {
   // Timer is .unref()-ed inside startMemSampler so it does not keep the process alive.
   // Interval: SCRYBE_DAEMON_MEM_SAMPLE_MS (default 60000 ms).
   startMemSampler();
+
+  // Arm build-integrity self-check (Plan 101 Phase 1/2). Detects the daemon's
+  // own build vanishing out from under it (e.g. a deleted worktree). Timer is
+  // .unref()-ed; interval is a plain default parameter, not an env var.
+  _stopBuildIntegrityCheck = startBuildIntegrityCheck();
 
   // Arm RSS-threshold self-restart guard (Plan 92 Phase 2).
   // Evaluated on the same cadence as the mem-sampler.

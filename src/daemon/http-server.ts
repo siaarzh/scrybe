@@ -17,6 +17,7 @@ import { listJobRows, getJobRow, getQueueStatus } from "../jobs-store.js";
 import { cancelJob } from "../jobs.js";
 import { handleMcpRoute } from "./mcp-rpc.js";
 import { readPidfile } from "./pidfile.js";
+import { isDegraded } from "./build-integrity.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -363,6 +364,20 @@ async function handle(
 
   // ── GET /health ────────────────────────────────────────────────────────
   if (method === "GET" && path === "/health") {
+    // Plan 101 D2: a degraded build-integrity check reports non-2xx, not a
+    // truthful `ready:false` at 200 — pidfile.ts:61 maps !res.ok → "refused",
+    // which is what drives isDaemonRunning to SIGKILL + respawn. A 200 body
+    // saying `ready:false` is inert (ensureRunning never reads it).
+    if (isDegraded()) {
+      jsonRes(res, 503, {
+        ready: false,
+        reason: "build-missing",
+        version: VERSION,
+        uptimeMs: Date.now() - _startedAt.getTime(),
+        pid: process.pid,
+      });
+      return;
+    }
     jsonRes(res, 200, {
       ready: true,
       version: VERSION,
