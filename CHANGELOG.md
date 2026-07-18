@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.46.2] — 2026-07-19
+
 ### Security
 
 - Updated bundled transitive dependencies to their patched releases — **protobufjs** (7.6.x), **ws** (8.21.1) and **fast-uri** (3.1.3) — clearing several known denial-of-service and request-handling advisories. None of these code paths are reachable with untrusted input in scrybe, so the update is precautionary.
@@ -69,24 +73,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.43.1] — 2026-07-01
-
-### Fixed
-
-- **The background daemon now restarts cleanly after crossing its memory ceiling.** Previously the automatic restart couldn't take over from the old process — leaving search unavailable for minutes, or the daemon stuck until manually killed. A restarting daemon now health-checks the previous one, replaces it promptly if it's unresponsive, and exits without blocking on a long shutdown drain.
-
----
-
 ## Older releases
 
-For releases v0.43.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.43.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.2...HEAD
+[0.46.2]: https://github.com/siaarzh/scrybe/compare/v0.46.1...v0.46.2
 [0.46.1]: https://github.com/siaarzh/scrybe/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/siaarzh/scrybe/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/siaarzh/scrybe/compare/v0.44.1...v0.45.0
 [0.44.1]: https://github.com/siaarzh/scrybe/compare/v0.44.0...v0.44.1
 [0.44.0]: https://github.com/siaarzh/scrybe/compare/v0.43.1...v0.44.0
-[0.43.1]: https://github.com/siaarzh/scrybe/compare/v0.43.0...v0.43.1
