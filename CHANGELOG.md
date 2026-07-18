@@ -7,6 +7,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Security
+
+- Updated bundled transitive dependencies to their patched releases — **protobufjs** (7.6.x), **ws** (8.21.1) and **fast-uri** (3.1.3) — clearing several known denial-of-service and request-handling advisories. None of these code paths are reachable with untrusted input in scrybe, so the update is precautionary.
+
+### Fixed
+
+- Hardened the background daemon's health check: a malformed port value in the daemon pidfile can no longer shape the internal health-probe request.
+
 ---
 
 ## [0.46.1] — 2026-07-17
