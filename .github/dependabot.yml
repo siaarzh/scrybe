@@ -8,6 +8,24 @@ updates:
     groups:
       dev-deps:
         dependency-type: development
+    ignore:
+      # tree-sitter runtime grammars + the native core binding are exact-pinned and
+      # peer-locked across ABI bands: individual Dependabot bumps fail ERESOLVE, and the
+      # indexer degrades gracefully on unknown syntax (unparseable region -> ERROR node ->
+      # line-window fallback, nothing dropped from search), so grammar refreshes carry
+      # near-zero value. Update these only via a coordinated manual bump or a security
+      # advisory. (tree-sitter-cli is a dev-only generator tool, deliberately NOT ignored.)
+      - dependency-name: "tree-sitter"
+      - dependency-name: "tree-sitter-c"
+      - dependency-name: "tree-sitter-c-sharp"
+      - dependency-name: "tree-sitter-cpp"
+      - dependency-name: "tree-sitter-go"
+      - dependency-name: "tree-sitter-java"
+      - dependency-name: "tree-sitter-javascript"
+      - dependency-name: "tree-sitter-python"
+      - dependency-name: "tree-sitter-ruby"
+      - dependency-name: "tree-sitter-rust"
+      - dependency-name: "tree-sitter-typescript"
     open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: /
