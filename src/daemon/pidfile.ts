@@ -53,9 +53,13 @@ type HealthProbeResult = "healthy" | "refused" | "timeout";
  *   "timeout"  — port accepted the connection but /health did not respond in time
  */
 async function probeHealthOnce(port: number, timeoutMs: number): Promise<HealthProbeResult> {
-  if (port <= 0) return "refused";
+  // `port` originates from the on-disk pidfile (JSON.parse), so treat it as untrusted:
+  // coerce to a bounded TCP port integer before it reaches fetch(). Anything outside the
+  // valid range means there is no listener we can reach — report "refused".
+  const safePort = Number.isInteger(port) ? port : 0;
+  if (safePort <= 0 || safePort > 65535) return "refused";
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+    const res = await fetch(`http://127.0.0.1:${safePort}/health`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
     return res.ok ? "healthy" : "refused";
