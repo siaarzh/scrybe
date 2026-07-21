@@ -147,6 +147,22 @@ function jsonResult(data: unknown) {
   return textResult(JSON.stringify(data, null, 2));
 }
 
+/**
+ * Builds the CallTool response for a failed `callRpc` (Plan 94 Decision 4 —
+ * "scope bomb"). `_singleRpc` already attaches `rpcCode` (the daemon's JSON-RPC
+ * error code, e.g. -32602 INVALID_PARAMS for caller-facing errors, -32603 for
+ * masked internal faults) to the thrown Error; this handler previously read
+ * only `err.message` and dropped both the code and `isError`, so a classified
+ * -32602 message never reached the calling agent. The daemon has already done
+ * the classification (echoed message for caller-facing, masked "internal
+ * error" otherwise) — this just needs to mark the MCP result as an error so
+ * the agent doesn't mistake either for a successful call.
+ */
+function callToolErrorResult(err: unknown): { content: { type: "text"; text: string }[]; isError: true } {
+  const message = err instanceof Error ? err.message : String(err);
+  return { ...jsonResult({ error: message }), isError: true };
+}
+
 /** D3 — connect-class error codes that justify a retry (request never reached daemon). */
 const CONNECT_CLASS_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"]);
 
@@ -733,8 +749,7 @@ export async function runMcpShim(): Promise<void> {
       const result = await callRpc(name, params);
       return jsonResult(result);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return jsonResult({ error: message });
+      return callToolErrorResult(err);
     }
   });
 
@@ -756,6 +771,8 @@ export const __testing = {
   isConnectClassError,
   /** Invoke callRpc directly with injected state. */
   callRpc,
+  /** Build the CallTool error response for a caught callRpc failure (Plan 94 Decision 4). */
+  callToolErrorResult,
   /** Trigger a heartbeat tick (for heartbeat-update tests). */
   sendHeartbeat: _sendHeartbeat,
   /** Get current skew state. */

@@ -9,11 +9,35 @@
  *   - POST /mcp/rpc invalid JSON body → -32600
  *   - GET /mcp/manifest returns correct structure
  *   - X-Scrybe-Client-Id header is accepted without error
+ *   - Plan 94 Slice 1: boundary param validation (-32602), caller-facing vs
+ *     internal error classification (-32603 stays masked), and the
+ *     activity-span error-message field
  */
 import { describe, it, expect } from "vitest";
 import http from "node:http";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { buildManifest, handleMcpRoute } from "../src/daemon/mcp-rpc.js";
 import { mcpTools } from "../src/tools/all-tools.js";
+import { config } from "../src/config.js";
+
+// `config.dataDir` is resolved once at this file's static-import time, from
+// the SAME module graph mcp-rpc.ts's diagEmit calls write through (events.ts
+// also imports config.js statically). isolate.ts's per-test SCRYBE_DATA_DIR +
+// vi.resetModules() only affects *dynamic* re-imports, not this file's
+// already-bound static imports — so the log path must be derived from this
+// bound `config`, not read fresh from process.env per test.
+const daemonLogPath = join(config.dataDir, "daemon-log.jsonl");
+
+function readJsonlLines(logPath: string): Record<string, unknown>[] {
+  if (!existsSync(logPath)) return [];
+  return readFileSync(logPath, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean) as Record<string, unknown>[];
+}
 
 // ─── Lightweight in-process HTTP server ────────────────────────────────────
 
@@ -284,6 +308,222 @@ describe("handleMcpRoute — route matching", () => {
     try {
       const { status } = await get(srv.port, "/mcp/manifest");
       expect(status).toBe(200);
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+// ─── Plan 94 Slice 1 — boundary param validation ───────────────────────────
+
+describe("POST /mcp/rpc — boundary param validation (-32602)", () => {
+  it("rejects an unknown key with a did-you-mean pointing at the real field (project_ids → project_id)", async () => {
+    const srv = await startTestServer();
+    try {
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 20,
+        method: "search_code",
+        // recurrence #2: invented arg name instead of project_id
+        params: { project_ids: "myrepo", query: "auth flow" },
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32602);
+      expect(err["message"]).toContain("unknown key 'project_ids'");
+      expect(err["message"]).toContain("project_id");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("rejects an unknown key with a did-you-mean pointing at the real field (symbol → symbol_name)", async () => {
+    const srv = await startTestServer();
+    try {
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 21,
+        method: "lookup_symbol",
+        params: { project_id: "myrepo", symbol: "getName" },
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32602);
+      expect(err["message"]).toContain("unknown key 'symbol'");
+      expect(err["message"]).toContain("symbol_name");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("rejects a missing required field, naming it", async () => {
+    const srv = await startTestServer();
+    try {
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 22,
+        method: "search_code",
+        params: { query: "auth flow" }, // project_id omitted
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32602);
+      expect(err["message"]).toContain("missing required 'project_id'");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("rejects a null value for a required field (treated as absent, not passed to handler)", async () => {
+    const srv = await startTestServer();
+    try {
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 24,
+        method: "search_code",
+        params: { project_id: null, query: "auth flow" }, // null must not slip through
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32602);
+      expect(err["message"]).toContain("missing required 'project_id'");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("rejects a wrong-type field, naming it", async () => {
+    const srv = await startTestServer();
+    try {
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 23,
+        method: "search_code",
+        // recurrence #2: limit-shaped value passed under the wrong (but real) key
+        params: { project_id: "myrepo", query: "auth flow", top_k: "10" },
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32602);
+      expect(err["message"]).toContain("'top_k'");
+      expect(err["message"]).toContain("number");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("rejects an out-of-enum value, naming it", async () => {
+    const srv = await startTestServer();
+    try {
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 24,
+        method: "lookup_symbol",
+        params: { project_id: "myrepo", symbol_name: "getName", match: "fuzzy" },
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32602);
+      expect(err["message"]).toContain("'match'");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("a validation failure still emits an activity-span (not silently dropped)", async () => {
+    const srv = await startTestServer();
+    try {
+      // daemonLogPath is a real, persistent, cross-run file (see comment on its
+      // declaration) — tag this call with a unique clientId and take the LAST
+      // matching record, so stale entries from other runs/tests can't be picked
+      // up by a bare event/spanType/method match.
+      const clientId = `test-span-validation-${Date.now()}`;
+      await post(
+        srv.port,
+        "/mcp/rpc",
+        { id: 25, method: "search_code", params: { project_ids: "myrepo", query: "auth flow" } },
+        { "X-Scrybe-Client-Id": clientId }
+      );
+      const recs = readJsonlLines(daemonLogPath);
+      const spanRec = recs
+        .filter((r) => r["event"] === "activity-span" && r["spanType"] === "mcp-call" && r["clientId"] === clientId)
+        .at(-1);
+      expect(spanRec).toBeDefined();
+      expect(spanRec!["method"]).toBe("search_code");
+      expect(spanRec!["outcome"]).toBe("error");
+      expect(typeof spanRec!["error"]).toBe("string");
+      expect(spanRec!["error"] as string).toContain("unknown key 'project_ids'");
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+// ─── Plan 94 Slice 1 — internal-fault masking is preserved ─────────────────
+
+describe("POST /mcp/rpc — internal faults stay masked (-32603, CodeQL-110)", () => {
+  it("a handler throwing a plain (non-caller-facing) Error still returns \"internal error\"", async () => {
+    const srv = await startTestServer();
+    try {
+      // gc.ts throws a plain `Error` (no callerFacing marker) for an unknown
+      // project_id — this is a real, well-formed-shape call whose handler
+      // faults, exercising the classify-else-mask branch of the catch.
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 26,
+        method: "gc",
+        params: { project_id: "definitely-not-a-registered-project-94" },
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32603);
+      expect(err["message"]).toBe("internal error");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("the masked call's activity-span still carries the real (sanitized) message", async () => {
+    const srv = await startTestServer();
+    try {
+      const clientId = `test-span-masked-${Date.now()}`;
+      await post(
+        srv.port,
+        "/mcp/rpc",
+        { id: 27, method: "gc", params: { project_id: "definitely-not-a-registered-project-94" } },
+        { "X-Scrybe-Client-Id": clientId }
+      );
+      const recs = readJsonlLines(daemonLogPath);
+      const spanRec = recs
+        .filter((r) => r["event"] === "activity-span" && r["spanType"] === "mcp-call" && r["clientId"] === clientId)
+        .at(-1);
+      expect(spanRec).toBeDefined();
+      expect(spanRec!["method"]).toBe("gc");
+      expect(spanRec!["outcome"]).toBe("error");
+      // the wire response says "internal error", but the span keeps the real message
+      expect(spanRec!["error"] as string).toContain("definitely-not-a-registered-project-94");
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+// ─── Plan 94 Slice 2 — search.ts semantic caller-errors are echoed (-32602) ─
+
+describe("POST /mcp/rpc — search_code with a well-formed but nonexistent project_id is echoed, not masked", () => {
+  it("returns -32602 with the field-naming \"Project 'X' not found\" message (not \"internal error\")", async () => {
+    const srv = await startTestServer();
+    try {
+      const { status, body } = await post(srv.port, "/mcp/rpc", {
+        id: 28,
+        method: "search_code",
+        params: { project_id: "definitely-not-a-registered-project-94", query: "auth flow" },
+      });
+      const r = body as Record<string, unknown>;
+      expect(status).toBe(200);
+      const err = r["error"] as Record<string, unknown>;
+      expect(err["code"]).toBe(-32602);
+      expect(err["message"]).toBe("Project 'definitely-not-a-registered-project-94' not found");
     } finally {
       await srv.close();
     }

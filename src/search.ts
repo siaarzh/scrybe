@@ -12,6 +12,7 @@ import {
 import { rerank } from "./reranker.js";
 import { resolveBranch, getChunkIdsForBranch, getBranchesForChunks, resolveBranchForSearch } from "./branch-state.js";
 import type { SearchResult, KnowledgeSearchResult, Source } from "./types.js";
+import { markCallerFacing } from "./daemon/caller-error.js";
 
 const MAX_RERANK_CANDIDATES = 500;
 
@@ -86,7 +87,7 @@ export async function searchCode(
   opts?: SearchCodeOptions
 ): Promise<SearchResult[]> {
   const project = getProject(projectId);
-  if (!project) throw new Error(`Project '${projectId}' not found`);
+  if (!project) throw markCallerFacing(new Error(`Project '${projectId}' not found`));
 
   const topK = opts?.limit ?? 10;
   // SCRYBE_SKIP_MIGRATION=1 → read-only compat mode, no branch filter (old chunks lack tags)
@@ -97,7 +98,7 @@ export async function searchCode(
     codeSources = codeSources.filter((s) => opts.sources!.includes(s.source_id));
   }
   if (codeSources.length === 0) {
-    throw new Error("NO_CODE_SOURCES: Project has no indexed code sources");
+    throw markCallerFacing(new Error("NO_CODE_SOURCES: Project has no indexed code sources"));
   }
 
   const fetchCount = config.rerankEnabled
@@ -201,17 +202,17 @@ export async function searchKnowledge(
   itemTypes?: string[]
 ): Promise<KnowledgeSearchResult[]> {
   const project = getProject(projectId);
-  if (!project) throw new Error(`Project '${projectId}' not found`);
+  if (!project) throw markCallerFacing(new Error(`Project '${projectId}' not found`));
 
   let knowledgeSources = getKnowledgeSources(project.sources);
   if (sourceId) {
     knowledgeSources = knowledgeSources.filter((s) => s.source_id === sourceId);
     if (knowledgeSources.length === 0) {
-      throw new Error(`NO_KNOWLEDGE_SOURCES: No knowledge source with id '${sourceId}' found`);
+      throw markCallerFacing(new Error(`NO_KNOWLEDGE_SOURCES: No knowledge source with id '${sourceId}' found`));
     }
   }
   if (knowledgeSources.length === 0) {
-    throw new Error("NO_KNOWLEDGE_SOURCES: Project has no indexed knowledge sources");
+    throw markCallerFacing(new Error("NO_KNOWLEDGE_SOURCES: Project has no indexed knowledge sources"));
   }
 
   const fetchCount = config.rerankEnabled

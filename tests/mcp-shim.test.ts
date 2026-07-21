@@ -251,6 +251,66 @@ describe("shim surfaces RPC error as tool error", () => {
   });
 });
 
+// ─── Plan 94 Slice 2 — CallTool propagation of daemon rpcCode → isError ───────
+
+describe("shim CallTool handler propagates daemon error as isError:true (Plan 94 Decision 4)", () => {
+  it("a -32602 caller-facing daemon error reaches the caller as isError:true with the field-naming message", async () => {
+    const srv = await startFakeDaemon({
+      rpcHandler: (body) => {
+        const req = body as { id: unknown };
+        return { id: req.id, error: { code: -32602, message: "Project 'nonexistent' not found" } };
+      },
+    });
+    try {
+      const { __testing } = await import("../src/mcp-shim.js");
+      __testing.setBaseUrl(`http://127.0.0.1:${srv.port}`);
+
+      let caught: unknown;
+      try {
+        await __testing.callRpc("search_code", { project_id: "nonexistent", query: "x" });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error & { rpcCode?: number }).rpcCode).toBe(-32602);
+
+      const result = __testing.callToolErrorResult(caught);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("Project 'nonexistent' not found");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  it("a -32603 masked internal-fault daemon error still reaches the caller as isError:true (message stays masked)", async () => {
+    const srv = await startFakeDaemon({
+      rpcHandler: (body) => {
+        const req = body as { id: unknown };
+        return { id: req.id, error: { code: -32603, message: "internal error" } };
+      },
+    });
+    try {
+      const { __testing } = await import("../src/mcp-shim.js");
+      __testing.setBaseUrl(`http://127.0.0.1:${srv.port}`);
+
+      let caught: unknown;
+      try {
+        await __testing.callRpc("search_code", { project_id: "myrepo", query: "x" });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error & { rpcCode?: number }).rpcCode).toBe(-32603);
+
+      const result = __testing.callToolErrorResult(caught);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("internal error");
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
 // ─── JobResult unwrapping ─────────────────────────────────────────────────────
 
 describe("shim unwraps JobResult-style response", () => {
