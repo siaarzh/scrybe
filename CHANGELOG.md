@@ -9,6 +9,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.46.3] — 2026-07-22
+
+### Fixed
+
+- MCP tool calls with invalid, missing, or misspelled arguments now return a specific error naming the offending field — e.g. an unknown `project_ids` suggests `project_id` — instead of a generic `internal error`. Genuine internal faults stay masked.
+- `search_code` / `search_knowledge` now surface "project/source not found" and "no matching sources" messages to the caller instead of masking them as `internal error`.
+
+---
+
 ## [0.46.2] — 2026-07-19
 
 ### Security
@@ -60,29 +69,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.44.0] — 2026-07-03
-
-### Changed
-
-- Dependency updates. Refreshed the vector-store engine (LanceDB), the daemon HTTP layer (Hono), the terminal UI stack (Ink, Clack prompts), build/test tooling, and CI actions. The LanceDB update stays backward-compatible with existing on-disk indexes — no reindex required.
-- Updated the CLI argument parser (Commander). No change to any command, flag, or output.
-
-### Fixed
-
-- **Corrected the minimum Node.js version to 22.13.0** (previously documented as 22.5.0). scrybe relies on the built-in `node:sqlite` module, which is only available without an experimental flag from Node 22.13.0 onward — so scrybe could not actually run on Node 22.5–22.12. Update Node to 22.13 or newer.
-
----
-
 ## Older releases
 
-For releases v0.43.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.44.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.2...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.3...HEAD
+[0.46.3]: https://github.com/siaarzh/scrybe/compare/v0.46.2...v0.46.3
 [0.46.2]: https://github.com/siaarzh/scrybe/compare/v0.46.1...v0.46.2
 [0.46.1]: https://github.com/siaarzh/scrybe/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/siaarzh/scrybe/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/siaarzh/scrybe/compare/v0.44.1...v0.45.0
 [0.44.1]: https://github.com/siaarzh/scrybe/compare/v0.44.0...v0.44.1
-[0.44.0]: https://github.com/siaarzh/scrybe/compare/v0.43.1...v0.44.0

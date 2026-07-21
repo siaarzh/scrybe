@@ -264,7 +264,8 @@ Dispatch a tool call to the daemon. Request body is a JSON-RPC 2.0 request; resp
 |---|---|
 | `-32600` | Invalid Request — body is not valid JSON-RPC |
 | `-32601` | Method not found — tool does not exist |
-| `-32603` | Internal error — tool handler threw or returned an error |
+| `-32602` | Invalid params — a required argument is missing/null, an argument is the wrong type or an unknown key, or the handler raised a caller-facing "not found" error. The message names the offending field (with a did-you-mean hint for unknown keys). |
+| `-32603` | Internal error — genuine internal fault (handler threw a non-caller-facing error); the message is masked as `"internal error"` |
 
 **Request ID semantics:** The `id` field echoes back in the response. MCP shim uses this to correlate async tool calls with their results.
 
