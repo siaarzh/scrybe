@@ -15,7 +15,7 @@
  */
 import { describe, it, expect } from "vitest";
 import http from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildManifest, handleMcpRoute } from "../src/daemon/mcp-rpc.js";
 import { mcpTools } from "../src/tools/all-tools.js";
@@ -28,6 +28,12 @@ import { config } from "../src/config.js";
 // already-bound static imports — so the log path must be derived from this
 // bound `config`, not read fresh from process.env per test.
 const daemonLogPath = join(config.dataDir, "daemon-log.jsonl");
+
+// In production the daemon creates dataDir at startup; the in-process test
+// server below skips that bootstrap. On a fresh machine (CI runners) the dir
+// doesn't exist, diagEmit's appendFileSync throws ENOENT and swallows it, and
+// the span-assertion tests fail with "expected undefined to be defined".
+mkdirSync(config.dataDir, { recursive: true });
 
 function readJsonlLines(logPath: string): Record<string, unknown>[] {
   if (!existsSync(logPath)) return [];
