@@ -80,8 +80,19 @@ function getClientId(req: http.IncomingMessage): string {
 
 // Strip CR/LF/control chars so client-controlled clientId/method/error strings
 // can't forge fake log lines when logs are pasted into issues or shared.
+//
+// The CR and LF passes are deliberately spelled out as two separate
+// single-character global replacements before the catch-all control-char pass.
+// Output is identical to the single `[\r\n\x00-\x1f\x7f]` character class it
+// replaces, but static analysers (CodeQL js/log-injection) only recognise a
+// replacement as a line-break barrier when the pattern is a literal "\r"/"\n" —
+// a character class with ranges is not matched by that model, so the sanitizer
+// was invisible to it. Keep these two passes first and separate.
 function sanitizeForLog(s: string): string {
-  return s.replace(/[\r\n\x00-\x1f\x7f]/g, "?");
+  return s
+    .replace(/\r/g, "?")
+    .replace(/\n/g, "?")
+    .replace(/[\x00-\x1f\x7f]/g, "?");
 }
 
 const EXPOSE_INTERNAL_ERRORS = process.env["NODE_ENV"] === "development";
