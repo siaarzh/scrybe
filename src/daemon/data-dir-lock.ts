@@ -141,9 +141,15 @@ function lockPathFor(name: LockName): string {
   return join(normaliseDataDir(config.dataDir), basename);
 }
 
+/**
+ * Path of the ownership lock database. Exported for tests only.
+ *
+ * NOTE: the presence of this FILE says nothing about whether the lock is held —
+ * the database is a token that persists across acquire and release, and the
+ * lock itself is an open transaction inside it. Anything wanting to know
+ * "is this lock held?" must try to acquire it from another process.
+ */
 export function getOwnerLockPath(): string { return lockPathFor("owner"); }
-export function getSpawnLockPath(): string { return lockPathFor("spawn"); }
-export function getMigrateLockPath(): string { return lockPathFor("migrate"); }
 
 /**
  * Test-only fault injection (never read outside a test run): when
@@ -171,16 +177,6 @@ function sqliteCode(err: unknown): number | null {
   return typeof raw === "number" ? raw & 0xff : null;
 }
 
-export type LockingMode = "sqlite";
-
-/** Which mechanism last succeeded in THIS process. Surfaced by `scrybe doctor`. */
-let _lockingMode: LockingMode | null = null;
-
-/** The locking mechanism this process is using, or null if it has not locked yet. */
-export function getLockingMode(): LockingMode | null {
-  return _lockingMode;
-}
-
 export type LockOutcome = "acquired" | "contended" | "unavailable";
 
 export interface AcquireResult {
@@ -201,7 +197,20 @@ export interface AcquireResult {
  * the lock — dropping it (or dying) releases it — so these must stay reachable
  * for exactly as long as the lock is held.
  */
-const _held = new Map<LockName, DatabaseSync>();
+interface HeldLock {
+  db: DatabaseSync;
+  /**
+   * The path this lock was actually acquired on. Remembered rather than
+   * re-derived on release: `acquire()` resolves the path BEFORE its `mkdirSync`,
+   * so on a fresh install `realpathSync` fails and `normaliseDataDir` falls back
+   * to `resolve()`. Once the directory exists the same call can return a
+   * different string if any component is a symlink — and `release()` would then
+   * clear a sidecar it never wrote, stranding the real one.
+   */
+  lockPath: string;
+}
+
+const _held = new Map<LockName, HeldLock>();
 
 function ownerSidecarPath(lockPath: string): string {
   return `${lockPath}.owner`;
@@ -272,8 +281,28 @@ function acquire(name: LockName, waitMs = 0): AcquireResult {
   const forced = forcedTestFailure();
   if (forced) return forced;
 
-  // Re-entrant: this process already holds it.
-  if (_held.has(name)) return { outcome: "acquired" };
+  // ALREADY HELD BY US — report contention, not success.
+  //
+  // This used to short-circuit with `acquired`, mirroring the file-based
+  // implementation's "the lock file records our own pid" case. That is unsound
+  // here, in both directions. A caller receiving `acquired` believes it may now
+  // act: `ensureRunning()` re-checks the pidfile and, finding no healthy daemon
+  // yet, spawns one — a SECOND spawn, which is precisely what the spawn lock
+  // exists to prevent. Worse, `release()` is not refcounted, so that caller's
+  // `finally` closes the transaction the FIRST caller is still relying on,
+  // handing the cross-process lock to any other process on the machine while
+  // the original holder is still inside its critical section.
+  //
+  // Reporting `contended` is correct on both counts: the caller does not act,
+  // and (since every caller releases only on `acquired`) it cannot free a lock
+  // it never took. It is also honest — from the caller's point of view somebody
+  // else genuinely is in the critical section; that it happens to be another
+  // async caller in this same process changes nothing about what is safe to do.
+  //
+  // Reachable today via `mcp-shim.ts`, which calls `ensureRunning()` per request
+  // and can have two tool calls in flight at once. No caller in this codebase
+  // legitimately needs to hold one of these locks twice over.
+  if (_held.has(name)) return { outcome: "contended", heldByPid: process.pid };
 
   const lockPath = lockPathFor(name);
   try { mkdirSync(dirname(lockPath), { recursive: true }); } catch { /* the open below reports the real error */ }
@@ -292,8 +321,7 @@ function acquire(name: LockName, waitMs = 0): AcquireResult {
   }
 
   if (attempt.ok) {
-    _held.set(name, attempt.db);
-    _lockingMode = "sqlite";
+    _held.set(name, { db: attempt.db, lockPath });
     writeOwnerSidecar(lockPath);
     return { outcome: "acquired" };
   }
@@ -316,12 +344,12 @@ function acquire(name: LockName, waitMs = 0): AcquireResult {
  * implementation had to guard against cannot arise here.
  */
 function release(name: LockName): void {
-  const db = _held.get(name);
-  if (!db) return;
+  const held = _held.get(name);
+  if (!held) return;
   _held.delete(name);
-  try { db.exec("ROLLBACK"); } catch { /* closing releases it regardless */ }
-  try { db.close(); } catch { /* ignore */ }
-  clearOwnerSidecar(lockPathFor(name));
+  try { held.db.exec("ROLLBACK"); } catch { /* closing releases it regardless */ }
+  try { held.db.close(); } catch { /* ignore */ }
+  clearOwnerSidecar(held.lockPath);
 }
 
 /**
@@ -371,7 +399,7 @@ export interface LockingProbe {
   /** False when this data dir cannot arbitrate locks at all — every lock fails open. */
   ok: boolean;
   /** `"not-created"`: the data dir does not exist yet, so there is nothing to probe. */
-  mode: LockingMode | "none" | "not-created";
+  mode: "sqlite" | "none" | "not-created";
   errorCode?: string;
 }
 
@@ -393,7 +421,11 @@ export function probeDataDirLocking(): LockingProbe {
   const dir = normaliseDataDir(config.dataDir);
   if (!existsSync(dir)) return { ok: true, mode: "not-created" };
 
-  const probePath = join(dir, "daemon-probe.lock.db");
+  // Per-process probe name: a fixed one lets two concurrent `scrybe doctor`
+  // runs collide, and the winner's unlink of a file the loser still has open
+  // throws on Windows — stranding a probe database in the data dir permanently,
+  // where it is the only lock-shaped file a user ever sees lying around.
+  const probePath = join(dir, `daemon-probe.${process.pid}.lock.db`);
   const attempt = tryBegin(probePath, 0);
   if (attempt.ok) {
     try { attempt.db.exec("ROLLBACK"); } catch { /* ignore */ }

@@ -379,7 +379,16 @@ export const dropEphemeralTool: Tool<
 
     // Source-scoped gc to actually reclaim the label's now-orphaned chunks.
     const daemon = await ensureRunning();
-    if (daemon.ok && !daemon.draining) {
+    // A DRAINING daemon still owns the data dir and is still writing, so the
+    // in-process fallback below would be a second writer on the same LanceDB
+    // tables. Refuse only in that case: when there is no live daemon at all
+    // (container, opted-out, or a daemon that could not start) nothing else is
+    // writing and the fallback is both safe and this tool's documented
+    // behaviour.
+    if (daemon.ok && daemon.draining) {
+      throw daemonWriteUnavailableError(daemon, "Dropping an ephemeral branch")!;
+    }
+    if (daemon.ok) {
       const client = DaemonClient.fromPidfile();
       if (client) {
         try {

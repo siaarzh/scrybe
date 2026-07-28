@@ -431,6 +431,27 @@ async function handle(
       });
       return;
     }
+    // Past the drain, in the CLOSING phase, the daemon is provably incapable of
+    // serving: setClosing() is followed immediately by stopQueue(),
+    // cancelAllJobs() and closeDB(), and every route below already 503s. A 200
+    // here would suppress pidfile.ts's !res.ok → "refused" → SIGKILL → respawn
+    // recovery for the whole teardown tail — and stopHttpServer() has no
+    // timeout, so a single hung in-flight request (e.g. an /mcp/rpc call
+    // admitted during the drain) leaves a process holding the pidfile and the
+    // ownership lock while reporting itself healthy. That is exactly the
+    // healthy-looking-but-locked daemon this lock work exists to eliminate.
+    // The drain's 200 is still correct and deliberate: during the drain the
+    // daemon is genuinely alive and serving reads.
+    if (_closing) {
+      jsonRes(res, 503, {
+        ready: false,
+        reason: "closing",
+        version: VERSION,
+        uptimeMs: Date.now() - _startedAt.getTime(),
+        pid: process.pid,
+      });
+      return;
+    }
     jsonRes(res, 200, {
       ready: true,
       // Deliberately 200 even while draining: the daemon IS alive and must not

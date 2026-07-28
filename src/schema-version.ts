@@ -71,8 +71,10 @@ function writeSchemaDoc(doc: SchemaDoc): void {
  * legitimately take a while compacting tables across every registered
  * project) — it exists solely so a holder that is alive but wedged cannot
  * hang every future CLI/MCP/daemon invocation forever. A holder that has
- * actually crashed is reclaimed on the very next `acquireMigrationLock()`
- * attempt (dead-pid detection in `data-dir-lock.ts`), long before this fires.
+ * actually CRASHED never reaches this timeout at all: the lock is an open
+ * SQLite transaction that the OS drops when its holder dies, so the very next
+ * `acquireMigrationLock()` simply succeeds. This cap is only for a holder that
+ * is alive and stuck.
  */
 const MIGRATION_WAIT_TIMEOUT_MS = 120_000;
 const MIGRATION_WAIT_POLL_MS = 50;
@@ -92,9 +94,9 @@ async function waitForMigrationLock(): Promise<AcquireResult> {
     // launder it into "unavailable". A previous revision did exactly that, and
     // since `checkAndMigrate()` fails open on "unavailable", timing out against
     // a provably LIVE holder ran the destructive migration unprotected. A dead
-    // holder is already reclaimed by `acquireMigrationLock()` itself, so a
-    // still-contended result after the wait means the holder is genuinely
-    // alive — the one case where failing open is wrong.
+    // holder holds no SQLite transaction, so `acquireMigrationLock()` would
+    // already have succeeded — a still-contended result after the wait means
+    // the holder is genuinely alive, the one case where failing open is wrong.
     if (result.outcome !== "contended") return result;
     if (Date.now() >= deadline) return result;
     await new Promise((r) => setTimeout(r, MIGRATION_WAIT_POLL_MS));

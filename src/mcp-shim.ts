@@ -616,12 +616,18 @@ function serveUnavailableServer(unavailable: DaemonUnavailableState): void {
 /**
  * Cold-start budget handed to `ensureRunning()`.
  *
- * Clamped to `MAX_SPAWN_LOCK_HOLD_MS` (review F8): `ensureRunning()` holds the
- * cross-process spawn lock for its WHOLE budget (it releases in a `finally`
- * after the health wait), and the spawn lock expires by age. An unbounded
- * env-tunable budget could therefore exceed the staleness threshold, at which
- * point a waiting caller age-reclaims a lock that is still legitimately held
- * and spawns the duplicate daemon the lock exists to prevent.
+ * Clamped to `MAX_SPAWN_LOCK_HOLD_MS`. The ORIGINAL reason for this clamp is
+ * gone: under the previous file-based lock the spawn lock expired by age, so a
+ * caller holding it past the threshold would have it reclaimed underneath them
+ * and a duplicate daemon spawned. The SQLite lock has no age expiry at all
+ * (data-dir-lock.ts) — a crashed holder releases instantly, a live one keeps it
+ * as long as it needs — so over-holding is no longer a correctness hazard.
+ *
+ * The clamp is kept on a different, weaker justification: this value is how
+ * long a single MCP tool call will BLOCK before reporting the daemon
+ * unavailable, and an unbounded env var there means an agent can hang for
+ * minutes with no output. If that ceiling is ever the wrong one, raise this
+ * constant deliberately rather than removing the bound.
  */
 const COLD_START_WAIT_MS = (() => {
   const raw = parseInt(process.env["SCRYBE_MCP_COLD_START_WAIT_MS"] ?? "", 10);
@@ -676,7 +682,7 @@ export async function runMcpShim(): Promise<void> {
     serveUnavailableServer({
       variant: "daemon-version-mismatch",
       description:
-        "Run: scrybe daemon stop && scrybe daemon start   (then reconnect)\n" +
+        "Run: scrybe daemon restart --force   (then reconnect)\n" +
         "\n" +
         "scrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\n" +
         "and cannot use the new on-disk format helpers. Stop + start refreshes the daemon\n" +
@@ -767,7 +773,7 @@ export async function runMcpShim(): Promise<void> {
     if (skew.isPreUpgradeBoundary) {
       return jsonResult({
         error:
-          `Run: scrybe daemon stop && scrybe daemon start   (then reconnect)\n` +
+          `Run: scrybe daemon restart --force   (then reconnect)\n` +
           `\n` +
           `scrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\n` +
           `and cannot use the new on-disk format helpers. Stop + start refreshes the daemon\n` +

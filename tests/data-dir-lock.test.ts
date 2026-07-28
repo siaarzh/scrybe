@@ -100,10 +100,40 @@ describe("data-dir-lock — contention", () => {
     expect(acquireSpawnLock().outcome).toBe("contended");
   });
 
-  it("is re-entrant: a process that already holds a lock still reads 'acquired'", async () => {
+  /**
+   * A second acquire from the SAME process must NOT report success.
+   *
+   * It used to, mirroring the old file-based "the lock file records our own pid"
+   * case. That is unsound in both directions: a caller told `acquired` believes
+   * it may act (ensureRunning would spawn a second daemon), and since release()
+   * is not refcounted its `finally` would close the transaction the first caller
+   * is still inside — handing the cross-process lock to any other process on the
+   * machine mid-critical-section.
+   */
+  it("a second acquire in the same process reports contended, not acquired", async () => {
     const { acquireDataDirOwnership } = await freshLockModule();
     expect(acquireDataDirOwnership().outcome).toBe("acquired");
+
+    const second = acquireDataDirOwnership();
+    expect(second.outcome).toBe("contended");
+    expect(second.heldByPid).toBe(process.pid);
+  });
+
+  it("a release paired with that second acquire cannot free the real holder's lock", async () => {
+    const dataDir = process.env["SCRYBE_DATA_DIR"]!;
+    const { acquireDataDirOwnership, releaseDataDirOwnership } = await freshLockModule();
+
     expect(acquireDataDirOwnership().outcome).toBe("acquired");
+    const second = acquireDataDirOwnership();
+
+    // Every caller in the tree releases only on `acquired`, so a correct caller
+    // never reaches this. Prove the lock survives even if one gets it wrong.
+    if (second.outcome === "acquired") releaseDataDirOwnership();
+
+    expect(
+      isLockHeld(dataDir, "owner"),
+      "a second in-process acquire/release pair freed the lock the first caller still holds",
+    ).toBe(true);
   });
 
   it("release frees the lock for another process", async () => {

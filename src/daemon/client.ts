@@ -121,26 +121,44 @@ export async function ensureRunning(timeoutMs = 3000): Promise<EnsureRunningResu
   const existingPid = readPidfile();
   if (existingPid?.version) warnVersionSkewCli(existingPid.version);
   const existing = existingPid?.port ? new DaemonClient({ port: existingPid.port }) : null;
+  const deadline = Date.now() + timeoutMs;
+
   if (existing) {
     try {
       const h = await existing.health();
-      return h.draining ? { ok: true, draining: true } : { ok: true };
+      if (!h.draining) return { ok: true };
+      // DRAINING — do not return yet. `waitForHealthyPidfile` exists precisely
+      // for this case (see its docstring: a draining daemon must not end the
+      // wait early, because it is on its way out and a replacement is usually
+      // coming), but returning here meant the single most common shape —
+      // pidfile intact, daemon alive and draining — was the one shape that
+      // never reached it, and the caller spent none of its budget.
+      //
+      // The concrete cost of returning early: an always-on daemon's rss-guard
+      // restart drains for ~2 s and DOES spawn its own replacement, yet a
+      // caller with a 3-15 s budget was told "shutting down, retry later"; and
+      // `daemon up` / the onboarding wizard read `ok: true` and reported a
+      // daemon as started when the pid they printed was already exiting.
+      //
+      // A long drain (a plain `daemon stop`, up to 30 min, no replacement owed)
+      // still ends in `{ok:true, draining:true}` — just after the caller's own
+      // budget rather than instantly. That is the honest answer either way, and
+      // no caller waits longer than the timeout it chose.
+      return await waitForHealthyPidfile(deadline);
     } catch {
       // Stale pidfile — proceed to spawn
     }
   }
-
-  const deadline = Date.now() + timeoutMs;
 
   // Plan 108 slice 2: serialise check→spawn across PROCESSES via the spawn
   // lock (client.ts is invoked as N separate OS processes — pmux sessions,
   // CLI invocations, the MCP shim — not N calls within one process, which is
   // exactly the shape of the incident). Only the caller that wins the lock
   // actually spawns a daemon; losers wait for the winner's daemon to become
-  // healthy instead of racing a second spawn of their own. A stale spawn
-  // lock left by a crashed holder is reclaimed inside acquireSpawnLock()
-  // itself (dead-pid + age-based reclaim, Plan 108 slice 1) — it can never
-  // wedge a caller here indefinitely.
+  // healthy instead of racing a second spawn of their own. A crashed holder
+  // cannot wedge a caller here: the lock is an open SQLite transaction, which
+  // the OS drops when the holder dies — there is no reclaim step, no dead-pid
+  // detection and no age expiry, because there is nothing left to reclaim.
   const lock = acquireSpawnLock();
 
   if (lock.outcome === "contended") {

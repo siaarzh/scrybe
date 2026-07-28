@@ -784,7 +784,12 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
           const { ensureRunning, DAEMON_COLD_START_WAIT_MS } = await import("../daemon/client.js");
           const started = await ensureRunning(DAEMON_COLD_START_WAIT_MS);
           const { readPidfile } = await import("../daemon/pidfile.js");
-          const pidData = started.ok ? readPidfile() : null;
+          // `draining` is not started: the pid in the pidfile belongs to a
+          // daemon on its way out, and printing it as "started · PID N" is the
+          // same false success G11 removed, one layer up. ensureRunning() now
+          // waits out a short drain for us, so reaching here with `draining`
+          // means the daemon really is still going down.
+          const pidData = started.ok && !started.draining ? readPidfile() : null;
           const pidStr = pidData ? `PID ${pidData.pid} · port ${pidData.port}` : "not started — run `scrybe doctor`";
           spin.stop(`Daemon autostart registered · ${status.method ?? "autostart"} · daemon ${pidData ? "started" : "NOT started"} · ${pidStr}`);
         } catch (err: any) {

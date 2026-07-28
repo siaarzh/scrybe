@@ -28,7 +28,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { spawn, spawnSync } from "child_process";
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "fs";
+import { existsSync, readFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { holdLock, killHeldLocks, probeLock } from "./helpers/lock-probe.js";
@@ -221,7 +221,6 @@ describe("rss-guard restart — contended spawn lock must not produce ZERO daemo
       const dataDir = makeDataDir();
       activeDataDirs.push(dataDir);
       const pidfilePath = join(dataDir, "daemon.pid");
-      const spawnLockPath = join(dataDir, "daemon-spawn.lock");
 
       const env = {
         ...process.env,

@@ -36,10 +36,13 @@ export function removePidfile(): void {
 }
 
 /**
- * True when `pid` names a process that is still RUNNING. The single shared
- * implementation for the whole product (review G12) — `data-dir-lock.ts` used
- * to carry a second, subtly different copy, and there it is the SOLE staleness
- * signal for a lock that never expires by age.
+ * True when `pid` names a process that is still RUNNING.
+ *
+ * Used for the PIDFILE only. The data-dir locks deliberately do NOT consult
+ * this: a SQLite lock is released by the OS when its holder dies, so liveness
+ * never has to be inferred there. This is the single implementation for the
+ * pidfile paths that genuinely do need to guess whether a recorded pid is
+ * still alive.
  *
  *  - A non-integer / non-positive pid can only come from a corrupt lock or
  *    pidfile; treat it as dead rather than letting `process.kill` interpret it

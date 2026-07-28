@@ -30,7 +30,7 @@ import {
   type ValidateResult,
 } from "../onboarding/validate-provider.js";
 import { PROVIDERS } from "../providers.js";
-import { ensureRunning, DaemonClient } from "../daemon/client.js";
+import { ensureRunning, DaemonClient, daemonWriteUnavailableError } from "../daemon/client.js";
 import { submitSourceJob } from "../jobs.js";
 import { listProjects } from "../registry.js";
 import type { Tool } from "./types.js";
@@ -372,6 +372,21 @@ export const initTool: Tool<InitInput, InitOutput> = {
       const jobIds: string[] = [];
       const indexedProjects: string[] = [];
 
+      // This was the one daemon-routing site the draining sweep missed. Against
+      // a draining daemon `ensureRunning()` reports ok, so we entered the daemon
+      // branch and `submitReindex` threw a bare `POST /kick returned 503` from
+      // inside the loop below — uncaught, after the MCP config had already been
+      // written, leaving onboarding half-done.
+      //
+      // Refuse ONLY for a live-but-draining daemon: it will 503 the /kick below
+      // and it still owns the data dir. Every other degraded outcome
+      // (container, opted-out, or a daemon that could not start) means nothing
+      // else is writing, so the in-process fallback further down is correct —
+      // refusing those too would break onboarding on exactly the machines that
+      // depend on the fallback.
+      if (daemon.ok && daemon.draining) {
+        throw daemonWriteUnavailableError(daemon, "Initial indexing")!;
+      }
       if (daemon.ok) {
         const client = DaemonClient.fromPidfile();
         if (client) {
