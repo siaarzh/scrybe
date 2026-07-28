@@ -81,25 +81,44 @@ afterEach(() => {
   fixture?.cleanup(); fixture = null;
 });
 
+/**
+ * Run the preinstall hook WITHOUT blocking this process's event loop.
+ *
+ * Deliberately async, NOT spawnSync — same trap as tests/sigterm-escalation.test.ts
+ * documents. The daemon under test is a child of THIS vitest process, so when it
+ * exits it becomes a zombie until vitest reaps it. spawnSync blocks the event
+ * loop for the whole hook run, so the reap never happens, `process.kill(pid, 0)`
+ * keeps succeeding on the zombie, and the hook's waitForExit never sees it die —
+ * it burns its full escalation budget (POST /shutdown + 5s + SIGTERM + 5s +
+ * SIGTERM + 10s = 22s) and blows the harness timeout.
+ *
+ * That is a harness artifact, not product behaviour: in a real install the
+ * daemon is detached and reparented to init, which reaps it immediately. Timed
+ * directly against a live daemon, this hook returns in ~300ms.
+ */
 function runPreinstall(
   hookPath: string,
   dataDir: string,
   extraEnv: Record<string, string> = {}
-): { stdout: string; stderr: string; exit: number } {
-  const result = spawnSync(NODE, [hookPath], {
-    env: {
-      ...(process.env as Record<string, string>),
-      SCRYBE_DATA_DIR: dataDir,
-      ...extraEnv,
-    },
-    encoding: "utf8",
-    timeout: 15_000,
+): Promise<{ stdout: string; stderr: string; exit: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(NODE, [hookPath], {
+      env: {
+        ...(process.env as Record<string, string>),
+        SCRYBE_DATA_DIR: dataDir,
+        ...extraEnv,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => { stdout += c.toString(); });
+    child.stderr.on("data", (c) => { stderr += c.toString(); });
+    const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* ignore */ } }, 25_000);
+    child.once("error", (err) => { clearTimeout(timer); reject(err); });
+    child.once("exit", (code) => { clearTimeout(timer); resolve({ stdout, stderr, exit: code ?? 1 }); });
   });
-  return {
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    exit: result.status ?? 1,
-  };
 }
 
 function isPidAlive(pid: number): boolean {
@@ -113,7 +132,7 @@ describe("Plan 102 — preinstall dev-checkout guard", () => {
     expect(isPidAlive(daemon.pid)).toBe(true);
 
     // PRE_INSTALL resolves pkgRoot to this repo's root, which has `.git`.
-    const result = runPreinstall(PRE_INSTALL, env.dataDir);
+    const result = await runPreinstall(PRE_INSTALL, env.dataDir);
 
     expect(result.exit).toBe(0);
     expect(result.stdout).not.toContain("[scrybe preinstall]");
@@ -126,7 +145,7 @@ describe("Plan 102 — preinstall dev-checkout guard", () => {
     const daemon = await startDaemon(env.dataDir);
     expect(isPidAlive(daemon.pid)).toBe(true);
 
-    const result = runPreinstall(fixture.hookPath, env.dataDir);
+    const result = await runPreinstall(fixture.hookPath, env.dataDir);
 
     expect(result.exit).toBe(0);
     expect(result.stdout).toContain("[scrybe preinstall]");
@@ -142,7 +161,7 @@ describe("Plan 102 — preinstall dev-checkout guard", () => {
     const daemon = await startDaemon(env.dataDir);
     expect(isPidAlive(daemon.pid)).toBe(true);
 
-    const result = runPreinstall(PRE_INSTALL, env.dataDir, { SCRYBE_HOOK_ASSUME_INSTALL: "1" });
+    const result = await runPreinstall(PRE_INSTALL, env.dataDir, { SCRYBE_HOOK_ASSUME_INSTALL: "1" });
 
     expect(result.exit).toBe(0);
     expect(result.stdout).toContain("[scrybe preinstall]");

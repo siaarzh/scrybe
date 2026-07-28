@@ -81,23 +81,42 @@ afterEach(() => {
   env?.cleanup(); env = null;
 });
 
-function runPreinstall(dataDir: string): { stdout: string; stderr: string; exit: number } {
-  const result = spawnSync(NODE, [PRE_INSTALL], {
-    env: {
-      ...(process.env as Record<string, string>),
-      SCRYBE_DATA_DIR: dataDir,
-      // Plan 102: pkgRoot here is the repo root (join(process.cwd(), ...)), which has `.git` —
-      // without this the dev-checkout guard would skip the stop this test asserts on (D4).
-      SCRYBE_HOOK_ASSUME_INSTALL: "1",
-    },
-    encoding: "utf8",
-    timeout: 15_000,
+/**
+ * Run the preinstall hook WITHOUT blocking this process's event loop.
+ *
+ * Deliberately async, NOT spawnSync — same trap as tests/sigterm-escalation.test.ts
+ * documents. The daemon under test is a child of THIS vitest process, so when it
+ * exits it becomes a zombie until vitest reaps it. spawnSync blocks the event
+ * loop for the whole hook run, so the reap never happens, `process.kill(pid, 0)`
+ * keeps succeeding on the zombie, and the hook's waitForExit never sees it die —
+ * it burns its full escalation budget (POST /shutdown + 5s + SIGTERM + 5s +
+ * SIGTERM + 10s = 22s) and blows the harness timeout.
+ *
+ * That is a harness artifact, not product behaviour: in a real install the
+ * daemon is detached and reparented to init, which reaps it immediately. Timed
+ * directly against a live daemon, this hook returns in ~300ms.
+ */
+function runPreinstall(dataDir: string): Promise<{ stdout: string; stderr: string; exit: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(NODE, [PRE_INSTALL], {
+      env: {
+        ...(process.env as Record<string, string>),
+        SCRYBE_DATA_DIR: dataDir,
+        // Plan 102: pkgRoot here is the repo root (join(process.cwd(), ...)), which has `.git` —
+        // without this the dev-checkout guard would skip the stop this test asserts on (D4).
+        SCRYBE_HOOK_ASSUME_INSTALL: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (c) => { stdout += c.toString(); });
+    child.stderr.on("data", (c) => { stderr += c.toString(); });
+    const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* ignore */ } }, 25_000);
+    child.once("error", (err) => { clearTimeout(timer); reject(err); });
+    child.once("exit", (code) => { clearTimeout(timer); resolve({ stdout, stderr, exit: code ?? 1 }); });
   });
-  return {
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    exit: result.status ?? 1,
-  };
 }
 
 function isPidAlive(pid: number): boolean {
@@ -105,18 +124,18 @@ function isPidAlive(pid: number): boolean {
 }
 
 describe("Fix 4 — preinstall script", () => {
-  it("exits 0 when no pidfile exists (fresh install)", () => {
+  it("exits 0 when no pidfile exists (fresh install)", async () => {
     env = makeScenarioEnv();
     // No pidfile written — directory is empty
 
-    const result = runPreinstall(env.dataDir);
+    const result = await runPreinstall(env.dataDir);
 
     expect(result.exit).toBe(0);
     // stdout should be silent (no daemon to stop)
     expect(result.stdout).not.toContain("[scrybe preinstall]");
   });
 
-  it("exits 0 when pidfile has a dead PID (stale pidfile)", () => {
+  it("exits 0 when pidfile has a dead PID (stale pidfile)", async () => {
     env = makeScenarioEnv();
     mkdirSync(env.dataDir, { recursive: true });
 
@@ -133,7 +152,7 @@ describe("Fix 4 — preinstall script", () => {
       "utf8"
     );
 
-    const result = runPreinstall(env.dataDir);
+    const result = await runPreinstall(env.dataDir);
 
     // Must always exit 0
     expect(result.exit).toBe(0);
@@ -146,7 +165,7 @@ describe("Fix 4 — preinstall script", () => {
     expect(isPidAlive(daemon.pid)).toBe(true);
 
     // Run preinstall — should send /shutdown and wait for process to exit
-    const result = runPreinstall(env.dataDir);
+    const result = await runPreinstall(env.dataDir);
 
     expect(result.exit).toBe(0);
     expect(result.stdout).toContain("[scrybe preinstall]");
