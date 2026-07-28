@@ -108,7 +108,21 @@ describe("Global plural shortcuts (no deprecation warning)", () => {
 });
 
 describe("ps alias for status", () => {
-  beforeAll(() => { run(["daemon", "stop"]); }); // drain any daemon left by earlier tests
+  // Kill — not merely request a stop on — any daemon left by earlier tests.
+  //
+  // A plain `daemon stop` only ASKS, and returns while the daemon drains. The
+  // `branch list -p` case above registers a source rooted at process.cwd(), so
+  // the daemon left behind is indexing this entire repo, and a polite request
+  // leaves it running — that is how a test daemon reached 6.9 GB RSS in 74 s
+  // and nearly livelocked the host. `--force` is the documented way to say
+  // "I need it gone now", which is what a teardown means.
+  //
+  // NOTE: an earlier version of this comment blamed node_modules. That is
+  // WRONG — `node_modules` is in SKIP_DIRS (src/chunker.ts) and dot-dirs are
+  // skipped too, so it is never indexed. The growth is in ordinary indexing and
+  // embedding, which means it is NOT a test-only artifact: a real session
+  // indexing a large tree hits the same path. See Plan 109.
+  beforeAll(() => { run(["daemon", "stop", "--force"]); });
 
   it("scrybe ps exits 0 without deprecation warning", () => {
     const r = run(["ps"], {}, 30_000);

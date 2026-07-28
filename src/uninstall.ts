@@ -1,4 +1,4 @@
-import { existsSync, accessSync, constants, rmSync, readdirSync, statSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, accessSync, constants, rmSync, readdirSync, statSync, readFileSync } from "fs";
 import { join } from "path";
 import { config } from "./config.js";
 import { listProjects } from "./registry.js";
@@ -159,26 +159,37 @@ export async function executeUninstallPlan(plan: UninstallPlan): Promise<Uninsta
 
   const actions: UninstallResult["actions"] = [];
   let anyFailed = false;
+  /**
+   * Review F6: deleting the data dir out from under a LIVE daemon is
+   * destructive in the worst way — it still holds the data-dir ownership lock
+   * plus open LanceDB/SQLite handles. The old code force-unlinked the pidfile after
+   * a 5 s poll and then rmSync'd the whole dir regardless. Now a daemon that
+   * refuses to die BLOCKS the data-dir deletion instead.
+   */
+  let daemonStillAlive = false;
 
   // 1. Stop daemon
   if (plan.daemon.running && plan.daemon.pid) {
+    const { stopDaemonGracefully } = await import("./daemon/pidfile.js");
     try {
-      process.kill(plan.daemon.pid, "SIGTERM");
-      // Wait up to 5s for pidfile to disappear
-      const { getPidfilePath } = await import("./daemon/pidfile.js");
-      const pidfilePath = getPidfilePath();
-      const deadline = Date.now() + 5000;
-      while (existsSync(pidfilePath) && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 200));
+      // `force: true` — escalation is opt-in (review G3), and uninstall is the
+      // one caller where the opt-in has already happened: the CLI prints
+      // "will stop, cancels N active reindex job(s)" and requires the operator
+      // to type `yes` (or pass --yes) before this runs. Waiting out a 30-minute
+      // drain here would strand the whole uninstall.
+      const result = await stopDaemonGracefully(plan.daemon.pid, { force: true });
+      if (result.stopped) {
+        actions.push({ kind: "daemon", target: `PID ${plan.daemon.pid}`, status: "ok",
+          message: `stopped (${plan.daemon.activeJobs} jobs cancelled)` });
+      } else {
+        anyFailed = true;
+        daemonStillAlive = true;
+        actions.push({ kind: "daemon", target: `PID ${plan.daemon.pid}`, status: "failed",
+          message: `${result.detail ?? result.reason}` });
       }
-      // Windows: SIGTERM → TerminateProcess skips signal handlers; force-remove stale pidfile
-      if (existsSync(pidfilePath)) {
-        try { unlinkSync(pidfilePath); } catch { /* ignore */ }
-      }
-      actions.push({ kind: "daemon", target: `PID ${plan.daemon.pid}`, status: "ok",
-        message: `stopped (${plan.daemon.activeJobs} jobs cancelled)` });
     } catch (err: any) {
       anyFailed = true;
+      daemonStillAlive = true;
       actions.push({ kind: "daemon", target: `PID ${plan.daemon.pid}`, status: "failed",
         message: err.message });
     }
@@ -233,7 +244,11 @@ export async function executeUninstallPlan(plan: UninstallPlan): Promise<Uninsta
   }
 
   // 4. Delete DATA_DIR
-  if (existsSync(plan.dataDir.path)) {
+  if (daemonStillAlive) {
+    actions.push({ kind: "dataDir", target: plan.dataDir.path, status: "skipped",
+      message: "daemon still running — refusing to delete the data dir under a live process. " +
+        "Stop it (kill -9 the PID above) and re-run `scrybe uninstall`." });
+  } else if (existsSync(plan.dataDir.path)) {
     try {
       rmSync(plan.dataDir.path, { recursive: true, force: true });
       actions.push({ kind: "dataDir", target: plan.dataDir.path, status: "ok" });

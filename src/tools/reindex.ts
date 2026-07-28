@@ -12,7 +12,7 @@ import {
   listJobs,
 } from "../jobs.js";
 import { getQueueStatus } from "../jobs-store.js";
-import { ensureRunning, DaemonClient } from "../daemon/client.js";
+import { ensureRunning, DaemonClient, daemonWriteUnavailableError } from "../daemon/client.js";
 import { deleteBranch, getChunkIdsForBranch } from "../branch-state.js";
 import { config } from "../config.js";
 import type { IndexMode } from "../types.js";
@@ -71,7 +71,7 @@ export const reindexProjectTool: Tool<
 
     // Route through daemon when available (prevents cross-process write races)
     const daemon = await ensureRunning();
-    if (daemon.ok) {
+    if (daemon.ok && !daemon.draining) {
       const client = DaemonClient.fromPidfile();
       if (client) {
         const resp = await client.submitReindex({ projectId: project_id, sourceId: source_ids?.[0], branch, mode: m, contentRef: content_ref });
@@ -89,12 +89,8 @@ export const reindexProjectTool: Tool<
     }
 
     // In-process fallback (container / opted-out / daemon unavailable)
-    if (!daemon.ok && (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout")) {
-      throw Object.assign(new Error(
-        "The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\n" +
-        "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
-      ), { error_type: "daemon_unavailable" });
-    }
+    const unavailable = daemonWriteUnavailableError(daemon);
+    if (unavailable) throw unavailable;
     const jobResult = submitJob(project_id, m, source_ids, branch, undefined, content_ref);
     if (typeof jobResult === "object" && "error" in jobResult) {
       throw new Error(`A reindex job is already running for this project (job: ${jobResult.job_id})`);
@@ -131,7 +127,7 @@ export const reindexSourceTool: Tool<
 
     // Route through daemon when available
     const daemon = await ensureRunning();
-    if (daemon.ok) {
+    if (daemon.ok && !daemon.draining) {
       const client = DaemonClient.fromPidfile();
       if (client) {
         const resp = await client.submitReindex({ projectId: project_id, sourceId: source_id, branch, mode: m, contentRef: content_ref });
@@ -149,12 +145,8 @@ export const reindexSourceTool: Tool<
       }
     }
 
-    if (!daemon.ok && (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout")) {
-      throw Object.assign(new Error(
-        "The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\n" +
-        "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
-      ), { error_type: "daemon_unavailable" });
-    }
+    const unavailable = daemonWriteUnavailableError(daemon);
+    if (unavailable) throw unavailable;
     const sourceJobResult = submitSourceJob(project_id, source_id, m, branch, undefined, content_ref);
     if (typeof sourceJobResult === "object" && "error" in sourceJobResult) {
       throw new Error(`A reindex job is already running for this project (job: ${sourceJobResult.job_id})`);
@@ -273,7 +265,7 @@ export const indexEphemeralTool: Tool<
     // Route through daemon when available (prevents cross-process write races) —
     // same Slice-2 plumbing reindex_source uses (label via `branch`, content via `contentRef`).
     const daemon = await ensureRunning();
-    if (daemon.ok) {
+    if (daemon.ok && !daemon.draining) {
       const client = DaemonClient.fromPidfile();
       if (client) {
         const resp = await client.submitReindex({ projectId: project_id, sourceId: resolvedSourceId, branch: ephemeralLabel, mode: "incremental", contentRef });
@@ -290,12 +282,8 @@ export const indexEphemeralTool: Tool<
       }
     }
 
-    if (!daemon.ok && (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout")) {
-      throw Object.assign(new Error(
-        "The scrybe daemon failed to start. index_ephemeral requires the daemon to coordinate writes.\n" +
-        "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index-ephemeral ..."
-      ), { error_type: "daemon_unavailable" });
-    }
+    const unavailable = daemonWriteUnavailableError(daemon, "index_ephemeral");
+    if (unavailable) throw unavailable;
 
     const jobResult = submitSourceJob(project_id, resolvedSourceId, "incremental", ephemeralLabel, undefined, contentRef);
     if (typeof jobResult === "object" && "error" in jobResult) {
@@ -391,6 +379,15 @@ export const dropEphemeralTool: Tool<
 
     // Source-scoped gc to actually reclaim the label's now-orphaned chunks.
     const daemon = await ensureRunning();
+    // A DRAINING daemon still owns the data dir and is still writing, so the
+    // in-process fallback below would be a second writer on the same LanceDB
+    // tables. Refuse only in that case: when there is no live daemon at all
+    // (container, opted-out, or a daemon that could not start) nothing else is
+    // writing and the fallback is both safe and this tool's documented
+    // behaviour.
+    if (daemon.ok && daemon.draining) {
+      throw daemonWriteUnavailableError(daemon, "Dropping an ephemeral branch")!;
+    }
     if (daemon.ok) {
       const client = DaemonClient.fromPidfile();
       if (client) {

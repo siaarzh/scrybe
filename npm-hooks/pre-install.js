@@ -71,15 +71,34 @@ async function main() {
     } catch { /* fall through to SIGTERM */ }
   }
 
-  // Wait up to 5s for PID to exit
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    try { process.kill(pid, 0); } catch { return; } // ESRCH = gone
-    await new Promise(r => setTimeout(r, 200));
-  }
+  const waitForExit = async (ms) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      try { process.kill(pid, 0); } catch { return true; } // ESRCH = gone
+      await new Promise(r => setTimeout(r, 200));
+    }
+    try { process.kill(pid, 0); } catch { return true; }
+    return false;
+  };
 
-  // Force-kill as last resort
-  try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+  if (await waitForExit(5000)) return;
+
+  // Review G5: this hook is the FOURTH stop path, and it used to end with a
+  // single SIGTERM and return immediately. If the /shutdown POST above failed
+  // (port 0, daemon busy, wrong port), that one signal merely STARTS the
+  // daemon's drain — up to 30 minutes — while npm replaces files underneath a
+  // live process, which is the exact Windows file-replacement failure this hook
+  // exists to prevent. Force the exit: SIGTERM, wait, then a SECOND SIGTERM,
+  // which the daemon's escalation path turns into an immediate exit.
+  //
+  // Kept inline rather than importing `stopDaemonGracefully` from dist/: this
+  // file must stay zero-deps, and at preinstall time dist/ belongs to whichever
+  // version npm happens to have staged — importing it is exactly the
+  // "run code from an unrelated checkout" hazard that Plan 102 fixed.
+  try { process.kill(pid, "SIGTERM"); } catch { return; } // ESRCH = already gone
+  if (await waitForExit(5000)) return;
+  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  await waitForExit(10000);
 }
 
 main().catch(() => {}).finally(() => process.exit(0));

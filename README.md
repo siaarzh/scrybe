@@ -160,7 +160,9 @@ Architecture, autostart, and pinned branches: [docs/daemon.md](docs/daemon.md).
 
 ## Upgrading & uninstalling
 
-- **Global install:** `scrybe daemon stop && npm install -g scrybe-cli` (exit Claude Code first).
+- **Global install:** `scrybe daemon stop --force && npm install -g scrybe-cli` (exit Claude Code first).
+  `--force` is deliberate: a plain `daemon stop` exits non-zero while the daemon finishes an
+  in-flight reindex, which would short-circuit the `&&` and skip the upgrade.
 - **npx users:** upgrades are automatic on each new session.
 - **Uninstall:** `scrybe uninstall` reverses everything scrybe writes outside the binary (daemon, MCP
   entries, git-hook blocks, DATA_DIR — with timestamped backups), then `npm uninstall -g scrybe-cli`.

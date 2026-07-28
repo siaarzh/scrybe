@@ -65,7 +65,13 @@ async function isDaemonAlreadyRunning(dataDir) {
     const res = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: AbortSignal.timeout(1000),
     }).catch(() => null);
-    return res?.ok === true;
+    if (res?.ok !== true) return false;
+    // A DRAINING daemon answers /health with 200 (any non-2xx there makes
+    // callers SIGKILL it), but it is on its way out and will be gone seconds
+    // from now. Treating it as "already running" meant an upgrade spawned
+    // nothing and left NO daemon at all (review G5).
+    const body = await res.json().catch(() => null);
+    return body?.draining !== true;
   } catch {
     return false;
   }

@@ -961,6 +961,19 @@ const MIGRATIONS: Migration[] = [
 ];
 
 /**
+ * Cheap, side-effect-free "is there anything to do?" predicate.
+ *
+ * Lets `checkAndMigrate()` take a no-lock fast path on the overwhelmingly
+ * common case where the store is already current (review F10) — every CLI
+ * invocation and every MCP `initialize` used to pay a write+link+unlink and a
+ * potential 120 s block against a wedged holder, for a pure no-op read.
+ */
+export function hasPendingMigrations(appliedIds: string[]): boolean {
+  const applied = new Set(appliedIds);
+  return MIGRATIONS.some((m) => !applied.has(m.id));
+}
+
+/**
  * Run any migrations not yet in `appliedIds`.
  * Returns the updated list of applied IDs (caller must persist).
  */

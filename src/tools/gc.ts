@@ -5,7 +5,7 @@
  */
 import { getProject, listProjects } from "../registry.js";
 import type { Tool } from "./types.js";
-import { DaemonClient, ensureRunning } from "../daemon/client.js";
+import { DaemonClient, ensureRunning, daemonWriteUnavailableError } from "../daemon/client.js";
 
 export const gcTool: Tool<
   { project_id?: string; source_id?: string },
@@ -46,6 +46,17 @@ export const gcTool: Tool<
 
     // Try to route through daemon queue via HTTP (cross-process safe)
     const daemon = await ensureRunning();
+    // A DRAINING daemon still owns the data dir and is still writing, so the
+    // in-process fallback below would be a second writer on the same LanceDB
+    // tables. Refuse only in that case: when there is no live daemon at all
+    // (container, opted-out, or a daemon that could not start) nothing else is
+    // writing and the fallback is both safe and this tool's documented
+    // behaviour.
+    // gc deletes orphaned chunks and COMPACTS LanceDB tables, so racing a
+    // draining daemon's own writes is the worst version of this.
+    if (daemon.ok && daemon.draining) {
+      throw daemonWriteUnavailableError(daemon, "Garbage collection")!;
+    }
     if (daemon.ok) {
       const client = DaemonClient.fromPidfile();
       if (client) {

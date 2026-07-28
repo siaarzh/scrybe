@@ -6,8 +6,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { VERSION, readScrybeConfig } from "./config.js";
-import { DaemonClient, ensureRunning } from "./daemon/client.js";
+import { DaemonClient, ensureRunning, DAEMON_COLD_START_WAIT_MS } from "./daemon/client.js";
 import { readPidfile } from "./daemon/pidfile.js";
+import { MAX_SPAWN_LOCK_HOLD_MS } from "./daemon/data-dir-lock.js";
 import { KNOWN_TOOL_NAMES } from "./tools/tool-names.js";
 import { compareSemVer, getMajorVersion } from "./util/semver-compare.js";
 
@@ -179,6 +180,18 @@ function isConnectClassError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * A 503 carrying `draining: true` means the daemon is finishing in-flight work
+ * and going away; a replacement can be spawned. Treat it exactly like a
+ * connect-class failure so `callRpc` re-resolves / respawns instead of
+ * rethrowing an opaque `daemon RPC returned HTTP 503` at the agent (review G1:
+ * recovery from a drain-time 503 was structurally unreachable, because
+ * `isConnectClassError` only ever matches an errno on `err.cause.code`).
+ */
+function isDrainingError(err: unknown): boolean {
+  return err instanceof Error && (err as { daemonDraining?: boolean }).daemonDraining === true;
+}
+
 async function _singleRpc(url: string, method: string, params: Record<string, unknown>): Promise<unknown> {
   const id = Math.random().toString(36).slice(2);
   // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
@@ -193,7 +206,15 @@ async function _singleRpc(url: string, method: string, params: Record<string, un
   });
 
   if (!res.ok) {
-    throw new Error(`daemon RPC returned HTTP ${res.status}`);
+    // Tag a drain-time 503 so callRpc can recover from it (see isDrainingError).
+    let draining = false;
+    if (res.status === 503) {
+      try { draining = ((await res.json()) as { draining?: boolean })?.draining === true; } catch { /* body not JSON */ }
+    }
+    throw Object.assign(
+      new Error(`daemon RPC returned HTTP ${res.status}`),
+      draining ? { daemonDraining: true } : {},
+    );
   }
 
   const data = (await res.json()) as RpcSuccess | RpcError;
@@ -243,8 +264,10 @@ async function callRpc(
   try {
     return await _singleRpc(url, method, params);
   } catch (firstErr) {
-    // D3: only retry for connect-class errors (request never reached daemon)
-    if (!isConnectClassError(firstErr)) throw firstErr;
+    // D3: only retry for connect-class errors (request never reached daemon),
+    // plus a drain-time 503 (review G1 — the daemon is going away and a
+    // replacement can serve the call).
+    if (!isConnectClassError(firstErr) && !isDrainingError(firstErr)) throw firstErr;
 
     // Re-resolve from pidfile
     const newUrl = resolveBaseUrl();
@@ -590,9 +613,26 @@ function serveUnavailableServer(unavailable: DaemonUnavailableState): void {
 
 // ─── Main shim entrypoint ─────────────────────────────────────────────────────
 
+/**
+ * Cold-start budget handed to `ensureRunning()`.
+ *
+ * Clamped to `MAX_SPAWN_LOCK_HOLD_MS`. The ORIGINAL reason for this clamp is
+ * gone: under the previous file-based lock the spawn lock expired by age, so a
+ * caller holding it past the threshold would have it reclaimed underneath them
+ * and a duplicate daemon spawned. The SQLite lock has no age expiry at all
+ * (data-dir-lock.ts) — a crashed holder releases instantly, a live one keeps it
+ * as long as it needs — so over-holding is no longer a correctness hazard.
+ *
+ * The clamp is kept on a different, weaker justification: this value is how
+ * long a single MCP tool call will BLOCK before reporting the daemon
+ * unavailable, and an unbounded env var there means an agent can hang for
+ * minutes with no output. If that ceiling is ever the wrong one, raise this
+ * constant deliberately rather than removing the bound.
+ */
 const COLD_START_WAIT_MS = (() => {
   const raw = parseInt(process.env["SCRYBE_MCP_COLD_START_WAIT_MS"] ?? "", 10);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 15_000;
+  const requested = Number.isFinite(raw) && raw >= 0 ? raw : DAEMON_COLD_START_WAIT_MS;
+  return Math.min(requested, MAX_SPAWN_LOCK_HOLD_MS);
 })();
 
 export async function runMcpShim(): Promise<void> {
@@ -642,7 +682,7 @@ export async function runMcpShim(): Promise<void> {
     serveUnavailableServer({
       variant: "daemon-version-mismatch",
       description:
-        "Run: scrybe daemon stop && scrybe daemon start   (then reconnect)\n" +
+        "Run: scrybe daemon restart --force   (then reconnect)\n" +
         "\n" +
         "scrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\n" +
         "and cannot use the new on-disk format helpers. Stop + start refreshes the daemon\n" +
@@ -733,7 +773,7 @@ export async function runMcpShim(): Promise<void> {
     if (skew.isPreUpgradeBoundary) {
       return jsonResult({
         error:
-          `Run: scrybe daemon stop && scrybe daemon start   (then reconnect)\n` +
+          `Run: scrybe daemon restart --force   (then reconnect)\n` +
           `\n` +
           `scrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\n` +
           `and cannot use the new on-disk format helpers. Stop + start refreshes the daemon\n` +

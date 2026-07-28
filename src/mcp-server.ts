@@ -116,17 +116,16 @@ let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let _unregisterCalled = false;
 
 async function bootstrapDaemon(): Promise<void> {
-  if (process.env["SCRYBE_NO_AUTO_DAEMON"] === "1") return;
-
-  const { isContainer } = await import("./daemon/container-detect.js");
-  if (isContainer()) return;
-
-  const { isDaemonRunning } = await import("./daemon/pidfile.js");
-  const { running } = await isDaemonRunning();
-  if (!running) {
-    const { spawnDaemonDetached } = await import("./daemon/spawn-detached.js");
-    spawnDaemonDetached({});
-  }
+  // Review G11: this used to fire-and-forget `spawnDaemonDetached({})` with no
+  // verification at all, outside the spawn lock. `ensureRunning()` does the
+  // opt-out/container checks, serialises the check→spawn across processes, and
+  // waits for the child to actually become healthy — the child exiting(0)
+  // silently on contended data-dir ownership is far more likely than it used
+  // to be. Failure is non-fatal: the shim degrades on its own.
+  const { ensureRunning, DAEMON_COLD_START_WAIT_MS } = await import("./daemon/client.js");
+  const result = await ensureRunning(DAEMON_COLD_START_WAIT_MS);
+  // No daemon will ever exist on these two paths — don't heartbeat at one.
+  if (!result.ok && (result.reason === "container" || result.reason === "opted-out")) return;
 
   _startHeartbeatLoop();
 }

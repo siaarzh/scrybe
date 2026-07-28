@@ -5,6 +5,8 @@
 import { readPidfile } from "./pidfile.js";
 import { spawnDaemonDetached } from "./spawn-detached.js";
 import { isContainer } from "./container-detect.js";
+import { acquireSpawnLock, releaseSpawnLock } from "./data-dir-lock.js";
+import { diagEmit } from "./events.js";
 import { VERSION } from "../config.js";
 import type {
   DaemonStatus, DaemonEvent, KickRequest, KickResponse, GcRequest, GcResponse,
@@ -13,10 +15,67 @@ import type {
 export type { DaemonStatus, DaemonEvent, KickRequest, KickResponse, GcRequest, GcResponse };
 
 export type EnsureRunningResult =
-  | { ok: true }
+  | {
+      ok: true;
+      /**
+       * The daemon answered, but it is DRAINING — finishing in-flight work
+       * before it exits (review G4). Deliberately still `ok: true`: the drain
+       * gate keeps reads and `/mcp/rpc` search serving against a still-open DB
+       * (review G1), so failing every caller here would recreate the outage
+       * G1 exists to remove. Only callers that want to ENQUEUE work
+       * (reindex/gc/source) need to treat this as degraded and fall back
+       * in-process — the daemon will refuse those with 503.
+       */
+      draining?: boolean;
+    }
   | { ok: false; reason: "container" | "opted-out" | "spawn-failed" | "health-timeout" };
 
 const DAEMON_OPT_OUT_ENV = "SCRYBE_NO_AUTO_DAEMON";
+
+/**
+ * Cold-start budget for "make sure a daemon exists and is healthy".
+ *
+ * One constant shared by every caller that needs a *verified* daemon — the MCP
+ * shim's cold start and `daemon up` (review G13, which otherwise grew its own
+ * hard-coded 20 s). `ensureRunning()`'s own default (3 s) stays as-is for
+ * opportunistic callers that can degrade.
+ */
+export const DAEMON_COLD_START_WAIT_MS = 15_000;
+
+/**
+ * The error a WRITE path must surface for a degraded `ensureRunning()` outcome,
+ * or `null` when the caller may proceed (either through the daemon or, for
+ * `container`/`opted-out`, in-process — there is no daemon by design there).
+ *
+ * Review G4: `draining` is included. The daemon refuses new work with 503 while
+ * draining, and callers could not tell — they issued the request, got a raw
+ * `HTTP 503` and, because the in-process fallback was gated on the two `ok:false`
+ * reasons, `scrybe index` exited 1 with a bare HTTP error. Falling back
+ * in-process is not the answer either: it would put a SECOND writer on a
+ * LanceDB dir the draining daemon still owns. Refuse, and say to retry.
+ *
+ * Consolidated here because the same block was copy-pasted across four reindex
+ * tools plus `source_add`.
+ */
+export function daemonWriteUnavailableError(
+  result: EnsureRunningResult,
+  what = "Reindex",
+): (Error & { error_type: string }) | null {
+  if (result.ok) {
+    if (!result.draining) return null;
+    return Object.assign(new Error(
+      "The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\n" +
+      "Retry in a moment — a replacement daemon starts on the next call."
+    ), { error_type: "daemon_unavailable" });
+  }
+  if (result.reason === "spawn-failed" || result.reason === "health-timeout") {
+    return Object.assign(new Error(
+      `The scrybe daemon failed to start. ${what} requires the daemon to coordinate writes.\n` +
+      "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
+    ), { error_type: "daemon_unavailable" });
+  }
+  return null;
+}
 
 /**
  * Fix 3 (Plan 31): Warn once per CLI process when the running daemon's version
@@ -62,35 +121,123 @@ export async function ensureRunning(timeoutMs = 3000): Promise<EnsureRunningResu
   const existingPid = readPidfile();
   if (existingPid?.version) warnVersionSkewCli(existingPid.version);
   const existing = existingPid?.port ? new DaemonClient({ port: existingPid.port }) : null;
+  const deadline = Date.now() + timeoutMs;
+
   if (existing) {
     try {
-      await existing.health();
-      return { ok: true };
+      const h = await existing.health();
+      if (!h.draining) return { ok: true };
+      // DRAINING — do not return yet. `waitForHealthyPidfile` exists precisely
+      // for this case (see its docstring: a draining daemon must not end the
+      // wait early, because it is on its way out and a replacement is usually
+      // coming), but returning here meant the single most common shape —
+      // pidfile intact, daemon alive and draining — was the one shape that
+      // never reached it, and the caller spent none of its budget.
+      //
+      // The concrete cost of returning early: an always-on daemon's rss-guard
+      // restart drains for ~2 s and DOES spawn its own replacement, yet a
+      // caller with a 3-15 s budget was told "shutting down, retry later"; and
+      // `daemon up` / the onboarding wizard read `ok: true` and reported a
+      // daemon as started when the pid they printed was already exiting.
+      //
+      // A long drain (a plain `daemon stop`, up to 30 min, no replacement owed)
+      // still ends in `{ok:true, draining:true}` — just after the caller's own
+      // budget rather than instantly. That is the honest answer either way, and
+      // no caller waits longer than the timeout it chose.
+      return await waitForHealthyPidfile(deadline);
     } catch {
       // Stale pidfile — proceed to spawn
     }
   }
 
-  // Spawn daemon and wait for it to become healthy
-  try {
-    spawnDaemonDetached({});
-  } catch {
-    return { ok: false, reason: "spawn-failed" };
+  // Plan 108 slice 2: serialise check→spawn across PROCESSES via the spawn
+  // lock (client.ts is invoked as N separate OS processes — pmux sessions,
+  // CLI invocations, the MCP shim — not N calls within one process, which is
+  // exactly the shape of the incident). Only the caller that wins the lock
+  // actually spawns a daemon; losers wait for the winner's daemon to become
+  // healthy instead of racing a second spawn of their own. A crashed holder
+  // cannot wedge a caller here: the lock is an open SQLite transaction, which
+  // the OS drops when the holder dies — there is no reclaim step, no dead-pid
+  // detection and no age expiry, because there is nothing left to reclaim.
+  const lock = acquireSpawnLock();
+
+  if (lock.outcome === "contended") {
+    // Someone else is actively spawning right now — wait for THEIR daemon
+    // within our existing timeout budget rather than spawning a second one.
+    //
+    // Review F16: emit the outcome. A `health-timeout` returned from HERE means
+    // "we never even attempted a spawn because someone else held the lock",
+    // which is a completely different incident from "we spawned and it never
+    // came up" — and the whole class of bug this change addresses was
+    // originally diagnosed from `daemon-log.jsonl`, so the distinction has to
+    // be on record there.
+    diagEmit({
+      level: "warn",
+      event: "daemon.spawn.contended",
+      heldByPid: lock.heldByPid ?? null,
+      timeoutMs,
+    });
+    return await waitForHealthyPidfile(deadline);
   }
 
-  const deadline = Date.now() + timeoutMs;
+  if (lock.outcome === "unavailable") {
+    diagEmit({
+      level: "warn",
+      event: "daemon.spawn.lock_unavailable",
+      errorCode: lock.error?.code ?? null,
+      errorMessage: lock.error?.message ?? null,
+    });
+  }
+
+  // "acquired", or "unavailable" (fail-open — a permissions/disk fault on the
+  // lock must not block startup, only lose the serialisation guarantee for
+  // this one call; matches the ownership lock's fail-open policy in
+  // runDaemon()).
+  try {
+    // Re-check: the previous holder may have finished spawning between our
+    // pidfile read above and winning the lock just now.
+    const freshClient = DaemonClient.fromPidfile();
+    if (freshClient) {
+      try {
+        const h = await freshClient.health();
+        return h.draining ? { ok: true, draining: true } : { ok: true };
+      } catch { /* still not healthy — proceed to spawn */ }
+    }
+
+    try {
+      spawnDaemonDetached({});
+    } catch {
+      return { ok: false, reason: "spawn-failed" };
+    }
+
+    return await waitForHealthyPidfile(deadline);
+  } finally {
+    if (lock.outcome === "acquired") releaseSpawnLock();
+  }
+}
+
+/**
+ * Poll the pidfile until it reports a healthy daemon or `deadline` passes.
+ *
+ * A DRAINING daemon does not end the wait early (review G4): it is on its way
+ * out, so we keep polling for its replacement and only report `draining` if the
+ * budget runs out first. That way the common case — a daemon shutting down
+ * while a caller starts up — resolves to a fresh, fully-serving daemon.
+ */
+async function waitForHealthyPidfile(deadline: number): Promise<EnsureRunningResult> {
+  let sawDraining = false;
   while (Date.now() < deadline) {
     const client = DaemonClient.fromPidfile();
     if (client) {
       try {
-        await client.health();
-        return { ok: true };
+        const h = await client.health();
+        if (!h.draining) return { ok: true };
+        sawDraining = true;
       } catch { /* not ready yet */ }
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-
-  return { ok: false, reason: "health-timeout" };
+  return sawDraining ? { ok: true, draining: true } : { ok: false, reason: "health-timeout" };
 }
 
 export class DaemonClient {
@@ -112,7 +259,12 @@ export class DaemonClient {
     return new DaemonClient({ port: data.port });
   }
 
-  async health(): Promise<{ ready: boolean; version: string; uptimeMs: number; pid: number }> {
+  /**
+   * `draining` (review G15) is part of the typed contract, not a raw cast:
+   * `doctor.ts` and the VS Code extension both read it, and it is the only way
+   * a consumer can tell a serving daemon from one that is on its way out.
+   */
+  async health(): Promise<{ ready: boolean; version: string; uptimeMs: number; pid: number; draining?: boolean }> {
     return this._get("/health");
   }
 

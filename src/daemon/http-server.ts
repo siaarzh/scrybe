@@ -68,6 +68,12 @@ export interface DaemonStatus {
   };
   recentEvents: DaemonEvent[];
   lastError: DaemonEvent | null;
+  /**
+   * True while the daemon is finishing in-flight work before exiting (review
+   * G8). `/status` keeps serving throughout, so `scrybe status` must render a
+   * draining daemon as running-but-draining rather than as absent.
+   */
+  draining?: boolean;
   // M-D11: on-demand lifecycle fields
   clientCount?: number;
   mode?: "on-demand" | "always-on";
@@ -155,6 +161,50 @@ export function pushEvent(ev: DaemonEvent): void {
   }
 }
 
+/**
+ * Shutdown is TWO phases, not one (review G1).
+ *
+ * `shutdown()` used to call `stopHttpServer()` as its FIRST act, so for the
+ * whole drain — up to `daemonShutdownMaxWaitMs`, 30 min by default — the
+ * pidfile still existed and data-dir ownership was still held while nothing
+ * answered on the port. The server therefore keeps LISTENING for the whole
+ * drain now. `/health` must keep answering **200** — `pidfile.ts` maps any
+ * non-2xx to "refused" and then SIGKILLs the pid, so a 503 there would make
+ * every caller kill a daemon that is politely finishing a reindex.
+ *
+ * But a single flag that 503'd EVERY route below `/health` was worse than the
+ * problem: `/mcp/rpc` — which every MCP tool call proxies through — sat behind
+ * it, so all search traffic hard-failed for up to 30 minutes while `/health`
+ * simultaneously suppressed the pidfile SIGKILL → respawn self-heal. And the
+ * justification was factually wrong: `stopQueue()` / `closeDB()` run AFTER the
+ * drain, so the DB is demonstrably open the whole time.
+ *
+ *   `_draining` — set at drain start. Only routes that ENQUEUE NEW WORK are
+ *                 refused. Reads (`/health`, `/status`, `/jobs`, `/events`,
+ *                 `/mcp/rpc` search) keep serving against the still-open DB.
+ *   `_closing`  — set immediately before `closeDB()`. Now nothing below
+ *                 `/health` is safe, so everything else is refused.
+ */
+let _draining = false;
+let _closing = false;
+
+export function setDraining(v: boolean): void {
+  _draining = v;
+}
+
+export function setClosing(v: boolean): void {
+  _closing = v;
+}
+
+/** Routes that accept or mutate work, refused for the duration of the drain. */
+function isWorkAcceptingRoute(method: string, path: string): boolean {
+  if (method === "POST" && (path === "/kick" || path === "/gc" || path === "/pause" || path === "/resume")) return true;
+  if (method === "DELETE" && path.startsWith("/jobs/")) return true;
+  // Pinned-branch writes mutate registry state that the drain is winding down.
+  if (method !== "GET" && PINNED_RE.test(path)) return true;
+  return false;
+}
+
 export function setDaemonState(s: DaemonState): void {
   _state = s;
   pushEvent({
@@ -188,6 +238,8 @@ export async function startHttpServer(opts: {
   _getMode = opts.getMode;
   _getGracePeriodRemainingMs = opts.getGracePeriodRemainingMs;
   _state = "cold";
+  _draining = false;
+  _closing = false;
 
   _server = http.createServer((req, res) => {
     handle(req, res).catch((err) => {
@@ -330,6 +382,7 @@ function buildStatus(): DaemonStatus {
     queue: getQueueStats(),
     recentEvents: _ring.slice(-10),
     lastError: _ring.filter((e) => e.level === "error").at(-1) ?? null,
+    draining: _draining,
     clientCount: _getClientCount?.() ?? 0,
     mode: _getMode?.() ?? "on-demand",
     gracePeriodRemainingMs: _getGracePeriodRemainingMs?.() ?? null,
@@ -378,12 +431,52 @@ async function handle(
       });
       return;
     }
+    // Past the drain, in the CLOSING phase, the daemon is provably incapable of
+    // serving: setClosing() is followed immediately by stopQueue(),
+    // cancelAllJobs() and closeDB(), and every route below already 503s. A 200
+    // here would suppress pidfile.ts's !res.ok → "refused" → SIGKILL → respawn
+    // recovery for the whole teardown tail — and stopHttpServer() has no
+    // timeout, so a single hung in-flight request (e.g. an /mcp/rpc call
+    // admitted during the drain) leaves a process holding the pidfile and the
+    // ownership lock while reporting itself healthy. That is exactly the
+    // healthy-looking-but-locked daemon this lock work exists to eliminate.
+    // The drain's 200 is still correct and deliberate: during the drain the
+    // daemon is genuinely alive and serving reads.
+    if (_closing) {
+      jsonRes(res, 503, {
+        ready: false,
+        reason: "closing",
+        version: VERSION,
+        uptimeMs: Date.now() - _startedAt.getTime(),
+        pid: process.pid,
+      });
+      return;
+    }
     jsonRes(res, 200, {
       ready: true,
+      // Deliberately 200 even while draining: the daemon IS alive and must not
+      // be SIGKILLed by pidfile.ts's !res.ok → "refused" path. `draining` is a
+      // diagnostic field, inert to every caller (same shape as Plan 101 D2).
+      draining: _draining,
       version: VERSION,
       uptimeMs: Date.now() - _startedAt.getTime(),
       pid: process.pid,
     });
+    return;
+  }
+
+  // ── Shutdown gate ──────────────────────────────────────────────────────
+  // Placed after /health (which must keep answering 200). Two phases — see the
+  // `_draining` / `_closing` comment above. During the drain the DB is still
+  // open, so only work-accepting routes are refused; reads and /mcp/rpc search
+  // traffic keep serving. `draining: true` in the body is what lets the MCP
+  // shim treat the 503 as recoverable instead of an opaque hard failure.
+  if (_closing) {
+    jsonRes(res, 503, { error: "daemon is shutting down", draining: true });
+    return;
+  }
+  if (_draining && isWorkAcceptingRoute(method, path)) {
+    jsonRes(res, 503, { error: "daemon is shutting down — not accepting new work", draining: true });
     return;
   }
 

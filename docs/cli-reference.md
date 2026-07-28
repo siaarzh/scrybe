@@ -725,10 +725,31 @@ scrybe daemon start
 
 ### `daemon stop`
 
-Graceful shutdown: calls `POST /shutdown`, waits up to 5 s for the pidfile to be removed.
+Requests a graceful shutdown (SIGTERM) and waits up to 5 s for the daemon to exit.
+
+A daemon with an in-flight reindex does **not** exit immediately — it finishes its
+current work first, up to `SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS` (30 minutes by
+default). That is deliberate: cutting a reindex off mid-write is worse than waiting.
+While draining it keeps answering `scrybe status` and refuses only new work.
 
 ```bash
 scrybe daemon stop
+scrybe daemon stop --force   # don't wait for an in-flight reindex
+```
+
+| Flag | Description |
+| --- | --- |
+| `--force` | Abandon the drain — a second SIGTERM makes the daemon exit immediately, cancelling in-flight reindex jobs. |
+
+**Exit codes:** `0` = the daemon is gone (confirmed, not assumed), `3` = stop accepted
+but the daemon is still draining, `1` = the process could not be signalled at all.
+
+Exit `0` means the daemon has actually exited, so `scrybe daemon stop && …` is safe to
+chain. If you need the daemon gone before the next step, either use `--force` or treat
+exit `3` as "not done yet" and retry — do not assume a zero-length wait was enough:
+
+```bash
+scrybe daemon stop || scrybe daemon stop --force
 ```
 
 ---
@@ -750,7 +771,16 @@ Stop then start the daemon.
 
 ```bash
 scrybe daemon restart
+scrybe daemon restart --force   # don't wait for an in-flight reindex
 ```
+
+| Flag | Description |
+| --- | --- |
+| `--force` | Abandon the drain — the old daemon exits immediately, cancelling in-flight reindex jobs. |
+
+If the running daemon does not stop, `restart` **refuses and exits 1** rather than starting a
+second one — a replacement could not take ownership of the data directory anyway, and would exit
+silently. Use `--force`, or wait for the in-flight work to finish.
 
 ---
 
@@ -789,6 +819,11 @@ scrybe daemon uninstall
 ### `daemon ensure-running`
 
 Start the daemon if not running; no-op if already running. Quiet by default (no output). Intended for scripts and autotests that need the daemon up without interactive prompts.
+
+**This blocks** until the daemon is verified healthy (up to 15 s on a cold start) and **exits 1 if
+it could not be started**. It previously returned 0 unconditionally. A `set -e` script that chains
+off `daemon ensure-running` will now stop when the daemon genuinely failed to come up, which is the
+intent — but it is a behaviour change if you relied on it never failing.
 
 | Flag | Required | Description |
 |------|----------|-------------|
