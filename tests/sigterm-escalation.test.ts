@@ -380,8 +380,11 @@ describeSignals("SIGTERM/SIGINT escalation (Plan 108 slice 4)", () => {
       const stop = await runCliAsync([ENTRY, "daemon", "stop"], cliEnv, 60_000);
 
       // Honest report: it says the daemon is STILL DRAINING, and does not lie
-      // about having stopped it.
-      expect(stop.status, `${stop.stdout}\n${stop.stderr}`).toBe(0);
+      // about having stopped it — including in its EXIT STATUS, which is all a
+      // shell caller sees. Exit 3 is "accepted, still draining" (distinct from
+      // 1, "could not signal it"); exit 0 is reserved for "the daemon is gone".
+      // See tests/plan108-stop-invariants.test.ts for why this is load-bearing.
+      expect(stop.status, `${stop.stdout}\n${stop.stderr}`).toBe(3);
       expect(stop.stdout).toContain("still draining");
       expect(stop.stdout).not.toContain("Daemon stopped.");
 

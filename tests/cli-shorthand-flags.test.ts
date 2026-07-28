@@ -108,7 +108,15 @@ describe("Global plural shortcuts (no deprecation warning)", () => {
 });
 
 describe("ps alias for status", () => {
-  beforeAll(() => { run(["daemon", "stop"]); }); // drain any daemon left by earlier tests
+  // Kill — not merely request a stop on — any daemon left by earlier tests.
+  //
+  // A plain `daemon stop` only ASKS, and returns while the daemon drains. The
+  // `branch list -p` case above registers a source rooted at process.cwd(), so
+  // the daemon left behind is indexing this entire repo (node_modules included)
+  // and a polite request leaves it running: that is exactly how a test daemon
+  // reached 6.9 GB RSS in 74 s and nearly livelocked the host. `--force` is the
+  // documented way to say "I need it gone now", which is what a teardown means.
+  beforeAll(() => { run(["daemon", "stop", "--force"]); });
 
   it("scrybe ps exits 0 without deprecation warning", () => {
     const r = run(["ps"], {}, 30_000);

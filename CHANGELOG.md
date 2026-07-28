@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Changed
+
+- **`scrybe daemon stop` now exits non-zero when the daemon is still running.** It previously reported success whether or not the daemon had actually stopped, so `scrybe daemon stop && …` would carry on with a live daemon behind it — in one case leaving a daemon indexing unattended until it consumed several gigabytes of memory. Exit `0` now means the daemon is confirmed gone; exit `3` means the stop was accepted but the daemon is still finishing in-flight work; exit `1` means it could not be signalled at all. The 30-minute drain and `--force` are unchanged. Scripts that chain off `daemon stop` and need the daemon gone should use `--force`, or retry on exit `3`.
+
 ---
 
 ## [0.46.3] — 2026-07-22

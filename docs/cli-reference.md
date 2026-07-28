@@ -725,10 +725,31 @@ scrybe daemon start
 
 ### `daemon stop`
 
-Graceful shutdown: calls `POST /shutdown`, waits up to 5 s for the pidfile to be removed.
+Requests a graceful shutdown (SIGTERM) and waits up to 5 s for the daemon to exit.
+
+A daemon with an in-flight reindex does **not** exit immediately — it finishes its
+current work first, up to `SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS` (30 minutes by
+default). That is deliberate: cutting a reindex off mid-write is worse than waiting.
+While draining it keeps answering `scrybe status` and refuses only new work.
 
 ```bash
 scrybe daemon stop
+scrybe daemon stop --force   # don't wait for an in-flight reindex
+```
+
+| Flag | Description |
+| --- | --- |
+| `--force` | Abandon the drain — a second SIGTERM makes the daemon exit immediately, cancelling in-flight reindex jobs. |
+
+**Exit codes:** `0` = the daemon is gone (confirmed, not assumed), `3` = stop accepted
+but the daemon is still draining, `1` = the process could not be signalled at all.
+
+Exit `0` means the daemon has actually exited, so `scrybe daemon stop && …` is safe to
+chain. If you need the daemon gone before the next step, either use `--force` or treat
+exit `3` as "not done yet" and retry — do not assume a zero-length wait was enough:
+
+```bash
+scrybe daemon stop || scrybe daemon stop --force
 ```
 
 ---

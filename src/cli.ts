@@ -942,14 +942,26 @@ export async function runCli(): Promise<void> {
       const result = await stopDaemonGracefully(data.pid, { force: opts.force === true });
       if (result.stopped) { console.log("Daemon stopped."); return; }
       if (result.reason === "still-draining") {
-        // Not an error: the stop was accepted and the daemon is finishing
-        // in-flight work, exactly as documented. Exit 0.
+        // The stop was accepted and the daemon is finishing in-flight work,
+        // exactly as documented — but the daemon is STILL ALIVE, and this exit
+        // status is the only thing a shell caller sees.
+        //
+        // This used to exit 0 on the reasoning that "the request succeeded".
+        // That made `scrybe daemon stop && <next thing>` proceed with a live
+        // daemon behind it, which is how a test harness believed it had stopped
+        // a daemon that then indexed on to 6.9 GB RSS in 74 s. Exit 0 must mean
+        // "the daemon is gone", because that is what every caller reads it as.
+        //
+        // Distinct from the exit 1 below on purpose: 3 is "accepted, still
+        // draining, retry or --force", 1 is "could not signal it at all" — a
+        // caller that wants to wait out a legitimate drain can special-case 3
+        // without also swallowing a permissions fault.
         console.log(
           `Stop requested. Daemon (PID ${data.pid}) is still draining — it finishes in-flight work before exiting.\n` +
           `  Check progress: scrybe status\n` +
           `  Don't wait:     scrybe daemon stop --force`
         );
-        return;
+        process.exit(3);
       }
       console.error(
         `[scrybe] Daemon (PID ${data.pid}) did NOT stop.\n` +
