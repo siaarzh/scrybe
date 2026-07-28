@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.47.0] — 2026-07-29
+
 ### Fixed
 
 - **Only one scrybe daemon can now run per data directory.** Several tools or editor sessions starting at the same moment could each launch their own daemon against the same index — every extra daemon held its own copy of the index in memory, and on one machine four of them together exhausted the host. Startup is now serialised, and a daemon that finds another already responsible for its data directory exits immediately instead of coming up on a second port. Genuinely separate data directories are unaffected.
@@ -71,24 +75,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.44.1] — 2026-07-04
-
-### Changed
-
-- On Linux, the background daemon now caps glibc malloc arenas, cutting retained memory substantially after sustained search activity. No effect on Windows or musl-based systems; a pre-set `MALLOC_ARENA_MAX` in your environment is always respected.
-
----
-
 ## Older releases
 
-For releases v0.44.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.44.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.46.3...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.47.0...HEAD
+[0.47.0]: https://github.com/siaarzh/scrybe/compare/v0.46.3...v0.47.0
 [0.46.3]: https://github.com/siaarzh/scrybe/compare/v0.46.2...v0.46.3
 [0.46.2]: https://github.com/siaarzh/scrybe/compare/v0.46.1...v0.46.2
 [0.46.1]: https://github.com/siaarzh/scrybe/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/siaarzh/scrybe/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/siaarzh/scrybe/compare/v0.44.1...v0.45.0
-[0.44.1]: https://github.com/siaarzh/scrybe/compare/v0.44.0...v0.44.1

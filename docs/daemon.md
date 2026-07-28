@@ -47,6 +47,8 @@ scrybe daemon restart
 
 The daemon writes a pidfile at `<DATA_DIR>/daemon.pid` containing `{pid, port, startedAt, version, dataDir, execPath}`. The port is ephemeral if `58451` is taken — clients always read the port from the pidfile.
 
+**One daemon per data directory.** Startup is serialised, and a daemon that finds another already responsible for its data directory exits immediately rather than coming up on a second port. Port fallback still applies to daemons on genuinely separate data directories — the data directory, not the port, is what decides whether two daemons may coexist.
+
 ---
 
 ## Pinned branches
