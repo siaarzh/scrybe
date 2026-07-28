@@ -31,6 +31,7 @@ import { spawn, spawnSync } from "child_process";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { holdLock, killHeldLocks, probeLock } from "./helpers/lock-probe.js";
 
 const NODE = process.execPath;
 const ENTRY = join(process.cwd(), "dist/index.js");
@@ -102,6 +103,9 @@ function countLogEvents(logPath: string, eventName: string): number {
 const activeDataDirs: string[] = [];
 
 afterEach(() => {
+  // Reap lock holders BEFORE deleting their data dirs — a live holder keeps an
+  // open SQLite handle into the dir it is locking.
+  killHeldLocks();
   for (const d of activeDataDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -240,13 +244,10 @@ describe("rss-guard restart — contended spawn lock must not produce ZERO daemo
       try {
         const first = await waitForHealthyPidfile(pidfilePath);
 
-        // Plant a spawn lock held by THIS test process: alive pid, fresh
-        // timestamp, so the daemon's acquire reads "contended" (not stale).
-        writeFileSync(
-          spawnLockPath,
-          JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() }),
-          "utf8"
-        );
+        // Hold the spawn lock in a real foreign process, so the daemon's
+        // acquire reads "contended". It cannot be planted as a file: the lock
+        // is an open SQLite write transaction, which only a live process holds.
+        const holder = await holdLock(dataDir, "spawn");
 
         // Wait for the rss-guard tick to take the daemon down and a
         // REPLACEMENT to appear. Pre-fix this never happens: the pidfile
@@ -261,13 +262,13 @@ describe("rss-guard restart — contended spawn lock must not produce ZERO daemo
         const health = await fetch(`http://127.0.0.1:${replacement.port}/health`);
         expect(health.ok).toBe(true);
 
-        // Non-vacuity: the lock must still be OURS. If it had been reclaimed
-        // (dead pid / age expiry) the daemon would have seen "acquired" and the
+        // Non-vacuity: the lock must still be held by our holder. If it had
+        // somehow been released, the daemon would have seen "acquired" and the
         // contended branch — the whole point of this test — would never have
-        // run. It is fresh and our pid is alive, so it can only have read
-        // "contended".
-        expect(existsSync(spawnLockPath)).toBe(true);
-        expect(JSON.parse(readFileSync(spawnLockPath, "utf8")).pid).toBe(process.pid);
+        // run. Asked from a third process, so the answer is the real one.
+        const stillHeld = probeLock(dataDir, "spawn");
+        expect(stillHeld.outcome).toBe("contended");
+        expect(stillHeld.heldByPid).toBe(holder.pid);
       } finally {
         // Reap the restart cascade deterministically: SIGKILL is not catchable
         // so a killed generation cannot spawn a successor. Bounded loop, and
@@ -286,24 +287,27 @@ describe("rss-guard restart — contended spawn lock must not produce ZERO daemo
   );
 });
 
-describe("spawn serialisation — stale spawn lock does not deadlock", () => {
-  it("ensureRunning() reclaims a spawn lock left by a crashed (dead-pid) holder instead of waiting forever", async () => {
+describe("spawn serialisation — a crashed spawn-lock holder does not deadlock", () => {
+  it("ensureRunning() proceeds after the spawn-lock holder is killed, instead of waiting forever", async () => {
     const dataDir = makeDataDir();
     activeDataDirs.push(dataDir);
     const pidfilePath = join(dataDir, "daemon.pid");
     const env = { ...process.env, SCRYBE_DATA_DIR: dataDir, SCRYBE_SKIP_MIGRATION: "1" };
 
-    // Simulate a crashed holder: a spawn lock file recording a pid that does
-    // not exist, well past the spawn lock's staleness age. If reclaim did
-    // not work, this single caller would just wait out its whole timeout
-    // budget polling a pidfile nobody ever creates, and (ok: false, reason:
-    // "health-timeout") — this test would fail with that instead.
-    const spawnLockPath = join(dataDir, "daemon-spawn.lock");
-    const deadPid = 999_999_999;
-    // Dead pid is the reclaim signal here (age expiry is 120 s since review F8,
-    // so a 60 s-old lock is NOT age-stale — this asserts the dead-pid path).
-    const staleTimestamp = new Date(Date.now() - 60_000).toISOString();
-    writeFileSync(spawnLockPath, JSON.stringify({ pid: deadPid, acquiredAt: staleTimestamp }), "utf8");
+    // A REAL crashed holder: take the spawn lock in a foreign process, then
+    // SIGKILL it so no cleanup code of ours can possibly run. The previous
+    // file-based lock survived its holder, so this scenario needed a staleness
+    // heuristic to recover from; a SQLite lock dies with its process, and this
+    // asserts that end-to-end through ensureRunning() rather than trusting it.
+    //
+    // If the lock somehow outlived the holder, this caller would wait out its
+    // whole timeout budget polling a pidfile nobody ever creates and fail with
+    // (ok: false, reason: "health-timeout") instead.
+    const crashed = await holdLock(dataDir, "spawn");
+    crashed.child.kill("SIGKILL");
+    await waitFor(() => {
+      try { process.kill(crashed.pid, 0); return false; } catch { return true; }
+    }, 5000);
 
     try {
       const result = await runHarness(env, 20000);

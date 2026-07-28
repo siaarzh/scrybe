@@ -161,8 +161,8 @@ export async function executeUninstallPlan(plan: UninstallPlan): Promise<Uninsta
   let anyFailed = false;
   /**
    * Review F6: deleting the data dir out from under a LIVE daemon is
-   * destructive in the worst way — it still holds `daemon-owner.lock` plus
-   * open LanceDB/SQLite handles. The old code force-unlinked the pidfile after
+   * destructive in the worst way — it still holds the data-dir ownership lock
+   * plus open LanceDB/SQLite handles. The old code force-unlinked the pidfile after
    * a 5 s poll and then rmSync'd the whole dir regardless. Now a daemon that
    * refuses to die BLOCKS the data-dir deletion instead.
    */

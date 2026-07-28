@@ -158,8 +158,8 @@ export async function checkAndMigrate(): Promise<{ migrated: boolean; version: n
     throw new Error(
       `[scrybe] Another scrybe process (PID ${lock.heldByPid ?? "unknown"}) is migrating the store ` +
       `at ${config.dataDir} and did not finish within ${Math.round(MIGRATION_WAIT_TIMEOUT_MS / 1000)}s. ` +
-      `Wait for it to finish and try again. If that process is gone, remove ` +
-      `${join(config.dataDir, "daemon-migrate.lock")} by hand.`
+      `Wait for it to finish and try again. The lock is released automatically ` +
+      `when that process exits — there is no lock file to remove by hand.`
     );
   }
 

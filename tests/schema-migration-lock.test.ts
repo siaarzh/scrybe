@@ -33,6 +33,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { holdLock, killHeldLocks, probeLock, isLockHeld } from "./helpers/lock-probe.js";
 
 const NODE = process.execPath;
 const ENTRY = join(process.cwd(), "dist/index.js");
@@ -72,6 +73,9 @@ async function raceConcurrent(dataDir: string, n: number): Promise<ChildResult[]
 const activeDataDirs: string[] = [];
 
 afterEach(() => {
+  // Reap lock holders BEFORE deleting their data dirs — a live holder keeps an
+  // open SQLite handle into the dir it is locking.
+  killHeldLocks();
   for (const d of activeDataDirs) {
     try { rmSync(d, { recursive: true, force: true }); } catch { /* ignore */ }
   }
@@ -111,7 +115,7 @@ describe("schema migration lock — destructive v1→v2 race", () => {
       expect(doc.version).toBe(4);
 
       // The migration lock must not leak past the race.
-      expect(existsSync(join(dataDir, "daemon-migrate.lock"))).toBe(false);
+      expect(isLockHeld(dataDir, "migrate"), "the migration lock leaked past the race").toBe(false);
     },
     60_000
   );
@@ -148,7 +152,7 @@ describe("schema migration lock — data dir that does not exist yet (review F9)
 
       const doc = JSON.parse(readFileSync(join(dataDir, "schema.json"), "utf8"));
       expect(doc.version).toBe(4);
-      expect(existsSync(join(dataDir, "daemon-migrate.lock"))).toBe(false);
+      expect(isLockHeld(dataDir, "migrate"), "the migration lock leaked past the race").toBe(false);
     },
     60_000
   );
@@ -181,10 +185,11 @@ describe("schema migration lock — no-op fast path (review F10)", () => {
       expect(warmDoc.version).toBe(4);
       expect(warmDoc.migrations_applied.length).toBeGreaterThan(0);
 
-      // A wedged holder: pid 1 is alive and not us, and the migration lock has
-      // NO age expiry by design, so this would block the full 120 s ceiling.
-      const migrateLock = join(dataDir, "daemon-migrate.lock");
-      writeFileSync(migrateLock, JSON.stringify({ pid: 1, acquiredAt: new Date().toISOString() }), "utf8");
+      // A genuinely wedged holder: a live foreign process that takes the
+      // migration lock and never lets go. The migration lock has NO age expiry
+      // by design (a real migration's duration is unbounded), so a caller that
+      // waits on it would block the full 120 s ceiling.
+      const wedged = await holdLock(dataDir, "migrate");
 
       const t0 = Date.now();
       const result = await runChild(dataDir);
@@ -193,8 +198,9 @@ describe("schema migration lock — no-op fast path (review F10)", () => {
       expect(result.status, result.stderr).toBe(0);
       expect(elapsedMs).toBeLessThan(30_000); // vs. the 120 s ceiling it used to pay
       // The foreign lock is untouched — proof we never even attempted to take it.
-      expect(existsSync(migrateLock)).toBe(true);
-      expect(JSON.parse(readFileSync(migrateLock, "utf8")).pid).toBe(1);
+      const stillWedged = probeLock(dataDir, "migrate");
+      expect(stillWedged.outcome).toBe("contended");
+      expect(stillWedged.heldByPid).toBe(wedged.pid);
     },
     90_000
   );
@@ -272,7 +278,7 @@ describe("schema migration lock — additive v2→v4 race", () => {
         verifyDb.close();
       }
 
-      expect(existsSync(join(dataDir, "daemon-migrate.lock"))).toBe(false);
+      expect(isLockHeld(dataDir, "migrate"), "the migration lock leaked past the race").toBe(false);
     },
     60_000
   );

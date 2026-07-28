@@ -655,16 +655,11 @@ export async function runDoctor(): Promise<DoctorReport> {
         "Data dir not created yet — nothing to probe", { mode: probe.mode }));
     } else if (!probe.ok) {
       checks.push(warn("daemon.locking", SEC_DAEMON, "Data-dir locking",
-        `Unsupported on this filesystem (${probe.errorCode ?? "unknown errno"}) — duplicate daemons cannot be prevented`,
-        `Move SCRYBE_DATA_DIR to a local disk (exFAT / SMB / some FUSE mounts cannot lock)`,
+        `Unavailable on this data dir (${probe.errorCode ?? "unknown error"}) — duplicate daemons cannot be prevented`,
+        `Move SCRYBE_DATA_DIR to a writable local disk (a read-only, full, or network-mounted data dir cannot lock)`,
         { mode: probe.mode, errorCode: probe.errorCode ?? null }));
-    } else if (probe.mode === "o_excl-fallback") {
-      checks.push(warn("daemon.locking", SEC_DAEMON, "Data-dir locking",
-        "Degraded (no hard-link support) — locking works but is more fragile under a crash mid-write",
-        `Move SCRYBE_DATA_DIR to a filesystem that supports hard links for the strongest guarantee`,
-        { mode: probe.mode }));
     } else {
-      checks.push(ok("daemon.locking", SEC_DAEMON, "Data-dir locking", "Atomic (hard-link)", { mode: probe.mode }));
+      checks.push(ok("daemon.locking", SEC_DAEMON, "Data-dir locking", "Atomic (SQLite)", { mode: probe.mode }));
     }
   } catch (e: any) {
     checks.push(warn("daemon.locking", SEC_DAEMON, "Data-dir locking",

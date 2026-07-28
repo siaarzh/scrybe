@@ -53,6 +53,7 @@ import { existsSync, readFileSync, mkdtempSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir, platform } from "os";
 import { makeTempRepo, type TempRepo } from "./scenarios/helpers/repo.js";
+import { isLockHeld } from "./helpers/lock-probe.js";
 
 const NODE = process.execPath;
 const ENTRY = join(process.cwd(), "dist/index.js");
@@ -310,7 +311,7 @@ describeSignals("SIGTERM/SIGINT escalation (Plan 108 slice 4)", () => {
       // itself. A stranded owner lock is exactly the permanent silent outage
       // (every future runDaemon() exits 0 quietly) this plan exists to remove.
       expect(existsSync(join(dataDir, "daemon.pid"))).toBe(false);
-      expect(existsSync(join(dataDir, "daemon-owner.lock"))).toBe(false);
+      expect(isLockHeld(dataDir, "owner"), "data-dir ownership was not released on exit").toBe(false);
     },
     90_000
   );
@@ -392,7 +393,7 @@ describeSignals("SIGTERM/SIGINT escalation (Plan 108 slice 4)", () => {
       // and its pidfile/ownership are intact so it remains discoverable.
       expect(getExitState().exited, "default stop must not escalate — the drain is the documented contract").toBe(false);
       expect(existsSync(join(dataDir, "daemon.pid"))).toBe(true);
-      expect(existsSync(join(dataDir, "daemon-owner.lock"))).toBe(true);
+      expect(isLockHeld(dataDir, "owner"), "ownership must be held for the whole drain").toBe(true);
 
       let events = readFileSync(daemonLogJsonlPath, "utf8")
         .split("\n").filter(Boolean)
@@ -410,7 +411,7 @@ describeSignals("SIGTERM/SIGINT escalation (Plan 108 slice 4)", () => {
       await waitUntil(() => getExitState().exited, 5000, 50);
       expect(getExitState().exited).toBe(true);
       expect(existsSync(join(dataDir, "daemon.pid"))).toBe(false);
-      expect(existsSync(join(dataDir, "daemon-owner.lock"))).toBe(false);
+      expect(isLockHeld(dataDir, "owner"), "data-dir ownership was not released on exit").toBe(false);
 
       // And it got there via the escalation path — the drain would otherwise
       // have run the 30-minute default with a 12 s write delay in flight.
