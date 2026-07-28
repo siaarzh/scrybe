@@ -23,7 +23,17 @@ vi.mock("../src/daemon/pidfile.js", () => ({
 
 // ─── ensureRunning mock ────────────────────────────────────────────────────────
 
-vi.mock("../src/daemon/client.js", () => ({
+// Spread the REAL module and override only what this test controls.
+//
+// A factory that lists exports explicitly silently rots: the moment production
+// code imports one more symbol from this module, every test using the mock dies
+// with `No "X" export is defined on the mock` -- a failure tsc cannot see and
+// that only a full-suite run surfaces. That is exactly what happened here (two
+// separate symbols, from two separate commits, both invisible until the suite
+// ran end-to-end). Spreading `importOriginal` keeps the mock honest by default;
+// pure helpers then run for real, which is what the assertions want anyway.
+vi.mock("../src/daemon/client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/daemon/client.js")>()),
   ensureRunning: vi.fn().mockResolvedValue({ ok: false, reason: "spawn-failed" }),
   DaemonClient: class {
     static fromPidfile() { return null; }
