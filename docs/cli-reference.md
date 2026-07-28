@@ -771,7 +771,16 @@ Stop then start the daemon.
 
 ```bash
 scrybe daemon restart
+scrybe daemon restart --force   # don't wait for an in-flight reindex
 ```
+
+| Flag | Description |
+| --- | --- |
+| `--force` | Abandon the drain — the old daemon exits immediately, cancelling in-flight reindex jobs. |
+
+If the running daemon does not stop, `restart` **refuses and exits 1** rather than starting a
+second one — a replacement could not take ownership of the data directory anyway, and would exit
+silently. Use `--force`, or wait for the in-flight work to finish.
 
 ---
 
@@ -810,6 +819,11 @@ scrybe daemon uninstall
 ### `daemon ensure-running`
 
 Start the daemon if not running; no-op if already running. Quiet by default (no output). Intended for scripts and autotests that need the daemon up without interactive prompts.
+
+**This blocks** until the daemon is verified healthy (up to 15 s on a cold start) and **exits 1 if
+it could not be started**. It previously returned 0 unconditionally. A `set -e` script that chains
+off `daemon ensure-running` will now stop when the daemon genuinely failed to come up, which is the
+intent — but it is a behaviour change if you relied on it never failing.
 
 | Flag | Required | Description |
 |------|----------|-------------|
