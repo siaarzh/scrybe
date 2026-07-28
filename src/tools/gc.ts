@@ -46,7 +46,9 @@ export const gcTool: Tool<
 
     // Try to route through daemon queue via HTTP (cross-process safe)
     const daemon = await ensureRunning();
-    if (daemon.ok) {
+    // A draining daemon 503s new work (review G4); the in-process gc below
+    // takes over rather than surfacing a raw HTTP error.
+    if (daemon.ok && !daemon.draining) {
       const client = DaemonClient.fromPidfile();
       if (client) {
         try {

@@ -6,8 +6,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { VERSION, readScrybeConfig } from "./config.js";
-import { DaemonClient, ensureRunning } from "./daemon/client.js";
+import { DaemonClient, ensureRunning, DAEMON_COLD_START_WAIT_MS } from "./daemon/client.js";
 import { readPidfile } from "./daemon/pidfile.js";
+import { MAX_SPAWN_LOCK_HOLD_MS } from "./daemon/data-dir-lock.js";
 import { KNOWN_TOOL_NAMES } from "./tools/tool-names.js";
 import { compareSemVer, getMajorVersion } from "./util/semver-compare.js";
 
@@ -179,6 +180,18 @@ function isConnectClassError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * A 503 carrying `draining: true` means the daemon is finishing in-flight work
+ * and going away; a replacement can be spawned. Treat it exactly like a
+ * connect-class failure so `callRpc` re-resolves / respawns instead of
+ * rethrowing an opaque `daemon RPC returned HTTP 503` at the agent (review G1:
+ * recovery from a drain-time 503 was structurally unreachable, because
+ * `isConnectClassError` only ever matches an errno on `err.cause.code`).
+ */
+function isDrainingError(err: unknown): boolean {
+  return err instanceof Error && (err as { daemonDraining?: boolean }).daemonDraining === true;
+}
+
 async function _singleRpc(url: string, method: string, params: Record<string, unknown>): Promise<unknown> {
   const id = Math.random().toString(36).slice(2);
   // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
@@ -193,7 +206,15 @@ async function _singleRpc(url: string, method: string, params: Record<string, un
   });
 
   if (!res.ok) {
-    throw new Error(`daemon RPC returned HTTP ${res.status}`);
+    // Tag a drain-time 503 so callRpc can recover from it (see isDrainingError).
+    let draining = false;
+    if (res.status === 503) {
+      try { draining = ((await res.json()) as { draining?: boolean })?.draining === true; } catch { /* body not JSON */ }
+    }
+    throw Object.assign(
+      new Error(`daemon RPC returned HTTP ${res.status}`),
+      draining ? { daemonDraining: true } : {},
+    );
   }
 
   const data = (await res.json()) as RpcSuccess | RpcError;
@@ -243,8 +264,10 @@ async function callRpc(
   try {
     return await _singleRpc(url, method, params);
   } catch (firstErr) {
-    // D3: only retry for connect-class errors (request never reached daemon)
-    if (!isConnectClassError(firstErr)) throw firstErr;
+    // D3: only retry for connect-class errors (request never reached daemon),
+    // plus a drain-time 503 (review G1 — the daemon is going away and a
+    // replacement can serve the call).
+    if (!isConnectClassError(firstErr) && !isDrainingError(firstErr)) throw firstErr;
 
     // Re-resolve from pidfile
     const newUrl = resolveBaseUrl();
@@ -590,9 +613,20 @@ function serveUnavailableServer(unavailable: DaemonUnavailableState): void {
 
 // ─── Main shim entrypoint ─────────────────────────────────────────────────────
 
+/**
+ * Cold-start budget handed to `ensureRunning()`.
+ *
+ * Clamped to `MAX_SPAWN_LOCK_HOLD_MS` (review F8): `ensureRunning()` holds the
+ * cross-process spawn lock for its WHOLE budget (it releases in a `finally`
+ * after the health wait), and the spawn lock expires by age. An unbounded
+ * env-tunable budget could therefore exceed the staleness threshold, at which
+ * point a waiting caller age-reclaims a lock that is still legitimately held
+ * and spawns the duplicate daemon the lock exists to prevent.
+ */
 const COLD_START_WAIT_MS = (() => {
   const raw = parseInt(process.env["SCRYBE_MCP_COLD_START_WAIT_MS"] ?? "", 10);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 15_000;
+  const requested = Number.isFinite(raw) && raw >= 0 ? raw : DAEMON_COLD_START_WAIT_MS;
+  return Math.min(requested, MAX_SPAWN_LOCK_HOLD_MS);
 })();
 
 export async function runMcpShim(): Promise<void> {

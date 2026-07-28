@@ -11,7 +11,7 @@ import {
 import { validateGitlabToken } from "../plugins/gitlab-issues.js";
 import { validateGithubToken } from "../plugins/github-issues.js";
 import { submitSourceJob } from "../jobs.js";
-import { ensureRunning, DaemonClient } from "../daemon/client.js";
+import { ensureRunning, DaemonClient, daemonWriteUnavailableError } from "../daemon/client.js";
 import { config } from "../config.js";
 import type { Source, SourceConfig } from "../types.js";
 import type { Tool } from "./types.js";
@@ -264,12 +264,8 @@ export const addSourceTool: Tool<
     // D6 — decide daemon path BEFORE registry write so spawn-failed doesn't
     // leave a registered-but-never-indexed source behind
     const daemon = await ensureRunning();
-    if (!daemon.ok && (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout")) {
-      throw Object.assign(new Error(
-        "The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\n" +
-        "Diagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
-      ), { error_type: "daemon_unavailable" });
-    }
+    const unavailable = daemonWriteUnavailableError(daemon);
+    if (unavailable) throw unavailable;
 
     // Register the source
     const src: Omit<Source, "table_name" | "last_indexed"> = {
@@ -279,7 +275,7 @@ export const addSourceTool: Tool<
     addSource(project_id, src);
 
     // D3 — auto-enqueue via daemon when available
-    if (daemon.ok) {
+    if (daemon.ok && !daemon.draining) {
       const client = DaemonClient.fromPidfile();
       if (client) {
         const resp = await client.submitReindex({

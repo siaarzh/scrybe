@@ -1,4 +1,4 @@
-import { appendFileSync, createWriteStream, existsSync, writeSync } from "fs";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, writeSync } from "fs";
 import { mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -7,7 +7,9 @@ import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config, warnOldEnvVars } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
-import { startHttpServer, stopHttpServer, pushEvent, setDaemonState } from "./http-server.js";
+import { acquireDataDirOwnership, releaseDataDirOwnership, acquireSpawnLock, releaseSpawnLock } from "./data-dir-lock.js";
+import type { AcquireResult } from "./data-dir-lock.js";
+import { startHttpServer, stopHttpServer, pushEvent, setDaemonState, setDraining, setClosing } from "./http-server.js";
 import { initQueue, submitToQueue, stopQueue, onQueueJobEvent, getActiveReindexCount } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
 import { initGitWatcher, watchGitProject, stopGitWatcher } from "./git-watcher.js";
@@ -28,6 +30,8 @@ import { migrateModelsCache } from "./migrate-models-cache.js";
 import type { KickRequest, KickResponse } from "./http-server.js";
 
 let shutdownCalled = false;
+/** Set by shutdown() when this exit owes the world a replacement daemon (review G9). */
+let _respawnOwed = false;
 let _lifecycle: LifecycleManager | null = null;
 let _logWrite: ((line: string) => void) | null = null;
 let _stopBuildIntegrityCheck: (() => void) | null = null;
@@ -110,12 +114,41 @@ async function shutdown(signal: string, opts?: {
 }): Promise<void> {
   if (shutdownCalled) return;
   shutdownCalled = true;
+
+  // Review F1: when this shutdown owes the world a replacement daemon
+  // (RSS-guard always-on path), take the spawn lock HERE — before the drain,
+  // before ownership is released — and hold it across the entire
+  // drain → release-ownership → respawn sequence.
+  //
+  // The previous shape acquired it late and SKIPPED the respawn when it read
+  // "contended". That was unsound: the contender is typically a caller that
+  // already tried to spawn a daemon while WE still held ownership, so its
+  // daemon exited(0) on contended ownership. Skipping then left ZERO daemons —
+  // and since this process exits 0, systemd's `Restart=on-failure` never
+  // resurrects it. A guaranteed respawn racing into a harmless duplicate (the
+  // loser exits via the ownership lock) is strictly better than a silent
+  // outage, so there is no skip path at all now.
+  const willRespawn = !!opts?.spawnAfterRemovePidfile;
+  // Review G9: publish the owed respawn so the ESCALATION path (a second
+  // SIGTERM arriving mid-drain) can honour it too. A SIGTERM landing inside the
+  // rss-guard's 2 s drain window on an always-on daemon otherwise killed it
+  // with no replacement — and since escalation exits 0, systemd's
+  // `Restart=on-failure` never resurrects it.
+  _respawnOwed = willRespawn;
+  const spawnLock: AcquireResult | null = willRespawn ? acquireSpawnLock() : null;
+
   _lifecycle?.stop();
   stopRssGuard();
   stopMemSampler();
   _stopBuildIntegrityCheck?.();
   daemonLog(`[scrybe daemon] ${signal} — shutting down`);
-  await stopHttpServer();
+  // Review F7: do NOT close the HTTP listener yet. The pidfile and data-dir
+  // ownership both survive until the very end of this function, so closing the
+  // listener first makes the daemon look dead-but-locked for the whole drain.
+  // Instead flip to drain mode: /health keeps answering 200 (pidfile.ts
+  // SIGKILLs on any non-2xx) while every other endpoint returns 503, so no new
+  // work is accepted. stopHttpServer() runs just before removePidfile() below.
+  setDraining(true);
   await stopWatcher();
   await stopGitWatcher();
   stopFetchPoller();
@@ -148,16 +181,36 @@ async function shutdown(signal: string, opts?: {
     }
   } catch { /* non-fatal — drain must not block exit */ }
 
+  // Phase 2 (review G1): from here the queue is stopping and the DB is about to
+  // close, so nothing below /health is safe to serve any more. Up to this point
+  // the drain gate refused only work-accepting routes — reads and /mcp/rpc
+  // search kept working against the still-open DB, which is the whole point of
+  // splitting the flag in two.
+  setClosing(true);
   stopQueue();
   cancelAllJobs();
   closeDB();
+
+  // Only now stop serving (review F7) — the listener stayed up, in drain mode,
+  // for the whole drain above so callers could see a live-but-draining daemon
+  // instead of a locked ghost.
+  await stopHttpServer();
   removePidfile();
-  if (opts?.spawnAfterRemovePidfile) {
-    // Pidfile is gone — replacement can now acquire the lock cleanly.
+
+  // Release ownership before any replacement is spawned — otherwise the
+  // replacement can never acquire and the daemon disappears entirely.
+  releaseDataDirOwnership();
+
+  if (willRespawn) {
+    // Pidfile is gone — replacement can now acquire the lock cleanly. This is
+    // unconditional on purpose (see the spawn-lock comment at the top of this
+    // function): a duplicate is self-healing, zero daemons is not.
     try { spawnDaemonDetached({}); } catch (err) {
       daemonLog(`[scrybe daemon] rss-guard respawn failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  if (spawnLock?.outcome === "acquired") releaseSpawnLock();
+
   process.exit(0);
 }
 
@@ -197,6 +250,43 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
  * Phase 5+: Git ref watcher, fetch poller.
  */
 export async function runDaemon(): Promise<void> {
+  // Claim data-dir ownership before the HTTP server binds or the pidfile is
+  // written, so a second daemon exits(0) within milliseconds of starting
+  // rather than serving from a second port.
+  //
+  // Review F17c: this is NOT what protects `checkAndMigrate()`. By the time
+  // `daemon start` reaches here, `runCli()` has ALREADY run checkAndMigrate()
+  // at the top of the CLI (`cli.ts`), long before dispatching to this
+  // subcommand. The destructive migration is serialised by its own MIGRATE
+  // lock inside `checkAndMigrate()` — ordering with respect to ownership is
+  // irrelevant to it.
+  //
+  // The mkdirSync is kept because the rest of startup (logs, pidfile) needs
+  // the dir; the locks no longer depend on it — `acquire()` mkdirs for itself
+  // (review F9), which is what covers the CLI and MCP entry points too.
+  mkdirSync(config.dataDir, { recursive: true });
+  const ownership = acquireDataDirOwnership();
+  if (ownership.outcome === "contended") {
+    diagEmit({
+      level: "warn",
+      event: "daemon.ownership.contended",
+      dataDir: config.dataDir,
+      heldByPid: ownership.heldByPid ?? null,
+    });
+    process.exit(0);
+  }
+  if (ownership.outcome === "unavailable") {
+    // Fail-open: a permissions/disk fault must not brick every daemon. The
+    // data dir is left unprotected for this run, but the daemon still starts.
+    diagEmit({
+      level: "error",
+      event: "daemon.ownership.unavailable",
+      dataDir: config.dataDir,
+      errorCode: ownership.error?.code ?? null,
+      errorMessage: ownership.error?.message ?? null,
+    });
+  }
+
   const writeCrashEv = (event: string, err: unknown): void => {
     try {
       diagEmit({
@@ -441,8 +531,74 @@ export async function runDaemon(): Promise<void> {
     execPath: process.execPath,
   });
 
-  process.on("SIGTERM", () => { shutdown("SIGTERM").catch(() => {}); });
-  process.on("SIGINT", () => { shutdown("SIGINT").catch(() => {}); });
+  // Plan 108 slice 4: SIGTERM escalation. The FIRST SIGTERM/SIGINT starts the
+  // normal drain (up to config.daemonShutdownMaxWaitMs, 30 min default — left
+  // unchanged, it is correct for a genuine shutdown with a real reindex in
+  // flight). A SECOND SIGTERM/SIGINT arriving while that drain is already in
+  // progress means the operator (or an orphan-reaping script) has already
+  // asked once and is not willing to wait — escalate to an immediate exit
+  // instead of re-entering shutdown().
+  //
+  // `shutdownCalled` is the existing re-entrancy guard inside shutdown() —
+  // reused here as the "is a shutdown already in progress" signal rather than
+  // a separate counter, since shutdown()'s synchronous prefix (lines through
+  // the first `await`) sets it before yielding back to the event loop, so by
+  // the time a second signal is handled it is reliably true. Checking it
+  // BEFORE calling shutdown() means the second signal never re-enters
+  // teardown (the guard itself is untouched) — it escalates around it.
+  const handleTerminationSignal = (signal: "SIGTERM" | "SIGINT"): void => {
+    if (shutdownCalled) {
+      daemonLog(`[scrybe daemon] ${signal} received again while shutting down — forcing immediate exit`);
+      diagEmit({
+        level: "warn",
+        event: "daemon.shutdown.escalated",
+        signal,
+      });
+      // Review F3: exit 0, NOT 1. `linux-systemd.ts` installs the unit with
+      // `Type=simple` + `Restart=on-failure` + `RestartSec=5`, so a non-zero
+      // exit makes systemd resurrect the daemon 5 s later — inverting the
+      // intent of the very case this path exists for (a double `kill -TERM`
+      // from an orphan-reaping script). The operator asked for this exit; it is
+      // not a failure. (`SuccessExitStatus=1` is the wrong lever: exit 1 is a
+      // genuine startup-failure code elsewhere and must stay restartable.)
+      //
+      // Best-effort artifact cleanup first: the normal shutdown path never
+      // reaches removePidfile()/releaseDataDirOwnership() when we jump the
+      // queue like this, and a stranded owner lock is exactly the permanent
+      // silent outage this plan is trying to eliminate.
+      try { removePidfile(); } catch { /* best effort */ }
+      try { releaseDataDirOwnership(); } catch { /* best effort */ }
+      // Review G9: honour an owed replacement. `shutdown()` reads `willRespawn`
+      // at the top and respawns at the bottom; jumping the queue past it on an
+      // always-on rss-guard restart would leave ZERO daemons, and an exit 0
+      // means `Restart=on-failure` will not resurrect one.
+      if (_respawnOwed) {
+        try { spawnDaemonDetached({}); } catch (err) {
+          daemonLog(`[scrybe daemon] escalated-exit respawn failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      process.exit(0);
+      return;
+    }
+    shutdown(signal).catch(() => {});
+  };
+  // The generic CLI entry (src/index.ts) registers its own blanket
+  // SIGTERM/SIGINT listener BEFORE dispatching to `daemon start`/`daemon
+  // restart` — a convenience for one-shot commands (e.g. `scrybe index -f`)
+  // to cancel in-flight jobs on Ctrl+C. Node invokes same-event listeners in
+  // registration order, and that earlier listener calls process.exit(0)
+  // synchronously, which terminates the process before a LATER listener
+  // (ours, below) ever runs. Left alone, that earlier handler wins on every
+  // signal, unconditionally, and the drain/escalation logic added above is
+  // unreachable dead code. Verified via a two-listener repro (first listener
+  // calling process.exit() prevents the second from firing at all).
+  // Once we are the daemon, we are the sole authority over our own lifetime —
+  // clear any pre-existing listeners for these signals before installing
+  // ours so this handler is guaranteed to be the one that runs.
+  process.removeAllListeners("SIGTERM");
+  process.removeAllListeners("SIGINT");
+  process.on("SIGTERM", () => handleTerminationSignal("SIGTERM"));
+  process.on("SIGINT", () => handleTerminationSignal("SIGINT"));
 
   daemonLog(`[scrybe daemon] started pid=${process.pid} port=${port} dataDir=${config.dataDir}`);
 

@@ -778,13 +778,15 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
         try {
           const { installAutostart } = await import("../daemon/install/index.js");
           const status = await installAutostart();
-          const { spawnDaemonDetached } = await import("../daemon/spawn-detached.js");
-          spawnDaemonDetached({});
-          await new Promise((r) => setTimeout(r, 1200));
+          // Review G11: verify the spawn. This used to sleep 1200 ms, read the
+          // pidfile and report "daemon started · PID N" regardless — the child
+          // exiting(0) on contended data-dir ownership was reported as success.
+          const { ensureRunning, DAEMON_COLD_START_WAIT_MS } = await import("../daemon/client.js");
+          const started = await ensureRunning(DAEMON_COLD_START_WAIT_MS);
           const { readPidfile } = await import("../daemon/pidfile.js");
-          const pidData = readPidfile();
-          const pidStr = pidData ? `PID ${pidData.pid} · port ${pidData.port}` : "starting";
-          spin.stop(`Daemon autostart registered · ${status.method ?? "autostart"} · daemon started · ${pidStr}`);
+          const pidData = started.ok ? readPidfile() : null;
+          const pidStr = pidData ? `PID ${pidData.pid} · port ${pidData.port}` : "not started — run `scrybe doctor`";
+          spin.stop(`Daemon autostart registered · ${status.method ?? "autostart"} · daemon ${pidData ? "started" : "NOT started"} · ${pidStr}`);
         } catch (err: any) {
           spin.stop(
             `Could not register autostart: ${err?.message ?? String(err)}\n` +

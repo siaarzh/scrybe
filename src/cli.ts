@@ -444,7 +444,7 @@ export async function runCli(): Promise<void> {
 
       // Route through daemon when available — prevents cross-process write races.
       const daemon = await ensureRunning();
-      if (daemon.ok) {
+      if (daemon.ok && !daemon.draining) {
         const client = DaemonClient.fromPidfile();
         if (client) {
           try {
@@ -463,12 +463,18 @@ export async function runCli(): Promise<void> {
           }
           return;
         }
-      } else if (daemon.reason === "spawn-failed" || daemon.reason === "health-timeout") {
+      } else if (daemon.ok || daemon.reason === "spawn-failed" || daemon.reason === "health-timeout") {
+        // `daemon.ok` here can only mean DRAINING (review G4) — it refuses new
+        // work with 503, and indexing in-process alongside it would put a
+        // second writer on the data dir it still owns.
         console.error(
-          "[scrybe] Error: the scrybe daemon failed to start.\n" +
-          "Reindex requires the daemon to coordinate writes.\n" +
-          "Diagnose with: scrybe doctor\n" +
-          "Single-shot:   SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
+          daemon.ok
+            ? "[scrybe] Error: the scrybe daemon is shutting down and is not accepting new jobs.\n" +
+              "Retry in a moment — a replacement daemon starts on the next call."
+            : "[scrybe] Error: the scrybe daemon failed to start.\n" +
+              "Reindex requires the daemon to coordinate writes.\n" +
+              "Diagnose with: scrybe doctor\n" +
+              "Single-shot:   SCRYBE_NO_AUTO_DAEMON=1 scrybe index ..."
         );
         process.exit(1);
       }
@@ -691,14 +697,14 @@ export async function runCli(): Promise<void> {
       const { readPidfile } = await import("./daemon/pidfile.js");
       const { countTableRows } = await import("./vector-store.js");
       const pidData = readPidfile();
-      let daemonInfo: { running: false } | { running: true; pid: number; uptimeMs: number; activeJobs: number; clientCount: number; mode: "on-demand" | "always-on"; gracePeriodRemainingMs: number | null } = { running: false };
+      let daemonInfo: { running: false } | { running: true; pid: number; uptimeMs: number; activeJobs: number; clientCount: number; mode: "on-demand" | "always-on"; gracePeriodRemainingMs: number | null; draining: boolean } = { running: false };
       if (pidData?.port) {
         try {
           const { DaemonClient } = await import("./daemon/client.js");
           const client = new DaemonClient({ port: pidData.port });
           const signal = AbortSignal.timeout(2000);
           const s = await Promise.race([client.status(), new Promise<never>((_, rej) => signal.addEventListener("abort", () => rej(new Error("timeout"))))]);
-          daemonInfo = { running: true, pid: s.pid, uptimeMs: s.uptimeMs, activeJobs: s.queue.active + s.queue.pending, clientCount: s.clientCount ?? 0, mode: s.mode ?? "on-demand", gracePeriodRemainingMs: s.gracePeriodRemainingMs ?? null };
+          daemonInfo = { running: true, pid: s.pid, uptimeMs: s.uptimeMs, activeJobs: s.queue.active + s.queue.pending, clientCount: s.clientCount ?? 0, mode: s.mode ?? "on-demand", gracePeriodRemainingMs: s.gracePeriodRemainingMs ?? null, draining: s.draining === true };
         } catch { /* unresponsive */ }
       }
       let alwaysOnMethod: string | null = null;
@@ -778,7 +784,11 @@ export async function runCli(): Promise<void> {
       if (!opts.projects) {
         if (daemonInfo.running) {
           const uptime = fmtUptime(daemonInfo.uptimeMs), jobsStr = daemonInfo.activeJobs === 0 ? "0 jobs active" : `${daemonInfo.activeJobs} jobs active`, clientStr = daemonInfo.clientCount === 1 ? "1 client" : `${daemonInfo.clientCount} clients`, graceStr = daemonInfo.gracePeriodRemainingMs !== null ? ` · grace in ~${Math.ceil(daemonInfo.gracePeriodRemainingMs / 60000)}m` : "";
-          console.log(`Daemon         ● running · PID ${daemonInfo.pid} · uptime ${uptime} · ${clientStr}${graceStr} · ${jobsStr}`);
+          // Review G8: `/status` keeps serving for the whole drain, so render a
+          // draining daemon truthfully instead of as absent (which is what the
+          // old all-routes-503 drain gate made `scrybe status` print).
+          const drainStr = daemonInfo.draining ? " · DRAINING (finishing in-flight work, then exiting)" : "";
+          console.log(`Daemon         ● running · PID ${daemonInfo.pid} · uptime ${uptime} · ${clientStr}${graceStr} · ${jobsStr}${drainStr}`);
           console.log(`Mode           ${alwaysOnMethod ? `always-on (${alwaysOnMethod})` : daemonInfo.mode}`);
         } else if (alwaysOnMethod) {
           console.log(`Daemon         ○ not running · autostart registered (${alwaysOnMethod})`);
@@ -919,17 +929,34 @@ export async function runCli(): Promise<void> {
     });
 
   daemon.command("stop").description("Gracefully stop the running daemon")
-    .addHelpText("after", "\nExample:\n  scrybe daemon stop")
-    .action(async () => {
-      const { isDaemonRunning, getPidfilePath } = await import("./daemon/pidfile.js");
-      const { existsSync } = await import("fs");
+    .option("--force", "Abandon the drain: send a second SIGTERM so the daemon exits immediately, cancelling in-flight reindex jobs")
+    .addHelpText("after", "\nExample:\n  scrybe daemon stop\n  scrybe daemon stop --force   # don't wait for an in-flight reindex")
+    .action(async (opts: { force?: boolean }) => {
+      const { isDaemonRunning, stopDaemonGracefully } = await import("./daemon/pidfile.js");
       const { running, data } = await isDaemonRunning();
       if (!running || !data) { console.log("Daemon is not running."); return; }
-      process.kill(data.pid, "SIGTERM");
-      const pidfilePath = getPidfilePath();
-      for (let i = 0; i < 50; i++) { await new Promise((r) => setTimeout(r, 100)); if (!existsSync(pidfilePath)) break; }
-      if (existsSync(pidfilePath)) { const { unlinkSync } = await import("fs"); try { unlinkSync(pidfilePath); } catch { /* ignore */ } }
-      console.log("Daemon stopped.");
+      // Review F2/G3: never force-unlink a pidfile under a live pid, say what
+      // actually happened — and only ESCALATE when explicitly asked. The
+      // default preserves the documented drain (SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS,
+      // 30 min): one SIGTERM, then report.
+      const result = await stopDaemonGracefully(data.pid, { force: opts.force === true });
+      if (result.stopped) { console.log("Daemon stopped."); return; }
+      if (result.reason === "still-draining") {
+        // Not an error: the stop was accepted and the daemon is finishing
+        // in-flight work, exactly as documented. Exit 0.
+        console.log(
+          `Stop requested. Daemon (PID ${data.pid}) is still draining — it finishes in-flight work before exiting.\n` +
+          `  Check progress: scrybe status\n` +
+          `  Don't wait:     scrybe daemon stop --force`
+        );
+        return;
+      }
+      console.error(
+        `[scrybe] Daemon (PID ${data.pid}) did NOT stop.\n` +
+        `[scrybe] ${result.detail ?? result.reason}\n` +
+        `[scrybe] Could not signal the process — check permissions.\n`
+      );
+      process.exit(1);
     });
 
   daemon.command("status").description("[deprecated] Use `scrybe status` instead (will be removed in v2.0)")
@@ -949,16 +976,27 @@ export async function runCli(): Promise<void> {
     });
 
   daemon.command("restart").description("Stop and restart the daemon")
-    .addHelpText("after", "\nExample:\n  scrybe daemon restart")
-    .action(async () => {
-      const { isDaemonRunning, getPidfilePath } = await import("./daemon/pidfile.js");
-      const { existsSync } = await import("fs");
+    .option("--force", "Abandon the drain: send a second SIGTERM so the old daemon exits immediately, cancelling in-flight reindex jobs")
+    .addHelpText("after", "\nExample:\n  scrybe daemon restart\n  scrybe daemon restart --force")
+    .action(async (opts: { force?: boolean }) => {
+      const { isDaemonRunning, stopDaemonGracefully } = await import("./daemon/pidfile.js");
       const { running, data } = await isDaemonRunning();
       if (running && data) {
-        process.kill(data.pid, "SIGTERM");
-        const pidfilePath = getPidfilePath();
-        for (let i = 0; i < 50; i++) { await new Promise((r) => setTimeout(r, 100)); if (!existsSync(pidfilePath)) break; }
-        if (existsSync(pidfilePath)) { const { unlinkSync } = await import("fs"); try { unlinkSync(pidfilePath); } catch { /* ignore */ } }
+        const result = await stopDaemonGracefully(data.pid, { force: opts.force === true });
+        if (!result.stopped) {
+          // Review F2: proceeding here used to be silently fatal — runDaemon()
+          // would lose the ownership lock to the still-alive old daemon and
+          // exit(0) printing NOTHING (the diagnostic only reaches
+          // daemon-log.jsonl). Refuse loudly instead.
+          console.error(
+            `[scrybe] Cannot restart: the running daemon (PID ${data.pid}) did not stop.\n` +
+            `[scrybe] ${result.detail ?? result.reason}\n` +
+            (result.reason === "still-draining"
+              ? `[scrybe] It is finishing an in-flight reindex. Check: scrybe status  ·  Don't wait: scrybe daemon restart --force\n`
+              : "")
+          );
+          process.exit(1);
+        }
       }
       const { runDaemon } = await import("./daemon/main.js");
       await runDaemon();
@@ -1021,13 +1059,27 @@ export async function runCli(): Promise<void> {
   daemon.command("up").alias("ensure-running").description("Start the daemon if not running (idempotent, quiet by default)")
     .option("--verbose", "Print status to stdout")
     .action(async (opts: { verbose?: boolean }) => {
-      if (process.env["SCRYBE_NO_AUTO_DAEMON"] === "1") { if (opts.verbose) console.log("SCRYBE_NO_AUTO_DAEMON is set — skipping."); return; }
-      const { isDaemonRunning } = await import("./daemon/pidfile.js");
-      const { running } = await isDaemonRunning();
-      if (running) { if (opts.verbose) console.log("Daemon is already running."); return; }
-      const { spawnDaemonDetached } = await import("./daemon/spawn-detached.js");
-      spawnDaemonDetached({});
-      if (opts.verbose) console.log("Daemon started.");
+      // Review G13: route through ensureRunning() rather than calling
+      // spawnDaemonDetached() directly. That is the ONLY path that holds the
+      // cross-process spawn lock, so concurrent `daemon up` calls no longer
+      // double-spawn, and it verifies health instead of printing success for a
+      // child that already exited. Budget is the shared cold-start constant,
+      // not a bespoke number. Stays quiet on success (documented contract);
+      // only a genuine failure prints, and only to stderr.
+      const { ensureRunning, DAEMON_COLD_START_WAIT_MS } = await import("./daemon/client.js");
+      const result = await ensureRunning(DAEMON_COLD_START_WAIT_MS);
+      if (!result.ok) {
+        if (result.reason === "opted-out" || result.reason === "container") {
+          if (opts.verbose) console.log(`Skipping daemon start (${result.reason}).`);
+          return;
+        }
+        console.error(
+          `[scrybe] Daemon did not become healthy (${result.reason}).\n` +
+          "[scrybe] Diagnose with: scrybe doctor\n"
+        );
+        process.exit(1);
+      }
+      if (opts.verbose) console.log(result.draining ? "Daemon is draining — a replacement will start on the next call." : "Daemon is running.");
     });
 
   // ─── hook <verb> ──────────────────────────────────────────────────────────

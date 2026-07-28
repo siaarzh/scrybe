@@ -621,8 +621,12 @@ export async function runDoctor(): Promise<DoctorReport> {
         const res = await fetch(`http://127.0.0.1:${pidData.port}/health`, {
           signal: AbortSignal.timeout(3000),
         });
-        const body = await res.json() as { ready?: boolean; version?: string };
-        if (body.ready) {
+        const body = await res.json() as { ready?: boolean; version?: string; draining?: boolean };
+        if (body.draining) {
+          checks.push(warn("daemon.http", SEC_DAEMON, "HTTP health",
+            `Draining — finishing in-flight work before exiting (v${body.version})`,
+            "Wait for it to exit, or send a second SIGTERM to stop immediately"));
+        } else if (body.ready) {
           checks.push(ok("daemon.http", SEC_DAEMON, "HTTP health", `Ready (v${body.version})`));
         } else {
           checks.push(warn("daemon.http", SEC_DAEMON, "HTTP health", "Responding but not ready"));
@@ -633,6 +637,38 @@ export async function runDoctor(): Promise<DoctorReport> {
           `Try: scrybe daemon restart`));
       }
     }
+  }
+
+  // ── Cross-process locking support (review F12) ──────────────────────────────
+  // The ownership / spawn / migration locks all fail OPEN when the filesystem
+  // cannot arbitrate. That is the right policy, but it means a data dir on
+  // exFAT, an SMB-mounted home, or some FUSE mounts silently turns the whole
+  // guarantee into a no-op — previously visible only as a line in
+  // daemon-log.jsonl, which nobody reads until after an incident.
+  try {
+    const { probeDataDirLocking } = await import("../daemon/data-dir-lock.js");
+    const probe = probeDataDirLocking();
+    if (probe.mode === "not-created") {
+      // The probe is non-mutating (review G15) — `doctor` must not create the
+      // data dir as a side effect of a diagnostic.
+      checks.push(ok("daemon.locking", SEC_DAEMON, "Data-dir locking",
+        "Data dir not created yet — nothing to probe", { mode: probe.mode }));
+    } else if (!probe.ok) {
+      checks.push(warn("daemon.locking", SEC_DAEMON, "Data-dir locking",
+        `Unsupported on this filesystem (${probe.errorCode ?? "unknown errno"}) — duplicate daemons cannot be prevented`,
+        `Move SCRYBE_DATA_DIR to a local disk (exFAT / SMB / some FUSE mounts cannot lock)`,
+        { mode: probe.mode, errorCode: probe.errorCode ?? null }));
+    } else if (probe.mode === "o_excl-fallback") {
+      checks.push(warn("daemon.locking", SEC_DAEMON, "Data-dir locking",
+        "Degraded (no hard-link support) — locking works but is more fragile under a crash mid-write",
+        `Move SCRYBE_DATA_DIR to a filesystem that supports hard links for the strongest guarantee`,
+        { mode: probe.mode }));
+    } else {
+      checks.push(ok("daemon.locking", SEC_DAEMON, "Data-dir locking", "Atomic (hard-link)", { mode: probe.mode }));
+    }
+  } catch (e: any) {
+    checks.push(warn("daemon.locking", SEC_DAEMON, "Data-dir locking",
+      `Could not probe: ${e?.message ?? String(e)}`));
   }
 
   // Always-on install status
