@@ -317,6 +317,10 @@ async function handleRpc(
   const spanStart = Date.now();
   const startSample = sampleNow();
   let spanOutcome: "ok" | "error" = "ok";
+  // Re-sanitized inline at each console.log call below (not read from this `let`)
+  // because CodeQL's log-injection barrier model tracks the sanitizer through
+  // const/single-assignment locals (safeClientId, safeMethod) but not through a
+  // `let` reassigned across branches — js/log-injection alerts 169/170.
   let spanErrorMessage: string | undefined;
 
   try {
@@ -324,7 +328,7 @@ async function handleRpc(
     if (validationError) {
       spanOutcome = "error";
       spanErrorMessage = sanitizeForLog(validationError.message);
-      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${spanErrorMessage}`);
+      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(validationError.message)}`);
       jsonRes(res, 200, {
         id,
         error: { code: INVALID_PARAMS, message: validationError.message },
@@ -338,7 +342,7 @@ async function handleRpc(
     spanOutcome = "error";
     const message = err instanceof Error ? err.message : String(err);
     spanErrorMessage = sanitizeForLog(message);
-    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${spanErrorMessage}`);
+    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(message)}`);
 
     // Classify: caller-facing (bad-but-well-formed input, e.g. "project 'x' not
     // found") echoes its message under INVALID_PARAMS; everything else keeps the
