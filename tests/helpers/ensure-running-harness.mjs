@@ -13,11 +13,18 @@
  * Usage: node ensure-running-harness.mjs [timeoutMs]
  * Env:   SCRYBE_DATA_DIR (required), SCRYBE_SKIP_MIGRATION=1 (recommended)
  */
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const distClientPath = join(__dirname, "..", "..", "dist", "daemon", "client.js");
+// See lock-probe.mjs: `import()` needs a file:// URL. A bare Windows absolute
+// path is parsed as scheme "d:" and rejected by the ESM loader. This one is
+// imported, so it must be a URL...
+const distClientPath = pathToFileURL(
+  join(__dirname, "..", "..", "dist", "daemon", "client.js")
+).href;
+// ...whereas this one is only assigned to process.argv[1] below, which is a
+// plain path, not a specifier. Keep it as a path.
 const distEntryPath = join(__dirname, "..", "..", "dist", "index.js");
 
 const timeoutMs = Number(process.argv[2] ?? 5000);
