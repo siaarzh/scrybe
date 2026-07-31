@@ -14,11 +14,15 @@
  * Usage: node lock-holder.mjs <owner|spawn|migrate>
  * Env:   SCRYBE_DATA_DIR (required)
  */
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const distLockPath = join(__dirname, "..", "..", "dist", "daemon", "data-dir-lock.js");
+// See lock-probe.mjs: `import()` needs a file:// URL. A bare Windows absolute
+// path is parsed as scheme "d:" and rejected by the ESM loader.
+const distLockPath = pathToFileURL(
+  join(__dirname, "..", "..", "dist", "daemon", "data-dir-lock.js")
+).href;
 
 const name = process.argv[2];
 const ACQUIRERS = {

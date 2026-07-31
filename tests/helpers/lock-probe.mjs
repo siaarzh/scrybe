@@ -21,11 +21,17 @@
  * Usage: node lock-probe.mjs <owner|spawn|migrate>
  * Env:   SCRYBE_DATA_DIR (required)
  */
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const distLockPath = join(__dirname, "..", "..", "dist", "daemon", "data-dir-lock.js");
+// `import()` needs a file:// URL, not a bare path: on Windows an absolute path
+// starts with a drive letter, which the ESM loader reads as a URL scheme and
+// rejects ("Received protocol 'd:'"). POSIX tolerates the bare path; Windows
+// does not, so this was a Windows-only harness failure.
+const distLockPath = pathToFileURL(
+  join(__dirname, "..", "..", "dist", "daemon", "data-dir-lock.js")
+).href;
 
 const name = process.argv[2];
 const ACQUIRERS = {
