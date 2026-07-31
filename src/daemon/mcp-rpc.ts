@@ -317,12 +317,17 @@ async function handleRpc(
   const spanStart = Date.now();
   const startSample = sampleNow();
   let spanOutcome: "ok" | "error" = "ok";
-  // Never logged via this `let` — each console.log below reads a const local
-  // holding the sanitized value instead. CodeQL's log-injection barrier model
-  // tracks sanitizeForLog through const/single-assignment locals (safeClientId,
-  // safeMethod) but not through a `let` reassigned across branches (alerts
-  // 169/170), nor when applied straight to a property access (alert 180).
-  // This variable carries the sanitized text to the activity-span emit only.
+  // Carries the sanitized text to the activity-span emit below. Each
+  // console.log reads its own const local rather than this `let`.
+  //
+  // On CodeQL js/log-injection in this function: every value logged here goes
+  // through sanitizeForLog first, so the CR/LF barrier is real at runtime. The
+  // analyzer's barrier model does not consistently credit it. Three shapes were
+  // tried on the validation branch — read back from this `let` (169/170), the
+  // sanitizer inlined at the call site (180), and a const hoist mirroring the
+  // catch branch (181) — and it re-raised each time, only ever moving line.
+  // 181 is dismissed as an analyzer limitation. Do not contort this code
+  // further to chase it; verify sanitizeForLog itself instead.
   let spanErrorMessage: string | undefined;
 
   try {
@@ -330,9 +335,8 @@ async function handleRpc(
     if (validationError) {
       spanOutcome = "error";
       // Hoisted to a const before sanitizing, mirroring `message` in the catch
-      // branch below. Applying the sanitizer directly to a property access —
-      // sanitizeForLog(validationError.message) — is not recognised as a barrier
-      // (alert 180), while the identical call on a plain const local is.
+      // branch below. Kept for symmetry and readability — it did NOT satisfy
+      // CodeQL (see the note above `spanErrorMessage`).
       const validationMessage = validationError.message;
       const safeValidationMessage = sanitizeForLog(validationMessage);
       spanErrorMessage = safeValidationMessage;
