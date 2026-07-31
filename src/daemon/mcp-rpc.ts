@@ -317,18 +317,26 @@ async function handleRpc(
   const spanStart = Date.now();
   const startSample = sampleNow();
   let spanOutcome: "ok" | "error" = "ok";
-  // Re-sanitized inline at each console.log call below (not read from this `let`)
-  // because CodeQL's log-injection barrier model tracks the sanitizer through
-  // const/single-assignment locals (safeClientId, safeMethod) but not through a
-  // `let` reassigned across branches — js/log-injection alerts 169/170.
+  // Never logged via this `let` — each console.log below reads a const local
+  // holding the sanitized value instead. CodeQL's log-injection barrier model
+  // tracks sanitizeForLog through const/single-assignment locals (safeClientId,
+  // safeMethod) but not through a `let` reassigned across branches (alerts
+  // 169/170), nor when applied straight to a property access (alert 180).
+  // This variable carries the sanitized text to the activity-span emit only.
   let spanErrorMessage: string | undefined;
 
   try {
     const validationError = validateParams(method, tool.spec.inputSchema, params);
     if (validationError) {
       spanOutcome = "error";
-      spanErrorMessage = sanitizeForLog(validationError.message);
-      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(validationError.message)}`);
+      // Hoisted to a const before sanitizing, mirroring `message` in the catch
+      // branch below. Applying the sanitizer directly to a property access —
+      // sanitizeForLog(validationError.message) — is not recognised as a barrier
+      // (alert 180), while the identical call on a plain const local is.
+      const validationMessage = validationError.message;
+      const safeValidationMessage = sanitizeForLog(validationMessage);
+      spanErrorMessage = safeValidationMessage;
+      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${safeValidationMessage}`);
       jsonRes(res, 200, {
         id,
         error: { code: INVALID_PARAMS, message: validationError.message },
