@@ -98,7 +98,17 @@ describe("daemon lifecycle", () => {
         encoding: "utf8",
         timeout: 15000,
       });
-      expect(stopResult.status).toBe(0);
+      // 0 and 3 both mean "stop accepted"; only 1 is a failure to signal.
+      // Plan 108 made `daemon stop` exit 3 for "accepted, still draining"
+      // (src/cli.ts) so that exit 0 can keep meaning "the daemon is gone".
+      // Which of the two you get is a race against the daemon finishing its
+      // startup work: ubuntu goes idle before the stop lands and returns 0,
+      // slower macOS runners are still draining and correctly return 3.
+      // This test's actual subject is the pidfile removal asserted below.
+      expect(
+        [0, 3],
+        `daemon stop should report accepted (0 or 3), got ${stopResult.status}: ${stopResult.stderr}`,
+      ).toContain(stopResult.status);
     } finally {
       if (!child.killed) child.kill("SIGTERM");
     }

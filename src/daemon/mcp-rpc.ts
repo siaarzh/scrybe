@@ -317,14 +317,30 @@ async function handleRpc(
   const spanStart = Date.now();
   const startSample = sampleNow();
   let spanOutcome: "ok" | "error" = "ok";
+  // Carries the sanitized text to the activity-span emit below. Each
+  // console.log reads its own const local rather than this `let`.
+  //
+  // On CodeQL js/log-injection in this function: every value logged here goes
+  // through sanitizeForLog first, so the CR/LF barrier is real at runtime. The
+  // analyzer's barrier model does not consistently credit it. Three shapes were
+  // tried on the validation branch — read back from this `let` (169/170), the
+  // sanitizer inlined at the call site (180), and a const hoist mirroring the
+  // catch branch (181) — and it re-raised each time, only ever moving line.
+  // 181 is dismissed as an analyzer limitation. Do not contort this code
+  // further to chase it; verify sanitizeForLog itself instead.
   let spanErrorMessage: string | undefined;
 
   try {
     const validationError = validateParams(method, tool.spec.inputSchema, params);
     if (validationError) {
       spanOutcome = "error";
-      spanErrorMessage = sanitizeForLog(validationError.message);
-      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${spanErrorMessage}`);
+      // Hoisted to a const before sanitizing, mirroring `message` in the catch
+      // branch below. Kept for symmetry and readability — it did NOT satisfy
+      // CodeQL (see the note above `spanErrorMessage`).
+      const validationMessage = validationError.message;
+      const safeValidationMessage = sanitizeForLog(validationMessage);
+      spanErrorMessage = safeValidationMessage;
+      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${safeValidationMessage}`);
       jsonRes(res, 200, {
         id,
         error: { code: INVALID_PARAMS, message: validationError.message },
@@ -338,7 +354,7 @@ async function handleRpc(
     spanOutcome = "error";
     const message = err instanceof Error ? err.message : String(err);
     spanErrorMessage = sanitizeForLog(message);
-    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${spanErrorMessage}`);
+    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(message)}`);
 
     // Classify: caller-facing (bad-but-well-formed input, e.g. "project 'x' not
     // found") echoes its message under INVALID_PARAMS; everything else keeps the
