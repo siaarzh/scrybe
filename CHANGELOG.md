@@ -9,6 +9,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.47.1] — 2026-08-01
+
+### Security
+
+- Dependency updates carrying published security fixes: **fast-uri** (host confusion from a literal backslash in the URI authority), **tar** (uncontrolled recursion on crafted long-path archives), and **body-parser** (size limits silently ignored when given an invalid value). All three are transitive dependencies, and scrybe does not exercise the vulnerable paths. Precautionary.
+
+### Changed
+
+- Dependency updates: `@modelcontextprotocol/sdk` 1.30.0, `@parcel/watcher` 2.6.0, `ink` 7.1.1, `ignore` 7.0.6.
+
+---
+
 ## [0.47.0] — 2026-07-29
 
 ### Fixed
@@ -67,24 +79,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.45.0] — 2026-07-04
-
-### Added
-
-- Faster vector search on large indexes via a native quantized ANN index, built and maintained automatically in the background (no re-embedding, no manual step), with recall kept on par with exact search. Kicks in above 10,000 rows per source; set `SCRYBE_VECTOR_INDEX=false` to force exact search everywhere instead.
-
----
-
 ## Older releases
 
-For releases v0.44.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.45.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.47.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.47.1...HEAD
+[0.47.1]: https://github.com/siaarzh/scrybe/compare/v0.47.0...v0.47.1
 [0.47.0]: https://github.com/siaarzh/scrybe/compare/v0.46.3...v0.47.0
 [0.46.3]: https://github.com/siaarzh/scrybe/compare/v0.46.2...v0.46.3
 [0.46.2]: https://github.com/siaarzh/scrybe/compare/v0.46.1...v0.46.2
 [0.46.1]: https://github.com/siaarzh/scrybe/compare/v0.46.0...v0.46.1
 [0.46.0]: https://github.com/siaarzh/scrybe/compare/v0.45.0...v0.46.0
-[0.45.0]: https://github.com/siaarzh/scrybe/compare/v0.44.1...v0.45.0
