@@ -7,14 +7,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.48.0] — 2026-08-05
+
 ### Added
 
-- **The daemon now starts under a kernel-enforced memory ceiling on Linux**, so a runaway daemon is stopped by the kernel at the moment it asks for the memory instead of being noticed up to a minute later — and it can no longer take the host down with it. The limit defaults to 4096 MB and is set with `SCRYBE_DAEMON_CGROUP_MAX_MB` (`0` disables it). It applies where a systemd user session is available; everywhere else — other platforms, headless containers, hosts without systemd — the daemon starts exactly as before, uncapped.
-- **`scrybe doctor` reports whether the daemon is memory-capped.** For a running daemon it reads the limit actually in force; with no daemon running it predicts what the next one would get, and explains in plain language why a cap would be missing and what to do about it.
+- **The daemon now starts under a kernel-enforced memory ceiling on Linux.** A runaway daemon is stopped by the kernel at the moment it asks for the memory, not noticed up to a minute later, and it can no longer take the host down with it. The limit defaults to 4096 MB and is set with `SCRYBE_DAEMON_CGROUP_MAX_MB` (`0` disables it). It applies where a systemd user session is available; on other platforms, in headless containers, and on hosts without systemd the daemon starts exactly as before, uncapped. An always-on service installed by an earlier version keeps its existing unit and stays uncapped until reinstalled with `scrybe daemon install --force`.
+- **`scrybe doctor` reports whether the daemon is memory-capped.** For a running daemon it reads the limit actually in force, distinguishing a cap set by scrybe's own unit from one imposed by an ancestor cgroup. With no daemon running it predicts what the next one would get, and explains in plain language why a cap would be missing and what to do about it.
 
 ### Fixed
 
-- **A daemon that failed to restart after exceeding its memory ceiling is now forced to exit instead of lingering.** The self-restart could hang partway through, leaving a process that was over budget, no longer watching its own memory, and holding on to the lock the next daemon needs. Such a restart is now given a bounded window and then terminated, so a fresh daemon can take over. Tune the window with `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MS` (default 120 s) and its per-failure backoff ceiling `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MAX_MS` (default 30 min); a healthy restart always completes well within the window.
+- **A daemon that failed to restart after exceeding its memory ceiling is now forced to exit instead of lingering.** The self-restart could hang partway through, leaving a process that was over budget, no longer watching its own memory, and holding on to the lock the next daemon needs. Such a restart is now given a bounded window and then terminated, so a fresh daemon can take over. Tune the window with `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MS` (default 120 s, minimum 90 s) and its per-failure backoff ceiling `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MAX_MS` (default 30 min); a healthy restart always completes well within the window.
 
 ---
 
@@ -74,30 +78,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.46.0] — 2026-07-16
-
-### Added
-
-- **Temporarily index an unmerged remote branch for review, without pinning it or checking it out.** New `index_ephemeral` MCP tool (and `scrybe index-ephemeral`) fetches an open branch's content into a throwaway index under an `_ephemeral/…` label, so an agent can search a branch's own new code before it merges; `drop_ephemeral` (and `scrybe drop-ephemeral`) then tears it down and reclaims its chunks. The ephemeral index never joins the pinned-branch set and is never refreshed in the background.
-- `scrybe index --content-ref <ref>`: index content read from one git ref while storing it under a different branch label.
-- The background daemon sweeps leaked `_ephemeral/…` indexes on startup, so a review that ends abnormally can't leave a throwaway index behind.
-
-### Fixed
-
-- Source-scoped garbage collection now works through the background daemon (previously only the in-process path honored a specific source).
-
----
-
 ## Older releases
 
-For releases v0.45.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.46.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.47.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.48.0...HEAD
+[0.48.0]: https://github.com/siaarzh/scrybe/compare/v0.47.1...v0.48.0
 [0.47.1]: https://github.com/siaarzh/scrybe/compare/v0.47.0...v0.47.1
 [0.47.0]: https://github.com/siaarzh/scrybe/compare/v0.46.3...v0.47.0
 [0.46.3]: https://github.com/siaarzh/scrybe/compare/v0.46.2...v0.46.3
 [0.46.2]: https://github.com/siaarzh/scrybe/compare/v0.46.1...v0.46.2
 [0.46.1]: https://github.com/siaarzh/scrybe/compare/v0.46.0...v0.46.1
-[0.46.0]: https://github.com/siaarzh/scrybe/compare/v0.45.0...v0.46.0
