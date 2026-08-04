@@ -18,7 +18,7 @@ import { submitJob, submitSourceJob, getJobStatus } from "../jobs.js";
 import { insertJob, updateJobStatus, cancelPendingGcJobs } from "../jobs-store.js";
 import { getProject, getSource, resolveEmbeddingConfig } from "../registry.js";
 import { diagEmit } from "./events.js";
-import { sampleNow, createSpanRssTracker, type SpanRssTracker } from "./mem-sampler.js";
+import { sampleNow, createSpanRssTracker } from "./mem-sampler.js";
 import type { DaemonEvent } from "./http-server.js";
 import type { IndexMode } from "../types.js";
 import type { JobType } from "../jobs-store.js";
@@ -68,10 +68,6 @@ interface ActiveEntry extends QueueRequest {
   startRssBytes?: number;
   /** Active embedding provider type for this job's primary source. */
   providerType?: "local" | "api";
-  /** Per-span RSS high-water-mark tracker (Plan 109 Phase 2). Sampled on every
-   * status-poll tick below so the recorded peak reflects the span's interior,
-   * not just its start/end points. */
-  rssTracker?: SpanRssTracker;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────
@@ -469,7 +465,6 @@ function drain(): void {
       timer,
       startRssBytes: startSample.rssBytes,
       providerType,
-      rssTracker,
     });
   }
 }

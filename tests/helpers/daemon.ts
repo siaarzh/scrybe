@@ -55,6 +55,14 @@ export async function startTempDaemon(opts: {
     SCRYBE_SKIP_MIGRATION: "1",
     SCRYBE_DAEMON_PORT: String(opts.port ?? 0),
     SCRYBE_DAEMON_NO_FETCH: "1",
+    // Pin every test daemon's SELF-restart to the plain detached spawn. A real
+    // daemon started here can restart itself (rss-guard, SIGTERM escalation),
+    // and that goes through `spawnDaemonDetached()` — which on a Linux dev box
+    // with a live user bus would wrap the replacement in a real transient
+    // `scrybe-daemon-*.service`, and in a bus-less CI container would burn the
+    // wrapper timeout first. Before `...extraEnv` so a test that wants the
+    // wrapper can still ask for it.
+    SCRYBE_DAEMON_CGROUP_MAX_MB: "0",
     ...opts.extraEnv,
   };
 

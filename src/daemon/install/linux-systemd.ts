@@ -46,12 +46,24 @@ export function buildUnit(launcherScript: string): string {
   return `[Unit]
 Description=Scrybe code indexer daemon
 After=network.target
-# Bound the restart loop: a cgroup memory cap (companion slice) SIGKILLs the
-# daemon, bypassing its graceful self-respawn exit(0) path entirely. With
-# RestartSec=5, 6 starts fit in a 30s window — enough slack for ordinary
-# transient restarts (e.g. a flaky dependency at boot) — after which systemd
-# marks the unit "failed" instead of respawning an OOMing daemon every 5s
-# forever against an already memory-starved host.
+# Bound the restart loop — but only the FAST kind. A cgroup memory cap
+# (companion slice) SIGKILLs the daemon, bypassing its graceful self-respawn
+# exit(0) path entirely, so Restart=on-failure below takes over. With
+# RestartSec=5, 6 starts fit inside this 30s window, which is enough to catch
+# an immediate-exit crash loop (missing build, bad config — the daemon dies
+# within seconds of every start) and mark the unit "failed" instead of
+# hammering RestartSec=5 forever.
+#
+# It does NOT bound a real OOM cycle: start → index → grow to the cap →
+# SIGKILL takes minutes, so 6 such restarts never land inside one 30s window
+# and this limiter never trips for that case — Restart=on-failure just keeps
+# restarting it, unconditionally, forever. That is left as-is deliberately: a
+# daemon that dies and comes back every few minutes is still available in
+# between (each restart briefly gets fresh headroom before growing again),
+# which beats a unit permanently marked "failed" that needs a manual
+# 'systemctl --user reset-failed' + start to recover. A slow OOM loop is a
+# real health problem — the scrybe doctor memory-containment check is the
+# place operators should learn about it and raise the cap, not this file.
 StartLimitIntervalSec=30
 StartLimitBurst=6
 
@@ -60,6 +72,15 @@ Type=simple
 ExecStart=${launcherScript}
 Restart=on-failure
 RestartSec=5
+# KillMode=process: on the RSS-guard restart path this daemon spawns its
+# replacement and then exits 0. Under the default control-group kill mode,
+# unit deactivation would SIGKILL the just-spawned replacement (verified:
+# a detached child of a deactivating unit dies with KillMode=control-group,
+# survives with KillMode=process) — and the exit-0 means Restart=on-failure
+# would not resurrect anything either: zero daemons. The daemon spawns no
+# other long-lived children, so narrowing the kill to the main process
+# leaves nothing orphaned.
+KillMode=process
 ${buildMemoryCapLines()}
 [Install]
 WantedBy=default.target

@@ -33,8 +33,8 @@ function warn(id: string, section: string, title: string, message: string, remed
 function fail(id: string, section: string, title: string, message: string, remedy?: string, data?: Record<string, unknown>): CheckResult {
   return { id, section, title, status: "fail", message, remedy, data };
 }
-function skip(id: string, section: string, title: string, message: string): CheckResult {
-  return { id, section, title, status: "skip", message };
+function skip(id: string, section: string, title: string, message: string, data?: Record<string, unknown>): CheckResult {
+  return { id, section, title, status: "skip", message, data };
 }
 
 function dirSize(dir: string): number {
@@ -97,9 +97,14 @@ async function checkDaemonMemoryContainment(): Promise<CheckResult> {
 
       if (limit.state === "limited") {
         const limitMb = Math.round(limit.limitBytes / (1024 * 1024));
-        return ok(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
-          `Running daemon (PID ${livePid}) is capped at ${limitMb} MB — kernel-enforced`,
-          { ...base, state: limit.state, limitMb, limitBytes: limit.limitBytes, cgroupPath: limit.cgroupPath });
+        const message = limit.limitingLevel === "leaf"
+          ? `Running daemon (PID ${livePid}) is capped at ${limitMb} MB by its own unit — kernel-enforced`
+          : `Running daemon (PID ${livePid}) is capped at ${limitMb} MB by an ancestor cgroup (${limit.limitingPath}) — kernel-enforced, but not scrybe's to change`;
+        return ok(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE, message,
+          {
+            ...base, state: limit.state, limitMb, limitBytes: limit.limitBytes,
+            cgroupPath: limit.cgroupPath, limitingLevel: limit.limitingLevel, limitingPath: limit.limitingPath,
+          });
       }
 
       if (limit.state === "unlimited") {
@@ -110,7 +115,8 @@ async function checkDaemonMemoryContainment(): Promise<CheckResult> {
       }
 
       return skip(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
-        `Unknown for the running daemon (PID ${livePid}) — ${describeLimitUnknownReason(limit.reason)}`);
+        `Unknown for the running daemon (PID ${livePid}) — ${describeLimitUnknownReason(limit.reason)}`,
+        { ...base, reason: limit.reason });
     }
 
     // No daemon to observe. Everything below is a PREDICTION about the next
@@ -131,7 +137,8 @@ async function checkDaemonMemoryContainment(): Promise<CheckResult> {
     switch (capStatus.reason) {
       case "not-linux":
         return skip(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
-          "Not applicable — the memory cap wrapper (systemd-run) is Linux-only");
+          "Not applicable — the memory cap wrapper (systemd-run) is Linux-only",
+          { ...base, reason: capStatus.reason });
       case "disabled-by-config":
         return warn(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
           "No daemon running — the next one would be uncapped: the cap is disabled in config (SCRYBE_DAEMON_CGROUP_MAX_MB is 0 or not a positive number)",

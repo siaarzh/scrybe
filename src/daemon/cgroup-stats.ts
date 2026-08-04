@@ -145,9 +145,23 @@ export function readCgroupMemoryStats(opts?: {
  * `unknown` is a first-class outcome and is never collapsed into "uncapped":
  * a `hidepid=2` /proc, a cgroup v1 host, or a permission error tells us
  * nothing about the limit, and claiming either answer there would be a lie.
+ *
+ * `limitingLevel` / `limitingPath` name WHICH cgroup in the ancestor chain
+ * supplies the effective (minimum) limit — the leaf (this process's own unit)
+ * or an ancestor (e.g. `user.slice`, `user@1000.service`, a container's outer
+ * cgroup). The remedy differs: a leaf cap is scrybe's own doing and can be
+ * changed via `SCRYBE_DAEMON_CGROUP_MAX_MB` / reinstall; an ancestor cap
+ * belongs to the operator's systemd/container setup and is not scrybe's to
+ * change.
  */
 export type CgroupMemoryLimit =
-  | { state: "limited"; limitBytes: number; cgroupPath: string }
+  | {
+      state: "limited";
+      limitBytes: number;
+      cgroupPath: string;
+      limitingLevel: "leaf" | "ancestor";
+      limitingPath: string;
+    }
   | { state: "unlimited"; cgroupPath: string }
   | { state: "unknown"; reason: CgroupMemoryLimitUnknownReason };
 
@@ -157,9 +171,61 @@ export type CgroupMemoryLimitUnknownReason =
   | "memory-max-unreadable"
   | "memory-max-unparseable";
 
+interface CgroupLevelRead {
+  /** cgroup path of this level (never the true "/sys/fs/cgroup" mount root — see below). */
+  path: string;
+  /** memory.max content, trimmed; null if the file is missing/unreadable. */
+  raw: string | null;
+}
+
 /**
- * Reads `memory.max` for `pid`'s cgroup v2 group. Never throws: every failure
- * mode degrades to `{ state: "unknown", reason }`.
+ * Reads `memory.max` at the pid's own cgroup and every ancestor above it, up
+ * to (but excluding) the true cgroup v2 mount root.
+ *
+ * The mount root itself is excluded deliberately: cgroup v2's root cgroup
+ * does not carry a `memory.max` file at all (the memory controller is never
+ * "enabled" against the root — there is nothing above it to account
+ * against), so treating its absence as a read failure would make a
+ * completely ordinary host report "unknown" instead of "unlimited". Every
+ * level between the leaf and the root (`user.slice`, `user-1000.slice`,
+ * `user@1000.service`, `app.slice`, a container's outer cgroup, …) is a real
+ * cgroup and DOES carry the file whenever cgroup v2 delegates the memory
+ * controller down to it.
+ */
+function readCgroupAncestorChain(cgroupFsRoot: string, cgroupPath: string): CgroupLevelRead[] {
+  const segments = cgroupPath.split("/").filter((s) => s.length > 0);
+  const levels: CgroupLevelRead[] = [];
+  for (let i = segments.length; i >= 1; i--) {
+    const path = "/" + segments.slice(0, i).join("/");
+    const raw = readCgroupFile(cgroupFsRoot, path, "memory.max");
+    levels.push({ path, raw: raw !== null ? raw.trim() : null });
+  }
+  return levels;
+}
+
+/**
+ * Reads `memory.max` for `pid`'s cgroup v2 group AND every ancestor above it,
+ * and reports the MINIMUM — cgroup v2 enforces the tightest limit anywhere in
+ * the chain, so a leaf that reads "max" can still be capped by a
+ * `user.slice`/`user@.service`/container cgroup above it. Never throws: every
+ * failure mode degrades to `{ state: "unknown", reason }`.
+ *
+ * The leaf read is load-bearing and hard-blocking, matching the pre-ancestor-
+ * walk contract exactly: if the leaf itself is unreadable or unparseable,
+ * that is reported as `unknown` regardless of what the ancestors say (we
+ * cannot even confirm the pid's own cgroup, so nothing else is trustworthy
+ * either).
+ *
+ * Ancestor reads are best-effort ENRICHMENT, not equally hard-blocking: a
+ * genuinely unlimited leaf plus an unreadable (rather than a definitively
+ * "max") ancestor still reports `unlimited`. In practice every ancestor
+ * segment on a resolved path is a real, existing cgroup directory (cgroupfs
+ * requires parents to exist for a child to exist), so an unreadable ancestor
+ * almost always means the memory controller simply is not delegated there
+ * (no file at all) rather than a hidden cap we failed to see — treating that
+ * as blocking "unknown" would make the common case (no ancestor containment)
+ * unreportable. A definitively lower NUMERIC ancestor limit, when readable,
+ * always wins over a "max" leaf.
  */
 export function readCgroupMemoryLimitForPid(pid: number, opts?: {
   platform?: NodeJS.Platform;
@@ -172,15 +238,45 @@ export function readCgroupMemoryLimitForPid(pid: number, opts?: {
   const cgroupPath = resolveCgroupPathForPid(pid, opts?.procRoot ?? "/proc");
   if (cgroupPath === null) return { state: "unknown", reason: "no-cgroup-v2" };
 
-  const raw = readCgroupFile(opts?.cgroupFsRoot ?? "/sys/fs/cgroup", cgroupPath, "memory.max");
-  if (raw === null) return { state: "unknown", reason: "memory-max-unreadable" };
+  const cgroupFsRoot = opts?.cgroupFsRoot ?? "/sys/fs/cgroup";
+  const levels = readCgroupAncestorChain(cgroupFsRoot, cgroupPath);
 
-  const trimmed = raw.trim();
-  if (trimmed === "max") return { state: "unlimited", cgroupPath };
-
-  const limitBytes = Number(trimmed);
-  if (!Number.isFinite(limitBytes) || limitBytes <= 0) {
-    return { state: "unknown", reason: "memory-max-unparseable" };
+  // Leaf is always levels[0] (readCgroupAncestorChain walks leaf-first).
+  const leaf = levels[0]!;
+  if (leaf.raw === null) return { state: "unknown", reason: "memory-max-unreadable" };
+  if (leaf.raw !== "max") {
+    const leafBytes = Number(leaf.raw);
+    if (!Number.isFinite(leafBytes) || leafBytes <= 0) {
+      return { state: "unknown", reason: "memory-max-unparseable" };
+    }
   }
-  return { state: "limited", limitBytes, cgroupPath };
+
+  // Leaf is confirmed readable (either "max" or a valid number). Now fold in
+  // every ancestor that gave us a definitive numeric limit — unreadable or
+  // "max" ancestors contribute nothing and are silently skipped (see the
+  // best-effort rationale above).
+  let minBytes: number | null = leaf.raw === "max" ? null : Number(leaf.raw);
+  let minLevel: CgroupLevelRead | null = leaf.raw === "max" ? null : leaf;
+
+  for (const level of levels.slice(1)) {
+    if (level.raw === null || level.raw === "max") continue;
+    const bytes = Number(level.raw);
+    if (!Number.isFinite(bytes) || bytes <= 0) continue; // garbled ancestor value — ignore, not blocking
+    if (minBytes === null || bytes < minBytes) {
+      minBytes = bytes;
+      minLevel = level;
+    }
+  }
+
+  if (minBytes !== null && minLevel !== null) {
+    return {
+      state: "limited",
+      limitBytes: minBytes,
+      cgroupPath,
+      limitingLevel: minLevel.path === cgroupPath ? "leaf" : "ancestor",
+      limitingPath: minLevel.path,
+    };
+  }
+
+  return { state: "unlimited", cgroupPath };
 }

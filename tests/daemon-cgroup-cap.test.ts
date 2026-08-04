@@ -150,6 +150,15 @@ describe("buildSystemdRunArgs", () => {
     expect(buildSystemdRunArgs(base)).toContain("Restart=no");
   });
 
+  it("pins KillMode=process, or unit teardown kills the fallback replacement", () => {
+    // The default KillMode=control-group SIGKILLs everything left in the
+    // cgroup when the unit deactivates. A plain-spawn fallback replacement is
+    // in that cgroup (detached gives a new SESSION, not a new cgroup), and the
+    // parent exits immediately after spawning it — so on the exact path that
+    // exists as the safety net, the host would end up with ZERO daemons.
+    expect(buildSystemdRunArgs(base)).toContain("KillMode=process");
+  });
+
   it("ends with the unchanged daemon command line", () => {
     const args = buildSystemdRunArgs(base);
     expect(args.slice(-5)).toEqual([
@@ -317,5 +326,213 @@ describe.skipIf(process.platform !== "linux")("wrapper-failure fallback (synchro
     const opts = vi.mocked(spawnSync).mock.calls[0]![2] as any;
     expect(opts.windowsHide).toBe(true);
     expect(opts.timeout).toBeGreaterThan(0);
+  });
+
+  it("kills a hung systemd-run with SIGKILL, so `timeout` is a real bound", async () => {
+    const { spawnSync } = await import("child_process");
+    vi.mocked(spawnSync).mockReturnValue({ status: 0, signal: null, pid: 7, output: [], stdout: null, stderr: null } as any);
+
+    await callSpawn();
+
+    // Node's default killSignal is SIGTERM, which a D-Bus client blocked in
+    // connect() can sit on indefinitely — making the documented ceiling a
+    // suggestion rather than a bound.
+    expect((vi.mocked(spawnSync).mock.calls[0]![2] as any).killSignal).toBe("SIGKILL");
+  });
+
+  it("caps the systemd-run wait at a fraction of the caller's remaining budget", async () => {
+    const { spawnDaemonDetached } = await import("../src/daemon/spawn-detached.js");
+    const { spawnSync } = await import("child_process");
+    vi.mocked(spawnSync).mockReturnValue({ status: 0, signal: null, pid: 7, output: [], stdout: null, stderr: null } as any);
+
+    spawnDaemonDetached({
+      execPath: "/usr/bin/node",
+      entryScript: "/tmp/entry.js",
+      env: { PATH: binDir, XDG_RUNTIME_DIR: "/run/user/1000" },
+      cgroupMaxMb: 512,
+      budgetMs: 5000,
+    });
+
+    // The MCP shim's budget. A flat 10 s wrapper inside it overran the caller
+    // twice over and left the health wait with an expired deadline.
+    expect((vi.mocked(spawnSync).mock.calls[0]![2] as any).timeout).toBe(1500);
+  });
+
+  it("uses the full stuck-bus ceiling when no caller is waiting", async () => {
+    const { spawnSync } = await import("child_process");
+    const { SYSTEMD_RUN_TIMEOUT_MS } = await import("../src/daemon/spawn-detached.js");
+    vi.mocked(spawnSync).mockReturnValue({ status: 0, signal: null, pid: 7, output: [], stdout: null, stderr: null } as any);
+
+    // No budgetMs — the daemon's own restart sites, which exit immediately after.
+    await callSpawn();
+
+    expect((vi.mocked(spawnSync).mock.calls[0]![2] as any).timeout).toBe(SYSTEMD_RUN_TIMEOUT_MS);
+  });
+});
+
+// ─── The wrapper must not eat the caller's budget ─────────────────────────────
+
+describe("resolveWrapperTimeoutMs", () => {
+  it("gives the full stuck-bus ceiling when no budget is supplied", async () => {
+    const { resolveWrapperTimeoutMs, SYSTEMD_RUN_TIMEOUT_MS } =
+      await import("../src/daemon/spawn-detached.js");
+    expect(resolveWrapperTimeoutMs(undefined)).toBe(SYSTEMD_RUN_TIMEOUT_MS);
+    expect(resolveWrapperTimeoutMs(NaN)).toBe(SYSTEMD_RUN_TIMEOUT_MS);
+  });
+
+  it("leaves the majority of every real caller's budget to the health wait", async () => {
+    const { resolveWrapperTimeoutMs } = await import("../src/daemon/spawn-detached.js");
+    // The three budgets actually in the tree: ensureRunning's default, the MCP
+    // shim's per-RPC retry, and DAEMON_COLD_START_WAIT_MS.
+    for (const budget of [3000, 5000, 15000]) {
+      const t = resolveWrapperTimeoutMs(budget);
+      expect(t).toBeLessThan(budget / 2);
+      // ...and still enormous next to a measured 24-44 ms round-trip.
+      expect(t).toBeGreaterThanOrEqual(900);
+    }
+  });
+
+  it("never exceeds the stuck-bus ceiling for an enormous budget", async () => {
+    const { resolveWrapperTimeoutMs, SYSTEMD_RUN_TIMEOUT_MS } =
+      await import("../src/daemon/spawn-detached.js");
+    expect(resolveWrapperTimeoutMs(10 * 60_000)).toBe(SYSTEMD_RUN_TIMEOUT_MS);
+  });
+
+  it("keeps a floor so a tiny budget loses the cap only, never unboundedly", async () => {
+    const { resolveWrapperTimeoutMs } = await import("../src/daemon/spawn-detached.js");
+    // Below the floor we deliberately overshoot rather than drop the memory cap
+    // on every spawn — but the overshoot is bounded by the floor itself, not by
+    // the 10 s ceiling.
+    expect(resolveWrapperTimeoutMs(0)).toBe(250);
+    expect(resolveWrapperTimeoutMs(100)).toBe(250);
+  });
+});
+
+// ─── The async twin: same decisions, without freezing the caller's event loop ──
+// `ensureRunning()` runs inside the MCP shim with other RPCs in flight. A
+// blocking wrapper attempt there stalls all of them; only the daemon's own
+// exiting restart sites need the synchronous form.
+
+describe.skipIf(process.platform !== "linux")("spawnDaemonDetachedAsync", () => {
+  const DAEMON_ARGV = ["/tmp/entry.js", "daemon", "start"];
+  const SYSTEMD_RUN = () => join(binDir, "systemd-run");
+
+  /**
+   * Mocks `spawn` so the systemd-run child settles with `code`, while the
+   * plain-spawn daemon child behaves like the real one (never exits).
+   */
+  async function mockSpawn(code: number | null, signal: NodeJS.Signals | null = null) {
+    const { EventEmitter } = await import("events");
+    const { spawn } = await import("child_process");
+    vi.mocked(spawn).mockReset();
+    vi.mocked(spawn).mockImplementation(((cmd: string) => {
+      const child = new EventEmitter() as any;
+      child.pid = 4242;
+      child.unref = vi.fn();
+      child.kill = vi.fn();
+      if (cmd === SYSTEMD_RUN()) {
+        setImmediate(() => child.emit("exit", code, signal));
+      }
+      return child;
+    }) as any);
+    return vi.mocked(spawn);
+  }
+
+  async function callAsync(budgetMs?: number) {
+    const { spawnDaemonDetachedAsync } = await import("../src/daemon/spawn-detached.js");
+    await spawnDaemonDetachedAsync({
+      execPath: "/usr/bin/node",
+      entryScript: "/tmp/entry.js",
+      env: { PATH: binDir, XDG_RUNTIME_DIR: "/run/user/1000" },
+      cgroupMaxMb: 512,
+      ...(budgetMs === undefined ? {} : { budgetMs }),
+    });
+  }
+
+  it("never blocks on spawnSync — the shim's other RPCs must keep running", async () => {
+    const { spawnSync } = await import("child_process");
+    vi.mocked(spawnSync).mockReset();
+    await mockSpawn(0);
+
+    await callAsync(5000);
+
+    expect(vi.mocked(spawnSync)).not.toHaveBeenCalled();
+  });
+
+  it("wraps in the transient unit and does not double-spawn on success", async () => {
+    const spawnMock = await mockSpawn(0);
+
+    await callAsync(5000);
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0]![0]).toBe(SYSTEMD_RUN());
+    expect(spawnMock.mock.calls[0]![1]).toContain("KillMode=process");
+  });
+
+  it("falls back to the plain spawn when systemd-run exits non-zero", async () => {
+    const spawnMock = await mockSpawn(1);
+
+    await callAsync(5000);
+
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(spawnMock.mock.calls[1]![0]).toBe("/usr/bin/node");
+    expect(spawnMock.mock.calls[1]![1]).toEqual(DAEMON_ARGV);
+  });
+
+  it("falls back when systemd-run cannot be executed at all", async () => {
+    const { EventEmitter } = await import("events");
+    const { spawn } = await import("child_process");
+    vi.mocked(spawn).mockReset();
+    vi.mocked(spawn).mockImplementation(((cmd: string) => {
+      const child = new EventEmitter() as any;
+      child.pid = 4242;
+      child.unref = vi.fn();
+      child.kill = vi.fn();
+      if (cmd === SYSTEMD_RUN()) {
+        setImmediate(() => child.emit("error", new Error("spawn ENOENT")));
+      }
+      return child;
+    }) as any);
+
+    await callAsync(5000);
+
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(spawn).mock.calls[1]![1]).toEqual(DAEMON_ARGV);
+  });
+
+  it("gives up on a wedged bus within the budgeted slice and still starts a daemon", async () => {
+    const { EventEmitter } = await import("events");
+    const { spawn } = await import("child_process");
+    vi.mocked(spawn).mockReset();
+    // systemd-run that never exits — the wedged-bus shape. Nothing here emits,
+    // so only the timeout can resolve the attempt.
+    vi.mocked(spawn).mockImplementation((() => {
+      const child = new EventEmitter() as any;
+      child.pid = 4242;
+      child.unref = vi.fn();
+      child.kill = vi.fn();
+      return child;
+    }) as any);
+
+    const started = Date.now();
+    await callAsync(1000);   // → a 300 ms wrapper slice
+    const elapsed = Date.now() - started;
+
+    // The daemon exists despite the wedge...
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(spawn).mock.calls[1]![1]).toEqual(DAEMON_ARGV);
+    // ...and the caller kept most of its 1000 ms for the health wait, instead
+    // of the pre-fix flat 10 s that expired the deadline before the first probe.
+    expect(elapsed).toBeLessThan(700);
+  });
+
+  it("hides the console window on both the wrapper and the fallback", async () => {
+    const spawnMock = await mockSpawn(1);
+
+    await callAsync(5000);
+
+    for (const call of spawnMock.mock.calls) {
+      expect((call[2] as any).windowsHide).toBe(true);
+    }
   });
 });

@@ -83,7 +83,10 @@ describe("daemon.memory_cap — observed (a daemon is running)", () => {
   it("reports the measured limit of the running daemon, and never consults the prediction", async () => {
     mockAmbient();
     mockPidfile({ pid: 4242, alive: true });
-    mockObservation({ state: "limited", limitBytes: 4096 * 1024 * 1024, cgroupPath: "/user.slice/x.service" });
+    mockObservation({
+      state: "limited", limitBytes: 4096 * 1024 * 1024, cgroupPath: "/user.slice/x.service",
+      limitingLevel: "leaf", limitingPath: "/user.slice/x.service",
+    });
     let predicted = false;
     mockPrediction({ mode: "capped", wrapper: "systemd-run", limitMb: 9999, systemdRunPath: "/usr/bin/systemd-run" },
       () => { predicted = true; });
@@ -97,6 +100,25 @@ describe("daemon.memory_cap — observed (a daemon is running)", () => {
     expect(row.message).not.toMatch(/would/i);
     expect(row.data?.["observed"]).toBe(true);
     expect(predicted).toBe(false);
+  });
+
+  it("distinguishes an ancestor-imposed cap from the daemon's own leaf cap, and does not offer scrybe's own remedy", async () => {
+    mockAmbient();
+    mockPidfile({ pid: 4242, alive: true });
+    mockObservation({
+      state: "limited", limitBytes: 1024 * 1024 * 1024, cgroupPath: "/user.slice/user@1000.service/scrybe.service",
+      limitingLevel: "ancestor", limitingPath: "/user.slice/user@1000.service",
+    });
+    mockPrediction({ mode: "capped", wrapper: "systemd-run", limitMb: 4096, systemdRunPath: "/usr/bin/systemd-run" });
+
+    const row = await memoryCapRow();
+    expect(row.status).toBe("ok");
+    expect(row.message).toContain("4242");
+    expect(row.message).toContain("1024 MB");
+    expect(row.message).toMatch(/ancestor cgroup/);
+    expect(row.message).toContain("/user.slice/user@1000.service");
+    expect(row.message).toMatch(/not scrybe's to change/);
+    expect(row.data?.["limitingLevel"]).toBe("ancestor");
   });
 
   it("WARNS when the running daemon's cgroup is unlimited, even though a fresh spawn would be capped", async () => {
@@ -131,7 +153,10 @@ describe("daemon.memory_cap — observed (a daemon is running)", () => {
   it("falls back to the prediction when the pidfile is stale (pid not alive)", async () => {
     mockAmbient();
     mockPidfile({ pid: 4242, alive: false });
-    mockObservation({ state: "limited", limitBytes: 1, cgroupPath: "/should-not-be-read" });
+    mockObservation({
+      state: "limited", limitBytes: 1, cgroupPath: "/should-not-be-read",
+      limitingLevel: "leaf", limitingPath: "/should-not-be-read",
+    });
     mockPrediction({ mode: "capped", wrapper: "systemd-run", limitMb: 4096, systemdRunPath: "/usr/bin/systemd-run" });
 
     const row = await memoryCapRow();

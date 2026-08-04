@@ -159,18 +159,93 @@ describe("readCgroupMemoryLimitForPid", () => {
     return { procRoot, cgroupFsRoot };
   }
 
-  it("reports the real limit in bytes for a capped process", () => {
+  it("reports the real limit in bytes for a capped process, attributed to the leaf", () => {
     const { procRoot, cgroupFsRoot } = fixture("capped", "4294967296\n");
     const limit = readCgroupMemoryLimitForPid(555, { platform: "linux", procRoot, cgroupFsRoot });
     expect(limit).toEqual({
       state: "limited",
       limitBytes: 4294967296,
       cgroupPath: "/user.slice/scrybe-daemon-capped.service",
+      limitingLevel: "leaf",
+      limitingPath: "/user.slice/scrybe-daemon-capped.service",
     });
   });
 
   it("reports 'unlimited' for the literal max — an uncapped always-on daemon", () => {
     const { procRoot, cgroupFsRoot } = fixture("unlimited", "max\n");
+    const limit = readCgroupMemoryLimitForPid(555, { platform: "linux", procRoot, cgroupFsRoot });
+    expect(limit.state).toBe("unlimited");
+  });
+
+  // ── Ancestor chain (MAJOR: leaf-only read reported an ancestor-capped
+  // daemon as uncapped) ──────────────────────────────────────────────────
+  // cgroup v2 enforces the MINIMUM limit across the whole ancestor chain, so
+  // a leaf reading "max" can still be genuinely capped by a parent slice
+  // (user.slice / user@.service) or a container's outer cgroup.
+
+  function ancestorFixture(
+    name: string,
+    leafMax: string | null,
+    ancestorMax: string | null
+  ): { procRoot: string; cgroupFsRoot: string; leafPath: string; ancestorPath: string } {
+    const procRoot = join(root, `proc-anc-${name}`);
+    const cgroupFsRoot = join(root, `cgfs-anc-${name}`);
+    const ancestorPath = "/user.slice";
+    const leafPath = `/user.slice/scrybe-daemon-${name}.service`;
+    mkdirSync(join(procRoot, "555"), { recursive: true });
+    writeFileSync(join(procRoot, "555", "cgroup"), `0::${leafPath}\n`);
+    if (ancestorMax !== null) {
+      mkdirSync(join(cgroupFsRoot, ancestorPath), { recursive: true });
+      writeFileSync(join(cgroupFsRoot, ancestorPath, "memory.max"), ancestorMax);
+    }
+    if (leafMax !== null) {
+      mkdirSync(join(cgroupFsRoot, leafPath), { recursive: true });
+      writeFileSync(join(cgroupFsRoot, leafPath, "memory.max"), leafMax);
+    }
+    return { procRoot, cgroupFsRoot, leafPath, ancestorPath };
+  }
+
+  it("reports the ancestor's limit when the leaf is unlimited but an ancestor slice caps it", () => {
+    const { procRoot, cgroupFsRoot, leafPath, ancestorPath } =
+      ancestorFixture("ancestor-capped", "max\n", "1073741824\n");
+    const limit = readCgroupMemoryLimitForPid(555, { platform: "linux", procRoot, cgroupFsRoot });
+    expect(limit).toEqual({
+      state: "limited",
+      limitBytes: 1073741824,
+      cgroupPath: leafPath,
+      limitingLevel: "ancestor",
+      limitingPath: ancestorPath,
+    });
+  });
+
+  it("reports the leaf's limit when both leaf and ancestor are capped and the leaf is smaller", () => {
+    const { procRoot, cgroupFsRoot, leafPath } =
+      ancestorFixture("leaf-smaller", "536870912\n", "4294967296\n");
+    const limit = readCgroupMemoryLimitForPid(555, { platform: "linux", procRoot, cgroupFsRoot });
+    expect(limit).toEqual({
+      state: "limited",
+      limitBytes: 536870912,
+      cgroupPath: leafPath,
+      limitingLevel: "leaf",
+      limitingPath: leafPath,
+    });
+  });
+
+  it("reports the ancestor's limit when both are capped and the ancestor is smaller (the ancestor wins — cgroup v2 enforces the minimum)", () => {
+    const { procRoot, cgroupFsRoot, leafPath, ancestorPath } =
+      ancestorFixture("ancestor-smaller", "4294967296\n", "536870912\n");
+    const limit = readCgroupMemoryLimitForPid(555, { platform: "linux", procRoot, cgroupFsRoot });
+    expect(limit).toEqual({
+      state: "limited",
+      limitBytes: 536870912,
+      cgroupPath: leafPath,
+      limitingLevel: "ancestor",
+      limitingPath: ancestorPath,
+    });
+  });
+
+  it("reports 'unlimited' only when every level in the chain reads max", () => {
+    const { procRoot, cgroupFsRoot } = ancestorFixture("all-max", "max\n", "max\n");
     const limit = readCgroupMemoryLimitForPid(555, { platform: "linux", procRoot, cgroupFsRoot });
     expect(limit.state).toBe("unlimited");
   });

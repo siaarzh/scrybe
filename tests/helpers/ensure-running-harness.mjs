@@ -29,6 +29,24 @@ const distEntryPath = join(__dirname, "..", "..", "dist", "index.js");
 
 const timeoutMs = Number(process.argv[2] ?? 5000);
 
+// Pin this harness to the PLAIN detached spawn, unconditionally.
+//
+// `ensureRunning()` is driven for real here, so on any Linux box with a live
+// user bus (a dev machine — `XDG_RUNTIME_DIR` is set) the daemon spawn would
+// otherwise go through `systemd-run --user`, creating REAL transient
+// `scrybe-daemon-*.service` units on the developer's session, one per harness
+// process, several per test. In a CI container the opposite failure applies:
+// `XDG_RUNTIME_DIR` exists but the bus is dead, so every spawn burns the
+// wrapper timeout before falling back.
+//
+// Neither outcome is what these tests are about — they assert cross-process
+// spawn SERIALISATION, and the wrapper is orthogonal to that. Setting the cap
+// to 0 makes `describeDaemonMemoryCap()` return `disabled-by-config` before it
+// touches the bus, so the path is identical on every host. Set here rather than
+// in the spawning test so it holds however the harness is invoked; the wrapper
+// itself is covered by the mocked unit tests in tests/daemon-cgroup-cap.test.ts.
+process.env["SCRYBE_DAEMON_CGROUP_MAX_MB"] = "0";
+
 // spawnDaemonDetached() (invoked internally by ensureRunning()) defaults its
 // entry script to process.argv[1] — the real CLI's entry point in
 // production. This harness process's own argv[1] is this file, not

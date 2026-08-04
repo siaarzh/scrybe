@@ -36,6 +36,14 @@ describe.skipIf(LINUX_ONLY)("generated systemd user unit", () => {
     expect(section(await unitText(), "Service")).toMatch(/^MemorySwapMax=0$/m);
   });
 
+  it("narrows the kill to the main process so a fallback-spawned replacement survives unit deactivation", async () => {
+    // Without KillMode=process, the rss-guard restart path's plain-spawn
+    // fallback lands the replacement in this unit's own cgroup, and the
+    // exit-0 teardown SIGKILLs it under the default control-group mode —
+    // zero daemons, and Restart=on-failure ignores a clean exit.
+    expect(section(await unitText(), "Service")).toMatch(/^KillMode=process$/m);
+  });
+
   it("keeps the restart-loop bound in [Unit], not [Service]", async () => {
     const text = await unitText();
     const unit = section(text, "Unit");

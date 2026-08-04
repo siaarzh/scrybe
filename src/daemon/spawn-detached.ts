@@ -35,13 +35,26 @@ export function daemonSpawnEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Pr
  * Uses process.execPath (node binary) + process.argv[1] (dist/index.js or the
  * globally-installed scrybe script) so it works in both dev and production.
  */
-export function spawnDaemonDetached(opts: {
+export interface SpawnDaemonOptions {
   execPath?: string;
   entryScript?: string;
   env?: NodeJS.ProcessEnv;
   /** Override the cgroup cap (MB) for this spawn. 0 disables the wrapper. */
   cgroupMaxMb?: number;
-}): void {
+  /**
+   * The caller's REMAINING wall-clock budget for "get me a daemon", in ms.
+   *
+   * Only the `systemd-run` wrapper can block, and only this bounds it. Omit it
+   * (the daemon's own self-restart sites) and the wrapper gets its full stuck-bus
+   * ceiling — nobody is waiting on those; the process is already exiting.
+   * Supply it (`ensureRunning`) and the wrapper is capped at a small share of
+   * what is left, so the health-wait that follows still has most of the budget.
+   * See `resolveWrapperTimeoutMs`.
+   */
+  budgetMs?: number;
+}
+
+export function spawnDaemonDetached(opts: SpawnDaemonOptions): void {
   const node   = opts.execPath   ?? process.execPath;
   const script = opts.entryScript ?? process.argv[1]!;
   const env    = daemonSpawnEnv(opts.env ?? process.env);
@@ -77,24 +90,46 @@ export function spawnDaemonDetached(opts: {
     return;
   }
 
-  const capMb = opts.cgroupMaxMb ?? config.daemonCgroupMaxMb;
-  const status = describeDaemonMemoryCap({ env, platform: process.platform, capMb });
-
-  if (status.mode === "capped") {
-    // Decided SYNCHRONOUSLY (see spawnViaSystemdRun): callers such as
-    // main.ts's two self-restart sites call process.exit(0) on the next line,
-    // so a fallback that needed another turn of the event loop would never run
-    // and a failed wrapper would leave the host with no daemon at all.
-    if (spawnViaSystemdRun({ node, script, env, status })) return;
+  const attempt = planWrapperAttempt(opts, node, script, env);
+  if (attempt) {
+    // Decided SYNCHRONOUSLY (see the `spawnViaSystemdRun*` docstring): callers
+    // such as main.ts's three self-restart sites call process.exit() on the
+    // next line, so a fallback that needed another turn of the event loop would
+    // never run and a failed wrapper would leave the host with no daemon at
+    // all.
+    if (spawnViaSystemdRunSync(attempt, env)) return;
     // Wrapper did not start — fall through to a plain spawn so a broken cgroup
     // path can never mean "no daemon at all".
-  } else {
-    diagEmit({
-      event: "daemon.cgroup-cap.skipped",
-      level: "debug",
-      reason: status.reason,
-    });
   }
+
+  spawnPlainDetached(node, script, env);
+}
+
+/**
+ * Async twin of `spawnDaemonDetached`, for callers that are NOT about to exit.
+ *
+ * Identical behaviour and identical fallback ordering — the only difference is
+ * that the `systemd-run` round-trip is awaited instead of blocking the event
+ * loop. That matters exactly once, but it matters a lot: the MCP shim calls
+ * `ensureRunning()` from a live server process with other RPCs in flight, and a
+ * synchronous wrapper attempt there freezes every one of them for the duration.
+ * The daemon's own restart paths keep the sync form, because at those call
+ * sites there is no event loop left to yield to.
+ */
+export async function spawnDaemonDetachedAsync(opts: SpawnDaemonOptions): Promise<void> {
+  const node   = opts.execPath   ?? process.execPath;
+  const script = opts.entryScript ?? process.argv[1]!;
+  const env    = daemonSpawnEnv(opts.env ?? process.env);
+
+  if (process.platform === "win32") {
+    // The Windows launcher never blocks (wscript.exe returns immediately), so
+    // there is nothing to await — reuse the one implementation.
+    spawnDaemonDetached(opts);
+    return;
+  }
+
+  const attempt = planWrapperAttempt(opts, node, script, env);
+  if (attempt && await spawnViaSystemdRunAsync(attempt, env)) return;
 
   spawnPlainDetached(node, script, env);
 }
@@ -226,6 +261,37 @@ export function makeDaemonUnitName(): string {
  * - `Restart=no`: the shim-spawned deployment has no auto-restart today
  *   (recovery is the MCP shim's `ensureRunning()` on the next tool call).
  *   systemd must not invent a restart policy this path never had.
+ * - `KillMode=process`: WITHOUT THIS THE PLAIN-SPAWN FALLBACK DESTROYS ITSELF.
+ *   Once the daemon runs inside a transient unit — which this wrapper makes the
+ *   normal case — a self-restart that falls back to `spawn(…, {detached:true})`
+ *   puts the replacement in the PARENT's cgroup: `detached` buys a new session,
+ *   not a new cgroup. The parent then calls `process.exit()` on the next line,
+ *   its unit loses its main process and deactivates, and under the DEFAULT
+ *   `KillMode=control-group` systemd SIGKILLs everything still in that cgroup —
+ *   including the replacement that was just started. `Restart=no` means nothing
+ *   resurrects it. Net result on the exact path advertised as the safety net
+ *   (wrapper fails → fall back): ZERO daemons.
+ *
+ *   `KillMode=process` narrows the teardown kill to the main process only, so a
+ *   detached child started before the exit survives deactivation. Verified by
+ *   probe on systemd 255: with the default the detached child is gone within
+ *   3 s of the main process exiting; with `KillMode=process` it is still
+ *   running.
+ *
+ *   Three things this does NOT cost us, also probe-verified:
+ *   1. Resource control is unaffected — `KillMode` governs stop behaviour, not
+ *      the cgroup's limits. A `MemoryMax=32M` unit with `KillMode=process`
+ *      still ends in `Failed with result 'oom-kill'`, status 137.
+ *   2. The survivor stays in the (now deactivated) unit's cgroup, which is NOT
+ *      removed while it holds a process — and that cgroup's `memory.max` is
+ *      still the one we set, so the fallback daemon inherits the SAME cap
+ *      rather than escaping it.
+ *   3. That leftover cgroup is not a leak: the directory disappears on its own
+ *      once the survivor exits.
+ *
+ *   The daemon spawns no long-lived children of its own (indexing runs
+ *   in-process), so narrowing the kill leaves nothing else behind, and a user
+ *   logout still tears the whole `user.slice` down regardless of `KillMode`.
  * - `--collect`: a transient unit that failed or was OOM-killed otherwise
  *   lingers in `failed` state and blocks reuse of its name.
  * - `--setenv=NAME` (NAME-ONLY, never `NAME=VALUE`): a transient unit inherits
@@ -238,6 +304,15 @@ export function makeDaemonUnitName(): string {
  *   read the value from its OWN environment (which we hand it via `spawn`'s
  *   `env`) and pass it over the private D-Bus connection, so argv carries only
  *   the variable NAME. Verified on systemd 255.
+ *
+ *   HONEST LIMIT of the name-only form: it closes the CROSS-USER leak only.
+ *   systemd still resolves each value and stores it as the unit's
+ *   `Environment=` property, so `systemctl --user show <unit>` prints the
+ *   full `NAME=VALUE` — to the SAME uid (verified on systemd 255: a probe
+ *   secret came back verbatim). That is equivalent exposure to the daemon's
+ *   own `/proc/<pid>/environ` (mode 400, same-uid readable), so it grants an
+ *   attacker nothing they don't already have — unlike `/proc/<pid>/cmdline`,
+ *   which is mode 444 and readable by EVERY local user at default hidepid=0.
  *
  *   Name-only `--setenv` needs a reasonably recent systemd; older releases
  *   reject an assignment without `=` and exit non-zero WITHOUT starting a unit.
@@ -271,6 +346,7 @@ export function buildSystemdRunArgs(opts: {
     "-p", `MemoryMax=${opts.limitMb}M`,
     "-p", "MemorySwapMax=0",
     "-p", "Restart=no",
+    "-p", "KillMode=process",
   ];
 
   if (opts.workingDir) args.push("-p", `WorkingDirectory=-${opts.workingDir}`);
@@ -292,44 +368,80 @@ export function buildSystemdRunArgs(opts: {
 }
 
 /**
- * How long we are willing to block waiting for `systemd-run` to enqueue the
- * unit's start job. It is a D-Bus client that returns as soon as the job is
- * queued (measured well under a second on a healthy user manager), so this is
- * a stuck-bus ceiling, not an expected wait.
+ * Stuck-bus ceiling for a `systemd-run` round-trip when NO caller budget was
+ * supplied (the daemon's own restart sites). `systemd-run` is a D-Bus client
+ * that returns as soon as the start job is queued — measured 24–44 ms on a
+ * healthy user manager across five runs — so this is a hang bound, never an
+ * expected wait.
  */
-const SYSTEMD_RUN_TIMEOUT_MS = 10_000;
+export const SYSTEMD_RUN_TIMEOUT_MS = 10_000;
 
 /**
- * Spawns the daemon inside a transient systemd user service. Returns true only
- * when `systemd-run` reported success — i.e. the start job was accepted.
+ * Share of a caller's REMAINING budget the wrapper may consume.
  *
- * WHY THIS IS SYNCHRONOUS (`spawnSync`, not `spawn`). The fallback to a plain
- * spawn used to hang off `child.once("exit")`, which is unreachable from the
- * daemon's two self-restart call sites (`main.ts`): both call
- * `spawnDaemonDetached()` and then `process.exit(0)` on the very next line, so
- * the event loop never turns and the exit handler never fires. Any
- * systemd-run failure there — stale `XDG_RUNTIME_DIR`, unreachable bus, a
- * property (or a name-only `--setenv`) the local systemd does not understand —
- * therefore produced NO daemon at all: strictly worse than the uncapped status
- * quo. Deciding inside `spawnDaemonDetached`, before it returns, makes the
- * fallback reachable from every caller without touching their exit semantics.
- *
- * Blocking is acceptable here: the restart path is already tearing the process
- * down, and `ensureRunning()` tolerates a sub-second block (it already awaits a
- * multi-probe /health round-trip afterwards).
- *
- * A unit that is accepted and only THEN fails to exec is deliberately not
- * covered — that surfaces through the existing "daemon never became ready"
- * path in `ensureRunning`.
+ * The rest belongs to the /health wait that follows, and that wait is what
+ * decides whether the caller reports success. At the 30 % share, the MCP shim's
+ * 5 000 ms budget gives the wrapper 1 500 ms — roughly 35× the measured
+ * round-trip — and still leaves 3 500 ms of probing. The pre-fix behaviour was
+ * a flat 10 000 ms blocking wrapper inside a 5 000 ms budget, which on a wedged
+ * bus burned the entire deadline before a single probe ran and returned
+ * `health-timeout` for a daemon the fallback had in fact started.
  */
-function spawnViaSystemdRun(opts: {
+const WRAPPER_BUDGET_FRACTION = 0.3;
+
+/**
+ * Floor for the wrapper's slice. Below this even a healthy bus could be judged
+ * stuck, so we would lose the memory cap on every spawn rather than
+ * occasionally. A caller whose whole remaining budget is under this floor
+ * therefore overshoots — by at most this many ms, and only for budgets far
+ * below any real caller's (the smallest in the tree is `ensureRunning`'s 3 000
+ * ms default, which yields a 900 ms slice).
+ */
+const WRAPPER_MIN_TIMEOUT_MS = 250;
+
+/**
+ * The wrapper's timeout for a given remaining caller budget. `undefined` budget
+ * (the exiting-daemon call sites — nobody is waiting) gets the full ceiling.
+ */
+export function resolveWrapperTimeoutMs(budgetMs?: number): number {
+  if (budgetMs === undefined || !Number.isFinite(budgetMs)) return SYSTEMD_RUN_TIMEOUT_MS;
+  const share = Math.floor(budgetMs * WRAPPER_BUDGET_FRACTION);
+  return Math.min(SYSTEMD_RUN_TIMEOUT_MS, Math.max(WRAPPER_MIN_TIMEOUT_MS, share));
+}
+
+/** Everything needed to launch (and log) one `systemd-run` attempt. */
+interface WrapperAttempt {
+  unitName: string;
+  args: string[];
+  systemdRunPath: string;
+  limitMb: number;
+  timeoutMs: number;
   node: string;
   script: string;
-  env: NodeJS.ProcessEnv;
-  status: Extract<DaemonMemoryCapStatus, { mode: "capped" }>;
-}): boolean {
-  const { node, script, env, status } = opts;
-  const unitName = makeDaemonUnitName();
+}
+
+/**
+ * Decides whether this spawn gets the cgroup wrapper and, if so, builds the
+ * attempt. Returns null when the cap does not apply (and emits the reason), so
+ * both `spawnDaemonDetached` variants share one decision.
+ */
+function planWrapperAttempt(
+  opts: SpawnDaemonOptions,
+  node: string,
+  script: string,
+  env: NodeJS.ProcessEnv,
+): WrapperAttempt | null {
+  const capMb = opts.cgroupMaxMb ?? config.daemonCgroupMaxMb;
+  const status = describeDaemonMemoryCap({ env, platform: process.platform, capMb });
+
+  if (status.mode !== "capped") {
+    diagEmit({
+      event: "daemon.cgroup-cap.skipped",
+      level: "debug",
+      reason: status.reason,
+    });
+    return null;
+  }
 
   let workingDir: string | null = null;
   try {
@@ -338,50 +450,109 @@ function spawnViaSystemdRun(opts: {
     // cwd was deleted from under us — let systemd pick its default.
   }
 
-  const args = buildSystemdRunArgs({
+  // Generated ONCE per attempt: the same name must appear in the argv and in
+  // every diag record for this attempt, or the log cannot be joined back to the
+  // unit it describes.
+  const unitName = makeDaemonUnitName();
+
+  return {
+    unitName,
+    systemdRunPath: status.systemdRunPath,
+    limitMb: status.limitMb,
+    timeoutMs: resolveWrapperTimeoutMs(opts.budgetMs),
     node,
     script,
-    unitName,
-    limitMb: status.limitMb,
-    env,
-    workingDir,
-  });
+    args: buildSystemdRunArgs({
+      node,
+      script,
+      unitName,
+      limitMb: status.limitMb,
+      env,
+      workingDir,
+    }),
+  };
+}
 
+function emitWrapperSpawn(a: WrapperAttempt): void {
   diagEmit({
     event: "child-process.spawn",
     level: "info",
     pid: null,
     ppid: process.pid,
-    command: status.systemdRunPath,
+    command: a.systemdRunPath,
     // The forwarded environment is omitted — it is large and may hold secrets.
-    args: ["--user", `--unit=${unitName}`, `MemoryMax=${status.limitMb}M`, node, script, "daemon", "start"],
+    args: ["--user", `--unit=${a.unitName}`, `MemoryMax=${a.limitMb}M`, a.node, a.script, "daemon", "start"],
     detached: true,
-    unit: unitName,
-    memoryMaxMb: status.limitMb,
+    unit: a.unitName,
+    memoryMaxMb: a.limitMb,
+    timeoutMs: a.timeoutMs,
   });
+}
 
-  const declineWrapper = (why: string): false => {
-    diagEmit({
-      event: "daemon.cgroup-cap.fallback",
-      level: "warn",
-      unit: unitName,
-      reason: why,
-    });
-    return false;
-  };
+function emitWrapperExit(a: WrapperAttempt, code: number | null, signal: NodeJS.Signals | null): void {
+  diagEmit({
+    event: "child-process.exit",
+    level: "info",
+    pid: null,
+    ppid: process.pid,
+    exitCode: code,
+    signal: signal ?? null,
+    unit: a.unitName,
+  });
+}
+
+function declineWrapper(a: WrapperAttempt, why: string): false {
+  diagEmit({
+    event: "daemon.cgroup-cap.fallback",
+    level: "warn",
+    unit: a.unitName,
+    reason: why,
+  });
+  return false;
+}
+
+/**
+ * Spawns the daemon inside a transient systemd user service, blocking until
+ * `systemd-run` reports the start job accepted. Returns true only on success.
+ *
+ * WHY A SYNCHRONOUS VARIANT EXISTS (`spawnSync`, not `spawn`). The fallback to
+ * a plain spawn used to hang off `child.once("exit")`, which is unreachable
+ * from the daemon's self-restart call sites (`main.ts`): they call
+ * `spawnDaemonDetached()` and then `process.exit()` on the very next line, so
+ * the event loop never turns and the exit handler never fires. Any systemd-run
+ * failure there — stale `XDG_RUNTIME_DIR`, unreachable bus, a property (or a
+ * name-only `--setenv`) the local systemd does not understand — therefore
+ * produced NO daemon at all: strictly worse than the uncapped status quo.
+ * Deciding before `spawnDaemonDetached` returns makes the fallback reachable
+ * without touching those call sites' exit semantics.
+ *
+ * Callers that still have an event loop to protect use
+ * `spawnViaSystemdRunAsync` instead; the shim must not freeze its in-flight
+ * RPCs on a wedged bus.
+ *
+ * A unit that is accepted and only THEN fails to exec is deliberately not
+ * covered — that surfaces through the existing "daemon never became ready"
+ * path in `ensureRunning`.
+ */
+function spawnViaSystemdRunSync(a: WrapperAttempt, env: NodeJS.ProcessEnv): boolean {
+  emitWrapperSpawn(a);
 
   let result: ReturnType<typeof spawnSync>;
   try {
-    result = spawnSync(status.systemdRunPath, args, {
+    result = spawnSync(a.systemdRunPath, a.args, {
       stdio: "ignore",
       windowsHide: true,
       env,
-      timeout: SYSTEMD_RUN_TIMEOUT_MS,
+      timeout: a.timeoutMs,
+      // Node's default is SIGTERM, which a wedged D-Bus client blocked in an
+      // uninterruptible connect can ignore — turning the "bound" above into a
+      // suggestion. SIGKILL makes `timeout` mean what the comment says.
+      killSignal: "SIGKILL",
     });
   } catch (err) {
     // spawnSync only throws on a caller error (bad options), but a wrapper
     // that cannot even be attempted must never take the daemon down with it.
-    return declineWrapper(`spawn-threw: ${err instanceof Error ? err.message : String(err)}`);
+    return declineWrapper(a, `spawn-threw: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   if (result.error) {
@@ -390,23 +561,70 @@ function spawnViaSystemdRun(opts: {
     // now). If a unit did squeak through before the kill, the loser of the
     // data-dir ownership lock exits(0) on its own — a duplicate is
     // self-healing, zero daemons is not.
-    return declineWrapper(`spawn-error: ${result.error.message}`);
+    return declineWrapper(a, `spawn-error: ${result.error.message}`);
   }
 
-  diagEmit({
-    event: "child-process.exit",
-    level: "info",
-    pid: null,
-    ppid: process.pid,
-    exitCode: result.status,
-    signal: result.signal ?? null,
-    unit: unitName,
-  });
+  emitWrapperExit(a, result.status, result.signal ?? null);
 
   if (result.status !== 0) {
-    return declineWrapper(`systemd-run exited ${result.status ?? result.signal}`);
+    return declineWrapper(a, `systemd-run exited ${result.status ?? result.signal}`);
   }
   return true;
+}
+
+/**
+ * Non-blocking twin of `spawnViaSystemdRunSync`, with byte-identical argv,
+ * timeout and fallback semantics — it only differs in yielding the event loop
+ * while the D-Bus round-trip is in flight.
+ */
+function spawnViaSystemdRunAsync(a: WrapperAttempt, env: NodeJS.ProcessEnv): Promise<boolean> {
+  emitWrapperSpawn(a);
+
+  return new Promise<boolean>((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(a.systemdRunPath, a.args, {
+        stdio: "ignore",
+        windowsHide: true,
+        env,
+      });
+    } catch (err) {
+      resolve(declineWrapper(a, `spawn-threw: ${err instanceof Error ? err.message : String(err)}`));
+      return;
+    }
+
+    let settled = false;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+
+    // Same bound as the sync path, same signal: SIGKILL, because a D-Bus client
+    // wedged in connect() need not honour SIGTERM.
+    const timer = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      finish(declineWrapper(a, "spawn-error: ETIMEDOUT"));
+    }, a.timeoutMs);
+    // Never hold the process open on the wrapper's account — the caller's own
+    // deadline governs, and an exiting process must not be delayed by this.
+    timer.unref();
+
+    child.once("error", (err) => {
+      finish(declineWrapper(a, `spawn-error: ${err.message}`));
+    });
+
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      emitWrapperExit(a, code, signal ?? null);
+      if (code !== 0) {
+        finish(declineWrapper(a, `systemd-run exited ${code ?? signal}`));
+        return;
+      }
+      finish(true);
+    });
+  });
 }
 
 /**
