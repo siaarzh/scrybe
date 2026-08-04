@@ -397,11 +397,71 @@ function buildVectorIndexConfig() {
   };
 }
 
+/**
+ * The rss-guard's own hard-ceiling default/disable parsing, duplicated here
+ * (not imported) to avoid a cycle: `rss-guard.ts` imports `config` from THIS
+ * module, so this module cannot import back from `rss-guard.ts`. Keep this in
+ * sync with `MAX_RSS_HARD_BYTES` in `src/daemon/rss-guard.ts` — same env var,
+ * same default (3072), same 0-disables-it semantics.
+ */
+function readRssGuardHardCeilingMb(): number {
+  const v = parseInt(process.env["SCRYBE_DAEMON_MAX_RSS_HARD_MB"] ?? "", 10);
+  if (Number.isFinite(v) && v === 0) return 0; // explicitly disabled
+  return Number.isFinite(v) && v > 0 ? v : 3072;
+}
+
+/**
+ * The margin added above the RSS guard's hard ceiling when the configured
+ * cgroup cap is auto-adjusted (see `buildDaemonCgroupMaxMb` below) — enough
+ * headroom for the 60s mem-sampler to observe a hard-ceiling breach and
+ * self-restart before the kernel would otherwise OOM-kill the process.
+ */
+const CGROUP_CAP_AUTO_ADJUST_MARGIN_MB = 1024;
+
+/**
+ * Resolves `SCRYBE_DAEMON_CGROUP_MAX_MB`, enforcing the invariant documented
+ * on `config.daemonCgroupMaxMb` below: the cgroup cap must sit ABOVE the
+ * in-process RSS guard's hard ceiling, or every ordinary over-budget
+ * excursion becomes a kernel OOM kill instead of a clean self-restart.
+ *
+ * Both knobs are independently operator-settable env vars, so nothing else
+ * enforces this ordering — a `.env` that raises the hard ceiling without
+ * also raising the cgroup cap (or vice versa) silently creates the conflict.
+ *
+ * Design choice on violation: WARN + auto-adjust (lift the effective cap to
+ * hardCeiling + margin) rather than throwing / refusing to start. A daemon
+ * that refuses to start over a tuning conflict is strictly worse than one
+ * that starts and contains suboptimally — the whole point of Plan 109 is a
+ * backstop, and a backstop that can prevent the daemon from starting at all
+ * defeats its own purpose. The warning is loud (stderr) and actionable so the
+ * operator fixes the actual `.env` value rather than relying on the
+ * auto-adjustment as a steady-state answer.
+ */
+function buildDaemonCgroupMaxMb(): number {
+  const configured = parseInt(process.env["SCRYBE_DAEMON_CGROUP_MAX_MB"] ?? "4096", 10);
+  if (!Number.isFinite(configured) || configured <= 0) return 0; // disabled
+
+  const hardCeilingMb = readRssGuardHardCeilingMb();
+  if (hardCeilingMb === 0 || configured > hardCeilingMb) return configured;
+
+  const adjusted = hardCeilingMb + CGROUP_CAP_AUTO_ADJUST_MARGIN_MB;
+  process.stderr.write(
+    `scrybe: SCRYBE_DAEMON_CGROUP_MAX_MB (${configured} MB) is at or below ` +
+    `SCRYBE_DAEMON_MAX_RSS_HARD_MB (${hardCeilingMb} MB) — every ordinary over-budget ` +
+    `excursion would be a kernel OOM kill instead of the in-process guard's clean ` +
+    `self-restart. Using ${adjusted} MB (hard ceiling + ${CGROUP_CAP_AUTO_ADJUST_MARGIN_MB} MB ` +
+    `headroom) for this run instead of refusing to start. Fix SCRYBE_DAEMON_CGROUP_MAX_MB ` +
+    `(or SCRYBE_DAEMON_MAX_RSS_HARD_MB) in your .env to silence this.\n`
+  );
+  return adjusted;
+}
+
 const embedding = buildEmbeddingConfig();
 const knowledgeEmbedding = buildKnowledgeEmbeddingConfig();
 const rerank = buildRerankConfig();
 const hybrid = buildHybridConfig();
 const vectorIndex = buildVectorIndexConfig();
+const daemonCgroupMaxMb = buildDaemonCgroupMaxMb();
 
 function readPackageVersion(): string {
   try {
@@ -468,6 +528,27 @@ export const config = {
     process.env["SCRYBE_DAEMON_RESTART_DRAIN_MS"] ?? "2000",
     10
   ),
+
+  // Kernel-enforced memory ceiling applied to a newly spawned daemon (MB).
+  // Linux only, and only when a user systemd manager is reachable — the spawn
+  // is wrapped in a transient `systemd-run --user` service carrying
+  // `MemoryMax=<this>M`, so the kernel refuses the allocation at request time
+  // instead of the in-process RSS guard noticing up to 60 s later.
+  //
+  // Default 4096 MB: this is a BACKSTOP above the in-process guard, so it must
+  // sit above the guard's hard ceiling (3072 MB) or the guard would never get
+  // to act — a cap at or below it would turn every ordinary over-budget
+  // excursion into an OOM kill instead of a clean self-restart. 1024 MB of
+  // headroom is enough for the 60 s sampler to observe a breach and restart
+  // gracefully, while still stopping the measured multi-GB runaways (up to
+  // ~6.9 GB inside a single indexing job) that exhaust host memory and swap.
+  // Set SCRYBE_DAEMON_CGROUP_MAX_MB=0 to disable the wrapper entirely.
+  //
+  // The above-hard-ceiling invariant is enforced (not just documented) by
+  // `buildDaemonCgroupMaxMb()`: a misconfigured `.env` that violates it gets a
+  // loud stderr warning and an auto-adjusted effective value for this run,
+  // rather than either silently doing the wrong thing or refusing to start.
+  daemonCgroupMaxMb,
 } as const;
 
 if (config.chunkOverlap >= config.chunkSize) {

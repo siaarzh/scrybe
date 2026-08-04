@@ -33,8 +33,8 @@ function warn(id: string, section: string, title: string, message: string, remed
 function fail(id: string, section: string, title: string, message: string, remedy?: string, data?: Record<string, unknown>): CheckResult {
   return { id, section, title, status: "fail", message, remedy, data };
 }
-function skip(id: string, section: string, title: string, message: string): CheckResult {
-  return { id, section, title, status: "skip", message };
+function skip(id: string, section: string, title: string, message: string, data?: Record<string, unknown>): CheckResult {
+  return { id, section, title, status: "skip", message, data };
 }
 
 function dirSize(dir: string): number {
@@ -57,6 +57,124 @@ function fmtBytes(b: number): string {
 function nodeVersionOk(): boolean {
   const [major, minor] = process.versions.node.split(".").map(Number);
   return (major! > 22) || (major! === 22 && minor! >= 13);
+}
+
+const MEMORY_CAP_CHECK_ID = "daemon.memory_cap";
+const MEMORY_CAP_TITLE = "Memory containment";
+const MEMORY_CAP_SECTION = "Daemon";
+
+/**
+ * Reports whether the daemon's memory is actually contained by the kernel.
+ *
+ * Two mutually exclusive answers, never blended:
+ *
+ *  - OBSERVED (`observed: true` in `data`) — a daemon is running, so we read
+ *    ITS cgroup v2 `memory.max` out of /proc + /sys. This is the only claim
+ *    that can honestly be phrased as "is". It is also the only one that is
+ *    correct for an always-on systemd install, whose daemon runs in-process
+ *    from its unit and never passes through the systemd-run spawn wrapper.
+ *  - PREDICTED (`observed: false`) — no daemon to look at, so we fall back to
+ *    `describeDaemonMemoryCap()` and phrase every message as "would be". It
+ *    only ever describes a future shim-driven spawn.
+ *
+ * Anything we cannot read (cgroup v1, hidepid, a container without
+ * /sys/fs/cgroup, non-Linux) reports an honest "unknown" — never "capped".
+ */
+async function checkDaemonMemoryContainment(): Promise<CheckResult> {
+  try {
+    const { readPidfile, isPidAlive } = await import("../daemon/pidfile.js");
+    const { readCgroupMemoryLimitForPid } = await import("../daemon/cgroup-stats.js");
+    const { describeDaemonMemoryCap } = await import("../daemon/spawn-detached.js");
+
+    // Deliberately NOT isDaemonRunning(): that probe SIGKILLs a daemon whose
+    // /health does not answer. A diagnostic must not be able to kill anything.
+    const pidData = readPidfile();
+    const livePid = pidData && isPidAlive(pidData.pid) ? pidData.pid : null;
+
+    if (livePid !== null) {
+      const limit = readCgroupMemoryLimitForPid(livePid);
+      const base = { observed: true, pid: livePid };
+
+      if (limit.state === "limited") {
+        const limitMb = Math.round(limit.limitBytes / (1024 * 1024));
+        const message = limit.limitingLevel === "leaf"
+          ? `Running daemon (PID ${livePid}) is capped at ${limitMb} MB by its own unit — kernel-enforced`
+          : `Running daemon (PID ${livePid}) is capped at ${limitMb} MB by an ancestor cgroup (${limit.limitingPath}) — kernel-enforced, but not scrybe's to change`;
+        return ok(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE, message,
+          {
+            ...base, state: limit.state, limitMb, limitBytes: limit.limitBytes,
+            cgroupPath: limit.cgroupPath, limitingLevel: limit.limitingLevel, limitingPath: limit.limitingPath,
+          });
+      }
+
+      if (limit.state === "unlimited") {
+        return warn(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+          `Running daemon (PID ${livePid}) has NO memory limit — its cgroup reports "max" (unlimited)`,
+          "This daemon can grow until it exhausts host memory. Restart it (scrybe daemon restart) so it is started with a cap; if it was installed to run always-on, re-run the install (scrybe daemon install --force) so its service file carries the limit",
+          { ...base, state: limit.state, cgroupPath: limit.cgroupPath });
+      }
+
+      return skip(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+        `Unknown for the running daemon (PID ${livePid}) — ${describeLimitUnknownReason(limit.reason)}`,
+        { ...base, reason: limit.reason });
+    }
+
+    // No daemon to observe. Everything below is a PREDICTION about the next
+    // shim-driven spawn and says so in as many words.
+    const capStatus = describeDaemonMemoryCap();
+    const base = { observed: false, mode: capStatus.mode };
+
+    if (capStatus.mode === "capped") {
+      return ok(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+        `No daemon running — the next one started on demand would be capped at ${capStatus.limitMb} MB (kernel-enforced via ${capStatus.wrapper})`,
+        { ...base, limitMb: capStatus.limitMb, wrapper: capStatus.wrapper });
+    }
+
+    // Fail-open policy, as for daemon.locking: platform-not-supported is not an
+    // issue to flag (skip); everything else means a daemon started on this host
+    // would be uncontained, and gets a warn with a plain-language reason +
+    // remedy — never the raw enum tag.
+    switch (capStatus.reason) {
+      case "not-linux":
+        return skip(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+          "Not applicable — the memory cap wrapper (systemd-run) is Linux-only",
+          { ...base, reason: capStatus.reason });
+      case "disabled-by-config":
+        return warn(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+          "No daemon running — the next one would be uncapped: the cap is disabled in config (SCRYBE_DAEMON_CGROUP_MAX_MB is 0 or not a positive number)",
+          "Set SCRYBE_DAEMON_CGROUP_MAX_MB to a positive value (megabytes) in your .env to re-enable the cap",
+          { ...base, reason: capStatus.reason });
+      case "no-user-bus":
+        return warn(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+          "No daemon running — the next one would be uncapped: no reachable systemd user session (DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR are both unset), common under headless cron jobs or containers",
+          "A runaway daemon on this host would not be kernel-contained. If this is a real login session, start it from a full graphical or SSH session so a user D-Bus session is available; some headless setups (bare cron, minimal containers) cannot provide one at all",
+          { ...base, reason: capStatus.reason });
+      case "systemd-run-not-found":
+        return warn(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+          "No daemon running — the next one would be uncapped: systemd-run was not found on PATH",
+          "Install systemd (provides systemd-run) to enable the memory cap",
+          { ...base, reason: capStatus.reason });
+    }
+  } catch (e: any) {
+    return skip(MEMORY_CAP_CHECK_ID, MEMORY_CAP_SECTION, MEMORY_CAP_TITLE,
+      `Could not determine: ${e?.message ?? String(e)}`);
+  }
+}
+
+/** Plain-language rendering of why an observed limit could not be read. */
+function describeLimitUnknownReason(reason: string): string {
+  switch (reason) {
+    case "not-linux":
+      return "cgroup memory limits are a Linux kernel feature";
+    case "no-cgroup-v2":
+      return "this host does not expose a cgroup v2 (unified) hierarchy for that process, or /proc hides it";
+    case "memory-max-unreadable":
+      return "its cgroup's memory.max could not be read (permissions, or an unmounted /sys/fs/cgroup)";
+    case "memory-max-unparseable":
+      return "its cgroup's memory.max held a value this build does not understand";
+    default:
+      return reason;
+  }
 }
 
 export async function runDoctor(): Promise<DoctorReport> {
@@ -665,6 +783,21 @@ export async function runDoctor(): Promise<DoctorReport> {
     checks.push(warn("daemon.locking", SEC_DAEMON, "Data-dir locking",
       `Could not probe: ${e?.message ?? String(e)}`));
   }
+
+  // ── Daemon memory containment (Plan 109 Phase 4) ────────────────────────────
+  // A cap that silently fails to apply reads as containment while providing
+  // none — worse than no cap, because the operator believes they are
+  // protected. So this check MEASURES rather than predicts: when a daemon is
+  // running it reads that pid's own cgroup `memory.max`, which is the only
+  // thing that is actually true of it.
+  //
+  // The prediction (`describeDaemonMemoryCap()` — "would the next spawn be
+  // capped") is still reported, but ONLY when there is no running daemon to
+  // observe, and always in explicitly conditional wording ("would be"). The
+  // two must never be confused: an always-on systemd install runs the daemon
+  // in-process from its unit, never through the systemd-run wrapper, so the
+  // prediction can say "capped" about a daemon that is not.
+  checks.push(await checkDaemonMemoryContainment());
 
   // Always-on install status
   try {

@@ -3,7 +3,7 @@
  * Contract 15: imported by M-D3 VS Code extension and test helpers.
  */
 import { readPidfile } from "./pidfile.js";
-import { spawnDaemonDetached } from "./spawn-detached.js";
+import { spawnDaemonDetachedAsync } from "./spawn-detached.js";
 import { isContainer } from "./container-detect.js";
 import { acquireSpawnLock, releaseSpawnLock } from "./data-dir-lock.js";
 import { diagEmit } from "./events.js";
@@ -142,8 +142,18 @@ export async function ensureRunning(timeoutMs = 3000): Promise<EnsureRunningResu
       //
       // A long drain (a plain `daemon stop`, up to 30 min, no replacement owed)
       // still ends in `{ok:true, draining:true}` — just after the caller's own
-      // budget rather than instantly. That is the honest answer either way, and
-      // no caller waits longer than the timeout it chose.
+      // budget rather than instantly. That is the honest answer either way.
+      //
+      // "No caller waits longer than the timeout it chose" is an invariant this
+      // function has to actively maintain, not a property it gets for free. Every
+      // wait below is bounded by `deadline` — including the one thing that is not
+      // a /health poll: the `systemd-run` cgroup wrapper inside
+      // `spawnDaemonDetachedAsync`, which is handed the REMAINING budget and
+      // allowed only a fraction of it (see `resolveWrapperTimeoutMs`). Left
+      // unbounded it took a flat 10 s, which on a wedged user bus overran a 5 s
+      // caller twice over and left `waitForHealthyPidfile` with an already-expired
+      // deadline — reporting `health-timeout` for a daemon the fallback had
+      // successfully started.
       return await waitForHealthyPidfile(deadline);
     } catch {
       // Stale pidfile — proceed to spawn
@@ -205,7 +215,14 @@ export async function ensureRunning(timeoutMs = 3000): Promise<EnsureRunningResu
     }
 
     try {
-      spawnDaemonDetached({});
+      // Async variant on purpose. This caller has an event loop worth
+      // protecting — the MCP shim reaches here mid-session with other RPCs in
+      // flight — whereas the daemon's own restart sites call the sync form
+      // because they `process.exit()` on the next line. `budgetMs` is what is
+      // LEFT of the caller's deadline, not the original timeout: the pidfile
+      // read, the /health probe above and the spawn-lock acquisition have all
+      // already spent some of it.
+      await spawnDaemonDetachedAsync({ budgetMs: Math.max(0, deadline - Date.now()) });
     } catch {
       return { ok: false, reason: "spawn-failed" };
     }
@@ -223,20 +240,40 @@ export async function ensureRunning(timeoutMs = 3000): Promise<EnsureRunningResu
  * out, so we keep polling for its replacement and only report `draining` if the
  * budget runs out first. That way the common case — a daemon shutting down
  * while a caller starts up — resolves to a fresh, fully-serving daemon.
+ *
+ * ALWAYS PROBES AT LEAST ONCE, even on an already-expired deadline (hence
+ * do/while, not while). `health-timeout` is a claim about a daemon that did not
+ * answer, and this function is the only thing entitled to make it; returning it
+ * without having asked turns any upstream overrun — a slow spawn, a scheduler
+ * stall, a caller that passed a tiny timeout — into a false report about a
+ * daemon that may well be serving. One extra probe costs a loopback round-trip
+ * against a pidfile that usually does not exist yet.
  */
 async function waitForHealthyPidfile(deadline: number): Promise<EnsureRunningResult> {
   let sawDraining = false;
-  while (Date.now() < deadline) {
+  do {
     const client = DaemonClient.fromPidfile();
     if (client) {
       try {
-        const h = await client.health();
+        // Every probe is individually bounded. Without this, the guaranteed
+        // post-deadline probe (the do/while above) could hang forever on a
+        // daemon that is listening but wedged — accept()ing and never
+        // answering — which would break the very budget invariant the
+        // at-least-once probe exists to protect. The bound is the remaining
+        // budget, floored at 250 ms so the final probe is real, capped at 2 s
+        // so a wedged daemon cannot eat a long caller budget in one bite.
+        const probeMs = Math.min(2_000, Math.max(250, deadline - Date.now()));
+        const h = await Promise.race([
+          client.health(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("probe-timeout")), probeMs).unref?.()),
+        ]);
         if (!h.draining) return { ok: true };
         sawDraining = true;
-      } catch { /* not ready yet */ }
+      } catch { /* not ready yet, or probe timed out */ }
     }
+    if (Date.now() >= deadline) break;
     await new Promise((r) => setTimeout(r, 100));
-  }
+  } while (Date.now() < deadline);
   return sawDraining ? { ok: true, draining: true } : { ok: false, reason: "health-timeout" };
 }
 

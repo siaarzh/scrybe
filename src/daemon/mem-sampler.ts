@@ -12,6 +12,14 @@
  *   - `getLatestMemSample()` — returns the most recent RSS + heap snapshot
  *   - `startMemSampler(diagEmit)` — arms the timer; call once on daemon startup
  *   - `stopMemSampler()` — clears the timer; call on daemon shutdown
+ *
+ * Public API surface consumed by Plan 109 Phase 2 (intra-span RSS peak):
+ *   - `createSpanRssTracker(startRssBytes)` — per-span high-water-mark tracker.
+ *     Each call site that emits an `activity-span` record owns exactly one
+ *     tracker instance for the lifetime of its own span. There is no shared
+ *     module-level running max, so overlapping spans (measured: the majority
+ *     of spans overlap another in production) each track their own interior
+ *     peak independently and cannot book one another's high-water mark.
  */
 
 import { diagEmit } from "./events.js";
@@ -104,6 +112,65 @@ export function stopMemSampler(): void {
 export function _resetMemSamplerForTests(): void {
   stopMemSampler();
   _latest = null;
+}
+
+/**
+ * A per-span RSS high-water-mark tracker (Plan 109 Phase 2).
+ *
+ * Two-point (start, end) sampling cannot see a spike that rises and subsides
+ * inside a span. `sample()` is meant to be called repeatedly during the
+ * span's lifetime (e.g. from an existing poll timer, or a dedicated
+ * `.unref()`-ed interval bracketing the span) so the tracker actually
+ * observes the interior, not just its endpoints.
+ *
+ * Each tracker is its own closure over a private `peak` variable — there is
+ * no shared/global state, so instantiating one per span is what keeps
+ * concurrent, overlapping spans from clobbering each other's peak.
+ */
+export interface SpanRssTracker {
+  /** Take a fresh full sample now and fold it into this span's running peak. */
+  sample(): MemSample;
+  /**
+   * Cheap variant of `sample()` for high-frequency polling: reads RSS only,
+   * via `process.memoryUsage.rss()` (~8 µs), and folds it into the peak.
+   *
+   * `sample()` calls the full `process.memoryUsage()` — which walks V8 heap
+   * statistics — and allocates a `new Date().toISOString()` for the timestamp.
+   * That is fine a handful of times per span, but not at tens of hertz per
+   * concurrent in-flight call. Use this when only the peak matters and the
+   * returned MemSample fields would be thrown away.
+   *
+   * Returns the RSS just read, in bytes.
+   */
+  sampleRss(): number;
+  /** Highest rssBytes observed by this tracker so far (includes the start value). */
+  peakRssBytes(): number;
+}
+
+/**
+ * Create a new high-water-mark tracker for one span, seeded with the RSS
+ * observed at span start. Call `sample()` periodically during the span and
+ * read `peakRssBytes()` when the span ends.
+ */
+export function createSpanRssTracker(startRssBytes: number): SpanRssTracker {
+  let peak = startRssBytes;
+  return {
+    sample(): MemSample {
+      const snap = sampleNow();
+      if (snap.rssBytes > peak) peak = snap.rssBytes;
+      return snap;
+    },
+    sampleRss(): number {
+      // Same private `peak` closure as sample() — per-span isolation is
+      // unchanged; this only skips the heap stats and the ISO timestamp.
+      const rss = process.memoryUsage.rss();
+      if (rss > peak) peak = rss;
+      return rss;
+    },
+    peakRssBytes(): number {
+      return peak;
+    },
+  };
 }
 
 // ─── Internal ──────────────────────────────────────────────────────────────

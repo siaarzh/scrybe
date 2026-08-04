@@ -8,7 +8,7 @@
  * Skipped in container environments (/.dockerenv / WSL2 without systemd / etc.).
  */
 import { describe, it, expect, afterAll } from "vitest";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 
 // Detect if we're in a container before requiring any install logic
 let containerEnv = false;
@@ -58,6 +58,14 @@ describe.skipIf(SKIP)("autostart install/uninstall — real platform", () => {
     }
     if (result.detail?.unitPath) {
       expect(existsSync(result.detail.unitPath)).toBe(true);
+
+      // Restart-loop bound (Plan 109 phase 5): a cgroup memory cap SIGKILLs
+      // the daemon, bypassing its graceful self-respawn exit(0) path, so the
+      // generated unit must cap retries instead of looping forever.
+      const unitText = readFileSync(result.detail.unitPath, "utf8");
+      const unitSection = unitText.slice(unitText.indexOf("[Unit]"), unitText.indexOf("[Service]"));
+      expect(unitSection).toMatch(/^StartLimitIntervalSec=\d+$/m);
+      expect(unitSection).toMatch(/^StartLimitBurst=\d+$/m);
     }
   });
 

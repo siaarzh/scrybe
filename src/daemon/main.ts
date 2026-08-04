@@ -19,8 +19,9 @@ import { onStateChange } from "./idle-state.js";
 import { diagEmit } from "./events.js";
 import { startMemSampler, stopMemSampler, MEM_SAMPLE_INTERVAL_MS } from "./mem-sampler.js";
 import { startRssGuard, stopRssGuard } from "./rss-guard.js";
-import { startBuildIntegrityCheck } from "./build-integrity.js";
-import { spawnDaemonDetached } from "./spawn-detached.js";
+import { startBuildIntegrityCheck, getOwnModulePath } from "./build-integrity.js";
+import { spawnDaemonDetached, describeDaemonMemoryCap } from "./spawn-detached.js";
+import { readCgroupMemoryStats } from "./cgroup-stats.js";
 import { listProjects, onProjectRemoved } from "../registry.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
@@ -286,6 +287,61 @@ export async function runDaemon(): Promise<void> {
       errorMessage: ownership.error?.message ?? null,
     });
   }
+
+  // Plan 109 Phase 1: emit a daemon-identity record as early as possible so
+  // every later diagEmit line in this run can be attributed to this process —
+  // pid alone (stamped by diagEmit on every record) isn't enough on its own
+  // without a record marking where a given pid's log actually starts.
+  diagEmit({
+    level: "info",
+    event: "daemon.start",
+    pid: process.pid,
+    version: VERSION,
+    dataDir: config.dataDir,
+    modulePath: getOwnModulePath(),
+  });
+
+  // Plan 109 Phase 4: report whether the process spawn() actually landed under
+  // the cgroup memory cap (spawn-detached.ts), so daemon-log.jsonl carries the
+  // answer instead of forcing an operator to infer it from a wedge. Exec-free
+  // (describeDaemonMemoryCap only inspects env + PATH) and read-only, so this
+  // cannot itself destabilize a daemon already starting in a degraded
+  // environment — wrapped in try/catch regardless, because a diagnostic must
+  // never be able to block startup.
+  try {
+    // A PREDICTION, not an observation: describeDaemonMemoryCap() answers "if
+    // this process spawned a daemon right now, would the wrapper apply", which
+    // says nothing about how THIS process was itself started. It is emitted
+    // under an explicitly-named event so no reader can mistake it for the
+    // measured limit below — the always-on systemd deployment runs runDaemon()
+    // in-process from its unit and never passes through the spawn wrapper at
+    // all, so the two genuinely can disagree.
+    diagEmit({
+      level: "info",
+      event: "daemon.memory-cap.next-spawn-prediction",
+      ...describeDaemonMemoryCap(),
+    });
+
+    // The OBSERVATION: this process's own cgroup memory.max/current/events —
+    // whatever put us in that cgroup (the systemd-run wrapper, an always-on
+    // unit's MemoryMax=, an outer container, or nothing at all). Read
+    // unconditionally, because gating it on the prediction would suppress the
+    // measurement in exactly the deployment where the prediction is wrong.
+    // Defensive by construction (see cgroup-stats.ts) — a null/missing counter
+    // file is a silent no-op, never a startup failure. No periodic re-read:
+    // this is a one-shot record at startup, since piggybacking a periodic
+    // re-log onto an existing timer would require editing
+    // mem-sampler.ts/rss-guard.ts (both frozen for this plan), and adding a new
+    // always-on timer is out of scope.
+    const cgroupStats = readCgroupMemoryStats();
+    if (cgroupStats) {
+      diagEmit({
+        level: "info",
+        event: "daemon.memory-cap.cgroup-stats",
+        ...cgroupStats,
+      });
+    }
+  } catch { /* non-fatal — cap reporting must never block daemon startup */ }
 
   const writeCrashEv = (event: string, err: unknown): void => {
     try {
@@ -628,7 +684,59 @@ export async function runDaemon(): Promise<void> {
         shutdown(`rss-guard:${reason}`, {
           drainCapMs: config.daemonRestartDrainMs,
           spawnAfterRemovePidfile: _lifecycle?.isAlwaysOn() ?? false,
-        }).catch(() => {});
+        }).catch((err) => {
+          // Plan 109 Phase 6: this used to be a bare `.catch(() => {})` — a
+          // rejected/hung shutdown() left the process alive with no trace.
+          // The rss-guard's own watchdog (rss-guard.ts _orderRestart) is what
+          // actually re-arms the guard; this is purely so the failure is
+          // observable instead of silent.
+          const message = err instanceof Error ? err.message : String(err);
+          daemonLog(`[scrybe daemon] rss-guard restart failed: ${message}`);
+          diagEmit({
+            level: "error",
+            event: "rss-guard.restart-shutdown-failed",
+            reason,
+            error: message,
+          });
+        });
+      },
+      // Terminal escalation for a restart that never completed. By the time
+      // this runs, shutdown() has already stopped the guard, the mem-sampler,
+      // the lifecycle manager and the build-integrity check — the daemon is
+      // over its memory ceiling AND can no longer observe itself, so the only
+      // correct move is to stop being this process.
+      escalate: ({ reason, windowMs, consecutiveFailures }) => {
+        daemonLog(
+          `[scrybe daemon] rss-guard restart did not complete within ${windowMs}ms (${reason}) — forcing exit`
+        );
+        diagEmit({
+          level: "error",
+          event: "rss-guard.restart-escalated-exit",
+          reason,
+          windowMs,
+          consecutiveFailures,
+        });
+        // Best-effort artifact cleanup, same as the double-SIGTERM escalation
+        // path above: the hung shutdown() never reached removePidfile() /
+        // releaseDataDirOwnership(), and a stranded lock is a permanent silent
+        // outage. (The ownership lock is a held SQLite transaction, so the OS
+        // releases it on exit regardless — this just makes it prompt.)
+        try { removePidfile(); } catch { /* best effort */ }
+        try { releaseDataDirOwnership(); } catch { /* best effort */ }
+        // Honour an owed replacement in always-on mode — the hung shutdown()
+        // never got to its own respawn.
+        if (_respawnOwed) {
+          try { spawnDaemonDetached({}); } catch (err) {
+            daemonLog(`[scrybe daemon] rss-guard escalated-exit respawn failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        // Exit NON-zero, unlike the operator-requested double-SIGTERM path:
+        // this IS a failure, and `linux-systemd.ts` installs the unit with
+        // `Restart=on-failure`, so a systemd-managed daemon is resurrected 5 s
+        // later. If we also self-spawned above, the duplicate is self-healing
+        // (the loser exits on the data-dir ownership lock) — zero daemons is
+        // not.
+        process.exit(1);
       },
     });
   }

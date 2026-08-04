@@ -18,7 +18,7 @@ import { submitJob, submitSourceJob, getJobStatus } from "../jobs.js";
 import { insertJob, updateJobStatus, cancelPendingGcJobs } from "../jobs-store.js";
 import { getProject, getSource, resolveEmbeddingConfig } from "../registry.js";
 import { diagEmit } from "./events.js";
-import { sampleNow } from "./mem-sampler.js";
+import { sampleNow, createSpanRssTracker } from "./mem-sampler.js";
 import type { DaemonEvent } from "./http-server.js";
 import type { IndexMode } from "../types.js";
 import type { JobType } from "../jobs-store.js";
@@ -365,6 +365,10 @@ function drain(): void {
     // Capture start RSS and embedding provider for the activity-span telemetry.
     const startSample = sampleNow();
     const providerType = resolveReindexProvider(item.projectId, item.sourceId);
+    // Per-span high-water-mark tracker (Plan 109 Phase 2) — sampled on every
+    // status-poll tick below (200ms cadence) so the eventual peakRssBytes
+    // reflects the span's interior instead of just start/end.
+    const rssTracker = createSpanRssTracker(startSample.rssBytes);
 
     const result = item.sourceId
       ? submitSourceJob(item.projectId, item.sourceId, item.mode ?? "incremental", item.branch, item.jobId, item.contentRef)
@@ -387,6 +391,11 @@ function drain(): void {
     });
 
     const timer = setInterval(() => {
+      // Sample every tick (not just at completion) so the tracker actually
+      // observes the span's interior — a spike that rises and subsides
+      // between polls would otherwise go unrecorded.
+      rssTracker.sample();
+
       const status = getJobStatus(jobId);
       if (!status || status.status === "running") return;
 
@@ -423,6 +432,10 @@ function drain(): void {
       });
 
       // Emit reindex activity span for memory telemetry (Plan 92 Phase 1).
+      // peakRssBytes (Plan 109 Phase 2) is a true intra-span high-water mark —
+      // rssTracker.sample() below folds in one last reading taken right at
+      // completion, on top of every 200ms poll tick sampled above.
+      rssTracker.sample();
       const endSample = sampleNow();
       const activeEntry = _active.get(jobId); // may already be deleted above
       const spanStartRss = activeEntry?.startRssBytes ?? startSample.rssBytes;
@@ -437,7 +450,7 @@ function drain(): void {
         durationMs,
         outcome: status.status === "done" ? "ok" : status.status === "cancelled" ? "cancelled" : "error",
         startRssBytes: spanStartRss,
-        peakRssBytes: Math.max(spanStartRss, endSample.rssBytes),
+        peakRssBytes: rssTracker.peakRssBytes(),
         endRssBytes: endSample.rssBytes,
         provider: activeEntry?.providerType ?? providerType ?? null,
       });

@@ -15,8 +15,16 @@ import { VERSION } from "../config.js";
 import { mcpTools } from "../tools/all-tools.js";
 import type { JSONSchema } from "../tools/types.js";
 import { diagEmit } from "./events.js";
-import { sampleNow } from "./mem-sampler.js";
+import { sampleNow, createSpanRssTracker } from "./mem-sampler.js";
 import { isCallerFacing } from "./caller-error.js";
+
+// RSS poll cadence while an mcp-call span is in flight (Plan 109 Phase 2).
+// The poll calls rssTracker.sampleRss(), which is a bare
+// process.memoryUsage.rss() (~8.4µs/call on measured hardware) — NOT the full
+// process.memoryUsage() + ISO-timestamp of sampleNow(), which would be far too
+// heavy at this cadence once several calls are in flight at once. The timer is
+// .unref()-ed so it never keeps the event loop alive on its own.
+const MCP_SPAN_RSS_POLL_MS = 25;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -316,6 +324,12 @@ async function handleRpc(
   // Activity span telemetry — capture start RSS and emit span record on completion.
   const spanStart = Date.now();
   const startSample = sampleNow();
+  // Per-span high-water-mark tracker (Plan 109 Phase 2). One tracker instance
+  // per call — concurrent in-flight calls each get their own closure, so an
+  // overlapping call can never book another call's peak.
+  const rssTracker = createSpanRssTracker(startSample.rssBytes);
+  const rssPollTimer = setInterval(() => rssTracker.sampleRss(), MCP_SPAN_RSS_POLL_MS);
+  rssPollTimer.unref();
   let spanOutcome: "ok" | "error" = "ok";
   // Carries the sanitized text to the activity-span emit below. Each
   // console.log reads its own const local rather than this `let`.
@@ -370,6 +384,11 @@ async function handleRpc(
       },
     } satisfies RpcError);
   } finally {
+    clearInterval(rssPollTimer);
+    // One last reading right at completion, on top of every poll tick taken
+    // during the call — peakRssBytes below is a true intra-span high-water
+    // mark, not a two-point max of start/end.
+    rssTracker.sample();
     const endSample = sampleNow();
     diagEmit({
       event: "activity-span",
@@ -380,7 +399,7 @@ async function handleRpc(
       durationMs: Date.now() - spanStart,
       outcome: spanOutcome,
       startRssBytes: startSample.rssBytes,
-      peakRssBytes: Math.max(startSample.rssBytes, endSample.rssBytes),
+      peakRssBytes: rssTracker.peakRssBytes(),
       endRssBytes: endSample.rssBytes,
       // provider tag: not source-specific at the RPC layer; set to undefined here.
       // Per-source provider info is tagged in the reindex activity span (queue.ts).

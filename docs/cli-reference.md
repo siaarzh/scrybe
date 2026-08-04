@@ -1029,5 +1029,8 @@ All variables are read from `<DATA_DIR>/.env` (lower priority) or from the OS en
 | `SCRYBE_LANCE_GRACE_MS` | `60000` | Grace window (ms) before `compactTableWithGrace` runs |
 | `SCRYBE_NO_AUTO_DAEMON` | — | Set `1` to prevent auto-spawning the daemon |
 | `SCRYBE_DAEMON_MAX_CONCURRENT` | `max(1, cpus/2)` | Max simultaneous jobs in daemon queue |
+| `SCRYBE_DAEMON_CGROUP_MAX_MB` | `4096` | Kernel-enforced memory ceiling (MB) applied when the daemon is started, on Linux with a reachable systemd user session. Set `0` to disable |
+| `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MS` | `120000` | How long (ms) the daemon waits after ordering a memory-ceiling self-restart before forcing an exit |
+| `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MAX_MS` | `1800000` | Ceiling (ms) on the watchdog window above after repeated failed restarts |
 | `SCRYBE_DEBUG_INDEXER` | — | Set `1` to enable verbose indexer diagnostic logging |
 | `SCRYBE_DEBUG_FETCH_POLLER` | — | Set `1` to emit a per-cycle `fetch-poller.tick` event (with `branchesPolled` / `deltasFound` / `outOfBandDetected` counters) for daemon fetch-poller observability |

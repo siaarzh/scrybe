@@ -7,7 +7,11 @@
  *   3. hard-ceiling   — hard threshold crossed (regardless of idle state) → doRestart called
  *   4. below-threshold — RSS under soft threshold → silent no-op
  *
- * All dependencies (getRssBytes, getQueueStats, doRestart) are injected.
+ * Plus the restart watchdog: a restart that never completes must escalate to a
+ * forced exit (the `escalate` hook), including through the real startRssGuard
+ * wiring where shutdown() stops the guard before it hangs.
+ *
+ * All dependencies (getRssBytes, getQueueStats, doRestart, escalate) are injected.
  * diagEmit is mocked so no real log file is written.
  * No real processes are spawned; no real timers fire.
  */
@@ -46,6 +50,7 @@ function makeOpts(overrides: {
   active?: number;
   pending?: number;
   doRestart?: ReturnType<typeof vi.fn>;
+  escalate?: ReturnType<typeof vi.fn>;
 }) {
   return {
     getRssBytes: () => overrides.rssBytes,
@@ -55,6 +60,9 @@ function makeOpts(overrides: {
       maxConcurrent: 1,
     }),
     doRestart: overrides.doRestart ?? vi.fn(),
+    // Stand-in for the production hook, which releases the pidfile and calls
+    // process.exit(1). Injected everywhere so no test can terminate the runner.
+    escalate: overrides.escalate ?? vi.fn(),
   };
 }
 
@@ -67,6 +75,7 @@ import {
   _resetRssGuardForTests,
   MAX_RSS_SOFT_BYTES,
   MAX_RSS_HARD_BYTES,
+  RESTART_WATCHDOG_MS,
 } from "../src/daemon/rss-guard.js";
 import { diagEmit } from "../src/daemon/events.js";
 
@@ -208,6 +217,121 @@ describe("evaluateRss — below threshold (no-op)", () => {
     expect(result).toBe("below-threshold");
     expect(doRestart).not.toHaveBeenCalled();
     expect(diagEmit).not.toHaveBeenCalled();
+  });
+});
+
+describe("restart-watchdog — escalation of a hung restart", () => {
+  it("while a restart is pending, a later tick emits a log record instead of returning below-threshold silently", () => {
+    vi.useFakeTimers();
+    const rssBytes = MAX_RSS_SOFT_BYTES > 0 ? MAX_RSS_SOFT_BYTES + 1 : 1536 * MB + 1;
+    // doRestart never actually exits the process (simulating a hung/rejected shutdown)
+    const doRestart = vi.fn();
+
+    const r1 = evaluateRss(makeOpts({ rssBytes, doRestart }));
+    expect(r1).toBe("idle-restart");
+    expect(doRestart).toHaveBeenCalledOnce();
+
+    vi.clearAllMocks();
+
+    // Next tick, well before the watchdog window elapses: guard is still
+    // latched. Must NOT silently return "below-threshold" — must emit a
+    // record and return a distinct reason.
+    const r2 = evaluateRss(makeOpts({ rssBytes, doRestart }));
+    expect(r2).toBe("restart-pending");
+    expect(doRestart).not.toHaveBeenCalled();
+    expect(diagEmit).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "rss-guard.restart-pending" })
+    );
+  });
+
+  it("escalates, logs, and re-arms once the watchdog concludes the restart failed", () => {
+    vi.useFakeTimers();
+    const rssBytes = MAX_RSS_SOFT_BYTES > 0 ? MAX_RSS_SOFT_BYTES + 1 : 1536 * MB + 1;
+    const doRestart = vi.fn(); // never calls process.exit — restart "fails"
+    const escalate = vi.fn();
+
+    const r1 = evaluateRss(makeOpts({ rssBytes, doRestart, escalate }));
+    expect(r1).toBe("idle-restart");
+    expect(escalate).not.toHaveBeenCalled();
+
+    // Advance past the watchdog window — it should conclude the restart never
+    // completed, log the failure, and escalate to a forced exit.
+    vi.advanceTimersByTime(RESTART_WATCHDOG_MS + 1);
+    expect(diagEmit).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "rss-guard.restart-watchdog-timeout", escalating: true })
+    );
+    expect(escalate).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "idle-restart", consecutiveFailures: 1 })
+    );
+
+    vi.clearAllMocks();
+
+    // The latch reset survives IN ADDITION to the escalation: on the residual
+    // path where the injected hook did not actually terminate the process, a
+    // subsequent over-threshold evaluation must retry — a real restart
+    // decision, with a log record — not the silent "below-threshold" path.
+    const r2 = evaluateRss(makeOpts({ rssBytes, doRestart, escalate }));
+    expect(r2).toBe("idle-restart");
+    expect(doRestart).toHaveBeenCalledOnce();
+    expect(diagEmit).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "rss-guard.restart", reason: "idle-restart" })
+    );
+  });
+
+  it("escalates through the REAL guard wiring when shutdown() stops the guard and then hangs", () => {
+    // Regression test for the class the earlier watchdog missed: every other
+    // test drives evaluateRss() by hand, so it never notices that production's
+    // shutdown() synchronously calls stopRssGuard() before it can hang — which
+    // makes "re-arm the latch" a no-op, because no timer is left to re-evaluate.
+    vi.useFakeTimers();
+    const rssBytes = MAX_RSS_SOFT_BYTES > 0 ? MAX_RSS_SOFT_BYTES + 1 : 1536 * MB + 1;
+
+    let processAlive = true;
+    // Stand-in for main.ts's escalate hook (removePidfile → process.exit(1)).
+    const escalate = vi.fn(() => { processAlive = false; });
+
+    // Stand-in for main.ts's doRestart → shutdown(): re-entrancy-guarded, stops
+    // the RSS guard synchronously, then hangs forever in the drain and never
+    // reaches process.exit().
+    let shutdownEntered = false;
+    const doRestart = vi.fn(() => {
+      if (shutdownEntered) return; // main.ts `shutdownCalled` re-entrancy guard
+      shutdownEntered = true;
+      stopRssGuard();
+      // ...and then never resolves.
+    });
+
+    const guardIntervalMs = 100;
+    startRssGuard(guardIntervalMs, makeOpts({ rssBytes, doRestart, escalate }));
+
+    vi.advanceTimersByTime(guardIntervalMs);
+    expect(doRestart).toHaveBeenCalledOnce();
+
+    // The guard's own interval is gone — no amount of latch re-arming can bring
+    // this daemon back under observation. Nothing re-evaluates.
+    vi.advanceTimersByTime(guardIntervalMs * 20);
+    expect(doRestart).toHaveBeenCalledOnce();
+    expect(escalate).not.toHaveBeenCalled();
+    expect(processAlive).toBe(true);
+
+    // The watchdog is the only survivor, and it must terminate the process.
+    vi.advanceTimersByTime(RESTART_WATCHDOG_MS + 1);
+    expect(escalate).toHaveBeenCalledOnce();
+    // The forbidden end state: alive, with a stopped guard.
+    expect(processAlive).toBe(false);
+  });
+
+  it("never escalates on an ordinary shutdown — the watchdog is armed only by the guard's own restart", () => {
+    vi.useFakeTimers();
+    const escalate = vi.fn();
+    // RSS below the ceiling: no restart is ever ordered, so nothing arms the
+    // watchdog. A SIGTERM shutdown reaches stopRssGuard() by this same path.
+    startRssGuard(100, makeOpts({ rssBytes: 1 * MB, escalate }));
+    vi.advanceTimersByTime(1000);
+    stopRssGuard();
+
+    vi.advanceTimersByTime(RESTART_WATCHDOG_MS * 4);
+    expect(escalate).not.toHaveBeenCalled();
   });
 });
 
