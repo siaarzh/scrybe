@@ -11,6 +11,14 @@ function debugEnabled(): boolean {
 }
 
 /**
+ * This process's pid, cached once at module init (Plan 109 Phase 1). Stamped
+ * onto every record `diagEmit` writes so any line in daemon-log.jsonl can be
+ * attributed to a specific daemon process — `process.pid` never changes for
+ * the life of the process, so there is no benefit to re-reading it per call.
+ */
+const _pid = process.pid;
+
+/**
  * Emit a structured event to daemon-log.jsonl.
  *
  * Volume policy (Decision 9):
@@ -32,7 +40,7 @@ export function diagEmit(record: Record<string, unknown>): void {
   try {
     appendFileSync(
       logPath(),
-      JSON.stringify({ ts: new Date().toISOString(), ...record }) + "\n",
+      JSON.stringify({ ts: new Date().toISOString(), pid: _pid, ...record }) + "\n",
       "utf8",
     );
   } catch { /* non-fatal */ }

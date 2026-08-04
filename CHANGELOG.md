@@ -7,6 +7,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **The daemon now starts under a kernel-enforced memory ceiling on Linux**, so a runaway daemon is stopped by the kernel at the moment it asks for the memory instead of being noticed up to a minute later — and it can no longer take the host down with it. The limit defaults to 4096 MB and is set with `SCRYBE_DAEMON_CGROUP_MAX_MB` (`0` disables it). It applies where a systemd user session is available; everywhere else — other platforms, headless containers, hosts without systemd — the daemon starts exactly as before, uncapped.
+- **`scrybe doctor` reports whether the daemon is memory-capped.** For a running daemon it reads the limit actually in force; with no daemon running it predicts what the next one would get, and explains in plain language why a cap would be missing and what to do about it.
+
+### Fixed
+
+- **A daemon that failed to restart after exceeding its memory ceiling is now forced to exit instead of lingering.** The self-restart could hang partway through, leaving a process that was over budget, no longer watching its own memory, and holding on to the lock the next daemon needs. Such a restart is now given a bounded window and then terminated, so a fresh daemon can take over. Tune the window with `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MS` (default 120 s) and its per-failure backoff ceiling `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MAX_MS` (default 30 min); a healthy restart always completes well within the window.
+
 ---
 
 ## [0.47.1] — 2026-08-01

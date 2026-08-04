@@ -48,7 +48,18 @@ let _timer: ReturnType<typeof setInterval> | null = null;
 // ─── Public API ────────────────────────────────────────────────────────────
 
 /**
- * Returns the absolute path this check stats. Exported for tests only.
+ * Returns the absolute path this check stats — the daemon's own loaded
+ * module, resolved once at module init (D4: never `argv[1]`). Reused by
+ * `daemon/main.ts` for the `daemon.start` diagnostic record (Plan 109 Phase 1)
+ * so the module-path resolution isn't duplicated.
+ */
+export function getOwnModulePath(): string {
+  return _ownModulePath;
+}
+
+/**
+ * @deprecated use {@link getOwnModulePath} — kept as an alias so existing
+ * tests don't need renaming.
  */
 export function _getOwnModulePathForTests(): string {
   return _ownModulePath;

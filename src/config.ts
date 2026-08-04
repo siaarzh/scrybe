@@ -468,6 +468,25 @@ export const config = {
     process.env["SCRYBE_DAEMON_RESTART_DRAIN_MS"] ?? "2000",
     10
   ),
+
+  // Kernel-enforced memory ceiling applied to a newly spawned daemon (MB).
+  // Linux only, and only when a user systemd manager is reachable — the spawn
+  // is wrapped in a transient `systemd-run --user` service carrying
+  // `MemoryMax=<this>M`, so the kernel refuses the allocation at request time
+  // instead of the in-process RSS guard noticing up to 60 s later.
+  //
+  // Default 4096 MB: this is a BACKSTOP above the in-process guard, so it must
+  // sit above the guard's hard ceiling (3072 MB) or the guard would never get
+  // to act — a cap at or below it would turn every ordinary over-budget
+  // excursion into an OOM kill instead of a clean self-restart. 1024 MB of
+  // headroom is enough for the 60 s sampler to observe a breach and restart
+  // gracefully, while still stopping the measured multi-GB runaways (up to
+  // ~6.9 GB inside a single indexing job) that exhaust host memory and swap.
+  // Set SCRYBE_DAEMON_CGROUP_MAX_MB=0 to disable the wrapper entirely.
+  daemonCgroupMaxMb: parseInt(
+    process.env["SCRYBE_DAEMON_CGROUP_MAX_MB"] ?? "4096",
+    10
+  ),
 } as const;
 
 if (config.chunkOverlap >= config.chunkSize) {

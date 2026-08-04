@@ -34,7 +34,13 @@ vi.mock("../src/registry.js", () => ({
   onProjectRemoved: vi.fn(),
 }));
 
-// Mock child_process.spawn so spawnDaemonDetached doesn't fork a real process
+// Mock child_process.spawn so spawnDaemonDetached doesn't fork a real process.
+// spawnSync is mocked too: on a Linux dev box with a live user bus,
+// spawnDaemonDetached's cgroup-cap wrapper would otherwise really invoke
+// systemd-run and start a transient unit. The stub reports a failed launch, so
+// these tests always exercise the plain-spawn path deterministically (the
+// per-call `cgroupMaxMb: 0` below is the primary guard; this is belt-and-braces
+// against any spawnSync that slips in later).
 vi.mock("child_process", async (importOriginal) => {
   const original = await importOriginal<typeof import("child_process")>();
   const { EventEmitter } = await import("events");
@@ -46,6 +52,7 @@ vi.mock("child_process", async (importOriginal) => {
       child.unref = vi.fn();
       return child;
     }),
+    spawnSync: vi.fn(() => ({ status: 1, signal: null, pid: 0, output: [], stdout: null, stderr: null })),
   };
 });
 
@@ -249,6 +256,105 @@ describe("activity-span — reindex", () => {
   });
 });
 
+// ─── 2b. intra-span RSS high-water mark (Plan 109 Phase 2) ────────────────
+
+describe("activity-span — intra-span RSS peak (Plan 109 Phase 2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("createSpanRssTracker records a peak above both the start and end samples", async () => {
+    const { createSpanRssTracker, _resetMemSamplerForTests } = await import("../src/daemon/mem-sampler.js");
+    _resetMemSamplerForTests();
+
+    // Rise then fall entirely inside the tracker's lifetime — a two-point
+    // (start, end) max would report only 140MB (max(100MB, 140MB)) and miss
+    // the 250MB spike that occurred in between.
+    const rssSequence = [150_000_000, 250_000_000, 180_000_000, 140_000_000];
+    let call = 0;
+    vi.spyOn(process, "memoryUsage").mockImplementation((() => {
+      const rss = rssSequence[Math.min(call, rssSequence.length - 1)];
+      call++;
+      return { rss, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 };
+    }) as typeof process.memoryUsage);
+
+    const tracker = createSpanRssTracker(100_000_000); // start sample
+    tracker.sample(); // 150MB
+    tracker.sample(); // 250MB — the interior spike
+    tracker.sample(); // 180MB — falling
+    const endSample = tracker.sample(); // 140MB — end
+
+    expect(tracker.peakRssBytes()).toBe(250_000_000);
+    expect(tracker.peakRssBytes()).toBeGreaterThan(endSample.rssBytes);
+    expect(tracker.peakRssBytes()).toBeGreaterThan(Math.max(100_000_000, endSample.rssBytes));
+  });
+
+  it("a reindex job's activity-span records a true interior peak, not a two-point max", async () => {
+    const { submitJob, getJobStatus } = await import("../src/jobs.js");
+    vi.mocked(submitJob).mockReturnValue("job-span-peak");
+
+    // First two polls report "running"; the third reports "done".
+    let statusCalls = 0;
+    vi.mocked(getJobStatus).mockImplementation(() => {
+      statusCalls++;
+      return {
+        job_id: "job-span-peak",
+        project_id: "proj1",
+        mode: "incremental",
+        status: statusCalls < 3 ? "running" : "done",
+        tasks: [],
+        started_at: Date.now() - 600,
+        finished_at: statusCalls < 3 ? null : Date.now(),
+        error: null,
+      } as any;
+    });
+
+    const { getProject, getSource } = await import("../src/registry.js");
+    vi.mocked(getProject).mockReturnValue(undefined);
+    vi.mocked(getSource).mockReturnValue(undefined);
+
+    // memoryUsage() call order for this job:
+    //   1. startSample (before submit)               → 100MB
+    //   2. tick @200ms: rssTracker.sample() (running) → 150MB
+    //   3. tick @400ms: rssTracker.sample() (running)  → 250MB  ← interior spike
+    //   4. tick @600ms: rssTracker.sample() (done)     → 180MB
+    //   5. final rssTracker.sample() after completion  → 160MB
+    //   6. endSample = sampleNow()                     → 140MB
+    const rssSequence = [
+      100_000_000, 150_000_000, 250_000_000, 180_000_000, 160_000_000, 140_000_000,
+    ];
+    let call = 0;
+    vi.spyOn(process, "memoryUsage").mockImplementation((() => {
+      const rss = rssSequence[Math.min(call, rssSequence.length - 1)];
+      call++;
+      return { rss, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 };
+    }) as typeof process.memoryUsage);
+
+    const { initQueue, enqueue } = await import("../src/daemon/queue.js");
+    initQueue({ pushEvent: vi.fn() });
+
+    await enqueue({ projectId: "proj1", mode: "incremental" });
+    vi.advanceTimersByTime(600);
+
+    const logPath = join(process.env["SCRYBE_DATA_DIR"]!, "daemon-log.jsonl");
+    const recs = readJsonlLines(logPath);
+    const spanRec = recs.find(
+      (r) => r["event"] === "activity-span" && r["spanType"] === "reindex" && r["jobId"] === "job-span-peak"
+    );
+    expect(spanRec).toBeDefined();
+
+    const peak = spanRec!["peakRssBytes"] as number;
+    const start = spanRec!["startRssBytes"] as number;
+    const end = spanRec!["endRssBytes"] as number;
+
+    // Impossible under the old Math.max(start, end) implementation — this is
+    // the proof the interior of the span is actually being observed.
+    expect(peak).toBe(250_000_000);
+    expect(peak).toBeGreaterThan(end);
+    expect(peak).toBeGreaterThan(Math.max(start, end));
+  });
+});
+
 // ─── 3. activity-span for MCP call (via diagEmit directly) ────────────────
 
 describe("activity-span — mcp-call shape", () => {
@@ -291,7 +397,7 @@ describe("child-process lifecycle events", () => {
     const logPath = join(process.env["SCRYBE_DATA_DIR"]!, "daemon-log.jsonl");
 
     const { spawnDaemonDetached } = await import("../src/daemon/spawn-detached.js");
-    spawnDaemonDetached({ execPath: "/usr/bin/node", entryScript: "/tmp/test.js" });
+    spawnDaemonDetached({ execPath: "/usr/bin/node", entryScript: "/tmp/test.js", cgroupMaxMb: 0 });
 
     const recs = readJsonlLines(logPath);
     const spawnRec = recs.find((r) => r["event"] === "child-process.spawn");
@@ -309,7 +415,7 @@ describe("child-process lifecycle events", () => {
     const { spawn } = await import("child_process");
     const { spawnDaemonDetached } = await import("../src/daemon/spawn-detached.js");
 
-    spawnDaemonDetached({ execPath: "/usr/bin/node", entryScript: "/tmp/test.js" });
+    spawnDaemonDetached({ execPath: "/usr/bin/node", entryScript: "/tmp/test.js", cgroupMaxMb: 0 });
 
     // Get the child emitter returned by the mocked spawn and emit exit
     const mockSpawn = vi.mocked(spawn);
