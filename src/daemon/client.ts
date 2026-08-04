@@ -255,10 +255,21 @@ async function waitForHealthyPidfile(deadline: number): Promise<EnsureRunningRes
     const client = DaemonClient.fromPidfile();
     if (client) {
       try {
-        const h = await client.health();
+        // Every probe is individually bounded. Without this, the guaranteed
+        // post-deadline probe (the do/while above) could hang forever on a
+        // daemon that is listening but wedged — accept()ing and never
+        // answering — which would break the very budget invariant the
+        // at-least-once probe exists to protect. The bound is the remaining
+        // budget, floored at 250 ms so the final probe is real, capped at 2 s
+        // so a wedged daemon cannot eat a long caller budget in one bite.
+        const probeMs = Math.min(2_000, Math.max(250, deadline - Date.now()));
+        const h = await Promise.race([
+          client.health(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("probe-timeout")), probeMs).unref?.()),
+        ]);
         if (!h.draining) return { ok: true };
         sawDraining = true;
-      } catch { /* not ready yet */ }
+      } catch { /* not ready yet, or probe timed out */ }
     }
     if (Date.now() >= deadline) break;
     await new Promise((r) => setTimeout(r, 100));

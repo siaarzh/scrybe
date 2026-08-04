@@ -242,7 +242,11 @@ export function readCgroupMemoryLimitForPid(pid: number, opts?: {
   const levels = readCgroupAncestorChain(cgroupFsRoot, cgroupPath);
 
   // Leaf is always levels[0] (readCgroupAncestorChain walks leaf-first).
-  const leaf = levels[0]!;
+  // A pid in the ROOT cgroup (`0::/` — container with a private cgroup
+  // namespace, non-systemd init) yields zero segments and an empty chain;
+  // the root has no memory.max, so that is an honest unknown, never a throw.
+  const leaf = levels[0];
+  if (leaf === undefined) return { state: "unknown", reason: "memory-max-unreadable" };
   if (leaf.raw === null) return { state: "unknown", reason: "memory-max-unreadable" };
   if (leaf.raw !== "max") {
     const leafBytes = Number(leaf.raw);

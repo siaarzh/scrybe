@@ -96,7 +96,7 @@ describe.skipIf(SKIP)("ensureRunning budget", () => {
     // /health probe and the spawn lock have already spent part of it. A spawn
     // handed the FULL 2000 here could still overrun the deadline it shares.
     expect(budgets[0]!).toBeGreaterThan(0);
-    expect(budgets[0]!).toBeLessThanOrEqual(2000);
+    expect(budgets[0]!).toBeLessThan(2000);
   });
 
   it("does not report health-timeout for a daemon that came up while the spawn overran", async () => {
