@@ -112,6 +112,9 @@ async function runTasks(jobId: string): Promise<void> {
         signal: taskController.signal,
         branch: job.branch,
         contentRef: job.contentRef,
+        // Join key for per-phase memory records (phase-log.jsonl) ↔ the job's
+        // activity-span in daemon-log.jsonl.
+        jobId,
         onDownloadProgress(percent) {
           if (task.phase !== "downloading-model") {
             task.phase = "downloading-model";

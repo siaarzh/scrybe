@@ -26,8 +26,133 @@ export interface LocalEmbedderOptions {
   maxChars?: number;
 }
 
+/**
+ * A loaded pipeline plus the model metadata the batching planner needs.
+ * `maxSeqTokens` is the tokenizer's own `model_max_length` — the point at which
+ * the feature-extraction pipeline truncates internally (it hardcodes
+ * `truncation: true`), so it is also the largest padded sequence length any
+ * forward pass can ever see.
+ */
+interface LoadedModel {
+  extractor: FeatureExtractionPipeline;
+  maxSeqTokens: number;
+}
+
 // Pipeline cache keyed by modelId — shared across all call sites in the process
-const _pipelines = new Map<string, FeatureExtractionPipeline>();
+const _pipelines = new Map<string, LoadedModel>();
+
+/** Fallback when a tokenizer does not declare `model_max_length`. */
+const FALLBACK_MAX_SEQ_TOKENS = 512;
+
+/**
+ * Upper bound on source characters a single token may consume, used to turn the
+ * model's token limit into a character cap.
+ *
+ * The default model's tokenizer (Xenova/multilingual-e5-small, a 250k-piece
+ * SentencePiece vocabulary) has a longest vocabulary piece of 16 characters, so
+ * `maxSeqTokens` tokens can never span more than 16x that many non-whitespace
+ * characters. 64 keeps a 4x margin for normalisation forms that fold several
+ * source characters onto one piece.
+ */
+const MAX_CHARS_PER_TOKEN = 64;
+
+/**
+ * Total padded token slots (rows x padded sequence length) allowed in a single
+ * forward pass. Peak RSS is linear in this product at roughly 33 KB per slot,
+ * so an unbounded batch of 64 rows padded to 512 tokens costs ~1 GB while a
+ * 4096-slot budget costs ~140 MB.
+ */
+const DEFAULT_TOKEN_BUDGET = 4096;
+
+function resolveTokenBudget(maxSeqTokens: number): number {
+  const raw = process.env["SCRYBE_LOCAL_EMBED_TOKEN_BUDGET"];
+  const parsed = raw === undefined ? NaN : Number(raw);
+  const budget = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_TOKEN_BUDGET;
+  // A budget below one full-length row would stall the planner — a single row
+  // always goes through regardless, so floor it at one row.
+  return Math.max(budget, maxSeqTokens);
+}
+
+/**
+ * Truncates `text` so the tokenizer never has to scan an unbounded string.
+ *
+ * The budget is spent on non-whitespace characters only. Runs of whitespace
+ * collapse to a single token in this tokenizer family (20,000 spaces tokenize to
+ * one token), so charging them against the budget would be the one way a cap
+ * could drop content the model would otherwise have seen. `rawLimit` still bounds
+ * the scan itself so a pathological whitespace-only input cannot cost unbounded
+ * work.
+ *
+ * Because `maxNonWsChars` is derived from `maxSeqTokens * MAX_CHARS_PER_TOKEN`,
+ * any text this cuts was already past the model's token limit and would have
+ * been truncated by the tokenizer anyway — the resulting token sequence, and so
+ * the embedding, is unchanged.
+ */
+export function truncateForModel(text: string, maxNonWsChars: number): string {
+  if (text.length <= maxNonWsChars) return text;
+  let nonWs = 0;
+  let lastNonWs = -1;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    // space, tab, LF, CR, VT, FF, NBSP — the common collapsing whitespace
+    const isWs = c === 32 || (c >= 9 && c <= 13) || c === 160;
+    if (isWs) continue;
+    if (++nonWs > maxNonWsChars) return text.slice(0, i);
+    lastNonWs = i;
+  }
+
+  // The budget was never exhausted, so the model will see every real character
+  // in this text. The only thing left to bound is whitespace, and the governing
+  // rule is: NEVER drop a non-whitespace character; cap only what trails past
+  // the last one.
+  //
+  // Both halves of that rule are load-bearing and each has a test. An earlier
+  // version stopped scanning at `maxNonWsChars * 8` and cut there, which
+  // silently defeated the whitespace exemption this function exists for —
+  // "start" + 20k spaces + "end" lost the "end". Removing the cap outright then
+  // let a pure-whitespace input through whole. Keeping content through
+  // `lastNonWs` satisfies both: real text is never lost, and a
+  // whitespace-only input still collapses to the ceiling.
+  //
+  // The scan itself is deliberately uncapped: one charCodeAt pass is orders of
+  // magnitude cheaper than the tokenization it precedes.
+  const ceiling = maxNonWsChars * 8;
+  if (text.length <= ceiling) return text;
+  return text.slice(0, Math.max(lastNonWs + 1, ceiling));
+}
+
+/**
+ * Groups indices of `texts` into forward passes that each stay within `budget`
+ * padded token slots.
+ *
+ * Texts are visited shortest-first so that rows sharing a pass have similar
+ * lengths, which keeps padding — and therefore the padded sequence length that
+ * sets the cost — near the true length of the rows in it.
+ *
+ * The per-row estimate is a strict upper bound: no token can be shorter than one
+ * character, so `length + 2` (the two special tokens) can never understate the
+ * row's token count. The plan therefore never exceeds the budget in practice.
+ */
+export function planMicroBatches(texts: string[], maxSeqTokens: number, budget: number): number[][] {
+  const estTokens = (t: string): number => Math.min(maxSeqTokens, t.length + 2);
+  const order = texts.map((_, i) => i).sort((a, b) => estTokens(texts[a]!) - estTokens(texts[b]!));
+  const groups: number[][] = [];
+  let i = 0;
+  while (i < order.length) {
+    let paddedLen = 0;
+    let n = 0;
+    while (i + n < order.length) {
+      const next = Math.max(paddedLen, estTokens(texts[order[i + n]!]!));
+      // Always admit the first row, even if it alone exceeds the budget.
+      if (n > 0 && next * (n + 1) > budget) break;
+      paddedLen = next;
+      n++;
+    }
+    groups.push(order.slice(i, i + n));
+    i += n;
+  }
+  return groups;
+}
 
 /**
  * Returns true if the model is already loaded in-process OR its files are present
@@ -51,7 +176,7 @@ export interface ModelDownloadProgress {
 async function getPipeline(
   modelId: string,
   onDownloadProgress?: (progress: ModelDownloadProgress) => void,
-): Promise<FeatureExtractionPipeline> {
+): Promise<LoadedModel> {
   const cached = _pipelines.get(modelId);
   if (cached) return cached;
   const { pipeline } = await getTransformers();
@@ -101,8 +226,27 @@ async function getPipeline(
     (err as any).error_type = "local_model_load";
     throw err;
   }
-  _pipelines.set(modelId, p);
-  return p;
+  const declared = Number((p as { tokenizer?: { model_max_length?: unknown } }).tokenizer?.model_max_length);
+  const maxSeqTokens = Number.isFinite(declared) && declared > 0 ? declared : FALLBACK_MAX_SEQ_TOKENS;
+  const loaded: LoadedModel = { extractor: p, maxSeqTokens };
+  _pipelines.set(modelId, loaded);
+  return loaded;
+}
+
+/**
+ * Applies both length caps to one text.
+ *
+ * `optsMaxChars` (the configured `max_input_tokens * 4`) keeps its original raw
+ * slice semantics so texts already capped by config embed exactly as before.
+ * The model-derived backstop then bounds anything left — it is inert whenever a
+ * config cap is set, and is the only bound on presets that omit
+ * `max_input_tokens` and on sources that bypass the code chunker.
+ */
+function capText(text: string, optsMaxChars: number | undefined, maxSeqTokens: number): string {
+  const capped = optsMaxChars !== undefined && text.length > optsMaxChars
+    ? text.slice(0, optsMaxChars)
+    : text;
+  return truncateForModel(capped, maxSeqTokens * MAX_CHARS_PER_TOKEN);
 }
 
 function toVec(output: any, idx: number): number[] {
@@ -116,22 +260,24 @@ export async function embedLocalBatched(
   onDownloadProgress?: (progress: ModelDownloadProgress) => void,
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const extractor = await getPipeline(opts.modelId, onDownloadProgress);
+  const { extractor, maxSeqTokens } = await getPipeline(opts.modelId, onDownloadProgress);
   const passagePrefix = opts.prompt_template?.passage ?? "";
-  const maxChars = opts.maxChars;
-  const results: number[][] = [];
+  const budget = resolveTokenBudget(maxSeqTokens);
+  const results: number[][] = new Array(texts.length);
   for (let i = 0; i < texts.length; i += batchSize) {
-    let batch = texts.slice(i, i + batchSize);
     // Apply char cap before prefix (safety net; chunker should prevent this in most cases)
-    if (maxChars !== undefined) {
-      batch = batch.map((t) => t.length > maxChars ? t.slice(0, maxChars) : t);
-    }
-    if (passagePrefix) {
-      batch = batch.map((t) => passagePrefix + t);
-    }
-    const output = await extractor(batch, { pooling: "mean", normalize: true });
-    for (let j = 0; j < batch.length; j++) {
-      results.push(toVec(output, j));
+    const batch = texts.slice(i, i + batchSize).map((t) => {
+      const capped = capText(t, opts.maxChars, maxSeqTokens);
+      return passagePrefix ? passagePrefix + capped : capped;
+    });
+    // One oversized text pads the whole batch up to the model's sequence limit,
+    // and cost is the padded rectangle — so split into length-similar passes
+    // that each stay inside the token budget rather than sending all rows at once.
+    for (const group of planMicroBatches(batch, maxSeqTokens, budget)) {
+      const output = await extractor(group.map((k) => batch[k]!), { pooling: "mean", normalize: true });
+      for (let j = 0; j < group.length; j++) {
+        results[i + group[j]!] = toVec(output, j);
+      }
     }
   }
   return results;
@@ -141,9 +287,12 @@ export async function embedLocalQuery(
   query: string,
   opts: LocalEmbedderOptions
 ): Promise<number[]> {
-  const extractor = await getPipeline(opts.modelId);
+  const { extractor, maxSeqTokens } = await getPipeline(opts.modelId);
   const queryPrefix = opts.prompt_template?.query ?? "";
-  const prefixedQuery = queryPrefix ? queryPrefix + query : query;
+  // A single text cannot be padded by a batch-mate, but an over-long query is
+  // still an unbounded string for the tokenizer to scan.
+  const capped = capText(query, opts.maxChars, maxSeqTokens);
+  const prefixedQuery = queryPrefix ? queryPrefix + capped : capped;
   const output = await extractor([prefixedQuery], { pooling: "mean", normalize: true });
   return toVec(output, 0);
 }
@@ -151,7 +300,7 @@ export async function embedLocalQuery(
 /** Pre-loads the model into memory. No-op if already loaded. Call at daemon startup to avoid first-batch cold start. */
 export async function warmupLocalEmbedder(opts: LocalEmbedderOptions): Promise<void> {
   if (_pipelines.has(opts.modelId)) return;
-  const extractor = await getPipeline(opts.modelId);
+  const { extractor } = await getPipeline(opts.modelId);
   // Run a single inference to fully initialise the WASM runtime
   await extractor(["warmup"], { pooling: "mean", normalize: true });
 }

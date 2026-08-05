@@ -7,6 +7,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **Indexing jobs now record their memory use phase by phase.** A new `phase-log.jsonl` in the data directory records, for each stage of an indexing job (scan, diff, chunk/embed/upsert, compaction, and so on), the memory in use when it started, its peak while it ran, the memory left when it finished, how long it took, and how much work it did. Each record is written the moment its stage ends, so a daemon that runs out of memory partway through still leaves behind a trail showing exactly where it was — the previous per-job record was written only on completion, so the jobs that mattered most left nothing at all. The log rotates at 16 MB and keeps 3 backups; set `SCRYBE_PHASE_TELEMETRY=0` to turn it off.
+
+### Fixed
+
+- **Indexing with the built-in offline embedding model no longer spikes to several gigabytes.** The model processes a batch of texts as one rectangle, sized by the longest text in it, so a single long chunk made the whole batch expensive — and the cost of a batch grows with the square of its length. A full reindex of a mid-sized repository peaked around 6,900 MB. Batches are now assembled from texts of similar length and held to a fixed size budget, which caps the peak regardless of what lands in a batch: the same reindex now peaks around 340 MB. Long inputs are also cut down before the model sees them, using a limit derived from the model's own; because the model already ignored anything past that limit, the resulting search vectors are unchanged. Set `SCRYBE_LOCAL_EMBED_TOKEN_BUDGET` to trade memory for throughput (default 4096).
+
+  Vectors produced for a batch containing texts of very different lengths shift slightly, because the padding used to square off the old batches perturbed them; the new vectors are measurably closer to what the model produces for each text on its own. Existing indexes stay searchable and need no reindex.
+
 ---
 
 ## [0.48.0] — 2026-08-05
