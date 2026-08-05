@@ -7,6 +7,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.49.0] — 2026-08-05
+
+### Security
+
+- When a hosted embedding provider returns an error, its response body is logged to help diagnose the failure. If the provider echoed the API key back in that body, the key was written to the log in clear text. The key is now redacted before anything is logged.
+
 ### Added
 
 - **Indexing jobs now record their memory use phase by phase.** A new `phase-log.jsonl` in the data directory records, for each stage of an indexing job (scan, diff, chunk/embed/upsert, compaction, and so on), the memory in use when it started, its peak while it ran, the memory left when it finished, how long it took, and how much work it did. Each record is written the moment its stage ends, so a daemon that runs out of memory partway through still leaves behind a trail showing exactly where it was — the previous per-job record was written only on completion, so the jobs that mattered most left nothing at all. The log rotates at 16 MB and keeps 3 backups; set `SCRYBE_PHASE_TELEMETRY=0` to turn it off.
@@ -79,25 +87,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.46.1] — 2026-07-17
-
-### Fixed
-
-- **Installing or building scrybe from a source checkout no longer stops or replaces your running daemon.** The install hooks previously could not tell a global install from a working copy, so `npm install` in a clone, worktree or CI checkout would shut down whichever daemon you had running and start a replacement from that checkout — against your real index. They now act only on a genuine install; `npm i -g scrybe-cli` and `npx scrybe-cli` are unaffected.
-- **A daemon whose own installation was removed underneath it is now detected and replaced automatically.** Previously it stayed up serving `internal error` on every search, status, doctor call and reindex job — while still reporting itself healthy — until someone noticed and restarted it by hand. This could happen when scrybe was installed or reinstalled from a directory that was later deleted (a temporary checkout, a cleared package cache). The daemon now notices its own files are gone and steps aside so the next call starts a working one.
-
----
-
 ## Older releases
 
-For releases v0.46.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.46.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.48.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.49.0...HEAD
+[0.49.0]: https://github.com/siaarzh/scrybe/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/siaarzh/scrybe/compare/v0.47.1...v0.48.0
 [0.47.1]: https://github.com/siaarzh/scrybe/compare/v0.47.0...v0.47.1
 [0.47.0]: https://github.com/siaarzh/scrybe/compare/v0.46.3...v0.47.0
 [0.46.3]: https://github.com/siaarzh/scrybe/compare/v0.46.2...v0.46.3
 [0.46.2]: https://github.com/siaarzh/scrybe/compare/v0.46.1...v0.46.2
-[0.46.1]: https://github.com/siaarzh/scrybe/compare/v0.46.0...v0.46.1
