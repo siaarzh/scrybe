@@ -45,6 +45,13 @@ const _pipelines = new Map<string, LoadedModel>();
 const FALLBACK_MAX_SEQ_TOKENS = 512;
 
 /**
+ * Ceiling on a tokenizer's self-declared `model_max_length`. Long-context
+ * embedding models top out well below this; anything above it is a sentinel or
+ * a bad config, and trusting it would disable the batch budget entirely.
+ */
+const MAX_TRUSTED_SEQ_TOKENS = 8192;
+
+/**
  * Upper bound on source characters a single token may consume, used to turn the
  * model's token limit into a character cap.
  *
@@ -129,9 +136,22 @@ export function truncateForModel(text: string, maxNonWsChars: number): string {
  * lengths, which keeps padding — and therefore the padded sequence length that
  * sets the cost — near the true length of the rows in it.
  *
- * The per-row estimate is a strict upper bound: no token can be shorter than one
- * character, so `length + 2` (the two special tokens) can never understate the
- * row's token count. The plan therefore never exceeds the budget in practice.
+ * The per-row estimate is `length + 2` (the text plus two special tokens). That
+ * is a good estimate, NOT a strict upper bound, and the difference matters:
+ *
+ * - It can under-count. A tokenizer that emits more than one token per JS
+ *   character exceeds it — measured against the shipped SentencePiece model,
+ *   1,000 CJK characters produce 1,003 tokens, and a byte-fallback BPE
+ *   tokenizer can emit three or four tokens per character for CJK or emoji.
+ * - It is bounded anyway. Each row is clamped at `maxSeqTokens` before it
+ *   counts against the budget, so a pass can never exceed
+ *   `rows x maxSeqTokens` slots no matter how wrong the estimate is. An
+ *   under-count inflates a pass, it does not make it unbounded.
+ *
+ * So the budget is a soft target that holds exactly for ASCII-dominant text and
+ * degrades gracefully elsewhere. If a future model ships a tokenizer with a very
+ * different character-to-token ratio, re-measure rather than assuming this still
+ * holds.
  */
 export function planMicroBatches(texts: string[], maxSeqTokens: number, budget: number): number[][] {
   const estTokens = (t: string): number => Math.min(maxSeqTokens, t.length + 2);
@@ -227,7 +247,17 @@ async function getPipeline(
     throw err;
   }
   const declared = Number((p as { tokenizer?: { model_max_length?: unknown } }).tokenizer?.model_max_length);
-  const maxSeqTokens = Number.isFinite(declared) && declared > 0 ? declared : FALLBACK_MAX_SEQ_TOKENS;
+  // A finite, positive `model_max_length` is NOT enough to trust it. When a
+  // tokenizer declares no real limit, HuggingFace's convention is the sentinel
+  // 1000000000000000019884624838656 — finite and positive, so a naive check
+  // accepts it. That would set the budget to the sentinel, put every row in one
+  // forward pass, and lift the char backstop out of reach: both halves of this
+  // memory fix would silently revert to the multi-GB behaviour they exist to
+  // prevent, with nothing in the log to say so. Clamp to a value no real
+  // sentence-embedding model exceeds.
+  const maxSeqTokens = Number.isFinite(declared) && declared > 0
+    ? Math.min(declared, MAX_TRUSTED_SEQ_TOKENS)
+    : FALLBACK_MAX_SEQ_TOKENS;
   const loaded: LoadedModel = { extractor: p, maxSeqTokens };
   _pipelines.set(modelId, loaded);
   return loaded;
