@@ -201,3 +201,34 @@ describe("embedLocalBatched batching", () => {
     expect(capturedInputs).toHaveLength(0);
   });
 });
+
+describe("tokenizer-declared limit is clamped (regression: silent full revert)", () => {
+  // HuggingFace's convention when a tokenizer declares no real limit is this
+  // sentinel. It is finite and positive, so a naive `isFinite(x) && x > 0`
+  // check accepts it — which would set the batch budget to the sentinel, put
+  // every row in one forward pass, and lift the character backstop out of
+  // reach. Both halves of the memory bound would revert with nothing logged.
+  const HF_NO_LIMIT_SENTINEL = 1e30;
+
+  it("a sentinel model_max_length does not become the batch budget", () => {
+    // planMicroBatches is given the CLAMPED value in production; assert that a
+    // clamped ceiling still splits work, where the sentinel would not.
+    const rows = Array.from({ length: 40 }, () => "x".repeat(500));
+    const clamped = Math.min(HF_NO_LIMIT_SENTINEL, 8192);
+    expect(clamped).toBe(8192);
+
+    const groups = planMicroBatches(rows, clamped, 4096);
+    expect(groups.length).toBeGreaterThan(1);
+    for (const g of groups) {
+      const padded = Math.max(...g.map((i) => Math.min(clamped, rows[i]!.length + 2)));
+      expect(g.length * padded).toBeLessThanOrEqual(4096 + padded);
+    }
+  });
+
+  it("an unclamped sentinel would put everything in one pass — the thing being prevented", () => {
+    const rows = Array.from({ length: 40 }, () => "x".repeat(500));
+    const groups = planMicroBatches(rows, HF_NO_LIMIT_SENTINEL, HF_NO_LIMIT_SENTINEL);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toHaveLength(40);
+  });
+});

@@ -36,6 +36,14 @@ export interface LocalEmbedderOptions {
 interface LoadedModel {
   extractor: FeatureExtractionPipeline;
   maxSeqTokens: number;
+  /**
+   * Whether the tokenizer's own declared limit is one we trust it to truncate
+   * at. False when it declared nothing usable, and false when its declared value
+   * exceeded `MAX_TRUSTED_SEQ_TOKENS` — in both cases transformers.js pads to
+   * something other than `maxSeqTokens`, so the character backstop must use the
+   * conservative ratio rather than the generous one.
+   */
+  tokenizerTruncates: boolean;
 }
 
 // Pipeline cache keyed by modelId — shared across all call sites in the process
@@ -50,6 +58,13 @@ const FALLBACK_MAX_SEQ_TOKENS = 512;
  * a bad config, and trusting it would disable the batch budget entirely.
  */
 const MAX_TRUSTED_SEQ_TOKENS = 8192;
+
+/**
+ * Conservative chars-per-token floor, used for the backstop when a tokenizer's
+ * declared limit could not be trusted. No tokenizer emits fewer than one token
+ * per character, so this keeps the real sequence inside the planner's budget.
+ */
+const MIN_CHARS_PER_TOKEN = 1;
 
 /**
  * Upper bound on source characters a single token may consume, used to turn the
@@ -86,9 +101,9 @@ function resolveTokenBudget(maxSeqTokens: number): number {
  * The budget is spent on non-whitespace characters only. Runs of whitespace
  * collapse to a single token in this tokenizer family (20,000 spaces tokenize to
  * one token), so charging them against the budget would be the one way a cap
- * could drop content the model would otherwise have seen. `rawLimit` still bounds
- * the scan itself so a pathological whitespace-only input cannot cost unbounded
- * work.
+ * could drop content the model would otherwise have seen. A pathological
+ * whitespace-only input is still bounded, by the ceiling applied below rather
+ * than by capping the scan.
  *
  * Because `maxNonWsChars` is derived from `maxSeqTokens * MAX_CHARS_PER_TOKEN`,
  * any text this cuts was already past the model's token limit and would have
@@ -255,10 +270,16 @@ async function getPipeline(
   // memory fix would silently revert to the multi-GB behaviour they exist to
   // prevent, with nothing in the log to say so. Clamp to a value no real
   // sentence-embedding model exceeds.
-  const maxSeqTokens = Number.isFinite(declared) && declared > 0
+  const declaredIsUsable = Number.isFinite(declared) && declared > 0;
+  const maxSeqTokens = declaredIsUsable
     ? Math.min(declared, MAX_TRUSTED_SEQ_TOKENS)
     : FALLBACK_MAX_SEQ_TOKENS;
-  const loaded: LoadedModel = { extractor: p, maxSeqTokens };
+  // Whether the tokenizer will truncate at a length we trust. False when it
+  // declared nothing usable, and false when its declared value exceeded the
+  // clamp -- in both cases transformers.js pads to something other than
+  // `maxSeqTokens`, so the backstop must not assume otherwise.
+  const tokenizerTruncates = declaredIsUsable && declared <= MAX_TRUSTED_SEQ_TOKENS;
+  const loaded: LoadedModel = { extractor: p, maxSeqTokens, tokenizerTruncates };
   _pipelines.set(modelId, loaded);
   return loaded;
 }
@@ -272,11 +293,34 @@ async function getPipeline(
  * config cap is set, and is the only bound on presets that omit
  * `max_input_tokens` and on sources that bypass the code chunker.
  */
-function capText(text: string, optsMaxChars: number | undefined, maxSeqTokens: number): string {
+function capText(
+  text: string,
+  optsMaxChars: number | undefined,
+  maxSeqTokens: number,
+  tokenizerTruncates: boolean,
+): string {
   const capped = optsMaxChars !== undefined && text.length > optsMaxChars
     ? text.slice(0, optsMaxChars)
     : text;
-  return truncateForModel(capped, maxSeqTokens * MAX_CHARS_PER_TOKEN);
+
+  // `MAX_CHARS_PER_TOKEN` is a GENEROUS chars-per-token ratio, chosen so the
+  // backstop never cuts text the model would have seen. That makes it the right
+  // multiplier only when the tokenizer itself will truncate at a length we
+  // trust — i.e. when its declared limit survived the clamp in `getPipeline`.
+  //
+  // When it did not (a sentinel or absurd `model_max_length`), transformers.js
+  // pads to the tokenizer's OWN declared value, not to our clamped one, so a
+  // generous char cap stops bounding anything real: 8192 x 64 chars can be
+  // ~131k actual tokens in a pass the planner priced at 8192 slots. That is the
+  // regression the clamp exists to prevent, merely smaller.
+  //
+  // So in that case fall back to the CONSERVATIVE ratio — one token per
+  // character is the floor no tokenizer goes below — which keeps the real
+  // sequence inside the budget the planner assumed. It truncates more
+  // aggressively than a trustworthy tokenizer would, which is the correct trade
+  // when the alternative is an unbounded quadratic.
+  const charsPerToken = tokenizerTruncates ? MAX_CHARS_PER_TOKEN : MIN_CHARS_PER_TOKEN;
+  return truncateForModel(capped, maxSeqTokens * charsPerToken);
 }
 
 function toVec(output: any, idx: number): number[] {
@@ -290,14 +334,14 @@ export async function embedLocalBatched(
   onDownloadProgress?: (progress: ModelDownloadProgress) => void,
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const { extractor, maxSeqTokens } = await getPipeline(opts.modelId, onDownloadProgress);
+  const { extractor, maxSeqTokens, tokenizerTruncates } = await getPipeline(opts.modelId, onDownloadProgress);
   const passagePrefix = opts.prompt_template?.passage ?? "";
   const budget = resolveTokenBudget(maxSeqTokens);
   const results: number[][] = new Array(texts.length);
   for (let i = 0; i < texts.length; i += batchSize) {
     // Apply char cap before prefix (safety net; chunker should prevent this in most cases)
     const batch = texts.slice(i, i + batchSize).map((t) => {
-      const capped = capText(t, opts.maxChars, maxSeqTokens);
+      const capped = capText(t, opts.maxChars, maxSeqTokens, tokenizerTruncates);
       return passagePrefix ? passagePrefix + capped : capped;
     });
     // One oversized text pads the whole batch up to the model's sequence limit,
@@ -317,11 +361,11 @@ export async function embedLocalQuery(
   query: string,
   opts: LocalEmbedderOptions
 ): Promise<number[]> {
-  const { extractor, maxSeqTokens } = await getPipeline(opts.modelId);
+  const { extractor, maxSeqTokens, tokenizerTruncates } = await getPipeline(opts.modelId);
   const queryPrefix = opts.prompt_template?.query ?? "";
   // A single text cannot be padded by a batch-mate, but an over-long query is
   // still an unbounded string for the tokenizer to scan.
-  const capped = capText(query, opts.maxChars, maxSeqTokens);
+  const capped = capText(query, opts.maxChars, maxSeqTokens, tokenizerTruncates);
   const prefixedQuery = queryPrefix ? queryPrefix + capped : capped;
   const output = await extractor([prefixedQuery], { pooling: "mean", normalize: true });
   return toVec(output, 0);
