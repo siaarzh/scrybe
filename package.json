@@ -47,7 +47,7 @@
   "overrides": {
     "protobufjs": "^7.6.3",
     "ws": "^8.21.1",
-    "fast-uri": "^3.1.4",
+    "fast-uri": "^3.1.5",
     "hono": "^4.12.27",
     "@hono/node-server": "^1.19.13"
   },
