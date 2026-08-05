@@ -29,6 +29,15 @@ function truncate(text: string, maxChars: number): string {
   return text.length > maxChars ? text.slice(0, maxChars) : text;
 }
 
+// A custom base_url provider's error response is untrusted text — if it ever
+// echoes the Authorization header back (misconfigured proxy, buggy
+// OpenAI-compatible server), that shouldn't propagate into a thrown Error
+// that CLI/MCP error handlers print to the terminal or return to a caller.
+function redactApiKey(text: string, embConfig: EmbeddingConfig): string {
+  const key = process.env[embConfig.api_key_env];
+  return key ? text.split(key).join("[redacted]") : text;
+}
+
 // Client cache keyed by "{base_url}:{api_key_env}" to avoid recreating on every call
 const _clients = new Map<string, OpenAI>();
 
@@ -91,10 +100,11 @@ async function embedTexts(texts: string[], embConfig: EmbeddingConfig): Promise<
         delay *= 2;
         continue;
       }
-      const body =
+      const rawBody =
         (err as { error?: { message?: string } })?.error?.message ??
         (err instanceof Error ? err.message : String(err)) ??
         "(no body)";
+      const body = redactApiKey(rawBody, embConfig);
       throw new Error(`Embedding API error (HTTP ${status || "unknown"}): ${body}`, { cause: err });
     }
   }
