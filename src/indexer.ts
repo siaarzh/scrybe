@@ -30,6 +30,12 @@ import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage, walkRepoFiles } from "./chunker.js";
 import { normalizeContent } from "./normalize.js";
 import { diagEmit } from "./daemon/events.js";
+import {
+  withPhase,
+  startSegmentedPhase,
+  emitJobIntent,
+  type PhaseJobContext,
+} from "./daemon/phase-telemetry.js";
 import { recordUpsertForRebuildCadence, markFullReindexForRebuild } from "./daemon/vector-index-backfill.js";
 
 // ─── Indexer debug mode ───────────────────────────────────────────────────────
@@ -77,6 +83,12 @@ export interface IndexOptions {
    * The stored label in branch_tags and branch_state is always `branch`, never `contentRef`.
    */
   contentRef?: string;
+  /**
+   * Daemon job id, threaded through purely so per-phase memory records
+   * (`phase-log.jsonl`) can be joined to the job's `activity-span` in
+   * `daemon-log.jsonl`. Absent for direct CLI / wizard calls.
+   */
+  jobId?: string;
 }
 
 function checkAbort(signal?: AbortSignal): void {
@@ -124,6 +136,16 @@ export async function indexSource(
     async (session, branch) => {
       const jobStart = Date.now();
 
+      // Identity stamped on every per-phase memory record for this job.
+      const phaseCtx: PhaseJobContext = {
+        projectId,
+        sourceId,
+        jobId: options.jobId ?? null,
+        branch,
+        mode,
+      };
+      emitJobIntent(phaseCtx, "started", { is_code: isCode });
+
       // The git ref used for content reads (SHA capture, ls-tree). Uses contentRef when
       // provided (pinned branches read from origin/<branch>); falls back to the label branch.
       const gitRef = effectiveContentRef ?? branch;
@@ -158,10 +180,19 @@ export async function indexSource(
       // --- Pre-flight corruption check (full mode only) ---
       if (mode === "full") {
         checkAbort(signal);
+        // Phase `preflight_health`. NOTE: every expensive step in here
+        // (getTableHealth, restoreToVersion, dropTable, rmSync) is a single
+        // blocking native/sync call, so the poll timer never gets a tick and
+        // there is no loop to sample from. peakRssBytes for this phase is
+        // therefore max(entry, exit) — treat it as two-point, not a true
+        // high-water mark.
+        await withPhase(phaseCtx, "preflight_health", async (phase) => {
+        phase.setWork({ table_state: "unknown", repaired: "none" });
         try {
           let pluginProfile: "code" | "knowledge" = isCode ? "code" : "knowledge";
           const expDims = getExpectedDimensions(pluginProfile) ?? embConfig.dimensions;
           const preHealth = await getTableHealth(tableName, { force: true, expectedDimensions: expDims });
+          phase.setWork({ table_state: preHealth.state });
           if (preHealth.state === "corrupt") {
             const tableDir = join(config.dataDir, "lancedb", `${tableName}.lance`);
             const versionsDir = join(tableDir, "_versions");
@@ -186,6 +217,7 @@ export async function indexSource(
                       if (typeof (tbl as any).restoreToVersion === "function") {
                         await (tbl as any).restoreToVersion(version);
                         repaired = true;
+                        phase.setWork({ repaired: "rollback" });
                         invalidateHealthCache(tableName);
                         debugEmit({ event: "indexer.repaired", projectId, sourceId, method: "rollback", recovered_to_version: version });
                         appendFileSync(
@@ -210,6 +242,7 @@ export async function indexSource(
                   rmSync(tableDir, { recursive: true, force: true });
                 }
                 invalidateHealthCache(tableName);
+                phase.setWork({ repaired: "rebuild" });
                 debugEmit({ event: "indexer.repaired", projectId, sourceId, method: "rebuild" });
                 appendFileSync(
                   process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl"),
@@ -220,6 +253,7 @@ export async function indexSource(
             }
           }
         } catch { /* non-fatal — probe must not block full reindex */ }
+        });
       }
 
       // --- Phase 1: Scan and diff ---
@@ -229,19 +263,43 @@ export async function indexSource(
       if (mode === "full") deleteCursor(projectId, sourceId);
       const cursor = mode === "full" ? null : loadCursor(projectId, sourceId);
 
-      let currentSources: Record<string, string>;
-      if (isNonHeadBranch) {
-        currentSources = {};
-        // Use gitRef (contentRef ?? branch) so pinned branches read from origin/<branch>
-        // while `branch` (the label) remains the logical name stored in branch_tags.
-        for await (const entry of scanRef(rootPath, gitRef, projectId, sourceId)) {
-          const hash = createHash("sha256").update(entry.content).digest("hex");
-          currentSources[entry.relPath] = hash;
-          nonHeadContentCache.set(entry.relPath, entry.content);
+      // Phase `scan` — enumerate the source's current state. Two shapes:
+      //   - non-HEAD branch: streams every blob out of the git ref and keeps
+      //     the full content in `nonHeadContentCache`, so this phase's RSS
+      //     growth is the whole tree. It has a per-entry loop, so it is sampled
+      //     properly.
+      //   - everything else: one opaque `plugin.scanSources()` call. For ticket
+      //     sources that awaits network paging, so the poll timer does tick.
+      //     For code sources it is a synchronous filesystem walk that blocks
+      //     the event loop end to end — the peak there is max(entry, exit).
+      const currentSources: Record<string, string> = await withPhase(phaseCtx, "scan", async (phase) => {
+        if (isNonHeadBranch) {
+          const scanned: Record<string, string> = {};
+          let contentBytes = 0;
+          // Use gitRef (contentRef ?? branch) so pinned branches read from origin/<branch>
+          // while `branch` (the label) remains the logical name stored in branch_tags.
+          for await (const entry of scanRef(rootPath, gitRef, projectId, sourceId)) {
+            const hash = createHash("sha256").update(entry.content).digest("hex");
+            scanned[entry.relPath] = hash;
+            nonHeadContentCache.set(entry.relPath, entry.content);
+            contentBytes += Buffer.byteLength(entry.content, "utf8");
+            phase.sample();
+          }
+          phase.setWork({
+            scan_kind: "git-ref",
+            sources_found: Object.keys(scanned).length,
+            cached_content_bytes: contentBytes,
+          });
+          return scanned;
         }
-      } else {
-        currentSources = await plugin.scanSources(project, source, cursor);
-      }
+        const scanned = await plugin.scanSources(project, source, cursor);
+        phase.setWork({
+          scan_kind: isCode ? "working-tree" : "plugin-fetch",
+          sources_found: Object.keys(scanned).length,
+          cursor_used: cursor !== null,
+        });
+        return scanned;
+      });
 
       // Code sources scan the full filesystem and detect deletions via hash diff —
       // the cursor is irrelevant for them. Only knowledge sources (e.g. GitLab issues)
@@ -249,19 +307,35 @@ export async function indexSource(
       const effectiveCursor = (isNonHeadBranch || isCode) ? null : cursor;
       const merged = effectiveCursor ? { ...oldHashes, ...currentSources } : currentSources;
 
-      let filesScanned = 0;
-      for (const _key of Object.keys(merged)) {
-        checkAbort(signal);
-        filesScanned++;
-        onScanProgress?.(filesScanned);
-      }
+      // Phase `diff` — decide what changed. Pure JS and fully synchronous, so
+      // the poll timer cannot tick; the explicit samples below are the only
+      // interior readings. Sampled every 256th key rather than every key: the
+      // loop body is otherwise a counter increment, and a ~8µs
+      // process.memoryUsage.rss() per file would dominate the phase it measures.
+      const { filesScanned, toRemove, toReindex } = await withPhase(phaseCtx, "diff", async (phase) => {
+        let scanned = 0;
+        for (const _key of Object.keys(merged)) {
+          checkAbort(signal);
+          scanned++;
+          if ((scanned & 0xff) === 0) phase.sample();
+          onScanProgress?.(scanned);
+        }
 
-      const toRemove = effectiveCursor
-        ? new Set<string>()
-        : new Set(Object.keys(oldHashes).filter((p) => !(p in currentSources)));
-      const toReindex = new Set(
-        Object.keys(merged).filter((p) => oldHashes[p] !== merged[p])
-      );
+        const removing = effectiveCursor
+          ? new Set<string>()
+          : new Set(Object.keys(oldHashes).filter((p) => !(p in currentSources)));
+        const reindexing = new Set(
+          Object.keys(merged).filter((p) => oldHashes[p] !== merged[p])
+        );
+
+        phase.setWork({
+          files_total: Object.keys(merged).length,
+          prior_hashes: Object.keys(oldHashes).length,
+          files_to_reindex: reindexing.size,
+          files_to_remove: removing.size,
+        });
+        return { filesScanned: scanned, toRemove: removing, toReindex: reindexing };
+      });
 
       debugEmit({
         event: "indexer.phase1",
@@ -286,6 +360,24 @@ export async function indexSource(
         files_to_remove: toRemove.size,
       });
 
+      // What this job was told to do, recorded before any of the expensive work
+      // starts. A job that processes nothing but allocates GB is the case we
+      // most need to see, and this is what separates it from "killed before it
+      // could write anything".
+      emitJobIntent(phaseCtx, "planned", {
+        files_total: Object.keys(merged).length,
+        files_to_reindex: mode === "full" ? Object.keys(currentSources).length : toReindex.size,
+        files_to_remove: toRemove.size,
+        is_non_head_branch: isNonHeadBranch,
+        provider: embConfig.provider_type ?? "unknown",
+      });
+
+      // Phase `stale_apply` — wipe (full) or un-tag (incremental) whatever the
+      // diff condemned, then measure the byte size of what is about to be read.
+      // The full-mode branch is one blocking LanceDB delete; the incremental
+      // branch is a SQLite write loop. Neither yields to the event loop, so the
+      // samples below are placed in the loops themselves.
+      const bytesTotal: number | undefined = await withPhase(phaseCtx, "stale_apply", async (phase) => {
       if (mode === "full") {
         if (isCode) {
           await deleteProject(projectId, tableName);
@@ -300,6 +392,7 @@ export async function indexSource(
         for (const p of toRemove) {
           checkAbort(signal);
           session.applyFile(p, { kind: "removed" });
+          phase.sample();
           debugEmit({ event: "indexer.applyFile", projectId, sourceId, branch, path: p, kind: "removed" });
         }
         // Remove only tags (not hashes) for files that will be re-embedded.
@@ -307,6 +400,7 @@ export async function indexSource(
         for (const p of toReindex) {
           checkAbort(signal);
           session.applyFile(p, { kind: "stale-tags-only" });
+          phase.sample();
         }
       }
 
@@ -316,7 +410,7 @@ export async function indexSource(
 
       // --- Phase 2: Chunk + embed changed sources, checkpoint per key ---
 
-      let bytesTotal: number | undefined;
+      let sized: number | undefined;
       if (isCode && toReindex.size > 0) {
         let sum = 0;
         if (isNonHeadBranch) {
@@ -327,10 +421,20 @@ export async function indexSource(
         } else if (rootPath) {
           for (const relPath of toReindex) {
             try { sum += statSync(join(rootPath, relPath)).size; } catch { /* skip */ }
+            phase.sample();
           }
         }
-        if (sum > 0) bytesTotal = sum;
+        if (sum > 0) sized = sum;
       }
+
+      phase.setWork({
+        files_to_reindex: toReindex.size,
+        files_to_remove: toRemove.size,
+        known_chunk_ids: session.knownChunkIds.size,
+        bytes_to_read: sized ?? 0,
+      });
+      return sized;
+      });
 
       onProgress?.({ phase: "embed_start", projectId, sourceId, bytesTotal, filesTotal: toReindex.size });
 
@@ -358,10 +462,22 @@ export async function indexSource(
         ? (p: { percent: number }) => onDownloadProgress(p.percent)
         : undefined;
 
+      // Phase `chunk_embed` — the streaming chunk → embed → upsert loop. This is
+      // where a job spends nearly all of its wall clock and allocates nearly all
+      // of its memory, so a single record at loop end would rebuild the exact
+      // blind spot this instrumentation exists to remove. It is therefore
+      // SEGMENTED: an interim record is flushed at each batch boundary once the
+      // current segment has run longer than SCRYBE_PHASE_SEGMENT_MS (default
+      // 15 s), which both bounds volume and makes growth locatable inside the
+      // loop. `end()` is called from the finally below on every exit path.
+      const embedPhase = startSegmentedPhase(phaseCtx, "chunk_embed");
+      embedPhase.setWork({ batch_size: batchSize, provider: embConfig.provider_type ?? "unknown" });
+
       async function flushBatch(): Promise<void> {
         if (keyBatches.length === 0) return;
 
         const batchStart = Date.now();
+        const persistedAtBatchStart = chunksPersisted;
         const allChunks = keyBatches.flatMap((kb) => kb.chunks);
 
         const toEmbed = allChunks.filter((c) => !session.knownChunkIds.has(c.chunk_id));
@@ -371,6 +487,10 @@ export async function indexSource(
           const texts = toEmbed.map((c) => c.content);
           embedVectors = await embedBatched(texts, embConfig, batchSize, batchDelayMs, halvingSession, dlProgressCb);
         }
+        // Bracket the embed call. For an API provider the poll timer also ticks
+        // through the awaits; for the local provider the ONNX session runs as
+        // one blocking native call, so these two readings are all there is.
+        embedPhase.sample();
 
         const vectorMap = new Map<string, number[]>(
           toEmbed.map((c, i) => [c.chunk_id, embedVectors[i]])
@@ -435,6 +555,9 @@ export async function indexSource(
             cumulative_chunks_persisted: chunksPersisted,
           });
           filesReindexed += keyBatches.filter((kb) => kb.chunks.some((c) => vectorMap.has(c.chunk_id))).length;
+          // Bracket the upsert. countTableRows + mergeInsert are blocking
+          // native LanceDB calls; nothing in JS can see inside them.
+          embedPhase.sample();
         }
 
         // Test-only: widen conflict window for two-writer race tests.
@@ -490,62 +613,100 @@ export async function indexSource(
           cumulative_chunks_embedded: cumulativeEmbedded,
         });
 
+        embedPhase.addWork({
+          batches: 1,
+          chunks_prepared: allChunks.length,
+          chunks_embedded: toEmbed.length,
+          chunks_persisted: chunksPersisted - persistedAtBatchStart,
+          bytes_embedded: batchBytes,
+          files_checkpointed: keyBatches.length,
+        });
+        embedPhase.setWork({
+          cumulative_chunks_prepared: chunksIndexed,
+          cumulative_chunks_persisted: chunksPersisted,
+          cumulative_bytes_embedded: bytesEmbedded,
+          cumulative_files_seen: filesSeenSoFar.size,
+        });
+        // Batch boundary — the only place a segment may be cut, since a segment
+        // record must describe completed work only.
+        embedPhase.maybeRoll();
+
         keyBatches.length = 0;
         totalPending = 0;
       }
 
       let currentKey: string | null = null;
 
-      const maxChars = isCode ? getCharCap(embConfig) : undefined;
-      const chunkIter = isNonHeadBranch
-        ? fetchChunksFromRef(projectId, sourceId, toReindex, nonHeadContentCache, maxChars)
-        : isCode
-          ? fetchChunksFromWorkingTree(projectId, sourceId, rootPath, toReindex, maxChars)
-          : plugin.fetchChunks(project, source, toReindex);
+      // Inside the try so that a throw from getCharCap / iterator construction
+      // still ends the phase (and clears its poll timer) rather than leaking it.
+      try {
+        const maxChars = isCode ? getCharCap(embConfig) : undefined;
+        const chunkIter = isNonHeadBranch
+          ? fetchChunksFromRef(projectId, sourceId, toReindex, nonHeadContentCache, maxChars)
+          : isCode
+            ? fetchChunksFromWorkingTree(projectId, sourceId, rootPath, toReindex, maxChars)
+            : plugin.fetchChunks(project, source, toReindex);
 
-      for await (const chunk of chunkIter) {
-        checkAbort(signal);
-        const key = isCode
-          ? (chunk as CodeChunk).item_path
-          : (chunk as KnowledgeChunk).item_path;
+        let chunksSeen = 0;
+        for await (const chunk of chunkIter) {
+          checkAbort(signal);
+          const key = isCode
+            ? (chunk as CodeChunk).item_path
+            : (chunk as KnowledgeChunk).item_path;
 
-        if (key !== currentKey) {
-          keyBatches.push({ key, chunks: [] });
-          currentKey = key;
-        }
-        keyBatches[keyBatches.length - 1].chunks.push(chunk);
-        totalPending++;
+          if (key !== currentKey) {
+            keyBatches.push({ key, chunks: [] });
+            currentKey = key;
+          }
+          keyBatches[keyBatches.length - 1].chunks.push(chunk);
+          totalPending++;
 
-        if (totalPending >= batchSize) {
-          await flushBatch();
-          currentKey = null;
-        }
-      }
-      await flushBatch();
-      onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
+          // Chunk production is where a tree-sitter parse of a large file
+          // allocates, and an `async function*` only yields to microtasks — the
+          // poll timer (a macrotask) never fires while this loop is producing.
+          // Sample every 64th chunk: often enough to catch a parse spike,
+          // sparse enough that the ~8µs read stays off the hot path.
+          if ((++chunksSeen & 0x3f) === 0) embedPhase.sample();
 
-      // Sweep "attempted but produced 0 chunks" files — give them a hash so the scanner
-      // stops re-marking them next cycle. Uses the existing "embedded" outcome with empty
-      // tags (knowledge sources already use this path at line 423 / similar).
-      if (isCode) {
-        const noChunkFiles = [...toReindex].filter((p) => !filesSeenSoFar.has(p));
-        for (const p of noChunkFiles) {
-          if (merged[p] === undefined) continue; // defensive
-          try {
-            session.applyFile(p, { kind: "embedded", hash: merged[p], tags: [] });
-          } catch (err) {
-            // non-fatal — log warn, continue
-            debugEmit({
-              event: "indexer.zero-chunk-hash-save-failed",
-              projectId,
-              sourceId,
-              branch,
-              path: p,
-              error: String(err),
-            });
+          if (totalPending >= batchSize) {
+            await flushBatch();
+            currentKey = null;
           }
         }
+        await flushBatch();
+        onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
+
+        // Sweep "attempted but produced 0 chunks" files — give them a hash so the scanner
+        // stops re-marking them next cycle. Uses the existing "embedded" outcome with empty
+        // tags (knowledge sources already use this path at line 423 / similar).
+        if (isCode) {
+          const noChunkFiles = [...toReindex].filter((p) => !filesSeenSoFar.has(p));
+          embedPhase.setWork({ zero_chunk_files: noChunkFiles.length });
+          for (const p of noChunkFiles) {
+            if (merged[p] === undefined) continue; // defensive
+            try {
+              session.applyFile(p, { kind: "embedded", hash: merged[p], tags: [] });
+            } catch (err) {
+              // non-fatal — log warn, continue
+              debugEmit({
+                event: "indexer.zero-chunk-hash-save-failed",
+                projectId,
+                sourceId,
+                branch,
+                path: p,
+                error: String(err),
+              });
+            }
+          }
+        }
+      } catch (err) {
+        embedPhase.end(
+          (err instanceof Error ? err.message : String(err)) === "INDEX_CANCELLED" ? "cancelled" : "error",
+        );
+        throw err;
       }
+      // end() is idempotent, so the catch above and this call cannot double-emit.
+      embedPhase.end("ok");
 
       if (halvingSession) {
         const existingMaxFailed = stateEntry?.maxFailed ?? 0;
@@ -565,26 +726,41 @@ export async function indexSource(
 
       const didWork = toReindex.size + toRemove.size > 0;
 
+      // The three tail phases below are each a single blocking native LanceDB
+      // call. Nothing in JavaScript runs while they execute, so the poll timer
+      // never ticks and their peakRssBytes is max(entry, exit) — a two-point
+      // reading, not a high-water mark. They are still worth separating: a
+      // 500 MB step across `compact` is attributable even without an interior.
       if (didWork && config.hybridEnabled) {
-        try {
-          if (isCode) {
-            await createFtsIndex(tableName);
-          } else {
-            await createKnowledgeFtsIndex(tableName);
+        await withPhase(phaseCtx, "fts_index", async (phase) => {
+          try {
+            if (isCode) {
+              await createFtsIndex(tableName);
+            } else {
+              await createKnowledgeFtsIndex(tableName);
+            }
+            phase.setWork({ built: true });
+          } catch (err) {
+            phase.setWork({ built: false });
+            console.warn("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only):", err);
           }
-        } catch (err) {
-          console.warn("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only):", err);
-        }
+        });
       }
 
       if (didWork) {
-        try { await compactTableWithGrace(tableName); } catch { /* non-fatal */ }
-        try {
-          const pruneResult = await pruneIndexOrphans(tableName);
-          if (pruneResult.removed > 0) {
-            debugEmit({ event: "indexer.pruneOrphans", projectId, sourceId, ...pruneResult });
-          }
-        } catch { /* non-fatal */ }
+        await withPhase(phaseCtx, "compact", async (phase) => {
+          try { await compactTableWithGrace(tableName); phase.setWork({ compacted: true }); }
+          catch { phase.setWork({ compacted: false }); /* non-fatal */ }
+        });
+        await withPhase(phaseCtx, "prune_orphans", async (phase) => {
+          try {
+            const pruneResult = await pruneIndexOrphans(tableName);
+            phase.setWork({ orphans_removed: pruneResult.removed });
+            if (pruneResult.removed > 0) {
+              debugEmit({ event: "indexer.pruneOrphans", projectId, sourceId, ...pruneResult });
+            }
+          } catch { phase.setWork({ orphans_removed: -1 }); /* non-fatal */ }
+        });
       }
 
       // Plan 95 Phase 4: a full reindex can rewrite/add a large fraction of a

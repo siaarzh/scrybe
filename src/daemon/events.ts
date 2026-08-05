@@ -37,9 +37,22 @@ export function diagEmit(record: Record<string, unknown>): void {
 
   if (highVolume && !debugEnabled()) return;
 
+  diagEmitTo(logPath(), record);
+}
+
+/**
+ * Write one diagnostic record to an explicit JSONL sink.
+ *
+ * Same line shape and the same single `_pid` constant as `diagEmit` — this
+ * exists so a second sink (the per-phase memory log, see `phase-telemetry.ts`)
+ * can be kept out of `daemon-log.jsonl`'s retention window without duplicating
+ * the pid stamp or the record envelope. Applies no volume gating: the caller
+ * owns that decision, because the gating rules above are daemon-log specific.
+ */
+export function diagEmitTo(targetPath: string, record: Record<string, unknown>): void {
   try {
     appendFileSync(
-      logPath(),
+      targetPath,
       JSON.stringify({ ts: new Date().toISOString(), pid: _pid, ...record }) + "\n",
       "utf8",
     );
