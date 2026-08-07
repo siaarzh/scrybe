@@ -24,6 +24,8 @@ All configuration is via environment variables. Set them in `.env` or in the MCP
 
 Set this before running any `scrybe` command if you want to relocate state (e.g. point at a faster SSD). All processes — CLI, daemon, MCP server — must agree on the same value.
 
+One feature is configured by a file in this directory rather than by an environment variable: the Claude Code plugin's search toll reads `toll.json` from here. See [search-toll.md](search-toll.md).
+
 ---
 
 ## Chunking

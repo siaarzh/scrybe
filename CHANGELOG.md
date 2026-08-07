@@ -7,6 +7,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **The Claude Code plugin now ships a search toll.** When an agent reaches for a keyword-only issue search — `gh issue list`, `gh search issues`, `glab issue list`, or the GitLab MCP tools that trawl for issues — the plugin's hook makes that path slower than asking Scrybe, so it gets taken on purpose rather than out of habit. It does not forbid the keyword path: listing issues has no wrong answer, and repeating the command after a short wait runs it. A second mode leaves the call alone and attaches a one-line note to its result instead. Everything is configurable in `toll.json` in the data directory, including turning it off, widening the window, and adding your own commands. It fails open on any error, and it costs nothing in model context. See [docs/search-toll.md](docs/search-toll.md).
+
+### Fixed
+
+- **The plugin now actually ships its two skills.** They lived in a directory Claude Code never scanned, so installing the plugin added nothing to a session. The manifest now points at them explicitly.
+
 ---
 
 ## [0.49.0] — 2026-08-05
