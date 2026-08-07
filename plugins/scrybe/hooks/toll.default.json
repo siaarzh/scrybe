@@ -10,31 +10,31 @@
   "guards": [
     {
       "id": "gh-issue-list",
-      "action": "toll",
+      "action": "deny",
       "pattern": "\\bgh\\s+issue\\s+list\\b",
       "hint": "search_knowledge over this repo's issue source finds the duplicate that words it differently"
     },
     {
       "id": "gh-search-issues",
-      "action": "toll",
+      "action": "deny",
       "pattern": "\\bgh\\s+search\\s+issues\\b",
       "hint": "search_knowledge searches issue bodies AND comments, not just keywords in titles"
     },
     {
-      "id": "gh-api-search-issues",
-      "action": "toll",
-      "pattern": "\\bgh\\s+api\\s+\\S*search/issues",
+      "id": "gh-api-issues",
+      "action": "deny",
+      "pattern": "\\bgh\\s+api\\s+\\S*(search/issues|/issues\\b)",
       "hint": "search_knowledge searches issue bodies AND comments, not just keywords in titles"
     },
     {
       "id": "glab-issue-list",
-      "action": "toll",
+      "action": "deny",
       "pattern": "\\bglab\\s+issue\\s+list\\b",
       "hint": "search_knowledge over this repo's issue source finds the duplicate that words it differently"
     },
     {
       "id": "gitlab-mcp-issue-trawl",
-      "action": "toll",
+      "action": "deny",
       "tools": [
         "mcp__gitlab__list_issues",
         "mcp__gitlab__my_issues",

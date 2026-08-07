@@ -16,7 +16,7 @@ Restart Claude Code after installing to activate.
 
 **`/scrybe` command:** Checks if the current repo is indexed and triggers an incremental reindex via the scrybe MCP server.
 
-**Search toll (hook):** When Claude reaches for a keyword-only issue search such as `gh issue list`, the hook makes that path slower than asking Scrybe — or attaches a one-line note to the result, if you configure it that way. It does not forbid the keyword path: listing issues has no wrong answer, and an agent that decides it wants the list still gets it after a short wait. Turn it off with `{"enabled": false}` in `toll.json`. Full reference, including how to add your own commands: [docs/search-toll.md](../../docs/search-toll.md).
+**Search guard (hook):** When Claude reaches for a keyword-only issue search such as `gh issue list`, the hook refuses the command and tells it to use `search_knowledge` instead. The refusal does not expire — there is no wait to sit out. This exists because keyword search silently misses the ticket that describes the same problem in different words, which is how duplicates get filed. Turn it off with `{"enabled": false}` in `toll.json`, or soften it to a timed wait or a note per command. Full reference: [docs/search-toll.md](../../docs/search-toll.md).
 
 ## Prerequisites
 
@@ -54,5 +54,5 @@ Claude will call `search_code` automatically when the question is conceptual. To
 **MCP server not connecting:**
 - Run `scrybe doctor` in your terminal for a full diagnostic
 
-**The toll fires when you did not want it to:**
-- It is config, not code. See [docs/search-toll.md](../../docs/search-toll.md) — `enabled: false` turns it off, `upper_seconds` widens the window, and `action: "note"` turns a block into a note.
+**The guard refuses a command you wanted to run:**
+- It is config, not code. See [docs/search-toll.md](../../docs/search-toll.md) — `enabled: false` turns it off entirely, and a per-command `action` softens a refusal into a timed wait or a note.

@@ -66,8 +66,48 @@ afterEach(() => {
   rmSync(sandbox, { recursive: true, force: true });
 });
 
-describe("toll state machine", () => {
+/** The shipped guards ban outright; the timed toll is opt-in. */
+const TOLL_GUARD = {
+  guards: [
+    { id: "gh-issue-list", action: "toll", pattern: "\\bgh\\s+issue\\s+list\\b", hint: "search_knowledge finds it" },
+  ],
+};
+
+describe("shipped default: a ban, not a wait", () => {
   beforeEach(() => writeConfig());
+
+  it("denies every attempt, with nothing to wait for", () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const { json } = run("PreToolUse", bash("gh issue list"));
+      expect(decision(json)).toBe("deny");
+      const reason = json?.hookSpecificOutput.permissionDecisionReason as string;
+      expect(reason).toContain("NOT ALLOWED");
+      expect(reason).toContain("This is not a wait");
+      expect(reason).not.toMatch(/\d+ seconds/);
+    }
+  });
+
+  it("keeps no state at all, so nothing can expire into an allowance", () => {
+    run("PreToolUse", bash("gh issue list"));
+    expect(() => statSync(marker())).toThrow();
+  });
+
+  it("stays denied however long the caller waits", () => {
+    run("PreToolUse", bash("gh issue list"));
+    // No marker exists to age; a second call an hour later is identical.
+    expect(decision(run("PreToolUse", bash("gh issue list")).json)).toBe("deny");
+  });
+
+  it("treats a guard with no action at all as a ban", () => {
+    writeConfig({ guards: [{ id: "bare", pattern: "\\bgh\\s+issue\\s+list\\b" }] });
+    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+      .permissionDecisionReason as string;
+    expect(reason).toContain("NOT ALLOWED");
+  });
+});
+
+describe("toll state machine (opt-in)", () => {
+  beforeEach(() => writeConfig(TOLL_GUARD));
 
   it("denies the first attempt and writes the marker", () => {
     const { json } = run("PreToolUse", bash("gh issue list --repo owner/repo"));
@@ -136,6 +176,24 @@ describe("what is and is not guarded", () => {
     expect(run("PreToolUse", bash(command)).stdout).toBe("");
   });
 
+  it.each([
+    'grep -rn "gh issue list" .claude/',
+    "grep -rn 'gh issue list' .claude/",
+    'echo "run gh issue list to see them"',
+    'rg "glab issue list" docs/',
+  ])("does not toll a guarded phrase quoted inside another command: %s", (command) => {
+    // The phrase is being talked ABOUT, not run.
+    expect(run("PreToolUse", bash(command)).stdout).toBe("");
+  });
+
+  it("still tolls when the guarded command itself carries a quoted argument", () => {
+    expect(decision(run("PreToolUse", bash('gh issue list --search "crash on save"')).json)).toBe("deny");
+  });
+
+  it("still tolls a guarded command chained after another one", () => {
+    expect(decision(run("PreToolUse", bash('echo "checking" && gh issue list')).json)).toBe("deny");
+  });
+
   it("tolls a guarded MCP tool by name", () => {
     const { json } = run("PreToolUse", {
       hook_event_name: "PreToolUse",
@@ -163,8 +221,27 @@ describe("configuration", () => {
     expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
   });
 
+  it("frames an opt-in short wait as a speed bump, naming the way through", () => {
+    writeConfig(TOLL_GUARD);
+    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+      .permissionDecisionReason as string;
+    expect(reason).toContain("not banned");
+    expect(reason).toContain("15 seconds");
+  });
+
+  it("frames an opt-in long wait as a closed path, without leading with the workaround", () => {
+    writeConfig({ ...TOLL_GUARD, lower_seconds: 3600, upper_seconds: 3900 });
+    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+      .permissionDecisionReason as string;
+    expect(reason).toContain("This path is closed");
+    expect(reason).toContain("about 60 minutes");
+    expect(reason).not.toContain("not banned");
+    // The re-run recipe must not be the headline of a deliberately long wait.
+    expect(reason).not.toContain("repeating it EXACTLY");
+  });
+
   it("honours a longer grace period without a code change", () => {
-    writeConfig({ lower_seconds: 5, upper_seconds: 300 });
+    writeConfig({ ...TOLL_GUARD, lower_seconds: 5, upper_seconds: 300 });
     run("PreToolUse", bash("gh issue list"));
     ageMarker(280);
     expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
@@ -189,9 +266,9 @@ describe("configuration", () => {
   });
 });
 
-describe("marker scope", () => {
+describe("marker scope (toll action only)", () => {
   it("shares one window across sessions by default", () => {
-    writeConfig();
+    writeConfig(TOLL_GUARD);
     run("PreToolUse", bash("gh issue list", "session-a"));
     ageMarker(20);
     // Free-riding is the documented consequence of the global default.
@@ -199,7 +276,7 @@ describe("marker scope", () => {
   });
 
   it("gives each session its own window when scoped to the session", () => {
-    writeConfig({ scope: "session" });
+    writeConfig({ ...TOLL_GUARD, scope: "session" });
     run("PreToolUse", bash("gh issue list", "session-a"));
     ageMarker(20, "session-session-a");
 
@@ -208,7 +285,7 @@ describe("marker scope", () => {
   });
 
   it("pushes the expiry out on every allowed call when sliding", () => {
-    writeConfig({ window: "sliding" });
+    writeConfig({ ...TOLL_GUARD, window: "sliding" });
     run("PreToolUse", bash("gh issue list"));
     ageMarker(20);
 
@@ -289,10 +366,17 @@ describe("fails open", () => {
     expect(code).toBe(0);
   });
 
-  it("allows the call when the marker cannot be written", () => {
-    writeConfig({ marker_dir: join(sandbox, "does", "not", "exist") });
+  it("allows a tolled call when the marker cannot be written", () => {
+    // Otherwise the wait could never end, and the toll would become a ban by accident.
+    writeConfig({ ...TOLL_GUARD, marker_dir: join(sandbox, "does", "not", "exist") });
     const { stdout, code } = run("PreToolUse", bash("gh issue list"));
     expect(stdout).toBe("");
     expect(code).toBe(0);
+  });
+
+  it("still bans when the marker cannot be written", () => {
+    // A ban keeps no state, so an unwritable filesystem cannot defeat it.
+    writeConfig({ marker_dir: join(sandbox, "does", "not", "exist") });
+    expect(decision(run("PreToolUse", bash("gh issue list")).json)).toBe("deny");
   });
 });
