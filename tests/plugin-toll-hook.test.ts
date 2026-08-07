@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -19,11 +19,15 @@ function marker(scope = "global"): string {
 }
 
 function writeConfig(overrides: Record<string, unknown> = {}): void {
+  if (!existsSync(join(sandbox, "projects.json"))) writeProjects();
   writeFileSync(
     join(sandbox, "toll.json"),
-    JSON.stringify({ marker_dir: sandbox, ...overrides })
+    JSON.stringify({ marker_dir: sandbox, max_index_age_seconds: 86400, ...overrides })
   );
 }
+
+/** Force the unconditional ban, which is no longer the shipped default. */
+const BAN = { guards: [{ id: "gh-issue-list", action: "deny", pattern: "\\bgh\\s+issue\\s+list\\b" }] };
 
 /** Backdate the marker so a specific age can be asserted without sleeping. */
 function ageMarker(seconds: number, scope = "global"): void {
@@ -50,8 +54,37 @@ function run(
   return { stdout, json, code: result.status ?? -1 };
 }
 
-function bash(command: string, sessionId = "session-a") {
-  return { hook_event_name: "PreToolUse", session_id: sessionId, tool_name: "Bash", tool_input: { command } };
+const INDEXED = "/fake/repo/indexed";
+const CODE_ONLY = "/fake/repo/code-only";
+
+function bash(command: string, sessionId = "session-a", cwd = INDEXED) {
+  return {
+    hook_event_name: "PreToolUse",
+    session_id: sessionId,
+    cwd,
+    tool_name: "Bash",
+    tool_input: { command },
+  };
+}
+
+/** A projects.json the `auto` action can read: one indexed repo, one code-only. */
+function writeProjects(ticketIndexedAt = new Date().toISOString()): void {
+  writeFileSync(
+    join(sandbox, "projects.json"),
+    JSON.stringify([
+      {
+        id: "indexed-project",
+        sources: [
+          { source_id: "primary", source_config: { type: "code", root_path: INDEXED } },
+          { source_id: "issues", source_config: { type: "ticket" }, last_indexed: ticketIndexedAt },
+        ],
+      },
+      {
+        id: "code-only-project",
+        sources: [{ source_id: "primary", source_config: { type: "code", root_path: CODE_ONLY } }],
+      },
+    ])
+  );
 }
 
 function decision(json: Record<string, any> | null): string | undefined {
@@ -73,8 +106,95 @@ const TOLL_GUARD = {
   ],
 };
 
-describe("shipped default: a ban, not a wait", () => {
+describe("shipped default: auto — refuse only when Scrybe can answer", () => {
   beforeEach(() => writeConfig());
+
+  it.each([
+    "gh issue list",
+    'gh issue list --search "crash on save"',
+    "gh search issues memory",
+  ])("refuses a similarity question in an indexed repo: %s", (command) => {
+    expect(decision(run("PreToolUse", bash(command)).json)).toBe("deny");
+  });
+
+  it("names the project so the agent does not have to guess it", () => {
+    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+      .permissionDecisionReason as string;
+    expect(reason).toContain("indexed-project");
+  });
+
+  it.each([
+    "gh issue list --milestone 26.8 --state open",
+    "gh issue list --assignee @me",
+    "gh issue list --label bug --json number,title",
+  ])("allows a census, which has no semantic equivalent: %s", (command) => {
+    expect(run("PreToolUse", bash(command)).stdout).toBe("");
+  });
+
+  it("treats free text as a similarity question even beside a filter", () => {
+    // Otherwise adding --state would be a one-flag bypass of the whole guard.
+    expect(decision(run("PreToolUse", bash('gh issue list --state open --search "crash"')).json)).toBe(
+      "deny"
+    );
+  });
+
+  it("allows when no project covers this directory", () => {
+    expect(run("PreToolUse", bash("gh issue list", "s", "/fake/repo/unregistered")).stdout).toBe("");
+  });
+
+  it("allows when the project has code indexed but no issues", () => {
+    expect(run("PreToolUse", bash("gh issue list", "s", CODE_ONLY)).stdout).toBe("");
+  });
+
+  it("allows when the issue index is older than the threshold", () => {
+    writeProjects(new Date(Date.now() - 172_800_000).toISOString()); // 2 days
+    writeConfig({ max_index_age_seconds: 86400 });
+    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+  });
+
+  it("allows when the index has no timestamp at all", () => {
+    writeFileSync(
+      join(sandbox, "projects.json"),
+      JSON.stringify([
+        {
+          id: "never-indexed",
+          sources: [
+            { source_id: "primary", source_config: { type: "code", root_path: INDEXED } },
+            { source_id: "issues", source_config: { type: "ticket" } },
+          ],
+        },
+      ])
+    );
+    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+  });
+
+  it("tells the agent the census route exists, so a refusal is not a dead end", () => {
+    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+      .permissionDecisionReason as string;
+    expect(reason).toContain("CENSUS");
+    expect(reason).toContain("--milestone");
+  });
+
+  it("still refuses the guarded MCP tools", () => {
+    const { json } = run("PreToolUse", {
+      hook_event_name: "PreToolUse",
+      session_id: "s",
+      cwd: INDEXED,
+      tool_name: "mcp__gitlab__list_issues",
+      tool_input: { project_id: 34 },
+    });
+    expect(decision(json)).toBe("deny");
+  });
+
+  it("allows everything when projects.json cannot be read", () => {
+    // No index means no replacement to offer, so refusing would strand the agent.
+    rmSync(join(sandbox, "projects.json"));
+    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+  });
+});
+
+describe("deny action: a ban, not a wait", () => {
+  beforeEach(() => writeConfig(BAN));
 
   it("denies every attempt, with nothing to wait for", () => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -194,10 +314,11 @@ describe("what is and is not guarded", () => {
     expect(decision(run("PreToolUse", bash('echo "checking" && gh issue list')).json)).toBe("deny");
   });
 
-  it("tolls a guarded MCP tool by name", () => {
+  it("guards an MCP tool by name", () => {
     const { json } = run("PreToolUse", {
       hook_event_name: "PreToolUse",
       session_id: "s",
+      cwd: INDEXED,
       tool_name: "mcp__gitlab__list_issues",
       tool_input: { project_id: 34 },
     });

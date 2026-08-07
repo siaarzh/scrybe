@@ -43,7 +43,7 @@
  * beside this file; <SCRYBE_DATA_DIR>/toll.json overrides them.
  */
 
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,7 +80,11 @@ function readJson(path) {
  */
 function loadConfig() {
   const defaults = readJson(join(HERE, "toll.default.json")) ?? {};
-  const user = readJson(join(getDataDir(), "toll.json")) ?? {};
+  // SCRYBE_TOLL_CONFIG points at a different guard config WITHOUT moving
+  // SCRYBE_DATA_DIR, so the live index that search_knowledge needs stays put.
+  // Lets a config be tried, or several compared, without touching a working one.
+  const configPath = process.env.SCRYBE_TOLL_CONFIG || join(getDataDir(), "toll.json");
+  const user = readJson(configPath) ?? {};
   const merged = { ...defaults, ...user };
   const base = Array.isArray(user.guards) ? user.guards : (defaults.guards ?? []);
   const extra = Array.isArray(user.extra_guards) ? user.extra_guards : [];
@@ -156,6 +160,65 @@ function matchGuard(config, toolName, command) {
   return null;
 }
 
+/**
+ * Can Scrybe actually answer an issue question about this directory?
+ *
+ * Three ways the answer is no, all decidable from projects.json with no model
+ * call: no project covers this path, the project has no ticket source, or that
+ * source was last indexed too long ago to be trusted. Refusing the keyword path
+ * in any of those cases strands the agent with no route at all, which is worse
+ * than letting it run the keyword search.
+ *
+ * Returns { servable, reason, project }.
+ */
+function scrybeCoverage(config, cwd) {
+  const projects = readJson(join(getDataDir(), "projects.json"));
+  if (!Array.isArray(projects)) return { servable: false, reason: "no-index" };
+
+  // Longest matching root_path wins, so a nested repo beats its parent.
+  let best = null;
+  for (const project of projects) {
+    for (const source of project.sources ?? []) {
+      const root = source.source_config?.root_path;
+      if (typeof root !== "string" || !root) continue;
+      if (cwd !== root && !cwd.startsWith(root.endsWith("/") ? root : `${root}/`)) continue;
+      if (!best || root.length > best.rootLength) best = { project, rootLength: root.length };
+    }
+  }
+  if (!best) return { servable: false, reason: "no-project" };
+
+  const ticket = (best.project.sources ?? []).find((s) => s.source_config?.type === "ticket");
+  if (!ticket) return { servable: false, reason: "no-ticket-source", project: best.project.id };
+
+  const maxAge = Number(config.max_index_age_seconds);
+  if (Number.isFinite(maxAge) && maxAge > 0) {
+    const indexedAt = Date.parse(ticket.last_indexed ?? "");
+    if (!Number.isFinite(indexedAt)) {
+      return { servable: false, reason: "never-indexed", project: best.project.id };
+    }
+    if ((Date.now() - indexedAt) / 1000 > maxAge) {
+      return { servable: false, reason: "stale-index", project: best.project.id };
+    }
+  }
+  return { servable: true, project: best.project.id };
+}
+
+/**
+ * Enumeration or similarity?
+ *
+ * `search_knowledge` ranks by meaning. It cannot filter by milestone, list what
+ * is assigned to someone, or count — so a census question has no semantic
+ * equivalent and must not be refused. A flag that narrows a set is enumeration;
+ * a free-text query, or a bare list, is similarity.
+ */
+const ENUMERATION_FLAGS =
+  /--(milestone|assignee|author|mentions|label|state|json|app|template|web)\b|-(a|A|l|s|L)\s/;
+
+function isEnumeration(command) {
+  if (/--search\b/.test(command)) return false; // free text wins even beside a filter
+  return ENUMERATION_FLAGS.test(command);
+}
+
 /** Filesystem-safe fragment of a session id. */
 function safeKey(value) {
   const cleaned = String(value ?? "").replace(/[^A-Za-z0-9._-]/g, "");
@@ -226,23 +289,49 @@ function humanDuration(seconds) {
  * over the re-run recipe, so waiting was the reading the text invited. Raising
  * the price only raises what the agent is willing to wait.
  */
-function banReason(guard) {
+function banReason(guard, project) {
   const hint = guard.hint ?? "search_knowledge searches the same material semantically";
-  return [
-    "NOT ALLOWED. Listing or searching issues by keyword is closed on this machine.",
+  const id = project ?? "<project>";
+  const lines = [
+    project
+      ? `NOT ALLOWED. This repo's issues are indexed in Scrybe as "${project}". Keyword search over them is closed.`
+      : "NOT ALLOWED. Listing or searching issues by keyword is closed on this machine.",
     "This is not a wait. Repeating the command will not run it, now or later.",
     "",
-    `Use Scrybe — ${hint}:`,
+    `Use Scrybe — ${hint}.`,
     "",
-    '  mcp__scrybe__search_knowledge(project_id="<project>", query="<the problem in your own words>")',
+    // Rendered as a bare indented line, this read as a shell snippet and Haiku
+    // pasted it into Bash, then fell back to a `scrybe search knowledge` CLI
+    // guess. Measured, not theorised. Say plainly that it is a tool call.
+    "Make a TOOL CALL (this is not a shell command — do not run it in Bash):",
+    `  tool: mcp__scrybe__search_knowledge`,
+    `  project_id: ${id}`,
+    "  query: the problem in your own words",
     "",
     "Keyword listing cannot surface the ticket that describes the same thing in different",
     'words, and an empty keyword result looks exactly like "nothing exists". That miss is',
     "silent, and it is what this prevents.",
-    "",
-    "Do not spend the turn hunting for another command that returns the same list. If you",
-    "are certain the raw list is what you need, say so to the user and let them decide.",
-  ].join("\n");
+  ];
+
+  // Under `auto`, census questions really are allowed, and saying so is the
+  // difference between a guard and a dead end. Naming the route also makes it
+  // checkable: an enumeration must be expressed as one in the command itself.
+  if (guard.action === "auto") {
+    lines.push(
+      "",
+      "If you need a CENSUS rather than a match — everything in a milestone, everything",
+      "assigned to someone, a count — semantic search cannot do that, and this guard does",
+      "not block it. Re-run with the filter that says so (--milestone, --assignee, --label,",
+      "--state) and it will run."
+    );
+  } else {
+    lines.push(
+      "",
+      "Do not spend the turn hunting for another command that returns the same list. If you",
+      "are certain the raw list is what you need, say so to the user and let them decide."
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -304,8 +393,33 @@ function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
 }
 
-function handlePreToolUse(config, guard, sessionId) {
-  if (guard.action === "note") return; // Notes fire after the call, not before.
+/**
+ * Deny only when Scrybe can actually answer the question. Everything else runs.
+ *
+ * Under test: whether a guard that opens for census questions, unindexed repos
+ * and stale indexes still holds the line on duplicate-hunting, or whether the
+ * opening is simply the way around it. Not the shipped default.
+ */
+function handleAuto(config, guard, command, cwd) {
+  if (typeof command === "string" && command && isEnumeration(command)) return "allow-enumeration";
+
+  const coverage = scrybeCoverage(config, cwd);
+  if (!coverage.servable) return `allow-${coverage.reason}`;
+
+  emit({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: banReason(guard, coverage.project),
+    },
+  });
+  return "deny";
+}
+
+function handlePreToolUse(config, guard, sessionId, command, cwd) {
+  if (guard.action === "note") return "note-deferred"; // Notes fire after the call.
+
+  if (guard.action === "auto") return handleAuto(config, guard, command, cwd);
 
   // The default. Stateless on purpose: nothing accumulates, so nothing expires.
   if (guard.action !== "toll") {
@@ -316,12 +430,12 @@ function handlePreToolUse(config, guard, sessionId) {
         permissionDecisionReason: banReason(guard),
       },
     });
-    return;
+    return "deny";
   }
 
   const lower = Number(config.lower_seconds);
   const upper = Number(config.upper_seconds);
-  if (!Number.isFinite(lower) || !Number.isFinite(upper) || lower < 0 || upper <= lower) return;
+  if (!Number.isFinite(lower) || !Number.isFinite(upper) || lower < 0 || upper <= lower) return "allow-misconfigured";
 
   const path = markerPath(config, sessionId);
   const age = markerAge(path);
@@ -330,14 +444,14 @@ function handlePreToolUse(config, guard, sessionId) {
     // Inside the window. Allow, print nothing. A sliding window pushes the
     // expiry out to `upper` seconds from THIS call rather than the first one.
     if (config.window === "sliding") touch(path);
-    return;
+    return "allow-in-window";
   }
 
   let wait;
   if (age === null || age >= upper) {
     // No marker, or a stale one: the toll starts (or restarts) now. If the
     // marker cannot be written, the wait would never end — allow instead.
-    if (!touch(path)) return;
+    if (!touch(path)) return "allow-marker-unwritable";
     wait = Math.round(lower);
   } else {
     wait = Math.max(1, Math.ceil(lower - age));
@@ -350,6 +464,7 @@ function handlePreToolUse(config, guard, sessionId) {
       permissionDecisionReason: denyReason(guard, wait, Math.round(lower), Math.round(upper)),
     },
   });
+  return "deny-toll";
 }
 
 function handlePostToolUse(config, guard, sessionId) {
@@ -372,6 +487,28 @@ function handlePostToolUse(config, guard, sessionId) {
   });
 }
 
+/**
+ * Append one line per observed call when SCRYBE_TOLL_LOG is set.
+ *
+ * The hook already sees every Bash, Grep, Glob and MCP call, which is exactly
+ * the trajectory an experiment needs: which tool the agent reached for, whether
+ * it was refused, and whether it came back and tried again. Recording it here
+ * makes a run scoreable from a structured file instead of from its transcript.
+ * Off unless the variable is set, and it never affects the decision.
+ */
+function logCall(event, toolName, command, decision) {
+  const path = process.env.SCRYBE_TOLL_LOG;
+  if (!path) return;
+  try {
+    appendFileSync(
+      path,
+      `${JSON.stringify({ event, tool: toolName, command: command ?? null, decision })}\n`
+    );
+  } catch {
+    // Never let observability break the call it is observing.
+  }
+}
+
 function readStdin() {
   try {
     return readFileSync(0, "utf8");
@@ -391,10 +528,20 @@ function main() {
   const toolName = payload.tool_name;
   const command = payload.tool_input?.command;
   const guard = matchGuard(config, toolName, command);
-  if (!guard) return;
+  if (!guard) {
+    logCall(event, toolName, command, "unguarded");
+    return;
+  }
 
-  if (event === "PreToolUse") handlePreToolUse(config, guard, payload.session_id);
-  else handlePostToolUse(config, guard, payload.session_id);
+  if (event === "PreToolUse") {
+    const decision = handlePreToolUse(
+      config, guard, payload.session_id, command, payload.cwd || process.cwd()
+    );
+    logCall(event, toolName, command, decision ?? "allow");
+  } else {
+    handlePostToolUse(config, guard, payload.session_id);
+    logCall(event, toolName, command, "post");
+  }
 }
 
 try {

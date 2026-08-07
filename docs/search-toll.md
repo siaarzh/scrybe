@@ -2,7 +2,7 @@
 
 The Scrybe plugin for Claude Code ships a hook that refuses keyword-only searches over an issue tracker and points the agent at semantic search instead.
 
-**What it does.** By default it denies the command outright, every time. There is no wait, no window, and no state that runs out. The agent is told, at the moment it tries, to use `search_knowledge` instead.
+**What it does.** By default it refuses the command **only when Scrybe can actually answer the question** — the repo's issues are indexed, the index is fresh, and the question is a similarity question rather than a census. The refusal does not expire: there is no wait, no window, and no state that runs out. In every other case the command runs untouched, because refusing it would offer a replacement that cannot help.
 
 **What it does not do.** It cannot stop an agent that goes looking for a different command that returns the same list. It guards the commands it knows about, and that list is a starting point rather than a perimeter. It also does not stop a human from running the command in a terminal, which is the point — the rule is about how agents answer questions, not about who may read an issue list.
 
@@ -26,9 +26,21 @@ So the default is a refusal that does not expire. The timed toll is still availa
 
 ## The three modes
 
-Each guard chooses one, with its `action` field. **`deny` is the default**, including for a guard that omits `action` entirely.
+Each guard chooses one, with its `action` field. **`auto` is what ships.** A guard that omits `action` entirely gets the unconditional `deny`, which is the stricter reading of an unstated intent.
 
-### `deny` — refused, every time (default)
+### `auto` — refuse only where Scrybe can serve (shipped default)
+
+Two deterministic checks, both from files already on disk, before any refusal:
+
+**1. Is this a census or a similarity question?** A flag that narrows a set — `--milestone`, `--assignee`, `--author`, `--label`, `--state`, `--json` — means the caller wants a list. `search_knowledge` ranks by meaning and cannot filter or count, so a census has no semantic equivalent and is allowed. Free text (`--search`) or a bare list means a similarity question, and free text wins even when a filter sits beside it — otherwise adding one flag would bypass the guard.
+
+**2. Does Scrybe cover this repo?** Read from `projects.json`: no project covering this directory, no ticket source on that project, or a `last_indexed` older than `max_index_age_seconds` all mean Scrybe has nothing to offer. Each one allows the command.
+
+Only when both checks say Scrybe can answer does the refusal fire — and it names the project id, so the agent does not have to guess it, and it names the census route, so a refusal is never a dead end.
+
+**Why this is the default**, measured rather than assumed: against the unconditional ban it removed 6/6 false refusals at the guard layer and 8 of 9 stranded agents at the behaviour layer, with **zero** cases of an agent using the census route to grab the list it was refused. Full write-up in the internal experiment record.
+
+### `deny` — refused, every time
 
 The call is denied and the agent is told to use `search_knowledge`. Nothing is recorded, so there is nothing to wait out and nothing that can expire into an allowance. A second attempt gets the identical refusal. Because it keeps no state, it also cannot be defeated by an unwritable filesystem.
 
@@ -81,6 +93,7 @@ Top-level keys you set override the shipped ones. Keys you leave out keep their 
 | `window` | `"fixed"` | `"fixed"`: the window expires `upper_seconds` after the FIRST attempt. `"sliding"`: every allowed call pushes the expiry out. |
 | `marker_dir` | system temp directory | Where the marker files live. |
 | `note_once_per_session` | `true` | Set to `false` to let a `note` guard fire on every matching call. |
+| `max_index_age_seconds` | `86400` | `auto` only. An issue index older than this is treated as unable to answer, so the command runs. Set high if you index rarely and trust the index anyway; set low if you file issues faster than you index. |
 | `guards` | see below | Replaces the shipped guard list outright. |
 | `extra_guards` | `[]` | Appends to the shipped guard list, so adding one pattern does not mean recopying all of them. |
 
@@ -100,7 +113,7 @@ A guard matches either a shell command or a tool name.
 | Field | Meaning |
 |---|---|
 | `id` | A short name. Used to key the once-per-session note suppression. |
-| `action` | `"deny"`, `"toll"`, or `"note"`. **Defaults to `"deny"`** if omitted. |
+| `action` | `"auto"` (shipped), `"deny"`, `"toll"`, or `"note"`. A guard that omits it gets `"deny"`. |
 | `pattern` | A JavaScript regular expression, tested against the `Bash` tool's command string. |
 | `tools` | A list of exact tool names, for MCP tools and built-in tools where the match is on the name rather than a shell string. |
 | `hint` | One clause naming what Scrybe does better here. It is quoted back to the agent in both modes. |
