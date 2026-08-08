@@ -34,9 +34,11 @@ Two deterministic checks, both from files already on disk, before any refusal:
 
 **1. Is this a census or a similarity question?** A flag that narrows a set — `--milestone`, `--assignee`, `--author`, `--label`, `--state`, `--json` — means the caller wants a list. `search_knowledge` ranks by meaning and cannot filter or count, so a census has no semantic equivalent and is allowed. Free text (`--search`) or a bare list means a similarity question, and free text wins even when a filter sits beside it — otherwise adding one flag would bypass the guard.
 
+A guarded **MCP tool** carries no command line, so the same test reads its parameters instead: `milestone`, `assignee_username`, `assigneeUsernames`, `author_username`, `labels`, `labelNames`, `iids`, `state`, `scope`, `types`, `username` and the other set-narrowing names mark a census. Scoping and paging (`project_id`, `projectPath`, `fullPath`, `per_page`, `first`, `after`, `sort`) do not — a bare list of one project is still a bare list. A value that narrows nothing (`state: "all"`, `scope: "all"`, an empty string or empty array) does not count either. `search` / `searchTerm` is free text and wins beside a filter, exactly as `--search` does.
+
 **2. Does Scrybe cover this repo?** Read from `projects.json`: no project covering this directory, no ticket source on that project, or a `last_indexed` older than `max_index_age_seconds` all mean Scrybe has nothing to offer. Each one allows the command.
 
-Only when both checks say Scrybe can answer does the refusal fire — and it names the project id, so the agent does not have to guess it, and it names the census route, so a refusal is never a dead end.
+Only when both checks say Scrybe can answer does the refusal fire — and it names the project id, so the agent does not have to guess it, and it names the census route in the vocabulary the caller can use: shell flags for a shell command, parameter names for a tool call.
 
 **Why this is the default**, measured rather than assumed: against the unconditional ban it removed 6/6 false refusals at the guard layer and 8 of 9 stranded agents at the behaviour layer, with **zero** cases of an agent using the census route to grab the list it was refused. Full write-up in the internal experiment record.
 

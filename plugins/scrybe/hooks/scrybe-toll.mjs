@@ -219,6 +219,71 @@ function isEnumeration(command) {
   return ENUMERATION_FLAGS.test(command);
 }
 
+/**
+ * The same question, asked through an MCP tool instead of a shell.
+ *
+ * A guarded MCP call carries no command string — its arguments are structured
+ * fields. Reading only `command` meant the census test never ran for these
+ * tools, so `mcp__gitlab__list_issues(milestone: "26.8")` was refused exactly
+ * like a bare list, and the refusal then named shell flags the caller cannot
+ * use. Both halves of that are the same omission: the flag vocabulary has a
+ * parameter vocabulary, and the guard only knew the first one.
+ *
+ * Names are unioned across the guarded GitLab tools (REST and GraphQL spell the
+ * same filter differently), so one list covers all of them.
+ */
+const ENUMERATION_PARAMS = new Set([
+  "milestone", "milestone_title",
+  "assignee_id", "assignee_username", "assigneeUsernames",
+  "author_id", "author_username", "authorUsername",
+  "username", // get_user_issues: "everything assigned to X" is a census
+  "labels", "labelNames", "label_name",
+  "iids", // naming the exact issues wanted is the narrowest census of all
+  "state", "scope", "issue_type", "types",
+  "iteration_id", "mentions", "confidential", "due_date",
+  "created_after", "created_before", "updated_after", "updated_before",
+]);
+
+/** Free text asked as a parameter. Wins over a filter, exactly as `--search` does. */
+const SEARCH_PARAMS = ["search", "searchTerm", "search_term", "query"];
+
+/**
+ * Sentinels that name the whole set rather than narrowing it. `state: "all"` is
+ * the default of one guarded tool, so accepting it would make a census out of a
+ * parameter the caller never chose — a one-key bypass of the guard.
+ */
+const WIDENING_VALUES = new Set(["all", "any"]);
+
+function narrowsTheSet(name, value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    return !WIDENING_VALUES.has(trimmed.toLowerCase());
+  }
+  if (Array.isArray(value)) return value.some((item) => narrowsTheSet(name, item));
+  if (typeof value === "boolean" || typeof value === "number") return true;
+  return false;
+}
+
+/**
+ * Enumeration or similarity, decided from structured parameters.
+ *
+ * Scoping and paging (`project_id`, `projectPath`, `fullPath`, `per_page`,
+ * `first`, `after`, `sort`) are deliberately absent from ENUMERATION_PARAMS: a
+ * bare list of one project is still a bare list, and must stay refused.
+ */
+function isEnumerationParams(toolInput) {
+  if (!toolInput || typeof toolInput !== "object") return false;
+  for (const key of SEARCH_PARAMS) {
+    if (typeof toolInput[key] === "string" && toolInput[key].trim()) return false;
+  }
+  for (const [key, value] of Object.entries(toolInput)) {
+    if (ENUMERATION_PARAMS.has(key) && narrowsTheSet(key, value)) return true;
+  }
+  return false;
+}
+
 /** Filesystem-safe fragment of a session id. */
 function safeKey(value) {
   const cleaned = String(value ?? "").replace(/[^A-Za-z0-9._-]/g, "");
@@ -289,7 +354,7 @@ function humanDuration(seconds) {
  * over the re-run recipe, so waiting was the reading the text invited. Raising
  * the price only raises what the agent is willing to wait.
  */
-function banReason(guard, project) {
+function banReason(guard, project, surface = "shell") {
   const hint = guard.hint ?? "search_knowledge searches the same material semantically";
   const id = project ?? "<project>";
   const lines = [
@@ -317,12 +382,18 @@ function banReason(guard, project) {
   // difference between a guard and a dead end. Naming the route also makes it
   // checkable: an enumeration must be expressed as one in the command itself.
   if (guard.action === "auto") {
+    // The escape must be one the CALLER can take. Naming shell flags to a tool
+    // call is the same dead end as naming no route at all: the agent reads an
+    // allowance it has no way to express, and the guard becomes an unconditional
+    // ban for that whole surface.
     lines.push(
       "",
       "If you need a CENSUS rather than a match — everything in a milestone, everything",
       "assigned to someone, a count — semantic search cannot do that, and this guard does",
-      "not block it. Re-run with the filter that says so (--milestone, --assignee, --label,",
-      "--state) and it will run."
+      "not block it.",
+      surface === "params"
+        ? "Re-run this same tool with the parameter that says so (milestone, assignee_username, labels, state, or the equivalent this tool accepts) and it will run."
+        : "Re-run with the filter that says so (--milestone, --assignee, --label, --state) and it will run."
     );
   } else {
     lines.push(
@@ -400,8 +471,21 @@ function emit(payload) {
  * and stale indexes still holds the line on duplicate-hunting, or whether the
  * opening is simply the way around it. Not the shipped default.
  */
-function handleAuto(config, guard, command, cwd) {
-  if (typeof command === "string" && command && isEnumeration(command)) return "allow-enumeration";
+function handleAuto(config, guard, command, cwd, toolInput) {
+  // A shell call is read from its command text; a tool call from its parameters.
+  // Both surfaces get the same census test, and each is told the route it can use.
+  //
+  // The axis is the ABSENCE OF A COMMAND, not a `mcp__` prefix on the tool name.
+  // That is deliberate, and safe for a reason worth stating rather than
+  // rediscovering: absence never allows on its own. The allow still needs a
+  // POSITIVE match on a narrowing parameter, so a payload that arrives
+  // malformed or truncated — command field lost, parameters lost, or both —
+  // produces no match and falls through to the refusal, never to an allowance.
+  // A name check would behave identically today and would miss any future
+  // structured surface, so do not "harden" this into one.
+  const surface = typeof command === "string" && command ? "shell" : "params";
+  const enumeration = surface === "shell" ? isEnumeration(command) : isEnumerationParams(toolInput);
+  if (enumeration) return "allow-enumeration";
 
   const coverage = scrybeCoverage(config, cwd);
   if (!coverage.servable) return `allow-${coverage.reason}`;
@@ -410,16 +494,16 @@ function handleAuto(config, guard, command, cwd) {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: banReason(guard, coverage.project),
+      permissionDecisionReason: banReason(guard, coverage.project, surface),
     },
   });
   return "deny";
 }
 
-function handlePreToolUse(config, guard, sessionId, command, cwd) {
+function handlePreToolUse(config, guard, sessionId, command, cwd, toolInput) {
   if (guard.action === "note") return "note-deferred"; // Notes fire after the call.
 
-  if (guard.action === "auto") return handleAuto(config, guard, command, cwd);
+  if (guard.action === "auto") return handleAuto(config, guard, command, cwd, toolInput);
 
   // The default. Stateless on purpose: nothing accumulates, so nothing expires.
   if (guard.action !== "toll") {
@@ -535,7 +619,7 @@ function main() {
 
   if (event === "PreToolUse") {
     const decision = handlePreToolUse(
-      config, guard, payload.session_id, command, payload.cwd || process.cwd()
+      config, guard, payload.session_id, command, payload.cwd || process.cwd(), payload.tool_input
     );
     logCall(event, toolName, command, decision ?? "allow");
   } else {

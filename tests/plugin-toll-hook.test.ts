@@ -193,6 +193,112 @@ describe("shipped default: auto — refuse only when Scrybe can answer", () => {
   });
 });
 
+/**
+ * The census exemption has to be reachable from a tool call, not only from a
+ * shell. A guarded MCP call carries no command string, so reading only
+ * `tool_input.command` refused every one of them — including the filtered
+ * census the guard is supposed to allow — and then told the caller to retry
+ * with shell flags it cannot pass.
+ */
+describe("auto over MCP tool parameters", () => {
+  beforeEach(() => writeConfig());
+
+  function mcp(toolName: string, toolInput: Record<string, unknown>, cwd = INDEXED) {
+    return {
+      hook_event_name: "PreToolUse",
+      session_id: "s",
+      cwd,
+      tool_name: toolName,
+      tool_input: toolInput,
+    };
+  }
+
+  it.each([
+    ["milestone", "mcp__gitlab__list_issues", { project_id: "34", milestone: "26.8" }],
+    ["assignee", "mcp__gitlab__list_issues", { project_id: "34", assignee_username: ["serzh"] }],
+    ["labels", "mcp__gitlab__list_issues", { project_id: "34", labels: ["bug"] }],
+    ["state", "mcp__gitlab__list_issues", { project_id: "34", state: "closed" }],
+    ["author", "mcp__gitlab-gql__search_issues", { projectPath: "intra/cmx", authorUsername: "serzh" }],
+    ["label names", "mcp__gitlab-gql__search_issues", { labelNames: ["Priority::High"] }],
+    ["a named user", "mcp__gitlab-gql__get_user_issues", { username: "serzh" }],
+    ["work item types", "mcp__gitlab-gql__list_work_items", { fullPath: "intra/cmx", types: ["TASK"] }],
+  ])("allows a census expressed as a parameter: %s", (_label, tool, input) => {
+    expect(run("PreToolUse", mcp(tool, input)).stdout).toBe("");
+  });
+
+  it.each([
+    ["a bare project list", "mcp__gitlab__list_issues", { project_id: "34" }],
+    ["paging only", "mcp__gitlab__list_issues", { project_id: "34", per_page: 100, page: 2 }],
+    ["sorting only", "mcp__gitlab-gql__get_issues", { projectPath: "intra/cmx", sort: "UPDATED_DESC" }],
+    ["a bare namespace", "mcp__gitlab-gql__list_work_items", { fullPath: "intra/cmx" }],
+  ])("still refuses an unfiltered list: %s", (_label, tool, input) => {
+    expect(decision(run("PreToolUse", mcp(tool, input)).json)).toBe("deny");
+  });
+
+  it.each([
+    ["state: all", { project_id: "34", state: "all" }],
+    ["scope: all", { project_id: "34", scope: "all" }],
+    ["an empty label array", { project_id: "34", labels: [] }],
+    ["an empty milestone", { project_id: "34", milestone: "  " }],
+  ])("does not accept a value that narrows nothing: %s", (_label, input) => {
+    expect(decision(run("PreToolUse", mcp("mcp__gitlab__list_issues", input)).json)).toBe("deny");
+  });
+
+  it.each([
+    ["search", { project_id: "34", state: "opened", search: "crash on save" }],
+    ["searchTerm", { projectPath: "intra/cmx", labelNames: ["bug"], searchTerm: "crash on save" }],
+  ])("treats free text as similarity even beside a filter: %s", (_label, input) => {
+    // Otherwise one filter parameter is a bypass of the whole guard.
+    expect(decision(run("PreToolUse", mcp("mcp__gitlab__list_issues", input)).json)).toBe("deny");
+  });
+
+  it("allows a census naming the exact issues wanted", () => {
+    expect(run("PreToolUse", mcp("mcp__gitlab__list_issues", { project_id: "34", iids: [11, 12] })).stdout).toBe("");
+  });
+
+  it.each([
+    ["glab issue list --state opened", ""],
+    ["glab issue list --milestone 26.8", ""],
+  ])("does not regress the shell surface: %s stays allowed", (command) => {
+    expect(run("PreToolUse", bash(command)).stdout).toBe("");
+  });
+
+  it("still refuses a bare shell list on the other CLI too", () => {
+    expect(decision(run("PreToolUse", bash("glab issue list")).json)).toBe("deny");
+  });
+
+  it.each([
+    ["no parameters at all", undefined],
+    ["an empty parameter object", {}],
+    ["parameters that are not an object", "truncated"],
+  ])("refuses rather than allows when the payload arrives damaged: %s", (_label, input) => {
+    // The surface is keyed on the ABSENCE of a command, so it is worth pinning
+    // that absence cannot itself produce an allowance: the allow needs a
+    // positive match on a narrowing parameter, and a damaged payload has none.
+    expect(decision(run("PreToolUse", mcp("mcp__gitlab__list_issues", input as any)).json)).toBe("deny");
+  });
+
+  it("names a route the tool caller can actually take", () => {
+    const reason = run("PreToolUse", mcp("mcp__gitlab__list_issues", { project_id: "34" })).json
+      ?.hookSpecificOutput.permissionDecisionReason as string;
+    expect(reason).toContain("CENSUS");
+    expect(reason).toContain("milestone");
+    // Shell flags are unreachable from a tool call, so offering them strands the caller.
+    expect(reason).not.toContain("--milestone");
+  });
+
+  it("keeps the shell wording for a shell call", () => {
+    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+      .permissionDecisionReason as string;
+    expect(reason).toContain("--milestone");
+  });
+
+  it("allows a census even where Scrybe has no index at all", () => {
+    // Coverage is never consulted once the call is enumeration-shaped.
+    expect(run("PreToolUse", mcp("mcp__gitlab__list_issues", { milestone: "26.8" }, CODE_ONLY)).stdout).toBe("");
+  });
+});
+
 describe("deny action: a ban, not a wait", () => {
   beforeEach(() => writeConfig(BAN));
 
