@@ -24,7 +24,18 @@ All configuration is via environment variables. Set them in `.env` or in the MCP
 
 Set this before running any `scrybe` command if you want to relocate state (e.g. point at a faster SSD). All processes — CLI, daemon, MCP server — must agree on the same value.
 
-One feature is configured by a file in this directory rather than by an environment variable: the Claude Code plugin's search toll reads `toll.json` from here. See [search-toll.md](search-toll.md).
+One feature is configured by a file in this directory rather than by an environment variable: the Claude Code plugin's search guard reads `toll.json` from here. See [search-toll.md](search-toll.md).
+
+---
+
+## Search guard (Claude Code plugin)
+
+The plugin's hook refuses a keyword search over an issue tracker and points the agent at semantic search instead. It is configured by `toll.json` in the data directory; these two variables exist for trying a config out and for observing what the guard decides. Full contract: [search-toll.md](search-toll.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_TOLL_CONFIG` | `${DATA_DIR}/toll.json` | Read guard settings from a different file without moving `SCRYBE_DATA_DIR`, so the index the guard checks against stays put. Lets a config be tried, or several compared, without touching a working one. |
+| `SCRYBE_TOLL_LOG` | unset | Append one JSON line per observed call to this path: the tool, the command, and the decision. Off unless set, and it never affects the decision. |
 
 ---
 

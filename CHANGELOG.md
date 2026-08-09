@@ -7,9 +7,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.50.0] — 2026-08-09
+
 ### Added
 
-- **The Claude Code plugin now ships a search guard.** When an agent reaches for a keyword search over issues — `gh search issues`, `gh issue list --search`, `glab issue list -S`, or the GitLab MCP tools that search — the plugin's hook refuses the command and tells it to use `search_knowledge` instead. The refusal keeps no state, so there is no wait to sit out and nothing that expires into an allowance. It refuses **only when Scrybe can actually answer**: a repo whose issues are not indexed, and an index older than a day, both run the command untouched, because refusing it would offer a replacement that cannot help. **Listing issues is never refused, filtered or not** — only an actual keyword query triggers it. This exists because keyword search silently misses the ticket that describes the same problem in different words, and an empty keyword result looks exactly like "nothing exists". Two softer modes are available per command: a timed wait, or a one-line note attached to the result while the command runs normally. Everything is configurable in `toll.json` in the data directory, including turning it off and adding your own commands. It fails open on any error, and it costs nothing in model context. See [docs/search-toll.md](docs/search-toll.md).
+- **The Claude Code plugin now ships a search guard.** When an agent runs a keyword search over issues — `gh search issues`, `gh issue list --search`, `glab issue list -S`, or the GitLab MCP tools that search — the hook refuses it and points at `search_knowledge` instead. Keyword search misses the ticket that words the same problem differently, and an empty result reads exactly like "nothing exists". The miss is silent. That is why this is a hook and not a line in a config file an agent can reason its way past.
+
+  **Listing issues is never refused, with or without a filter.** Listing and semantic search answer different questions, and only one of them has a semantic equivalent. A query made of search qualifiers rather than keywords runs too, as does `--help`.
+
+  It refuses only where Scrybe can actually answer. A repo whose issues are not indexed, and an index older than a day, both run untouched, because refusing them would offer a replacement that cannot help. The refusal keeps no state, so there is no wait to sit out and nothing that expires into an allowance.
+
+  Two softer modes are available per command: a timed wait, or a one-line note attached to the result while the command runs normally. Everything is configurable in `toll.json` in the data directory, including turning it off and adding your own commands. It fails open on any error and costs nothing in model context. See [docs/search-toll.md](docs/search-toll.md).
 
 ### Fixed
 
@@ -83,28 +93,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.46.2] — 2026-07-19
-
-### Security
-
-- Updated bundled transitive dependencies to their patched releases — **protobufjs** (7.6.x), **ws** (8.21.1) and **fast-uri** (3.1.3) — clearing several known denial-of-service and request-handling advisories. None of these code paths are reachable with untrusted input in scrybe, so the update is precautionary.
-
-### Fixed
-
-- Hardened the background daemon's health check: a malformed port value in the daemon pidfile can no longer shape the internal health-probe request.
-
----
-
 ## Older releases
 
-For releases v0.46.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.46.2 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.49.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.50.0...HEAD
+[0.50.0]: https://github.com/siaarzh/scrybe/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/siaarzh/scrybe/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/siaarzh/scrybe/compare/v0.47.1...v0.48.0
 [0.47.1]: https://github.com/siaarzh/scrybe/compare/v0.47.0...v0.47.1
 [0.47.0]: https://github.com/siaarzh/scrybe/compare/v0.46.3...v0.47.0
 [0.46.3]: https://github.com/siaarzh/scrybe/compare/v0.46.2...v0.46.3
-[0.46.2]: https://github.com/siaarzh/scrybe/compare/v0.46.1...v0.46.2
