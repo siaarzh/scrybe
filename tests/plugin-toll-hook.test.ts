@@ -109,16 +109,19 @@ const TOLL_GUARD = {
 describe("shipped default: auto — refuse only when Scrybe can answer", () => {
   beforeEach(() => writeConfig());
 
+  it("allows a bare list — there is no free text to refuse", () => {
+    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+  });
+
   it.each([
-    "gh issue list",
     'gh issue list --search "crash on save"',
     "gh search issues memory",
-  ])("refuses a similarity question in an indexed repo: %s", (command) => {
+  ])("refuses a keyword search in an indexed repo: %s", (command) => {
     expect(decision(run("PreToolUse", bash(command)).json)).toBe("deny");
   });
 
   it("names the project so the agent does not have to guess it", () => {
-    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+    const reason = run("PreToolUse", bash('gh issue list --search "crash"')).json?.hookSpecificOutput
       .permissionDecisionReason as string;
     expect(reason).toContain("indexed-project");
   });
@@ -127,7 +130,7 @@ describe("shipped default: auto — refuse only when Scrybe can answer", () => {
     "gh issue list --milestone 26.8 --state open",
     "gh issue list --assignee @me",
     "gh issue list --label bug --json number,title",
-  ])("allows a census, which has no semantic equivalent: %s", (command) => {
+  ])("allows a filtered list — it carries no free text, not because it is a census: %s", (command) => {
     expect(run("PreToolUse", bash(command)).stdout).toBe("");
   });
 
@@ -138,21 +141,23 @@ describe("shipped default: auto — refuse only when Scrybe can answer", () => {
     );
   });
 
-  it("allows when no project covers this directory", () => {
-    expect(run("PreToolUse", bash("gh issue list", "s", "/fake/repo/unregistered")).stdout).toBe("");
+  it("allows when no project covers this directory, even for a keyword search", () => {
+    expect(
+      run("PreToolUse", bash('gh issue list --search "crash"', "s", "/fake/repo/unregistered")).stdout
+    ).toBe("");
   });
 
-  it("allows when the project has code indexed but no issues", () => {
-    expect(run("PreToolUse", bash("gh issue list", "s", CODE_ONLY)).stdout).toBe("");
+  it("allows when the project has code indexed but no issues, even for a keyword search", () => {
+    expect(run("PreToolUse", bash('gh issue list --search "crash"', "s", CODE_ONLY)).stdout).toBe("");
   });
 
-  it("allows when the issue index is older than the threshold", () => {
+  it("allows when the issue index is older than the threshold, even for a keyword search", () => {
     writeProjects(new Date(Date.now() - 172_800_000).toISOString()); // 2 days
     writeConfig({ max_index_age_seconds: 86400 });
-    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+    expect(run("PreToolUse", bash('gh issue list --search "crash"')).stdout).toBe("");
   });
 
-  it("allows when the index has no timestamp at all", () => {
+  it("allows when the index has no timestamp at all, even for a keyword search", () => {
     writeFileSync(
       join(sandbox, "projects.json"),
       JSON.stringify([
@@ -165,17 +170,17 @@ describe("shipped default: auto — refuse only when Scrybe can answer", () => {
         },
       ])
     );
-    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+    expect(run("PreToolUse", bash('gh issue list --search "crash"')).stdout).toBe("");
   });
 
-  it("tells the agent the census route exists, so a refusal is not a dead end", () => {
-    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+  it("tells the agent listing is never blocked, so a refusal is not a dead end", () => {
+    const reason = run("PreToolUse", bash('gh issue list --search "crash"')).json?.hookSpecificOutput
       .permissionDecisionReason as string;
-    expect(reason).toContain("CENSUS");
+    expect(reason).toContain("Listing is not blocked");
     expect(reason).toContain("--milestone");
   });
 
-  it("still refuses the guarded MCP tools", () => {
+  it("allows the guarded MCP tools when the call carries no free text", () => {
     const { json } = run("PreToolUse", {
       hook_event_name: "PreToolUse",
       session_id: "s",
@@ -183,13 +188,13 @@ describe("shipped default: auto — refuse only when Scrybe can answer", () => {
       tool_name: "mcp__gitlab__list_issues",
       tool_input: { project_id: 34 },
     });
-    expect(decision(json)).toBe("deny");
+    expect(json).toBeNull();
   });
 
-  it("allows everything when projects.json cannot be read", () => {
+  it("allows everything when projects.json cannot be read, even for a keyword search", () => {
     // No index means no replacement to offer, so refusing would strand the agent.
     rmSync(join(sandbox, "projects.json"));
-    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+    expect(run("PreToolUse", bash('gh issue list --search "crash"')).stdout).toBe("");
   });
 });
 
@@ -220,8 +225,6 @@ describe("auto over MCP tool parameters", () => {
     ["state", "mcp__gitlab__list_issues", { project_id: "34", state: "closed" }],
     ["author", "mcp__gitlab-gql__search_issues", { projectPath: "intra/cmx", authorUsername: "serzh" }],
     ["label names", "mcp__gitlab-gql__search_issues", { labelNames: ["Priority::High"] }],
-    ["a named user", "mcp__gitlab-gql__get_user_issues", { username: "serzh" }],
-    ["work item types", "mcp__gitlab-gql__list_work_items", { fullPath: "intra/cmx", types: ["TASK"] }],
   ])("allows a census expressed as a parameter: %s", (_label, tool, input) => {
     expect(run("PreToolUse", mcp(tool, input)).stdout).toBe("");
   });
@@ -229,10 +232,29 @@ describe("auto over MCP tool parameters", () => {
   it.each([
     ["a bare project list", "mcp__gitlab__list_issues", { project_id: "34" }],
     ["paging only", "mcp__gitlab__list_issues", { project_id: "34", per_page: 100, page: 2 }],
+  ])("allows an unfiltered list: %s", (_label, tool, input) => {
+    expect(run("PreToolUse", mcp(tool, input)).stdout).toBe("");
+  });
+
+  /**
+   * These three tools carry no guard entry at all — `matchGuard` returns null
+   * for them unconditionally, so `handleAuto` never runs. An `it.each` row
+   * that only asserts ALLOW here would pass even if the whole `auto` action
+   * were deleted, which is exactly what happened (B1): these used to sit
+   * inside the "census"/"unfiltered list" blocks above, dressed up as guard
+   * behaviour they were not exercising. Each row below also fires the same
+   * tool with an obviously search-shaped parameter — proving the allow is
+   * because the tool is unguarded, not because a filter satisfied the guard.
+   */
+  it.each([
+    ["a named user", "mcp__gitlab-gql__get_user_issues", { username: "serzh" }],
+    ["work item types", "mcp__gitlab-gql__list_work_items", { fullPath: "intra/cmx", types: ["TASK"] }],
     ["sorting only", "mcp__gitlab-gql__get_issues", { projectPath: "intra/cmx", sort: "UPDATED_DESC" }],
     ["a bare namespace", "mcp__gitlab-gql__list_work_items", { fullPath: "intra/cmx" }],
-  ])("still refuses an unfiltered list: %s", (_label, tool, input) => {
-    expect(decision(run("PreToolUse", mcp(tool, input)).json)).toBe("deny");
+  ])("tool carries no guard at all, so any shape is allowed: %s", (_label, tool, input) => {
+    expect(run("PreToolUse", mcp(tool, input)).stdout).toBe("");
+    const searchShaped = { ...input, search: "crash on save", searchTerm: "crash on save" };
+    expect(run("PreToolUse", mcp(tool, searchShaped)).stdout).toBe("");
   });
 
   it.each([
@@ -240,8 +262,8 @@ describe("auto over MCP tool parameters", () => {
     ["scope: all", { project_id: "34", scope: "all" }],
     ["an empty label array", { project_id: "34", labels: [] }],
     ["an empty milestone", { project_id: "34", milestone: "  " }],
-  ])("does not accept a value that narrows nothing: %s", (_label, input) => {
-    expect(decision(run("PreToolUse", mcp("mcp__gitlab__list_issues", input)).json)).toBe("deny");
+  ])("allows a value that would have narrowed nothing under the old census rule, since it carries no free text: %s", (_label, input) => {
+    expect(run("PreToolUse", mcp("mcp__gitlab__list_issues", input)).stdout).toBe("");
   });
 
   it.each([
@@ -263,39 +285,141 @@ describe("auto over MCP tool parameters", () => {
     expect(run("PreToolUse", bash(command)).stdout).toBe("");
   });
 
-  it("still refuses a bare shell list on the other CLI too", () => {
-    expect(decision(run("PreToolUse", bash("glab issue list")).json)).toBe("deny");
+  it("allows a bare shell list on the other CLI too", () => {
+    expect(run("PreToolUse", bash("glab issue list")).stdout).toBe("");
   });
 
   it.each([
     ["no parameters at all", undefined],
     ["an empty parameter object", {}],
     ["parameters that are not an object", "truncated"],
-  ])("refuses rather than allows when the payload arrives damaged: %s", (_label, input) => {
-    // The surface is keyed on the ABSENCE of a command, so it is worth pinning
-    // that absence cannot itself produce an allowance: the allow needs a
-    // positive match on a narrowing parameter, and a damaged payload has none.
-    expect(decision(run("PreToolUse", mcp("mcp__gitlab__list_issues", input as any)).json)).toBe("deny");
+  ])("allows rather than crashes when the payload arrives damaged: %s", (_label, input) => {
+    // A damaged payload carries no extractable free text either, so it must
+    // not be misread as a search: fail open, not a false denial.
+    expect(run("PreToolUse", mcp("mcp__gitlab__list_issues", input as any)).stdout).toBe("");
   });
 
   it("names a route the tool caller can actually take", () => {
-    const reason = run("PreToolUse", mcp("mcp__gitlab__list_issues", { project_id: "34" })).json
-      ?.hookSpecificOutput.permissionDecisionReason as string;
-    expect(reason).toContain("CENSUS");
+    const reason = run("PreToolUse", mcp("mcp__gitlab__list_issues", { project_id: "34", search: "crash" }))
+      .json?.hookSpecificOutput.permissionDecisionReason as string;
+    expect(reason).toContain("Listing is not blocked");
     expect(reason).toContain("milestone");
-    // Shell flags are unreachable from a tool call, so offering them strands the caller.
-    expect(reason).not.toContain("--milestone");
+    // The MCP-vs-shell distinction now lives in which drop-instruction is offered.
+    expect(reason).toContain("Drop the search/query parameter");
   });
 
   it("keeps the shell wording for a shell call", () => {
-    const reason = run("PreToolUse", bash("gh issue list")).json?.hookSpecificOutput
+    const reason = run("PreToolUse", bash('gh issue list --search "crash"')).json?.hookSpecificOutput
       .permissionDecisionReason as string;
     expect(reason).toContain("--milestone");
+    expect(reason).toContain("Drop the keyword text");
   });
 
-  it("allows a census even where Scrybe has no index at all", () => {
-    // Coverage is never consulted once the call is enumeration-shaped.
+  it("allows a filtered list even where Scrybe has no index at all", () => {
+    // Coverage is never consulted when the call carries no free text.
     expect(run("PreToolUse", mcp("mcp__gitlab__list_issues", { milestone: "26.8" }, CODE_ONLY)).stdout).toBe("");
+  });
+
+  it("still refuses a keyword search where Scrybe has an index, even beside a filter", () => {
+    expect(
+      decision(run("PreToolUse", mcp("mcp__gitlab__list_issues", { milestone: "26.8", search: "crash" })).json)
+    ).toBe("deny");
+  });
+});
+
+describe("regression: bypasses reproduced against the live hook", () => {
+  beforeEach(() => writeConfig());
+
+  it("denies the attached short-flag form -S<query> (A1)", () => {
+    expect(decision(run("PreToolUse", bash("gh issue list -Smemoryleak")).json)).toBe("deny");
+  });
+
+  it("denies gh search issues when the query trails a flag (A2)", () => {
+    expect(
+      decision(run("PreToolUse", bash("gh search issues --limit 5 crash on save")).json)
+    ).toBe("deny");
+  });
+
+  it("still allows gh search issues --limit 5 alone — 5 is the flag's value, not a query (A2)", () => {
+    expect(run("PreToolUse", bash("gh search issues --limit 5")).stdout).toBe("");
+  });
+
+  it("denies an MCP array-valued search param (A3)", () => {
+    const { json } = run("PreToolUse", {
+      hook_event_name: "PreToolUse",
+      session_id: "s",
+      cwd: INDEXED,
+      tool_name: "mcp__gitlab__list_issues",
+      tool_input: { project_id: "34", searchTerm: ["crash"] },
+    });
+    expect(decision(json)).toBe("deny");
+  });
+
+  it("denies an MCP number-valued search param (A3)", () => {
+    const { json } = run("PreToolUse", {
+      hook_event_name: "PreToolUse",
+      session_id: "s",
+      cwd: INDEXED,
+      tool_name: "mcp__gitlab__list_issues",
+      tool_input: { project_id: "34", searchTerm: 12345 },
+    });
+    expect(decision(json)).toBe("deny");
+  });
+
+  it("allows an MCP null-valued search param — there is no text to find (A3)", () => {
+    const { stdout } = run("PreToolUse", {
+      hook_event_name: "PreToolUse",
+      session_id: "s",
+      cwd: INDEXED,
+      tool_name: "mcp__gitlab__list_issues",
+      tool_input: { project_id: "34", searchTerm: null },
+    });
+    expect(stdout).toBe("");
+  });
+
+  it("still allows a bare gh issue list", () => {
+    expect(run("PreToolUse", bash("gh issue list")).stdout).toBe("");
+  });
+
+  it("still allows gh issue list --help", () => {
+    expect(run("PreToolUse", bash("gh issue list --help")).stdout).toBe("");
+  });
+
+  it("still allows a qualifier-only -S query", () => {
+    expect(run("PreToolUse", bash('gh issue list -S "no:assignee sort:created-asc"')).stdout).toBe("");
+  });
+});
+
+describe("regression: gh search issues flag-eats-query bypass (short forms and unknown flags)", () => {
+  beforeEach(() => writeConfig());
+
+  it.each([
+    ["gh search issues -w crash", "unrecognised short flag -w eats the query"],
+    ["gh search issues --xyz crash", "unrecognised long flag eats the query"],
+    ["gh search issues -- crash", "-- is end-of-options, crash is positional"],
+    ["gh search issues -R cli/cli crash", "-R consumes cli/cli, crash is left over"],
+    ["gh search issues --limit 5 crash on save", "--limit consumes 5, crash on save is left over"],
+    ["gh search issues crash on save", "plain keyword query, no flags at all"],
+  ])("denies: %s (%s)", (command) => {
+    expect(decision(run("PreToolUse", bash(command)).json)).toBe("deny");
+  });
+
+  it.each([
+    ["gh search issues --limit 5", "--limit consumes its value, nothing left over"],
+    ["gh search issues --state open", "--state consumes its value, nothing left over"],
+    ["gh search issues -R cli/cli", "-R consumes its value, nothing left over"],
+    ["gh search issues --json title,number", "--json consumes its value, nothing left over"],
+    ['gh search issues --label "help wanted"', "--label consumes its quoted value"],
+    ["gh search issues --sort created --order desc", "two value flags, both consume, nothing left over"],
+    ["gh search issues --limit=5", "self-contained via =, consumes nothing further"],
+    ["gh search issues --web", "boolean-shaped flag with no query at all"],
+    ['gh issue list --milestone "next release"', "gh issue list, not gh search issues — untouched by this rule"],
+    ['gh issue list --label "help wanted"', "gh issue list, not gh search issues — untouched by this rule"],
+    ["gh issue list", "bare listing"],
+    ["gh issue list --help", "help is never guarded"],
+    ['gh issue list -S "no:assignee sort:created-asc"', "qualifier-only -S query, not free text"],
+  ])("allows: %s (%s)", (command) => {
+    expect(run("PreToolUse", bash(command)).stdout).toBe("");
   });
 });
 
@@ -416,17 +540,23 @@ describe("what is and is not guarded", () => {
     expect(decision(run("PreToolUse", bash('gh issue list --search "crash on save"')).json)).toBe("deny");
   });
 
-  it("still tolls a guarded command chained after another one", () => {
-    expect(decision(run("PreToolUse", bash('echo "checking" && gh issue list')).json)).toBe("deny");
+  it("still denies a guarded keyword search chained after another command", () => {
+    expect(
+      decision(run("PreToolUse", bash('echo "checking" && gh issue list --search "crash"')).json)
+    ).toBe("deny");
   });
 
-  it("guards an MCP tool by name", () => {
+  it("allows a bare-list command chained after another one, since it carries no free text", () => {
+    expect(run("PreToolUse", bash('echo "checking" && gh issue list')).stdout).toBe("");
+  });
+
+  it("guards an MCP tool by name — matching is on the tool, not on a command string", () => {
     const { json } = run("PreToolUse", {
       hook_event_name: "PreToolUse",
       session_id: "s",
       cwd: INDEXED,
       tool_name: "mcp__gitlab__list_issues",
-      tool_input: { project_id: 34 },
+      tool_input: { project_id: 34, search: "crash" },
     });
     expect(decision(json)).toBe("deny");
   });
@@ -479,7 +609,7 @@ describe("configuration", () => {
     expect(decision(run("PreToolUse", bash("rg TODO src/")).json)).toBe("deny");
     // The shipped guards survive alongside it.
     rmSync(marker(), { force: true });
-    expect(decision(run("PreToolUse", bash("gh issue list")).json)).toBe("deny");
+    expect(decision(run("PreToolUse", bash('gh issue list --search "crash"')).json)).toBe("deny");
   });
 
   it("lets guards replace the shipped list outright", () => {
@@ -489,7 +619,7 @@ describe("configuration", () => {
 
   it("ignores a guard whose regex does not compile, and keeps the rest working", () => {
     writeConfig({ extra_guards: [{ id: "broken", action: "toll", pattern: "([" }] });
-    expect(decision(run("PreToolUse", bash("gh issue list")).json)).toBe("deny");
+    expect(decision(run("PreToolUse", bash('gh issue list --search "crash"')).json)).toBe("deny");
   });
 });
 
@@ -603,7 +733,7 @@ describe("fails open", () => {
 
   it("still bans when the marker cannot be written", () => {
     // A ban keeps no state, so an unwritable filesystem cannot defeat it.
-    writeConfig({ marker_dir: join(sandbox, "does", "not", "exist") });
+    writeConfig({ ...BAN, marker_dir: join(sandbox, "does", "not", "exist") });
     expect(decision(run("PreToolUse", bash("gh issue list")).json)).toBe("deny");
   });
 });

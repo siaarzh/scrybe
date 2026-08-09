@@ -2,7 +2,7 @@
 
 The Scrybe plugin for Claude Code ships a hook that refuses keyword-only searches over an issue tracker and points the agent at semantic search instead.
 
-**What it does.** By default it refuses the command **only when Scrybe can actually answer the question** — the repo's issues are indexed, the index is fresh, and the question is a similarity question rather than a census. The refusal does not expire: there is no wait, no window, and no state that runs out. In every other case the command runs untouched, because refusing it would offer a replacement that cannot help.
+**What it does.** By default it refuses the command **only when Scrybe can actually answer the question** — the repo's issues are indexed, the index is fresh, and a keyword search is actually being attempted. Listing issues, filtered or not, is never refused. The refusal does not expire: there is no wait, no window, and no state that runs out. In every other case the command runs untouched, because refusing it would offer a replacement that cannot help.
 
 **What it does not do.** It cannot stop an agent that goes looking for a different command that returns the same list. It guards the commands it knows about, and that list is a starting point rather than a perimeter. It also does not stop a human from running the command in a terminal, which is the point — the rule is about how agents answer questions, not about who may read an issue list.
 
@@ -32,15 +32,15 @@ Each guard chooses one, with its `action` field. **`auto` is what ships.** A gua
 
 Two deterministic checks, both from files already on disk, before any refusal:
 
-**1. Is this a census or a similarity question?** A flag that narrows a set — `--milestone`, `--assignee`, `--author`, `--label`, `--state`, `--json` — means the caller wants a list. `search_knowledge` ranks by meaning and cannot filter or count, so a census has no semantic equivalent and is allowed. Free text (`--search`) or a bare list means a similarity question, and free text wins even when a filter sits beside it — otherwise adding one flag would bypass the guard.
-
-A guarded **MCP tool** carries no command line, so the same test reads its parameters instead: `milestone`, `assignee_username`, `assigneeUsernames`, `author_username`, `labels`, `labelNames`, `iids`, `state`, `scope`, `types`, `username` and the other set-narrowing names mark a census. Scoping and paging (`project_id`, `projectPath`, `fullPath`, `per_page`, `first`, `after`, `sort`) do not — a bare list of one project is still a bare list. A value that narrows nothing (`state: "all"`, `scope: "all"`, an empty string or empty array) does not count either. `search` / `searchTerm` is free text and wins beside a filter, exactly as `--search` does.
+**1. Is a keyword search actually being attempted?** Some tools are always a search and nothing else — `search_notes` in particular has no non-search mode, and any call to it counts. Everything else is judged by whether it carries a free-text query: on the shell, `-S` / `--search` / `--search=` or a positional term on `gh search issues`; on an MCP tool, a `search`, `searchTerm`, `search_term`, or `query` parameter. A query only counts as free text if at least one of its whitespace-separated tokens has no `:` in it — so `-S "no:assignee sort:created-asc"` is qualifiers all the way down and is not free text. `--help` / `-h` is never treated as a search, no matter which command it is attached to.
 
 **2. Does Scrybe cover this repo?** Read from `projects.json`: no project covering this directory, no ticket source on that project, or a `last_indexed` older than `max_index_age_seconds` all mean Scrybe has nothing to offer. Each one allows the command.
 
-Only when both checks say Scrybe can answer does the refusal fire — and it names the project id, so the agent does not have to guess it, and it names the census route in the vocabulary the caller can use: shell flags for a shell command, parameter names for a tool call.
+Only when both checks say Scrybe can answer does the refusal fire — and it names the project id, so the agent does not have to guess it.
 
-**Why this is the default**, measured rather than assumed: against the unconditional ban it removed 6/6 false refusals at the guard layer and 8 of 9 stranded agents at the behaviour layer, with **zero** cases of an agent using the census route to grab the list it was refused. Full write-up in the internal experiment record.
+**A bare list, or a list narrowed by any filter — `--milestone`, `--assignee`, `--label`, `--state`, `--json`, or the matching MCP parameters — always allows, on every surface, regardless of what Scrybe covers.** Listing and searching are different questions, and only searching is what this guard exists to redirect. There is no dependency on a filter being present: an unfiltered `gh issue list` is exactly as allowed as a filtered one.
+
+**Why this is the default:** against the unconditional ban, it removes false refusals of plain listing while keeping the refusal on an actual keyword search. Note that a refused agent often does find another way to the same list — that is expected, and it is why the section above says this guards the commands it knows about rather than forming a perimeter.
 
 ### `deny` — refused, every time
 
@@ -118,6 +118,7 @@ A guard matches either a shell command or a tool name.
 | `action` | `"auto"` (shipped), `"deny"`, `"toll"`, or `"note"`. A guard that omits it gets `"deny"`. |
 | `pattern` | A JavaScript regular expression, tested against the `Bash` tool's command string. |
 | `tools` | A list of exact tool names, for MCP tools and built-in tools where the match is on the name rather than a shell string. |
+| `search_only` | Set on a guard whose matched tool has no non-search mode, so any call to it counts as a keyword search under `auto` — no free-text parameter needed. Defaults to `false`. |
 | `hint` | One clause naming what Scrybe does better here. It is quoted back to the agent in both modes. |
 
 A guard may set `pattern`, `tools`, or both. A guard whose regular expression does not compile is skipped; the other guards keep working.
@@ -142,9 +143,13 @@ Above 120 seconds the wording changes automatically — a long wait paired with 
 
 ### What ships guarded
 
-Issue **listing and searching** only: `gh issue list`, `gh search issues`, `gh api .../search/issues`, `glab issue list`, and the GitLab MCP tools that trawl for issues (`list_issues`, `my_issues`, `get_issues`, `search_issues`, `get_user_issues`, `list_work_items`).
+Issue **listing and searching**: `gh issue list`, `gh search issues`, `glab issue list`, and the GitLab MCP tools that trawl for issues (`list_issues`, `my_issues`, `search_issues`, `search_gitlab`). Under `auto`, matching one of these is not enough to refuse — see [`auto`](#auto--refuse-only-where-scrybe-can-serve-shipped-default) above for what actually has to be true. `search_notes` is the one tool that is always treated as a search, because it has no non-search mode.
 
-Deliberately **not** guarded: `gh issue view`, `create`, `comment`, `edit`, `close`, anything under `gh pr`, and every single-issue read such as `get_issue`. The toll is on trawling for something, never on reading or filing the one you already found — guarding those would break issue filing, which is the activity this exists to improve.
+`gh api .../search/issues` also carries a guard entry, but it does not currently refuse anything: there is no free-text extractor for a raw `gh api` query string yet, so the guard exists to record intent, not to enforce it. It ships anyway rather than being deleted, so the pattern is ready once that extraction lands.
+
+Tools that never carry a free-text query at all — `get_issues`, `get_user_issues`, `list_work_items` — are not guarded, because there is nothing on them that could ever mark them as a keyword search.
+
+Deliberately **not** guarded: `gh issue view`, `create`, `comment`, `edit`, `close`, anything under `gh pr`, and every single-issue read such as `get_issue`. The guard is on searching for something, never on reading or filing the one you already found — guarding those would break issue filing, which is the activity this exists to improve.
 
 ### Examples
 

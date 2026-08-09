@@ -10,7 +10,7 @@
  *
  * It makes the wrong path slower. It does not make it impossible.
  *
- * Two modes, chosen per guard by its `action` field:
+ * Three modes, chosen per guard by its `action` field:
  *
  *   action: "toll"  (PreToolUse)  — deny the call, state the seconds remaining,
  *                                   allow the exact same call once the wait is
@@ -20,6 +20,23 @@
  *                                   line to the result the model is already
  *                                   reading. No shared state. A note can be
  *                                   read and ignored; that is its known limit.
+ *
+ *   action: "auto"  (PreToolUse)  — deny only a keyword search over issues;
+ *                                   allow everything else, including a bare
+ *                                   list. A call is a keyword search when the
+ *                                   guard is flagged `search_only: true` (the
+ *                                   tool has no other purpose), or when it
+ *                                   carries a non-empty free-text query (a
+ *                                   qualifier-only query like `no:assignee` does
+ *                                   not count — see `isBareTextQuery`). `--help`
+ *                                   is never guarded. Listing — with or without
+ *                                   a narrowing filter such as --milestone — is
+ *                                   a different question than "find the issue
+ *                                   worded like this one," and semantic search
+ *                                   cannot answer it, so it is never refused.
+ *                                   Denial still only fires when
+ *                                   `scrybeCoverage()` says Scrybe can actually
+ *                                   answer the semantic version of the question.
  *
  * The toll state machine, on a matched call:
  *
@@ -203,85 +220,202 @@ function scrybeCoverage(config, cwd) {
   return { servable: true, project: best.project.id };
 }
 
-/**
- * Enumeration or similarity?
- *
- * `search_knowledge` ranks by meaning. It cannot filter by milestone, list what
- * is assigned to someone, or count — so a census question has no semantic
- * equivalent and must not be refused. A flag that narrows a set is enumeration;
- * a free-text query, or a bare list, is similarity.
- */
-const ENUMERATION_FLAGS =
-  /--(milestone|assignee|author|mentions|label|state|json|app|template|web)\b|-(a|A|l|s|L)\s/;
-
-function isEnumeration(command) {
-  if (/--search\b/.test(command)) return false; // free text wins even beside a filter
-  return ENUMERATION_FLAGS.test(command);
-}
-
-/**
- * The same question, asked through an MCP tool instead of a shell.
- *
- * A guarded MCP call carries no command string — its arguments are structured
- * fields. Reading only `command` meant the census test never ran for these
- * tools, so `mcp__gitlab__list_issues(milestone: "26.8")` was refused exactly
- * like a bare list, and the refusal then named shell flags the caller cannot
- * use. Both halves of that are the same omission: the flag vocabulary has a
- * parameter vocabulary, and the guard only knew the first one.
- *
- * Names are unioned across the guarded GitLab tools (REST and GraphQL spell the
- * same filter differently), so one list covers all of them.
- */
-const ENUMERATION_PARAMS = new Set([
-  "milestone", "milestone_title",
-  "assignee_id", "assignee_username", "assigneeUsernames",
-  "author_id", "author_username", "authorUsername",
-  "username", // get_user_issues: "everything assigned to X" is a census
-  "labels", "labelNames", "label_name",
-  "iids", // naming the exact issues wanted is the narrowest census of all
-  "state", "scope", "issue_type", "types",
-  "iteration_id", "mentions", "confidential", "due_date",
-  "created_after", "created_before", "updated_after", "updated_before",
-]);
-
-/** Free text asked as a parameter. Wins over a filter, exactly as `--search` does. */
+/** Free text asked as a structured MCP parameter. */
 const SEARCH_PARAMS = ["search", "searchTerm", "search_term", "query"];
 
 /**
- * Sentinels that name the whole set rather than narrowing it. `state: "all"` is
- * the default of one guarded tool, so accepting it would make a census out of a
- * parameter the caller never chose — a one-key bypass of the guard.
+ * A minimal quote-aware word splitter for shell command strings. Good enough to
+ * pull flag values and positional arguments back out; not a full POSIX shell
+ * parser (nested substitutions, `$()`, heredocs are out of scope — the guarded
+ * commands never use them).
  */
-const WIDENING_VALUES = new Set(["all", "any"]);
-
-function narrowsTheSet(name, value) {
-  if (value === null || value === undefined) return false;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return false;
-    return !WIDENING_VALUES.has(trimmed.toLowerCase());
+function tokenize(command) {
+  const tokens = [];
+  let i = 0;
+  while (i < command.length) {
+    while (i < command.length && /\s/.test(command[i])) i += 1;
+    if (i >= command.length) break;
+    let token = "";
+    while (i < command.length && !/\s/.test(command[i])) {
+      const ch = command[i];
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i += 1;
+        while (i < command.length && command[i] !== quote) {
+          if (quote === '"' && command[i] === "\\") {
+            token += command[i + 1];
+            i += 2;
+            continue;
+          }
+          token += command[i];
+          i += 1;
+        }
+        i += 1; // skip closing quote
+      } else if (ch === "\\") {
+        token += command[i + 1];
+        i += 2;
+      } else {
+        token += ch;
+        i += 1;
+      }
+    }
+    tokens.push(token);
   }
-  if (Array.isArray(value)) return value.some((item) => narrowsTheSet(name, item));
-  if (typeof value === "boolean" || typeof value === "number") return true;
-  return false;
+  return tokens;
+}
+
+/** True when the command carries `--help` or a standalone `-h`. Never guarded. */
+function hasHelpFlag(command) {
+  if (typeof command !== "string" || !command) return false;
+  const tokens = tokenize(command);
+  return tokens.includes("--help") || tokens.includes("-h");
 }
 
 /**
- * Enumeration or similarity, decided from structured parameters.
+ * Value-taking flags recognised by `gh search issues` — the ONLY flags that
+ * consume the next token as an argument. Every other flag, known or unknown,
+ * consumes nothing.
  *
- * Scoping and paging (`project_id`, `projectPath`, `fullPath`, `per_page`,
- * `first`, `after`, `sort`) are deliberately absent from ENUMERATION_PARAMS: a
- * bare list of one project is still a bare list, and must stay refused.
+ * This is deliberately an allowlist of what DOES eat a token, not a list of
+ * what doesn't. The previous shape (a boolean/no-value set) had the polarity
+ * backwards: any flag absent from that set — a short form like `-w`, or a
+ * future/unrecognised long flag like `--xyz` — silently ate the next token,
+ * so `gh search issues -w crash` swallowed the query and was wrongly
+ * allowed. Every flag gh ever adds, and every short alias, would have been a
+ * new hole. On a command whose only purpose is searching, an unrecognised
+ * flag must never be able to swallow a query term — erring toward refusal
+ * (treating an unknown flag's value as a leftover positional term, and thus
+ * denying) is the safe failure mode here, not the alternative.
  */
-function isEnumerationParams(toolInput) {
-  if (!toolInput || typeof toolInput !== "object") return false;
+const GH_SEARCH_ISSUES_VALUE_FLAGS = new Set([
+  "--app",
+  "--assignee",
+  "--author",
+  "--closed",
+  "--commenter",
+  "--comments",
+  "--created",
+  "--involves",
+  "--interactions",
+  "--json",
+  "--jq",
+  "-q",
+  "--label",
+  "--language",
+  "--limit",
+  "-L",
+  "--match",
+  "--mentions",
+  "--merged",
+  "--milestone",
+  "--order",
+  "--owner",
+  "--project",
+  "--reactions",
+  "--repo",
+  "-R",
+  "--sort",
+  "--state",
+  "--team-mentions",
+  "--template",
+  "-t",
+  "--updated",
+  "--visibility",
+]);
+
+/**
+ * The free-text query carried by a shell command, or "" if none.
+ *
+ * Two shapes: `-S <q>` / `-S<q>` / `--search <q>` / `--search=<q>` (the gh
+ * CLI's own flag, both the spaced and attached short-flag forms), and the
+ * positional terms of `gh search issues <terms...>` scanned across the WHOLE
+ * remainder of the command, skipping flags and their values rather than
+ * stopping at the first one.
+ */
+function extractFreeTextShell(command) {
+  if (typeof command !== "string" || !command) return "";
+  const tokens = tokenize(command);
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i];
+    if (t === "-S" || t === "--search") {
+      return i + 1 < tokens.length ? tokens[i + 1] : "";
+    }
+    if (t.startsWith("--search=")) return t.slice("--search=".length);
+    if (t.startsWith("-S") && t.length > 2) return t.slice(2);
+  }
+
+  for (let i = 0; i + 2 < tokens.length; i += 1) {
+    if (tokens[i] === "gh" && tokens[i + 1] === "search" && tokens[i + 2] === "issues") {
+      const terms = [];
+      let endOfOptions = false;
+      for (let j = i + 3; j < tokens.length; j += 1) {
+        const t = tokens[j];
+        if (!endOfOptions && t === "--") {
+          endOfOptions = true;
+          continue;
+        }
+        if (!endOfOptions && t.startsWith("-")) {
+          if (t.includes("=")) continue; // self-contained, e.g. --limit=5
+          if (t.length > 2 && !t.startsWith("--")) continue; // attached short value, e.g. -Rcli/cli, -L5
+          const next = j + 1 < tokens.length ? tokens[j + 1] : undefined;
+          if (GH_SEARCH_ISSUES_VALUE_FLAGS.has(t) && next !== undefined && !next.startsWith("-")) {
+            j += 1; // consume the value
+          }
+          continue;
+        }
+        terms.push(t);
+      }
+      return terms.join(" ");
+    }
+  }
+  return "";
+}
+
+/**
+ * Coerces one MCP parameter value to the free text it carries.
+ *
+ * A string is used as-is. An array contributes its string/number elements
+ * joined by a space (other element types are skipped, not stringified — an
+ * object or null inside the array is not text). A number contributes its
+ * decimal string. `null`, `undefined`, booleans, and plain objects carry no
+ * free text.
+ */
+function coerceFreeText(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) {
+    return value
+      .filter((el) => typeof el === "string" || (typeof el === "number" && Number.isFinite(el)))
+      .map((el) => String(el))
+      .join(" ");
+  }
+  return "";
+}
+
+/** The free-text query carried by a structured MCP call, or "" if none. */
+function extractFreeTextParams(toolInput) {
+  if (!toolInput || typeof toolInput !== "object") return "";
   for (const key of SEARCH_PARAMS) {
-    if (typeof toolInput[key] === "string" && toolInput[key].trim()) return false;
+    const text = coerceFreeText(toolInput[key]);
+    if (text.trim()) return text;
   }
-  for (const [key, value] of Object.entries(toolInput)) {
-    if (ENUMERATION_PARAMS.has(key) && narrowsTheSet(key, value)) return true;
-  }
-  return false;
+  return "";
+}
+
+/**
+ * A query counts as free text only if at least one whitespace-separated token
+ * has no `:`. `gh issue list -S "no:assignee sort:created-asc"` is gh's own
+ * documented example of a qualifier-only query — it contains no keywords,
+ * semantic search cannot help with it, and refusing it is a false refusal.
+ * `"crash on save"` has bare tokens (free text). `"crash no:assignee"` has one
+ * bare token (free text). `"no:assignee sort:created-asc"` has none (not free
+ * text).
+ */
+function isBareTextQuery(query) {
+  const trimmed = String(query ?? "").trim();
+  if (!trimmed) return false;
+  return trimmed.split(/\s+/).some((token) => !token.includes(":"));
 }
 
 /** Filesystem-safe fragment of a session id. */
@@ -378,22 +512,18 @@ function banReason(guard, project, surface = "shell") {
     "silent, and it is what this prevents.",
   ];
 
-  // Under `auto`, census questions really are allowed, and saying so is the
-  // difference between a guard and a dead end. Naming the route also makes it
-  // checkable: an enumeration must be expressed as one in the command itself.
+  // Under `auto`, listing is always allowed — with or without a narrowing
+  // filter such as --milestone. Only a keyword search is refused, so the
+  // escape is to drop the free-text keywords, not to add a filter.
   if (guard.action === "auto") {
-    // The escape must be one the CALLER can take. Naming shell flags to a tool
-    // call is the same dead end as naming no route at all: the agent reads an
-    // allowance it has no way to express, and the guard becomes an unconditional
-    // ban for that whole surface.
     lines.push(
       "",
-      "If you need a CENSUS rather than a match — everything in a milestone, everything",
-      "assigned to someone, a count — semantic search cannot do that, and this guard does",
-      "not block it.",
+      "Listing is not blocked, with or without a filter (--milestone, --assignee, --label,",
+      "--state, or the equivalent parameter). A qualifier-only search (e.g. -S \"no:assignee",
+      'sort:created-asc") is not blocked either — only free-text keywords are.',
       surface === "params"
-        ? "Re-run this same tool with the parameter that says so (milestone, assignee_username, labels, state, or the equivalent this tool accepts) and it will run."
-        : "Re-run with the filter that says so (--milestone, --assignee, --label, --state) and it will run."
+        ? "Drop the search/query parameter, or use search_knowledge above instead."
+        : "Drop the keyword text, or use search_knowledge above instead."
     );
   } else {
     lines.push(
@@ -465,27 +595,27 @@ function emit(payload) {
 }
 
 /**
- * Deny only when Scrybe can actually answer the question. Everything else runs.
+ * Deny if and only if the call is a keyword search over issues AND Scrybe can
+ * actually answer the semantic version of the question. Everything else runs —
+ * a bare list, a list narrowed by a filter, a qualifier-only query, `--help`.
  *
- * Under test: whether a guard that opens for census questions, unindexed repos
- * and stale indexes still holds the line on duplicate-hunting, or whether the
- * opening is simply the way around it. Not the shipped default.
+ * "Keyword search" is decided two ways: a guard flagged `search_only: true`
+ * (the tool has no purpose but keyword search, so any match is one — e.g.
+ * `mcp__gitlab-gql__search_notes`) or a non-empty free-text query, per
+ * `isBareTextQuery`. A qualifier-only query (`no:assignee sort:created-asc`)
+ * is not free text: semantic search cannot help with it either, so refusing it
+ * would strand the caller with no route at all.
  */
 function handleAuto(config, guard, command, cwd, toolInput) {
-  // A shell call is read from its command text; a tool call from its parameters.
-  // Both surfaces get the same census test, and each is told the route it can use.
-  //
-  // The axis is the ABSENCE OF A COMMAND, not a `mcp__` prefix on the tool name.
-  // That is deliberate, and safe for a reason worth stating rather than
-  // rediscovering: absence never allows on its own. The allow still needs a
-  // POSITIVE match on a narrowing parameter, so a payload that arrives
-  // malformed or truncated — command field lost, parameters lost, or both —
-  // produces no match and falls through to the refusal, never to an allowance.
-  // A name check would behave identically today and would miss any future
-  // structured surface, so do not "harden" this into one.
+  // A shell call is read from its command text; a tool call from its
+  // structured parameters. Both surfaces get the same keyword-search test.
   const surface = typeof command === "string" && command ? "shell" : "params";
-  const enumeration = surface === "shell" ? isEnumeration(command) : isEnumerationParams(toolInput);
-  if (enumeration) return "allow-enumeration";
+
+  if (surface === "shell" && hasHelpFlag(command)) return "allow-help";
+
+  const freeText = surface === "shell" ? extractFreeTextShell(command) : extractFreeTextParams(toolInput);
+  const isKeywordSearch = guard.search_only === true || isBareTextQuery(freeText);
+  if (!isKeywordSearch) return "allow-not-keyword-search";
 
   const coverage = scrybeCoverage(config, cwd);
   if (!coverage.servable) return `allow-${coverage.reason}`;
