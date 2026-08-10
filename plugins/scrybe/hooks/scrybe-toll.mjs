@@ -60,7 +60,7 @@
  * beside this file; <SCRYBE_DATA_DIR>/toll.json overrides them.
  */
 
-import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, constants as fsConstants, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -444,9 +444,18 @@ function markerAge(path) {
   }
 }
 
+/**
+ * O_NOFOLLOW refuses to write through a symlink planted at this predictable
+ * path ahead of time (the tmp dir is shared across users on POSIX systems).
+ * Undefined on Windows, where it folds to 0 in the bitwise OR and the flag
+ * has no effect — the write behaves exactly as before there.
+ */
+const TOUCH_FLAGS =
+  fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0);
+
 function touch(path) {
   try {
-    writeFileSync(path, String(Date.now()));
+    writeFileSync(path, String(Date.now()), { flag: TOUCH_FLAGS });
     return true;
   } catch {
     return false;
