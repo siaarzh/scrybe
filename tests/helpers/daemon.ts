@@ -5,12 +5,163 @@
  */
 import { spawn, spawnSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import http from "node:http";
+import { dirname, join } from "path";
+import { fileURLToPath } from "node:url";
 import { DaemonClient } from "../../src/daemon/client.js";
 import type { DaemonEvent } from "../../src/daemon/client.js";
 import type { TempProject } from "./project.js";
 
 export type { DaemonEvent };
+
+// ─── Fake daemon (a real HTTP server, never a real scrybe daemon) ─────────────
+//
+// One implementation, shared. There used to be four near-copies of this across
+// tests/ and they had already drifted apart (different health shapes, some with
+// no /clients/unregister route, some unable to flip readiness at all), so a
+// scenario written against one copy's behaviour said nothing about the others.
+
+/** The version this checkout reports — what a same-version daemon must claim. */
+export const PACKAGE_VERSION = (
+  JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf8")
+  ) as { version: string }
+).version;
+
+export interface FakeDaemonTool {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+}
+
+export interface FakeDaemonOptions {
+  /** Tools reported by `/mcp/manifest`. Default: `queue_status` + `list_projects`. */
+  tools?: FakeDaemonTool[];
+  /** `daemon_version` reported by `/mcp/manifest` and `/health`. Default: this package's version. */
+  daemonVersion?: string;
+  /** Whether `/health` answers 200 at start; `false` answers 503. Default true. */
+  initialHealthy?: boolean;
+  /** Replaces the whole `/mcp/manifest` body (wins over `tools`/`daemonVersion`). */
+  manifestOverride?: unknown;
+  /** Builds the `/mcp/rpc` response body. Default echoes `{ id, result: { ok: true, method } }`. */
+  rpcHandler?: (body: unknown) => unknown;
+  /** Builds the `/health` 200 body. Default `{ ready, version, uptimeMs, pid }`. */
+  healthHandler?: () => unknown | Promise<unknown>;
+  /** Pins `/health` to a status code (e.g. 503), overriding `initialHealthy`/`setHealthy`. */
+  healthStatus?: number;
+}
+
+export interface FakeDaemon {
+  port: number;
+  /** Flip `/health` between 200 (ready) and 503 (not ready) without recycling the port. */
+  setHealthy: (healthy: boolean) => void;
+  /** Replace the tool set `/mcp/manifest` reports, from the next fetch onward. */
+  setTools: (tools: FakeDaemonTool[]) => void;
+  /**
+   * Make exactly the NEXT `POST /mcp/rpc` answer 503 `{ draining: true }`, then
+   * go back to normal. That is `isDrainingError`'s trigger: a daemon that is
+   * reachable and otherwise healthy but rejects one in-flight call because it
+   * is finishing up and going away.
+   */
+  drainNextRpc: () => void;
+  /** `GET /health` requests served so far — how a background poller is observed. */
+  healthHitCount: () => number;
+  close: () => Promise<void>;
+}
+
+const DEFAULT_FAKE_TOOLS: FakeDaemonTool[] = [
+  { name: "queue_status", description: "Show queue status", inputSchema: { type: "object", properties: {}, required: [] } },
+  { name: "list_projects", description: "List projects", inputSchema: { type: "object", properties: {}, required: [] } },
+];
+
+/**
+ * Starts an in-process HTTP server that answers the daemon endpoints the MCP
+ * shim uses: `/health`, `/mcp/manifest`, `/mcp/rpc`, `/clients/heartbeat` and
+ * `/clients/unregister`. Binds an ephemeral port on 127.0.0.1.
+ */
+export function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<FakeDaemon> {
+  let healthy = opts.initialHealthy ?? true;
+  let tools = opts.tools ?? DEFAULT_FAKE_TOOLS;
+  let manifestOverride = opts.manifestOverride;
+  let healthHits = 0;
+  let drainNext = false;
+  const daemonVersion = opts.daemonVersion ?? PACKAGE_VERSION;
+  const rpcHandler =
+    opts.rpcHandler ??
+    ((body: unknown) => {
+      const req = body as { id: unknown; method: string };
+      return { id: req.id, result: { ok: true, method: req.method } };
+    });
+  const healthHandler =
+    opts.healthHandler ??
+    (() => ({ ready: true, version: daemonVersion, uptimeMs: 1000, pid: process.pid }));
+
+  function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
+    const data = JSON.stringify(payload);
+    res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) });
+    res.end(data);
+  }
+
+  return new Promise((resolve, reject) => {
+    const server = http.createServer(async (req, res) => {
+      const method = req.method?.toUpperCase() ?? "GET";
+      const url = new URL(req.url ?? "/", "http://localhost");
+
+      if (url.pathname === "/health" && method === "GET") {
+        healthHits++;
+        const status = opts.healthStatus ?? (healthy ? 200 : 503);
+        if (status !== 200) {
+          sendJson(res, status, { error: "service unavailable" });
+          return;
+        }
+        sendJson(res, 200, await healthHandler());
+        return;
+      }
+
+      if (url.pathname === "/mcp/manifest" && method === "GET") {
+        // Read `tools` fresh on every request (not captured once at startup)
+        // so setTools() can change what a LATER manifest fetch reports.
+        sendJson(res, 200, manifestOverride ?? { daemon_version: daemonVersion, tools });
+        return;
+      }
+
+      if (url.pathname === "/mcp/rpc" && method === "POST") {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+        if (drainNext) {
+          drainNext = false;
+          sendJson(res, 503, { draining: true });
+          return;
+        }
+        sendJson(res, 200, rpcHandler(body));
+        return;
+      }
+
+      if ((url.pathname === "/clients/heartbeat" || url.pathname === "/clients/unregister") && method === "POST") {
+        sendJson(res, 200, {});
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address() as { port: number };
+      resolve({
+        port: addr.port,
+        setHealthy: (h: boolean) => { healthy = h; },
+        setTools: (t: FakeDaemonTool[]) => { tools = t; manifestOverride = undefined; },
+        drainNextRpc: () => { drainNext = true; },
+        healthHitCount: () => healthHits,
+        close: () => new Promise<void>((res) => server.close(() => res())),
+      });
+    });
+
+    server.once("error", reject);
+  });
+}
 
 const NODE = process.execPath;
 const ENTRY = join(process.cwd(), "dist/index.js");

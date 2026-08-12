@@ -7,6 +7,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- **A session no longer loses the scrybe tools when the daemon is cold.** The MCP server used to wait for the daemon before answering the connection handshake, so a cold start could exceed the client's connect timeout and leave the session with no scrybe tools at all — and no error explaining why. The handshake is now answered immediately, and the daemon is resolved when the tool list is first requested instead.
+- **The tool surface now upgrades itself once the daemon is ready, within a bounded window.** If the daemon is still starting when a session connects, scrybe serves its offline tools (`status`, `doctor`, `init`) and swaps in the full tool list as soon as the daemon answers — no reconnect needed. This self-upgrade runs in the background for up to `SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS` (5 minutes by default); a session that then sits fully idle past that window stops being watched, but the very next tool call it makes still picks up the change. Previously a cold session stayed limited until you reconnected manually, with no self-upgrade at all.
+- Closed a local symlink-based file-write hazard in the Claude Code plugin's search-guard hook: it wrote a marker file to a predictable path in the shared OS temp directory, which could be made to follow a pre-planted symlink onto an arbitrary file.
+- A session talking to a daemon too old for it (the pre-0.34.0 lancedb boundary, or a major-version mismatch) now notices when that daemon is restarted on a compatible version, instead of staying stuck for the rest of the session.
+
 ---
 
 ## [0.50.0] — 2026-08-09

@@ -105,7 +105,7 @@ When called from the 3-tool degraded toolset (daemon not running), `init` first 
 ```json
 { "ok": true, "status": "daemon_started", "message": "..." }
 ```
-Tell the user to **reconnect their MCP client** (e.g. reload the Claude Code window), then call `init` again with provider settings from the healthy toolset.
+The tool surface upgrades itself automatically once the daemon is ready — no reconnect needed. Wait a few seconds, then call `init` again with provider settings.
 
 If the daemon cannot auto-start and config is missing, the response will be:
 ```json
@@ -170,7 +170,7 @@ After `phase: "done"`, call `status` once more to confirm:
 
 Then tell the user: "scrybe is set up and ready. You can now use `search_code`, `search_knowledge`, and all other scrybe tools."
 
-If the setup was completed in a degraded session (3-tool toolset), remind the user to reconnect their MCP client to get the full tool surface.
+If setup was completed in a degraded session (3-tool toolset), no action is needed — the tool surface upgrades itself to the full toolset automatically once the daemon is ready.
 
 ---
 
@@ -178,5 +178,5 @@ If the setup was completed in a degraded session (3-tool toolset), remind the us
 
 - **Local provider** (`code_provider: "local"`) is the default recommendation — no API key, works offline after the one-time model download.
 - **Progress is always visible**: polling `reindex_status` always returns the current `phase` and `percent` — narrate this to the user rather than saying "please wait."
-- **Reconnect after degraded init**: the 3-tool toolset is served by the shim when the daemon is unavailable. After the daemon starts (via `init` or manually), the client must reconnect to load the full tool manifest.
+- **The tool surface upgrades itself**: the 3-tool toolset is served by the shim when the daemon is unavailable. Once the daemon starts (via `init` or manually), the full tool manifest loads on its own within a bounded window — no reconnect required.
 - **Re-running `init`**: safe at any time. Without `reconfigure: true`, it returns `"status": "already_configured"` if a valid config exists. With `reconfigure: true`, it overwrites and re-validates.
