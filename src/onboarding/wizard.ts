@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync, readFileSync, mkdirSync } from "fs";
+import { existsSync, writeFileSync, readFileSync, mkdirSync, openSync, writeSync, closeSync, constants as fsConstants } from "fs";
 import { join, resolve, basename } from "path";
 import * as p from "@clack/prompts";
 import { formatProgressLine, updateThroughput } from "./progress-renderer.js";
@@ -10,6 +10,15 @@ export interface WizardOptions {
 }
 
 // ─── Env-file writer ──────────────────────────────────────────────────────────
+
+// O_NOFOLLOW refuses to write through a symlink planted at this predictable
+// path ahead of time — the same TOCTOU/symlink class as the scrybe-toll.mjs
+// touch() fix. This path holds live secrets (API keys), so a race that
+// redirects the write is worth closing even though dataDir is normally
+// user-owned, not a shared temp dir. Undefined on Windows, where it folds to
+// 0 in the bitwise OR and the flag has no effect — behavior there unchanged.
+const ENV_WRITE_FLAGS =
+  fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0);
 
 /**
  * Merge `vars` into `<dataDir>/.env`. Preserves existing unrelated keys and
@@ -56,7 +65,15 @@ export function writeEnvFile(dataDir: string, vars: Record<string, string>): voi
 
   // Ensure single trailing newline
   const content = lines.map((l) => l.raw).join("\n").replace(/\n+$/, "") + "\n";
-  writeFileSync(envPath, content, "utf8");
+  // openSync + writeSync on the resulting fd (rather than writeFileSync's
+  // string-only `flag` option) so O_NOFOLLOW can be passed as the numeric
+  // flag combo — writeFileSync's TS typing only accepts a string here.
+  const fd = openSync(envPath, ENV_WRITE_FLAGS);
+  try {
+    writeSync(fd, content, null, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
