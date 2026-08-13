@@ -7,12 +7,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.51.0] — 2026-08-13
+
+### Added
+
+- Two settings tune the background watch that upgrades a cold session's tool list: `SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS` (default 2000) and `SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS` (default 300000).
+
 ### Fixed
 
-- **A session no longer loses the scrybe tools when the daemon is cold.** The MCP server used to wait for the daemon before answering the connection handshake, so a cold start could exceed the client's connect timeout and leave the session with no scrybe tools at all — and no error explaining why. The handshake is now answered immediately, and the daemon is resolved when the tool list is first requested instead.
-- **The tool surface now upgrades itself once the daemon is ready, within a bounded window.** If the daemon is still starting when a session connects, scrybe serves its offline tools (`status`, `doctor`, `init`) and swaps in the full tool list as soon as the daemon answers — no reconnect needed. This self-upgrade runs in the background for up to `SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS` (5 minutes by default); a session that then sits fully idle past that window stops being watched, but the very next tool call it makes still picks up the change. Previously a cold session stayed limited until you reconnected manually, with no self-upgrade at all.
+- **A session no longer loses the scrybe tools when the daemon is cold.** The MCP server used to wait for the daemon before answering the connection handshake. On a cold start that wait could exceed the client's connect timeout, and the session ended up with no scrybe tools and no error saying why. The handshake is now answered immediately, and the daemon is resolved when the tool list is first requested.
+- **The tool surface upgrades itself once the daemon is ready.** If the daemon is still starting when a session connects, scrybe serves its offline tools (`status`, `doctor`, `init`) and swaps in the full list as soon as the daemon answers. No reconnect needed. The background watch runs for up to five minutes; a session left idle past that stops being watched, but its next tool call still picks up the change.
+- A session talking to a daemon too old for it now notices when that daemon is restarted on a compatible version, instead of staying stuck for the rest of the session.
 - Closed a local symlink-based file-write hazard in the Claude Code plugin's search-guard hook: it wrote a marker file to a predictable path in the shared OS temp directory, which could be made to follow a pre-planted symlink onto an arbitrary file.
-- A session talking to a daemon too old for it (the pre-0.34.0 lancedb boundary, or a major-version mismatch) now notices when that daemon is restarted on a compatible version, instead of staying stuck for the rest of the session.
 
 ---
 
@@ -91,25 +99,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.46.3] — 2026-07-22
-
-### Fixed
-
-- MCP tool calls with invalid, missing, or misspelled arguments now return a specific error naming the offending field — e.g. an unknown `project_ids` suggests `project_id` — instead of a generic `internal error`. Genuine internal faults stay masked.
-- `search_code` / `search_knowledge` now surface "project/source not found" and "no matching sources" messages to the caller instead of masking them as `internal error`.
-
----
-
 ## Older releases
 
-For releases v0.46.2 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.46.3 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.50.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.51.0...HEAD
+[0.51.0]: https://github.com/siaarzh/scrybe/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/siaarzh/scrybe/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/siaarzh/scrybe/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/siaarzh/scrybe/compare/v0.47.1...v0.48.0
 [0.47.1]: https://github.com/siaarzh/scrybe/compare/v0.47.0...v0.47.1
 [0.47.0]: https://github.com/siaarzh/scrybe/compare/v0.46.3...v0.47.0
-[0.46.3]: https://github.com/siaarzh/scrybe/compare/v0.46.2...v0.46.3
