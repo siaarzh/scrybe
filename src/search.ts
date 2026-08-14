@@ -11,7 +11,7 @@ import {
 } from "./vector-store.js";
 import { rerank } from "./reranker.js";
 import { resolveBranch, getChunkIdsForBranch, getBranchesForChunks, resolveBranchForSearch } from "./branch-state.js";
-import type { SearchResult, KnowledgeSearchResult, Source } from "./types.js";
+import type { EmbeddingConfig, SearchResult, KnowledgeSearchResult, Source } from "./types.js";
 import { markCallerFacing } from "./daemon/caller-error.js";
 
 const MAX_RERANK_CANDIDATES = 500;
@@ -65,6 +65,45 @@ function getKnowledgeSources(sources: Source[]): Source[] {
   });
 }
 
+/**
+ * Stable, non-secret identity of the settings that determine a query vector.
+ *
+ * Query vectors can be shared only within one search invocation: an API-backed
+ * provider may change its model between requests, so this deliberately does
+ * not retain vectors across calls. `api_key_env` is the environment-variable
+ * name, never the credential itself.
+ */
+function queryEmbeddingConfigKey(embedding: EmbeddingConfig): string {
+  return JSON.stringify({
+    base_url: embedding.base_url,
+    model: embedding.model,
+    dimensions: embedding.dimensions,
+    api_key_env: embedding.api_key_env,
+    provider_type: embedding.provider_type,
+    prompt_template: embedding.prompt_template,
+    max_input_tokens: embedding.max_input_tokens,
+  });
+}
+
+/**
+ * Reuse an in-flight query embedding across parallel sources with the same
+ * resolved embedding configuration. Storing the promise before awaiting it
+ * also shares a provider failure consistently across those sources.
+ */
+function embedQueryOnce(
+  query: string,
+  embedding: EmbeddingConfig,
+  cache: Map<string, Promise<number[]>>
+): Promise<number[]> {
+  const key = queryEmbeddingConfigKey(embedding);
+  const existing = cache.get(key);
+  if (existing) return existing;
+
+  const pending = embedQuery(query, embedding);
+  cache.set(key, pending);
+  return pending;
+}
+
 export interface SearchCodeOptions {
   /** Max results to return (default: 10). */
   limit?: number;
@@ -104,6 +143,7 @@ export async function searchCode(
   const fetchCount = config.rerankEnabled
     ? Math.min(topK * config.rerankFetchMultiplier, MAX_RERANK_CANDIDATES)
     : topK;
+  const queryEmbeddings = new Map<string, Promise<number[]>>();
 
   // Fan out across all code sources in parallel
   const allResults = await Promise.all(
@@ -141,7 +181,7 @@ export async function searchCode(
           }
         }
 
-        const queryVec = await embedQuery(query, embConfig);
+        const queryVec = await embedQueryOnce(query, embConfig, queryEmbeddings);
 
         let results: SearchResult[];
         if (!config.hybridEnabled) {
@@ -218,6 +258,7 @@ export async function searchKnowledge(
   const fetchCount = config.rerankEnabled
     ? Math.min(topK * config.rerankFetchMultiplier, MAX_RERANK_CANDIDATES)
     : topK;
+  const queryEmbeddings = new Map<string, Promise<number[]>>();
 
   // Fan out across matching knowledge sources in parallel
   const allResults = await Promise.all(
@@ -226,7 +267,7 @@ export async function searchKnowledge(
       .map(async (source) => {
         const embConfig = resolveEmbeddingConfig(source);
         const tableName = source.table_name!;
-        const queryVec = await embedQuery(query, embConfig);
+        const queryVec = await embedQueryOnce(query, embConfig, queryEmbeddings);
 
         let results: KnowledgeSearchResult[];
         if (!config.hybridEnabled) {

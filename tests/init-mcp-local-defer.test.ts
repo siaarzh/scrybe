@@ -194,3 +194,44 @@ describe("init — local provider with no registered projects", () => {
     expect(validateLocalMock).not.toHaveBeenCalled();
   });
 });
+
+describe("init — custom provider response encoding", () => {
+  it("persists float encoding for custom code and text presets", async () => {
+    mockValidateProvider(true);
+
+    vi.doMock("../src/daemon/client.js", () => ({
+      ensureRunning: vi.fn().mockResolvedValue({ ok: false }),
+      DaemonClient: { fromPidfile: vi.fn().mockReturnValue(null) },
+    }));
+    vi.doMock("../src/jobs.js", () => ({
+      submitSourceJob: vi.fn().mockReturnValue("fake-job-id"),
+    }));
+
+    await registerProject("proj-custom");
+
+    const tool = await loadInitTool();
+    const result = await tool.handler({
+      code_provider: "custom",
+      code_model: "local-qwen",
+      code_api_key: "not-needed",
+      code_base_url: "http://127.0.0.1:11480/v1",
+      code_dim: 1024,
+      code_encoding_format: "float",
+      text_provider: "custom",
+      text_model: "local-qwen",
+      text_api_key: "not-needed",
+      text_base_url: "http://127.0.0.1:11480/v1",
+      text_dim: 1024,
+      text_encoding_format: "float",
+    });
+
+    expect(result.ok).toBe(true);
+    const { readScrybeConfig } = await import("../src/config.js");
+    const cfg = readScrybeConfig();
+    expect(cfg).not.toBeNull();
+    const codePreset = cfg!.embedding_presets[cfg!.assignments.code_preset];
+    const textPreset = cfg!.embedding_presets[cfg!.assignments.text_preset];
+    expect(codePreset?.encoding_format).toBe("float");
+    expect(textPreset?.encoding_format).toBe("float");
+  });
+});

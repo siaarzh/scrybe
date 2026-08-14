@@ -13,6 +13,12 @@ export interface EmbeddingConfig {
    */
   prompt_template?: { query: string; passage: string };
   /**
+   * Optional OpenAI embeddings response encoding. Keep unset for the SDK's
+   * base64 default; set to "float" for compatible local servers that return
+   * JSON float arrays rather than base64.
+   */
+  encoding_format?: "float" | "base64";
+  /**
    * Per-preset maximum input token budget (Plan 77).
    * When set, derives a char cap of `max_input_tokens * 4` (heuristic).
    * The chunker uses this to prevent oversized chunks; the embedder applies it
