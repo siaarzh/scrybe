@@ -59,16 +59,11 @@ export const statusTool: Tool<Record<string, never>, StatusOutput> = {
 
   handler: async () => {
     // Lazy-load all state sources to avoid forcing heavy modules at parse time
-    const { config, VERSION, readScrybeConfig } = await import("../config.js");
+    const { VERSION } = await import("../config.js");
+    const { configuredEmbeddingStatus } = await import("../embedding-status.js");
     const { readPidfile, isDaemonRunning } = await import("../daemon/pidfile.js");
 
-    // Config presence
-    const configObj = readScrybeConfig();
-    const configPresent = configObj !== null;
-
-    // Config error
-    const configError = !!config.embeddingConfigError;
-    const configErrorMessage = config.embeddingConfigError ?? null;
+    const embeddingStatus = configuredEmbeddingStatus();
 
     // Daemon state (quick: pid alive check only, no HTTP probe)
     const pidData = readPidfile();
@@ -101,18 +96,11 @@ export const statusTool: Tool<Record<string, never>, StatusOutput> = {
 
     return {
       version: VERSION,
-      config_present: configPresent,
       daemon_running: daemonRunning,
       daemon_pid: daemonPid,
       daemon_port: daemonPort,
       daemon_version: daemonVersion,
-      code_provider_type: config.embeddingProviderType,
-      code_model: config.embeddingModel,
-      text_provider_type: config.textEmbeddingProviderType,
-      text_model: config.textEmbeddingModel,
-      api_key_present: !!config.embeddingApiKey,
-      config_error: configError,
-      config_error_message: configErrorMessage,
+      ...embeddingStatus,
     };
   },
 };
