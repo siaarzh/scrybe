@@ -81,6 +81,7 @@ function queryEmbeddingConfigKey(embedding: EmbeddingConfig): string {
     api_key_env: embedding.api_key_env,
     provider_type: embedding.provider_type,
     prompt_template: embedding.prompt_template,
+    encoding_format: embedding.encoding_format,
     max_input_tokens: embedding.max_input_tokens,
   });
 }

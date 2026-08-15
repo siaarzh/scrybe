@@ -121,6 +121,19 @@ describe("searchCode query embedding fan-out", () => {
     expect(embedQuery).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps embeddings separate when only the response encoding changes", async () => {
+    state.project = { id: "code-project", sources: [source("one", "code"), source("two", "code")] };
+    state.configs.set("one", embeddingConfig({ encoding_format: "float" }));
+    state.configs.set("two", embeddingConfig({ encoding_format: "base64" }));
+
+    const { searchCode } = await import("../src/search.js");
+    const { embedQuery } = await import("../src/embedder.js");
+    const results = await searchCode("find API authentication", "code-project");
+
+    expect(results).toHaveLength(2);
+    expect(embedQuery).toHaveBeenCalledTimes(2);
+  });
+
   it("does not retain a query vector after the search completes", async () => {
     state.project = { id: "code-project", sources: [source("one", "code"), source("two", "code")] };
     for (const sourceId of ["one", "two"]) state.configs.set(sourceId, embeddingConfig());
