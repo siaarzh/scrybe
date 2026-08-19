@@ -320,7 +320,7 @@ Daemon logs this for per-client tracing. Not required, but recommended for debug
 
 ## DaemonClient (Contract 15)
 
-`src/daemon/client.ts` exports a typed TS client for use by the VS Code extension (M-D3) and test helpers:
+`src/daemon/client.ts` exports a typed TS client for use by the VS Code extension and test helpers:
 
 ```ts
 import { DaemonClient } from "./src/daemon/client.js";
@@ -445,7 +445,7 @@ The same path also fires on a new commit on the current branch (`branchChanged: 
 
 ---
 
-## Architecture notes for M-D3 (VS Code extension)
+## Architecture notes for VS Code extension
 
 - **Spawn pattern:** extension should spawn `scrybe daemon start` detached (`stdio: "ignore"`, `unref()`). Daemon survives VS Code close.
 - **Port discovery:** read `<DATA_DIR>/daemon.pid` for the port. Do not fall back to the `SCRYBE_DAEMON_PORT` env var — the daemon may not be bound to it (fallback ports, or a reserved-port failure).

@@ -186,7 +186,7 @@ Architecture, autostart, and pinned branches: [docs/daemon.md](docs/daemon.md).
 
 ## Contributing
 
-See [docs/contributing.md](docs/contributing.md) for running tests locally and adding new ones.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for running tests locally and adding new ones.
 
 ## License
 
