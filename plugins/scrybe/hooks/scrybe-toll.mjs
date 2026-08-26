@@ -455,7 +455,11 @@ const TOUCH_FLAGS =
 
 function touch(path) {
   try {
-    writeFileSync(path, String(Date.now()), { flag: TOUCH_FLAGS });
+    // mode 0o600 keeps the marker unreadable by other users on a shared tmp
+    // dir (js/insecure-temporary-file) — O_NOFOLLOW above already stops a
+    // planted symlink; this closes the separate "other users can read it"
+    // gap. umask can still narrow this further but never widen it.
+    writeFileSync(path, String(Date.now()), { flag: TOUCH_FLAGS, mode: 0o600 });
     return true;
   } catch {
     return false;
