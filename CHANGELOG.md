@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, if the daemon's usual port had been reserved by another component (Hyper-V, WSL), it could fail to start with a bare, unhelpful error. It now starts on another port instead, and `doctor` reports when that has happened.
+
 ---
 
 ## [0.49.0] — 2026-08-05

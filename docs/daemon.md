@@ -11,7 +11,7 @@ scrybe daemon start
         ↓
 src/daemon/main.ts          ← long-running process, pidfile, signal handlers
         ↓
-src/daemon/http-server.ts   ← HTTP API on 127.0.0.1:58451 (ephemeral fallback)
+src/daemon/http-server.ts   ← HTTP API on 127.0.0.1:58451 (fallback port if taken/reserved)
         ↓ events
 @parcel/watcher             ← FS watcher per code source (file changes → reindex)
 .git/ watcher               ← HEAD / refs changes → branch-switch + commit reindex
@@ -45,7 +45,7 @@ scrybe daemon stop
 scrybe daemon restart
 ```
 
-The daemon writes a pidfile at `<DATA_DIR>/daemon.pid` containing `{pid, port, startedAt, version, dataDir, execPath}`. The port is ephemeral if `58451` is taken — clients always read the port from the pidfile.
+The daemon writes a pidfile at `<DATA_DIR>/daemon.pid` containing `{pid, port, startedAt, version, dataDir, execPath}`. The port is ephemeral if `58451` is taken or reserved by the OS (Windows Hyper-V/WSL port exclusion ranges are a common cause) — clients always read the port from the pidfile.
 
 **One daemon per data directory.** Startup is serialised, and a daemon that finds another already responsible for its data directory exits immediately rather than coming up on a second port. Port fallback still applies to daemons on genuinely separate data directories — the data directory, not the port, is what decides whether two daemons may coexist.
 
@@ -328,7 +328,7 @@ client.close(); // abort any open SSE stream
 
 | Variable | Default | Description |
 |---|---|---|
-| `SCRYBE_DAEMON_PORT` | `58451` | Exact HTTP port to bind (no fallback). When unset, the daemon reuses its previous port from the pidfile, then the default, then an ephemeral port |
+| `SCRYBE_DAEMON_PORT` | `58451` | Exact HTTP port to bind (no fallback). If that port is unavailable — taken or reserved by the OS — the daemon fails to start rather than falling back. When unset, the daemon reuses its previous port from the pidfile, then the default, then an ephemeral port |
 | `SCRYBE_DAEMON_PIDFILE` | `<DATA_DIR>/daemon.pid` | Override pidfile location |
 | `SCRYBE_DAEMON_HOT_MS` | `60000` | HOT window duration in ms |
 | `SCRYBE_DAEMON_COLD_MULTIPLIER` | `5` | Debounce multiplier in COLD state |
@@ -429,7 +429,7 @@ The same path also fires on a new commit on the current branch (`branchChanged: 
 ## Architecture notes for M-D3 (VS Code extension)
 
 - **Spawn pattern:** extension should spawn `scrybe daemon start` detached (`stdio: "ignore"`, `unref()`). Daemon survives VS Code close.
-- **Port discovery:** read `<DATA_DIR>/daemon.pid` for the port; fall back to `SCRYBE_DAEMON_PORT` env var.
+- **Port discovery:** read `<DATA_DIR>/daemon.pid` for the port. Do not fall back to the `SCRYBE_DAEMON_PORT` env var — the daemon may not be bound to it (fallback ports, or a reserved-port failure).
 - **Focus ping:** POST `/kick` (no body) when the VS Code window gains focus to extend the HOT window.
 - **Health check on activation:** if `/health` fails, start the daemon.
 - **MCP config:** extension auto-writes `~/.claude.json` `mcpServers.scrybe` entry on first activation.
