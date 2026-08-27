@@ -4,5 +4,7 @@
   "author": {
     "name": "Serzhan Akhmetov",
     "url": "https://github.com/siaarzh"
-  }
+  },
+  "skills": ["./plugins/scrybe/skills/scrybe", "./plugins/scrybe/skills/setup"],
+  "hooks": "./plugins/scrybe/hooks/hooks.json"
 }

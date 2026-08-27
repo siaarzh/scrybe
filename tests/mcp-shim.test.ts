@@ -6,106 +6,11 @@
  *
  * Cold-boot timing test is env-guarded: skipped when CI=true or SLOW_CI=1.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import http from "node:http";
-
-// ─── Fake daemon server ──────────────────────────────────────────────────────
-
-interface FakeDaemonOpts {
-  manifestOverride?: unknown;
-  rpcHandler?: (body: unknown) => unknown;
-  healthHandler?: () => unknown | Promise<unknown>;
-  healthStatus?: number;
-}
-
-function startFakeDaemon(opts: FakeDaemonOpts = {}): Promise<{
-  port: number;
-  close: () => Promise<void>;
-}> {
-  const manifest = opts.manifestOverride ?? {
-    daemon_version: "0.32.4",
-    tools: [
-      {
-        name: "queue_status",
-        description: "Show queue status",
-        inputSchema: { type: "object", properties: {}, required: [] },
-      },
-      {
-        name: "list_projects",
-        description: "List projects",
-        inputSchema: { type: "object", properties: {}, required: [] },
-      },
-    ],
-  };
-
-  const defaultRpc = (body: unknown) => {
-    const req = body as { id: unknown; method: string };
-    return { id: req.id, result: { ok: true, method: req.method } };
-  };
-
-  const rpcHandler = opts.rpcHandler ?? defaultRpc;
-  const healthStatus = opts.healthStatus ?? 200;
-  const defaultHealth = () => ({ ready: true, version: "0.32.4", uptimeMs: 1000, pid: 12345 });
-  const healthHandler = opts.healthHandler ?? defaultHealth;
-
-  return new Promise((resolve, reject) => {
-    const server = http.createServer(async (req, res) => {
-      const method = req.method?.toUpperCase() ?? "GET";
-      const url = new URL(req.url ?? "/", "http://localhost");
-
-      if (url.pathname === "/health" && method === "GET") {
-        if (healthStatus === 200) {
-          const health = await healthHandler();
-          const data = JSON.stringify(health);
-          res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) });
-          res.end(data);
-        } else {
-          res.writeHead(healthStatus, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "service unavailable" }));
-        }
-        return;
-      }
-
-      if (url.pathname === "/mcp/manifest" && method === "GET") {
-        const data = JSON.stringify(manifest);
-        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) });
-        res.end(data);
-        return;
-      }
-
-      if (url.pathname === "/mcp/rpc" && method === "POST") {
-        const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
-        const raw = Buffer.concat(chunks).toString("utf8");
-        const body = JSON.parse(raw);
-        const result = rpcHandler(body);
-        const data = JSON.stringify(result);
-        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) });
-        res.end(data);
-        return;
-      }
-
-      if (url.pathname === "/clients/heartbeat" && method === "POST") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end("{}");
-        return;
-      }
-
-      res.writeHead(404);
-      res.end();
-    });
-
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address() as { port: number };
-      resolve({
-        port: addr.port,
-        close: () => new Promise<void>((res) => server.close(() => res())),
-      });
-    });
-
-    server.once("error", reject);
-  });
-}
+// One shared fake daemon (tests/helpers/daemon.ts) — this file used to carry
+// its own near-copy of it. See that helper for the option surface.
+import { startFakeDaemon } from "./helpers/daemon.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -715,5 +620,86 @@ describe("shim degraded toolset (daemon unavailable → 3 tools)", () => {
     for (const [key, val] of Object.entries(expectedShape)) {
       expect(expectedShape[key]).toBe(val);
     }
+  });
+});
+
+// ─── Plan 121 D1 — in-handler wait has its own, lower clamp ───────────────────
+
+describe("COLD_START_WAIT_MS — clamped by MCP_TOOLS_LIST_WAIT_CEILING_MS, not MAX_SPAWN_LOCK_HOLD_MS", () => {
+  afterEach(() => {
+    delete process.env["SCRYBE_MCP_COLD_START_WAIT_MS"];
+  });
+
+  it("a raised SCRYBE_MCP_COLD_START_WAIT_MS is clamped to the new, lower ceiling", async () => {
+    // MAX_SPAWN_LOCK_HOLD_MS (60_000) used to be the clamp — set a value
+    // between the new ceiling and that old one so this only passes if the
+    // new, lower ceiling is actually the one in effect.
+    process.env["SCRYBE_MCP_COLD_START_WAIT_MS"] = "60000";
+
+    // isolate.ts's beforeEach already called vi.resetModules(), so this
+    // import re-evaluates COLD_START_WAIT_MS against the env var above.
+    const { __testing, MCP_TOOLS_LIST_WAIT_CEILING_MS } = await import("../src/mcp-shim.js");
+    const { MAX_SPAWN_LOCK_HOLD_MS } = await import("../src/daemon/data-dir-lock.js");
+
+    const waitMs = __testing.getColdStartWaitMs();
+
+    expect(waitMs).toBeLessThanOrEqual(MCP_TOOLS_LIST_WAIT_CEILING_MS);
+    // The old clamp must no longer be reachable via this env var.
+    expect(waitMs).toBeLessThan(MAX_SPAWN_LOCK_HOLD_MS);
+    expect(waitMs).toBe(MCP_TOOLS_LIST_WAIT_CEILING_MS);
+  });
+
+  it("leaves the default (15s) untouched — the new ceiling sits above it", async () => {
+    delete process.env["SCRYBE_MCP_COLD_START_WAIT_MS"];
+    const { __testing } = await import("../src/mcp-shim.js");
+    const { DAEMON_COLD_START_WAIT_MS } = await import("../src/daemon/client.js");
+
+    expect(__testing.getColdStartWaitMs()).toBe(DAEMON_COLD_START_WAIT_MS);
+  });
+});
+
+// ─── Plan 121 D9 — readiness-poll interval/ceiling are env-overridable ────────
+//
+// Same pattern as COLD_START_WAIT_MS above: a full behavioural test of the
+// poller belongs in the e2e suite (it needs a real spawned process to observe
+// notifications through), but the module-load-time env parsing is a plain
+// unit fact and doesn't need a process for that.
+
+describe("LIST_CHANGED_POLL_INTERVAL_MS / LIST_CHANGED_POLL_CEILING_MS — env-overridable", () => {
+  afterEach(() => {
+    delete process.env["SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS"];
+    delete process.env["SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS"];
+  });
+
+  it("defaults when unset", async () => {
+    delete process.env["SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS"];
+    delete process.env["SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS"];
+    const { __testing } = await import("../src/mcp-shim.js");
+
+    expect(__testing.getListChangedPollIntervalMs()).toBe(2_000);
+    expect(__testing.getListChangedPollCeilingMs()).toBe(5 * 60_000);
+  });
+
+  it("honours both env overrides", async () => {
+    process.env["SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS"] = "50";
+    process.env["SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS"] = "300";
+    const { __testing } = await import("../src/mcp-shim.js");
+
+    expect(__testing.getListChangedPollIntervalMs()).toBe(50);
+    expect(__testing.getListChangedPollCeilingMs()).toBe(300);
+  });
+
+  it("falls back to the default on a non-positive or garbage override", async () => {
+    process.env["SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS"] = "0";
+    process.env["SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS"] = "not-a-number";
+    const { __testing } = await import("../src/mcp-shim.js");
+
+    expect(__testing.getListChangedPollIntervalMs()).toBe(2_000);
+    expect(__testing.getListChangedPollCeilingMs()).toBe(5 * 60_000);
+  });
+
+  it("no readiness poller is active at module load (only a resolved degraded mode arms it)", async () => {
+    const { __testing } = await import("../src/mcp-shim.js");
+    expect(__testing.hasActiveReadinessPoller()).toBe(false);
   });
 });

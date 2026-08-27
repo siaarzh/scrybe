@@ -24,6 +24,19 @@ All configuration is via environment variables. Set them in `.env` or in the MCP
 
 Set this before running any `scrybe` command if you want to relocate state (e.g. point at a faster SSD). All processes — CLI, daemon, MCP server — must agree on the same value.
 
+One feature is configured by a file in this directory rather than by an environment variable: the Claude Code plugin's search guard reads `toll.json` from here. See [search-toll.md](search-toll.md).
+
+---
+
+## Search guard (Claude Code plugin)
+
+The plugin's hook refuses a keyword search over an issue tracker and points the agent at semantic search instead. It is configured by `toll.json` in the data directory; these two variables exist for trying a config out and for observing what the guard decides. Full contract: [search-toll.md](search-toll.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_TOLL_CONFIG` | `${DATA_DIR}/toll.json` | Read guard settings from a different file without moving `SCRYBE_DATA_DIR`, so the index the guard checks against stays put. Lets a config be tried, or several compared, without touching a working one. |
+| `SCRYBE_TOLL_LOG` | unset | Append one JSON line per observed call to this path: the tool, the command, and the decision. Off unless set, and it never affects the decision. |
+
 ---
 
 ## Chunking
@@ -187,7 +200,9 @@ Literal tokens also work but trigger a one-time daemon-start warning — using e
 | `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MS` | `120000` | How long (ms) the daemon waits after ordering a memory-ceiling self-restart before concluding it hung and forcing an exit, so a fresh daemon can take over. Values below 90000 are raised to 90000 so the watchdog can never fire on a healthy restart that is merely slow. |
 | `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MAX_MS` | `1800000` | Ceiling (ms, default 30 min) on the watchdog window above — it doubles after each consecutive failed restart, capped at this value. |
 | `SCRYBE_DEBUG_INDEXER` | unset | Set to `1` to emit per-batch embedding and write events (`indexer.embed.batch`, `indexer.write.completed`) to `daemon-log.jsonl`. Use when diagnosing chunk dedup or silent re-embed issues. Scan and job-summary events are always logged regardless of this flag. |
-| `SCRYBE_MCP_COLD_START_WAIT_MS` | `15000` | How long the MCP shim waits for the daemon to become reachable at startup before falling back to the 1-tool placeholder. Set to `0` to disable the wait. Useful when MCP clients launch the shim before the daemon is up (e.g. cold-boot, slow Windows binding loads). |
+| `SCRYBE_MCP_COLD_START_WAIT_MS` | `15000` | How long the MCP shim waits for the daemon to become reachable before falling back to the offline tools (`status`, `doctor`, `init`). The wait happens lazily, the first time the tool list is actually requested — not at process startup. Set to `0` to disable the wait. Clamped to `MCP_TOOLS_LIST_WAIT_CEILING_MS` (20 seconds, down from a former 60-second ceiling); a larger value has no further effect. Useful when MCP clients request the tool list before the daemon is up (e.g. cold-boot, slow Windows binding loads). |
+| `SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS` | `2000` | While serving the offline tools, how often (ms) the shim re-checks the daemon in the background, so a session that connects and then goes idle can still notice the daemon becoming ready without making another tool call. |
+| `SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS` | `300000` | Total time (ms, default 5 minutes) the background re-check above keeps running before it gives up. This bounds, rather than guarantees, the self-upgrade: a session that stays completely idle longer than this window stops being watched in the background. It still recovers on its own the next time it makes any tool call — that call re-checks the daemon on demand — so only a session with zero further activity for the whole window is affected. |
 
 On Linux (glibc), the daemon caps `MALLOC_ARENA_MAX=2` and `MALLOC_TRIM_THRESHOLD_=131072` in its own
 spawn environment unless you've already set either one — this cuts idle/retained daemon RSS substantially

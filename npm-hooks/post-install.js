@@ -156,7 +156,16 @@ function ensureWindowsLauncherVbs(dataDir) {
     "cmd = \"\"\"\" & WScript.Arguments(0) & \"\"\" \"\"\" & WScript.Arguments(1) & \"\"\" daemon start\"",
     "sh.Run cmd, 0, False",
   ].join("\r\n") + "\r\n";
-  writeFileSync(vbsPath, vbs, "utf8");
+  try {
+    // Exclusive create closes the TOCTOU window between the existsSync()
+    // check above and this write (js/file-system-race). Content is
+    // deterministic, so if another concurrent install won the race and
+    // created it first, EEXIST just means the file is already what we
+    // would have written — fall through and return the path either way.
+    writeFileSync(vbsPath, vbs, { encoding: "utf8", flag: "wx" });
+  } catch (err) {
+    if (err?.code !== "EEXIST") throw err;
+  }
   return vbsPath;
 }
 

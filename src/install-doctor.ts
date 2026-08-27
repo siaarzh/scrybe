@@ -199,9 +199,13 @@ export function attemptSelfRepair(b: BrokenInstall): boolean {
     return false;
   }
 
-  // Mark repair attempted (before running npm install, in case it crashes)
+  // Mark repair attempted (before running npm install, in case it crashes).
+  // Exclusive create closes the TOCTOU window between the existsSync() check
+  // above and this write (js/file-system-race) — if another process won the
+  // race and created the file first, the EEXIST is caught below same as any
+  // other write failure.
   try {
-    writeFileSync(sentinelFile, new Date().toISOString());
+    writeFileSync(sentinelFile, new Date().toISOString(), { flag: "wx" });
   } catch {
     // Non-fatal — env var guard is the primary recursion stopper
   }

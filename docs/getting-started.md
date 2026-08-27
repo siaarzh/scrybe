@@ -119,7 +119,7 @@ If you prefer to configure scrybe entirely from within Claude Code (no terminal)
 4. **`reindex_status`** — poll progress using the `job_id` returned by `init`. If the local model hasn't been downloaded before, the task `phase` will start at `"downloading-model"` with a `percent` field (0–100) showing download progress. This is a one-time ~130 MB download. Phases then progress through `"scanning"` → `"embedding"` → `"done"`.
 5. After `phase: "done"`, call `status` once more to confirm setup is complete.
 
-If setup was completed while the daemon was unavailable (the 3-tool degraded state), reconnect your MCP client after the daemon starts to load the full tool surface.
+If setup was completed while the daemon was unavailable (the 3-tool degraded state), no action is needed — the tool surface upgrades itself to the full toolset automatically once the daemon is ready, within a bounded window (a few minutes; see `SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS` in the configuration reference). If the session has been sitting idle longer than that, the next tool call you make still picks up the change.
 
 ## Day-to-day workflow
 

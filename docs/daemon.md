@@ -283,7 +283,7 @@ Daemon logs this for per-client tracing. Not required, but recommended for debug
 
 ### Version handshake
 
-At MCP `initialize`, the shim:
+`initialize` is answered immediately, with no daemon work at all. The version handshake happens later — the first time the tool list is actually needed (a `tools/list`, or a `tools/call` if one arrives first) — and again whenever the shim re-checks a daemon it is not currently being served by. At that point the shim:
 1. Fetches `GET /mcp/manifest`
 2. Compares `daemon_version` against shim's `package.json` version (SemVer)
 3. Routes based on version match:
@@ -292,7 +292,7 @@ At MCP `initialize`, the shim:
 |---|---|
 | Exact match | Full tool surface from manifest |
 | MAJOR mismatch (e.g. 0.x vs 1.x) | Refuse: return degraded MCP server with single `scrybe_daemon_unavailable` tool, description front-loads `scrybe daemon restart` |
-| Shim ≥ 0.34.0, daemon < 0.34.0 (lancedb upgrade boundary) | Refuse: return degraded MCP server with single `scrybe_daemon_unavailable` tool (`daemon-version-mismatch` variant), description front-loads `scrybe daemon restart --force`. Catches users who upgraded the CLI but didn't restart a daemon still holding the old lancedb native binding. |
+| Shim ≥ 0.34.0, daemon < 0.34.0 (lancedb upgrade boundary) | Refuse: serve the same offline 3-tool set (`status`, `doctor`, `init`) as an unavailable daemon — all three run in-process and work normally. Any other tool name returns an error whose description front-loads `scrybe daemon restart --force`. Catches users who upgraded the CLI but didn't restart a daemon still holding the old lancedb native binding. |
 | MINOR or PATCH mismatch | Degrade: expose only the intersection of (shim's known tool names) ∩ (manifest tools), `console.warn` to stderr. Calls to tools missing from the intersection return MCP error `-32601 method not found` |
 
 **Example:** Shim v0.33.0, daemon v0.32.5 (PATCH mismatch) → warn to stderr, expose tools present in both versions. On next daemon upgrade, the warn goes away.

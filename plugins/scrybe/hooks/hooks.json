@@ -1,0 +1,29 @@
+{
+  "description": "Scrybe search toll — makes a keyword-only issue search slower than asking Scrybe, or attaches a note to its result. It does not make the keyword path impossible, and it is off with one config key.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Grep|Glob|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/plugins/scrybe/hooks/scrybe-toll.mjs\" PreToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Grep|Glob|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/plugins/scrybe/hooks/scrybe-toll.mjs\" PostToolUse",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
