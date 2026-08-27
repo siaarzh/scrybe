@@ -2,6 +2,7 @@ import { existsSync, accessSync, statSync, readdirSync, constants, readFileSync 
 import { join } from "path";
 import { platform } from "os";
 import { execSync } from "child_process";
+import { findContainingRange, type PortRange } from "./windows-reserved-ports.js";
 
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
 
@@ -35,6 +36,84 @@ function fail(id: string, section: string, title: string, message: string, remed
 }
 function skip(id: string, section: string, title: string, message: string, data?: Record<string, unknown>): CheckResult {
   return { id, section, title, status: "skip", message, data };
+}
+
+/**
+ * Decide the `env.reserved_ports` check row from an already-parsed reserved
+ * range list. Pulled out as a seam so tests can drive it with injected
+ * values instead of the real environment, pidfile, and `netsh` output.
+ *
+ * This MUST branch on `portEnv != null` alone, and then classify the value
+ * with `parseInt(value, 10)` — exactly what startHttpServer's explicit-port
+ * path does in http-server.ts. The two must never drift apart: whatever the
+ * daemon does with a given value, this must describe it, or doctor reports on
+ * ports the daemon is not trying while missing the one that will actually
+ * fail. See GitHub issue #100.
+ */
+export function evaluateReservedPortCheck(
+  portEnv: string | undefined,
+  pidfilePort: number | undefined,
+  defaultPort: number,
+  ranges: PortRange[],
+): CheckResult {
+  const section = "Environment";
+
+  if (portEnv != null) {
+    // Classify on parseInt alone, because that is exactly what the daemon's
+    // exact-bind path does with this value before handing it to listen().
+    // A stricter rule (rejecting anything whose text is not the number back
+    // again) describes a daemon that does not exist: parseInt("58451abc") is
+    // 58451 and binds, parseInt("1e3") is 1 and binds, parseInt("0x10") is 0
+    // and takes an OS-assigned port. See GitHub issue #100.
+    const envPort = parseInt(portEnv, 10);
+    const isValidPort = Number.isInteger(envPort) && envPort >= 1 && envPort <= 65535;
+
+    if (envPort === 0) {
+      // The daemon binds an OS-assigned port on this path — no candidate
+      // can be reserved.
+      return ok("env.reserved_ports", section, "Reserved TCP port ranges",
+        "SCRYBE_DAEMON_PORT is set to 0 — the daemon binds an OS-assigned port, so no reserved-range check applies");
+    }
+
+    if (!isValidPort) {
+      // Not 0, and not a valid 1-65535 port either — the daemon's exact-bind
+      // path calls listen() with a value that can't bind at all
+      // (ERR_SOCKET_BAD_PORT). This stops the daemon regardless of reserved
+      // ranges, so report it directly instead of silently falling back to
+      // the two-candidate list.
+      return warn("env.reserved_ports", section, "Reserved TCP port ranges",
+        `SCRYBE_DAEMON_PORT is set to "${portEnv}", which is not a valid port — the daemon will FAIL to start`,
+        "Set SCRYBE_DAEMON_PORT to an integer from 1 to 65535, or unset it to let the daemon pick a port itself.");
+    }
+
+    const range = findContainingRange(ranges, envPort);
+    if (range) {
+      return warn("env.reserved_ports", section, "Reserved TCP port ranges",
+        `Port ${envPort} (from SCRYBE_DAEMON_PORT) falls inside a reserved range (${range.start}-${range.end}) — ` +
+        `the daemon will FAIL to start, there is no fallback on this path`,
+        "Run `netsh interface ipv4 show excludedportrange protocol=tcp` to see the reserved ranges, " +
+        "then pick a port outside them or unset SCRYBE_DAEMON_PORT.");
+    }
+    return ok("env.reserved_ports", section, "Reserved TCP port ranges",
+      "Daemon's candidate ports are clear of reserved ranges");
+  }
+
+  const candidatePorts = [pidfilePort, defaultPort].filter((p): p is number => typeof p === "number" && p > 0);
+  let hit: { port: number; range: PortRange } | undefined;
+  for (const port of candidatePorts) {
+    const range = findContainingRange(ranges, port);
+    if (range) { hit = { port, range }; break; }
+  }
+
+  if (hit) {
+    return warn("env.reserved_ports", section, "Reserved TCP port ranges",
+      `Port ${hit.port} falls inside a reserved range (${hit.range.start}-${hit.range.end}) — ` +
+      `the daemon will bind a different port instead`,
+      "Run `netsh interface ipv4 show excludedportrange protocol=tcp` to see the reserved ranges, " +
+      "then pick a port outside them.");
+  }
+  return ok("env.reserved_ports", section, "Reserved TCP port ranges",
+    "Daemon's candidate ports are clear of reserved ranges");
 }
 
 function dirSize(dir: string): number {
@@ -346,13 +425,44 @@ export async function runDoctor(): Promise<DoctorReport> {
     }
   }
 
+  // ── 1c-ii. Windows reserved TCP port range check ────────────────────────────
+  // Hyper-V/WSL reserve blocks of TCP ports at boot; a port inside a reserved
+  // block returns EACCES on bind. The daemon already falls through to another
+  // port when that happens — this row exists only to tell the operator why.
+  // See GitHub issue #100.
+  if (process.platform === "win32") {
+    const { detectReservedPortRanges } = await import("./windows-reserved-ports.js");
+    const { readPidfile } = await import("../daemon/pidfile.js");
+
+    // Not cached: the reserved blocks move without a reboot, so this must be
+    // read live on every doctor run. See GitHub issue #100.
+    const portReport = detectReservedPortRanges();
+
+    if (portReport.skip) {
+      checks.push(skip("env.reserved_ports", SEC_ENV, "Reserved TCP port ranges",
+        portReport.skipReason === "netsh-unavailable"
+          ? "netsh unavailable or timed out — reserved-port check skipped"
+          : "netsh output did not parse — reserved-port check skipped"));
+    } else {
+      const { DEFAULT_PORT } = await import("../daemon/http-server.js");
+      const pidfilePort = readPidfile()?.port;
+
+      checks.push(evaluateReservedPortCheck(
+        process.env["SCRYBE_DAEMON_PORT"],
+        pidfilePort,
+        DEFAULT_PORT,
+        portReport.ranges,
+      ));
+    }
+  }
+
   // ── 1d. npm global prefix writability ───────────────────────────────────────
   // Windows ACL semantics differ from POSIX — accessSync may report writable on
   // dirs that practically aren't (e.g. UNC paths, junction points). Skip on Win32
   // to avoid false positives; the EACCES failure mode is a Linux/macOS concern.
   if (process.platform !== "win32") {
     try {
-      const rawPrefix = execSync("npm config get prefix", { timeout: 2000, encoding: "utf8" }).trim();
+      const rawPrefix = execSync("npm config get prefix", { timeout: 2000, encoding: "utf8", windowsHide: true }).trim();
       const modulesDir = join(rawPrefix, "lib", "node_modules");
       try {
         accessSync(modulesDir, constants.W_OK);

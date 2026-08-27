@@ -17,6 +17,7 @@ import { listJobRows, getJobRow, getQueueStatus } from "../jobs-store.js";
 import { cancelJob } from "../jobs.js";
 import { handleMcpRoute } from "./mcp-rpc.js";
 import { readPidfile } from "./pidfile.js";
+import { diagEmit } from "./events.js";
 import { isDegraded } from "./build-integrity.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────
@@ -128,8 +129,23 @@ export interface GcResponse {
 
 // ─── Module state ──────────────────────────────────────────────────────────
 
-const DEFAULT_PORT = 58451;
+/**
+ * The daemon's preferred HTTP port. Exported so the doctor's reserved-port
+ * check (GitHub #100) reads the same value rather than repeating the literal —
+ * a duplicated definition is what let the bind fallback drift in the first place.
+ */
+export const DEFAULT_PORT = 58451;
 const RING_SIZE = 100;
+
+/**
+ * Bind-error codes that continue the bindSticky fallback chain (GitHub #100).
+ * The first is the POSIX/cross-platform "port taken" code. On Windows, a
+ * port inside a reserved range comes back with the second instead —
+ * verified on a real machine binding 58451. Both must be treated as "try
+ * the next candidate", never as fatal, or the fallback chain silently stops
+ * early on some platforms.
+ */
+const RETRYABLE_BIND_ERROR_CODES = new Set(["EADDRINUSE", "EACCES"]);
 
 let _state: DaemonState = "cold";
 let _startedAt = new Date();
@@ -253,7 +269,22 @@ export async function startHttpServer(opts: {
   const portEnv = process.env["SCRYBE_DAEMON_PORT"];
   if (portEnv != null) {
     // SCRYBE_DAEMON_PORT set → exact bind, no pidfile preference (D5)
-    _port = await bindTo(parseInt(portEnv, 10));
+    const desired = parseInt(portEnv, 10);
+    try {
+      _port = await bindTo(desired);
+    } catch (err) {
+      if (err instanceof Error && (err as NodeJS.ErrnoException).code === "EACCES") {
+        throw new Error(
+          `Port ${desired} (from SCRYBE_DAEMON_PORT) is unavailable to this process. ` +
+            "On Windows this usually means another component (Hyper-V, WSL, etc.) has " +
+            "reserved it at boot. Run `netsh interface ipv4 show excludedportrange " +
+            "protocol=tcp` to see the reserved ranges, or unset SCRYBE_DAEMON_PORT to let " +
+            "the daemon pick a free port itself.",
+          { cause: err },
+        );
+      }
+      throw err;
+    }
   } else {
     // D5: no env override — try stale pidfile port first, then DEFAULT_PORT, then ephemeral
     _port = await bindSticky();
@@ -295,42 +326,83 @@ async function bindTo(desired: number): Promise<number> {
   return tryBind(desired);
 }
 
+/** Default pidfile-port reader used by {@link bindSticky} in production. */
+function readPidfilePort(): number | null {
+  return readPidfile()?.port ?? null;
+}
+
 /**
  * D5 — Sticky port binding (when SCRYBE_DAEMON_PORT is unset).
  * Attempt order: stale pidfile port → DEFAULT_PORT → ephemeral (0).
  * Missing/corrupt pidfile falls through cleanly to DEFAULT_PORT.
- * EADDRINUSE on any candidate falls through to the next candidate.
+ * A retryable bind error (see RETRYABLE_BIND_ERROR_CODES, GitHub #100 — the
+ * Windows reserved-port case) on any candidate falls through to the next
+ * candidate.
+ *
+ * `deps` lets tests drive this function directly instead of a hand-copied
+ * duplicate — default to the real `tryBind`/pidfile reader used in production.
  */
-async function bindSticky(): Promise<number> {
+export async function bindSticky(
+  deps: {
+    tryBind?: (port: number) => Promise<number>;
+    readPidfilePort?: () => number | null;
+  } = {}
+): Promise<number> {
+  const tb = deps.tryBind ?? tryBind;
+  const readPort = deps.readPidfilePort ?? readPidfilePort;
+
   // Read stale pidfile port (the current process hasn't written its own pidfile yet)
   let stalePort: number | null = null;
   try {
-    const stale = readPidfile();
-    if (stale?.port && stale.port > 0 && stale.port !== DEFAULT_PORT) {
-      stalePort = stale.port;
+    const port = readPort();
+    if (port && port > 0 && port !== DEFAULT_PORT) {
+      stalePort = port;
     }
   } catch { /* corrupt pidfile — ignore */ }
 
   // 1. Try stale port (if any and different from DEFAULT_PORT)
   if (stalePort !== null) {
     try {
-      return await tryBind(stalePort);
+      return await tb(stalePort);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
-      // EADDRINUSE — fall through to DEFAULT_PORT
+      const code = e instanceof Error ? (e as NodeJS.ErrnoException).code ?? "" : "";
+      if (!RETRYABLE_BIND_ERROR_CODES.has(code)) throw e;
+      // Retryable — fall through to DEFAULT_PORT. Silent fallbacks hide a
+      // refused preferred port (EACCES off Windows can mean a privileged
+      // port, a container, or a security module, not just Hyper-V/WSL
+      // reservations) — GitHub issue #100.
+      diagEmit({
+        level: "warn", event: "daemon.bind.fallback",
+        detail: { refusedPort: stalePort, code: code || "unknown", nextPort: DEFAULT_PORT },
+      });
     }
   }
 
   // 2. Try DEFAULT_PORT
   try {
-    return await tryBind(DEFAULT_PORT);
+    return await tb(DEFAULT_PORT);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
-    // EADDRINUSE — fall through to ephemeral
+    const code = e instanceof Error ? (e as NodeJS.ErrnoException).code ?? "" : "";
+    if (!RETRYABLE_BIND_ERROR_CODES.has(code)) throw e;
+    // Retryable — fall through to ephemeral. See the note above — GitHub issue #100.
+    diagEmit({
+      level: "warn", event: "daemon.bind.fallback",
+      detail: { refusedPort: DEFAULT_PORT, code: code || "unknown", nextPort: "ephemeral" },
+    });
   }
 
   // 3. Ephemeral
-  return tryBind(0);
+  try {
+    return await tb(0);
+  } catch (e) {
+    throw new Error(
+      `All candidate ports were refused (stale pidfile port, ${DEFAULT_PORT}, and an OS-assigned ` +
+        "ephemeral port). On Windows this usually means an unusually large block of ports is " +
+        "reserved at boot (Hyper-V, WSL, etc.). Run `netsh interface ipv4 show excludedportrange " +
+        "protocol=tcp` to see the reserved ranges.",
+      { cause: e },
+    );
+  }
 }
 
 function jsonRes(res: http.ServerResponse, status: number, body: unknown): void {
@@ -730,47 +802,4 @@ async function handle(
   if (await handleMcpRoute(req, res)) return;
 
   jsonRes(res, 404, { error: "Not found" });
-}
-
-// ─── Testing seams ─────────────────────────────────────────────────────────────
-
-/**
- * Testable variant of bindSticky that accepts injected tryBind + readPidfile fns.
- * Allows tests to verify bind order without touching real sockets or pidfiles.
- * @internal
- */
-export async function __testingBindSticky(
-  opts: {
-    tryBind: (port: number) => Promise<number>;
-    readPidfilePort: () => number | null;
-  }
-): Promise<number> {
-  const { tryBind: tb, readPidfilePort } = opts;
-
-  let stalePort: number | null = null;
-  try {
-    const port = readPidfilePort();
-    if (port && port > 0 && port !== DEFAULT_PORT) {
-      stalePort = port;
-    }
-  } catch { /* corrupt — ignore */ }
-
-  // 1. Try stale port
-  if (stalePort !== null) {
-    try {
-      return await tb(stalePort);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
-    }
-  }
-
-  // 2. Try DEFAULT_PORT
-  try {
-    return await tb(DEFAULT_PORT);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
-  }
-
-  // 3. Ephemeral
-  return tb(0);
 }
