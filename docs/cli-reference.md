@@ -29,7 +29,7 @@ MCP auto-registration detects and offers to update: **Claude Code** (`~/.claude.
 
 ### `doctor`
 
-One-shot diagnostics. Checks: install integrity (landmark deps resolvable), DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, ticket-source token health (env-var resolution and authenticated probe), and MCP configuration for Claude Code and Cursor.
+One-shot diagnostics. Checks: install integrity (landmark deps resolvable), DATA_DIR, Node version, npm global-install dir writability (POSIX), provider config and auth (live test embedding), embedding dimensions match, schema version, projects.json integrity, LanceDB directory, branch-tags.db, per-source last-indexed and chunk count, daemon pidfile and HTTP health, always-on install state (skip-level recommendation when not installed), git hook presence, ticket-source token health (env-var resolution and authenticated probe), reserved TCP port ranges (Windows), and MCP configuration for Claude Code and Cursor.
 
 | Flag | Description |
 |------|-------------|
@@ -45,6 +45,14 @@ scrybe doctor --repair
 ```
 
 Exit codes: 0 = all ok, 1 = any failure (or any warning with `--strict`).
+
+#### Reserved TCP port row (Windows only)
+
+Hyper-V and WSL reserve blocks of TCP ports at boot, and the blocks change on each boot. `doctor` reads them live and reports when a port the daemon wants sits inside one.
+
+| Row ID | Typical status | Meaning |
+|--------|---------------|---------|
+| `env.reserved_ports` | `ok` / `warn` / `skip` | `warn` = a candidate port is reserved. Without `SCRYBE_DAEMON_PORT` the daemon binds another port and carries on; with it set, the daemon fails to start, because that variable pins the port exactly. `warn` also covers a value that is not a usable port at all. `skip` = `netsh` was missing, timed out, or printed something unrecognised. |
 
 #### Windows AV check rows (Windows only)
 
