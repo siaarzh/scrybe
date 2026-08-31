@@ -93,7 +93,8 @@ async function _sendHeartbeat(): Promise<void> {
   const url = _baseUrl;
   if (!url) return;
   try {
-    await fetch(`${url}/clients/heartbeat`, { // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+    // codeql[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+    await fetch(`${url}/clients/heartbeat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ clientId: _clientId, pid: process.pid }),
@@ -192,7 +193,8 @@ function isDrainingError(err: unknown): boolean {
 
 async function _singleRpc(url: string, method: string, params: Record<string, unknown>): Promise<unknown> {
   const id = Math.random().toString(36).slice(2);
-  const res = await fetch(`${url}/mcp/rpc`, { // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+  // codeql[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+  const res = await fetch(`${url}/mcp/rpc`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -260,7 +262,8 @@ async function _singleRpc(url: string, method: string, params: Record<string, un
  */
 async function _recomputeSkewFromHealth(url: string): Promise<void> {
   try {
-    const healthRes = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) }); // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+    // codeql[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+    const healthRes = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
     if (healthRes.ok) {
       const health = (await healthRes.json()) as { version?: string };
       const daemonVersion = health.version ?? "";
@@ -774,7 +777,8 @@ async function resolveShimMode(): Promise<ShimMode> {
   // D1: initialise module-level _baseUrl from the pidfile port at startup
   _baseUrl = `http://127.0.0.1:${port}`;
 
-  const manifestRes = await fetch(`${_baseUrl}/mcp/manifest`, { // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+  // codeql[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+  const manifestRes = await fetch(`${_baseUrl}/mcp/manifest`, {
     signal: AbortSignal.timeout(5000),
   });
 

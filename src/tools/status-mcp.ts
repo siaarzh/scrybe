@@ -85,7 +85,8 @@ export const statusTool: Tool<Record<string, never>, StatusOutput> = {
         daemonPort = pidData.port;
         // Best-effort HTTP version probe (short timeout)
         try {
-          const res = await fetch(`http://127.0.0.1:${pidData.port}/health`, { // lgtm[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+          // codeql[js/file-access-to-http] -- loopback only; port from pidfile owned by current user
+          const res = await fetch(`http://127.0.0.1:${pidData.port}/health`, {
             signal: AbortSignal.timeout(2000),
           });
           if (res.ok) {
