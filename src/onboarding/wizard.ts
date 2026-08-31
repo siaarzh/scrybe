@@ -144,6 +144,8 @@ export interface ProviderSelection {
   baseUrl?: string;
   /** Custom providers only */
   dim?: number;
+  /** Custom providers only: response encoding expected from the endpoint. */
+  encodingFormat?: "float";
 }
 
 export interface WizardInput {
@@ -207,6 +209,7 @@ export function synthesizeWizardConfig(input: WizardInput, priorEnvKeys?: Set<st
     if (sel.provider === "custom") {
       if (sel.baseUrl) preset.base_url = sel.baseUrl;
       if (sel.dim !== undefined) preset.dim = sel.dim;
+      if (sel.encodingFormat) preset.encoding_format = sel.encodingFormat;
     }
     return preset;
   }
@@ -515,7 +518,20 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
     if (p.isCancel(dimInput)) return null;
     dim = parseInt(dimInput as string, 10);
 
-    return { provider: "custom", apiKey, model, baseUrl, dim };
+    const useFloatEncoding = await p.confirm({
+      message: "Does this endpoint return JSON float arrays instead of the OpenAI-compatible default?",
+      initialValue: false,
+    });
+    if (p.isCancel(useFloatEncoding)) return null;
+
+    return {
+      provider: "custom",
+      apiKey,
+      model,
+      baseUrl,
+      dim,
+      encodingFormat: useFloatEncoding ? "float" : undefined,
+    };
   }
 
   async function promptNewApiKey(

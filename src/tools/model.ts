@@ -206,6 +206,7 @@ export interface PresetAddOptions {
   credentialsFrom?: string;
   baseUrl?: string;
   dim?: number;
+  encodingFormat?: "float";
 }
 
 /**
@@ -213,7 +214,7 @@ export interface PresetAddOptions {
  * Validates provider + model against the catalog (except for custom provider).
  */
 export function runPresetAdd(opts: PresetAddOptions): void {
-  const { name, provider, model, credentials, credentialsFrom, baseUrl, dim } = opts;
+  const { name, provider, model, credentials, credentialsFrom, baseUrl, dim, encodingFormat } = opts;
 
   const isCustom = provider === "custom";
 
@@ -230,6 +231,9 @@ export function runPresetAdd(opts: PresetAddOptions): void {
     if (dim !== undefined) {
       throw new Error(`--dim is only valid for custom providers. Catalog providers derive dim from the model spec.`);
     }
+    if (encodingFormat !== undefined) {
+      throw new Error(`--encoding-format is only valid for custom providers.`);
+    }
     // Validate model exists in catalog
     try {
       getModel(provider, model);
@@ -243,6 +247,9 @@ export function runPresetAdd(opts: PresetAddOptions): void {
     }
     if (dim === undefined) {
       throw new Error(`--dim is required for custom providers.`);
+    }
+    if (encodingFormat !== undefined && encodingFormat !== "float") {
+      throw new Error(`--encoding-format must be "float"; omit it for the OpenAI-compatible default.`);
     }
   }
 
@@ -266,6 +273,7 @@ export function runPresetAdd(opts: PresetAddOptions): void {
   if (isCustom) {
     preset.base_url = baseUrl;
     preset.dim = dim;
+    if (encodingFormat) preset.encoding_format = encodingFormat;
   }
 
   cfg.embedding_presets[name] = preset;
@@ -554,13 +562,14 @@ export function registerModelCommand(program: Command): void {
     .option("--credentials-from <preset>", "Reuse credentials from another named preset")
     .option("--base-url <url>", "API base URL (custom provider only)")
     .option("--dim <n>", "Embedding dimensions (custom provider only)", (v) => parseInt(v, 10))
+    .option("--encoding-format <format>", "Embedding response encoding: float (custom provider only; omit for default)")
     .addHelpText(
       "after",
       "\nExamples:\n" +
       "  scrybe model preset add voyage-code --provider voyage --model voyage-code-3 --credentials '${SCRYBE_VOYAGE_API_KEY}'\n" +
       "  scrybe model preset add together-bert --provider custom --model bert-model --base-url https://api.together.xyz/v1 --dim 768 --credentials '${SCRYBE_TOGETHER_API_KEY}'"
     )
-    .action((name: string, opts: { provider: string; model: string; credentials?: string; credentialsFrom?: string; baseUrl?: string; dim?: number }) => {
+    .action((name: string, opts: { provider: string; model: string; credentials?: string; credentialsFrom?: string; baseUrl?: string; dim?: number; encodingFormat?: "float" }) => {
       try {
         runPresetAdd({
           name,
@@ -570,6 +579,7 @@ export function registerModelCommand(program: Command): void {
           credentialsFrom: opts.credentialsFrom,
           baseUrl: opts.baseUrl,
           dim: opts.dim,
+          encodingFormat: opts.encodingFormat,
         });
       } catch (err: any) {
         console.error(`[scrybe] ${err.message}`);
