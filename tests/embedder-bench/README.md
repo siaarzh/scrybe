@@ -28,6 +28,16 @@ node --import tsx/esm tests/embedder-bench/run.ts --skip-size
 - 3 Russian queries (ru-001 through ru-003) — cross-lingual
 - 2 Chinese queries (zh-001, zh-002) — cross-lingual
 
+> **This fixture is saturated and cannot rank two models that both work.** Scrybe's production
+> embedder scores 100% recall@3, 100% recall@5 and MRR 1.000 on every query — every relevant chunk
+> ranks first. There is no headroom, so the fixture can only detect a model that *fails*, not
+> separate two that succeed. It also **selected the current default**, so it can never be used as
+> evidence *for* that default without arguing in a circle.
+>
+> Fixing it means **harder negatives** — topically adjacent distractors a good model still has to
+> separate — not more queries at this difficulty. Adding queries raises n without creating
+> discrimination. See `.plans/plans/126-default-embedder-benchmark.md` D3.
+
 ## Metrics
 
 | Metric | Threshold for consideration |
@@ -36,8 +46,10 @@ node --import tsx/esm tests/embedder-bench/run.ts --skip-size
 | Cold-start (ms) | < 8 000 ms on a laptop (first load after download) |
 | Warm RPS | > 50 texts/s on dev machine |
 | Output dims | 384 or 768 preferred (LanceDB-friendly) |
-| P@5 (English) | > 60% — relevant chunk in top 5 |
-| Cross-lingual hit rate | > 45% — foreign-language query finds English code in top 3 |
+| recall@3 | > 60% — of the chunks labelled relevant, how many reach the top 3 |
+| recall@5 | reported alongside recall@3 so no single cutoff carries the claim |
+| MRR | cutoff-free; 1.0 means the first relevant chunk always ranked first |
+| Cross-lingual recall@3 | > 45% — same metric, restricted to the 5 cross-lingual queries |
 
 ## Candidates
 
@@ -53,6 +65,18 @@ node --import tsx/esm tests/embedder-bench/run.ts --skip-size
 ---
 
 ## Results
+
+> **These numbers were produced by the pre-2026-09-05 harness and are NOT comparable to a run of the
+> current one.** That harness called the raw `@xenova/transformers` pipeline rather than scrybe's
+> production `embedLocalQuery` / `embedLocalBatched`, so it omitted the `query: ` / `passage: ` prefix
+> the default preset sets, and its `xLing` column scored a proxy ("top-3 holds any English chunk")
+> that a random ranking passes 99.57% of the time.
+>
+> Kept rather than deleted because **the decision they drove was correct**. Re-measured under the
+> replacement metric, `all-MiniLM-L6-v2` scores 37% cross-lingual recall@3 against the 40% below,
+> and `multilingual-e5-small` scores 100% against 100%. The proxy tracked the real quantity on these
+> candidates; it was replaced because it has no floor, not because it was wrong here.
+> Detail: `.plans/plans/126-default-embedder-benchmark.md`.
 
 Run: 2026-04-23 · Windows 11 · Node 22 · @xenova/transformers 2.17.x
 

@@ -1,20 +1,54 @@
 #!/usr/bin/env node
 /**
- * Scrybe Embedder Benchmark — M-D5 Phase 1
+ * Scrybe Embedder Benchmark
  *
  * Runs each WASM/ONNX candidate model against a fixed labeled corpus + query set.
- * Reports: disk size, cold-start ms, warm RPS, output dims, P@5, cross-lingual hit rate.
+ * Reports: disk size, cold-start ms, warm RPS, output dims, and retrieval quality
+ * (recall@3, recall@5, MRR) overall and on cross-lingual queries only.
  *
  * Usage:
  *   node --import tsx/esm tests/embedder-bench/run.ts
- *   node --import tsx/esm tests/embedder-bench/run.ts --model all-MiniLM-L6-v2
+ *   node --import tsx/esm tests/embedder-bench/run.ts --model multilingual-e5-small
  *   node --import tsx/esm tests/embedder-bench/run.ts --skip-size
+ *
+ * ---------------------------------------------------------------------------
+ * REWRITTEN 2026-09-05 (Plan 126, decisions D1 and D2). Two defects were found
+ * in the previous version and both invalidated its output:
+ *
+ *   D1  Its cross-lingual metric measured a proxy, not relevance. It scored
+ *       "the top-3 holds at least one English-primary chunk" against a corpus
+ *       that is 20/25 English, so a UNIFORMLY RANDOM ranking scores 99.57%
+ *       against a stated threshold of 45% — the metric has no meaningful floor
+ *       and never checked whether the RELEVANT chunk was found.
+ *
+ *       It is fair to record that it worked anyway. On the real candidates it
+ *       tracked the correct metric closely (all-MiniLM-L6-v2: 40% old, 37% new;
+ *       multilingual-e5-small: 100% both) and it did reject the English-only
+ *       models. The 2026-04 decision it drove was right. It was replaced because
+ *       a proxy that happens to correlate on five models cannot be trusted on
+ *       the sixth, not because it had produced a wrong answer.
+ *
+ *   D2  It called the raw @xenova/transformers pipeline, not scrybe. Production
+ *       embeds through embedLocalQuery / embedLocalBatched, which prepend
+ *       prompt_template and apply capText. The harness therefore measured a
+ *       function scrybe does not use.
+ *
+ * Both are fixed below: the metrics are scored against `relevant_chunk_ids`,
+ * and every embedding goes through the production functions. Random baselines
+ * are printed next to the results so a future reader can see at a glance
+ * whether a metric discriminates at all.
+ * ---------------------------------------------------------------------------
  */
-import { pipeline, type FeatureExtractionPipeline } from "@xenova/transformers";
 import { readFileSync, readdirSync, lstatSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
+import {
+  embedLocalQuery,
+  embedLocalBatched,
+  resetLocalEmbedderCache,
+  type LocalEmbedderOptions,
+} from "../../src/local-embedder.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -43,10 +77,12 @@ interface BenchResult {
   coldStartMs?: number;
   actualDims?: number;
   warmRps?: number;
-  meanP5?: number;
-  enP5?: number;
-  crossLingualHitRate?: number;
-  crossLingualN?: number;
+  recall3?: number;
+  recall5?: number;
+  mrr?: number;
+  xRecall3?: number;
+  xMrr?: number;
+  xN?: number;
 }
 
 // ─── Candidate list ───────────────────────────────────────────────────────────
@@ -75,6 +111,20 @@ const CANDIDATES = [
   // Intentionally excluded (too large for default):
   // { id: "Xenova/bge-m3", notes: "Best multilingual but ~570 MB" },
 ];
+
+/**
+ * Mirror production's own rule for who gets a prompt_template.
+ * `add-e5-prompt-template-v0.37.0` in src/migrations.ts applies it when the
+ * model id matches /e5/i and explicitly leaves BGE and all-MiniLM alone.
+ * Inventing a different rule here would reintroduce D2 in a new form.
+ */
+function optsFor(modelId: string): LocalEmbedderOptions {
+  const opts: LocalEmbedderOptions = { modelId, dimensions: 0 };
+  if (/e5/i.test(modelId)) {
+    opts.prompt_template = { query: "query: ", passage: "passage: " };
+  }
+  return opts;
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -119,8 +169,12 @@ function getHfCacheDir(modelId: string): string {
   return join(cacheRoot, safeName);
 }
 
-function toVec(output: any, idx: number): number[] {
-  return Array.from(output[idx].data as Float32Array);
+/** n-choose-k, for the combinatorial random baselines. */
+function comb(n: number, k: number): number {
+  if (k > n || k < 0) return 0;
+  let r = 1;
+  for (let i = 0; i < k; i++) r = (r * (n - i)) / (i + 1);
+  return r;
 }
 
 // ─── Benchmark one model ─────────────────────────────────────────────────────
@@ -132,80 +186,60 @@ async function benchmarkModel(
   queries: Query[],
   skipSize: boolean
 ): Promise<BenchResult> {
-  // Cold-start (includes model load + pipeline setup + first inference)
+  const opts = optsFor(modelId);
+
+  // Cold-start: model load + first inference, through the production path.
   const t0 = Date.now();
-  const extractor: FeatureExtractionPipeline = await pipeline(
-    "feature-extraction",
-    modelId,
-    { revision: "main" }
-  );
-  await extractor(["ping"], { pooling: "mean", normalize: true });
+  const probe = await embedLocalBatched(["ping"], opts);
   const coldStartMs = Date.now() - t0;
+  const actualDims = probe[0].length;
 
-  // Actual output dimensions
-  const pingOut = await extractor(["dimension_probe"], { pooling: "mean", normalize: true });
-  const actualDims = toVec(pingOut, 0).length;
-
-  // Disk size from HF cache
   let diskMb: number | undefined;
-  if (!skipSize) {
-    diskMb = dirSizeMb(getHfCacheDir(modelId));
-  }
+  if (!skipSize) diskMb = dirSizeMb(getHfCacheDir(modelId));
 
-  // Warm RPS: batch of 50 × 3 iterations
+  // Warm RPS: batch of 50 × 3 iterations.
   const warmTexts = Array.from({ length: 50 }, (_, i) => corpus[i % corpus.length].content);
   const ITERS = 3;
   let totalMs = 0;
   for (let i = 0; i < ITERS; i++) {
     const t = Date.now();
-    await extractor(warmTexts, { pooling: "mean", normalize: true });
+    await embedLocalBatched(warmTexts, opts);
     totalMs += Date.now() - t;
   }
   const warmRps = Math.round((50 * ITERS) / (totalMs / 1000));
 
-  // Embed the entire corpus in one batch
-  const corpusTexts = corpus.map((c) => c.content);
-  const corpusOut = await extractor(corpusTexts, { pooling: "mean", normalize: true });
-  const corpusVecs = corpus.map((_, i) => toVec(corpusOut, i));
+  // Embed the corpus as passages, exactly as indexing would.
+  const corpusVecs = await embedLocalBatched(corpus.map((c) => c.content), opts);
 
-  // Precision@5 for each query
-  let totalP5 = 0;
-  let enP5Total = 0;
-  let enCount = 0;
-  let clHits = 0;
-  let clTotal = 0;
+  let r3 = 0, r5 = 0, rr = 0;
+  let xr3 = 0, xrr = 0, xN = 0;
 
   for (const q of queries) {
-    const qOut = await extractor([q.query], { pooling: "mean", normalize: true });
-    const qVec = toVec(qOut, 0);
-
+    const qVec = await embedLocalQuery(q.query, opts);
     const ranked = corpus
       .map((c, i) => ({ id: c.id, score: cosineSim(qVec, corpusVecs[i]) }))
       .sort((a, b) => b.score - a.score);
 
-    const top5 = new Set(ranked.slice(0, 5).map((r) => r.id));
-    const relevant = q.relevant_chunk_ids;
-    const hits = relevant.filter((id) => top5.has(id)).length;
-    const p5 = relevant.length > 0 ? hits / relevant.length : 0;
-    totalP5 += p5;
+    const relevant = new Set(q.relevant_chunk_ids);
+    // recall@k — of the chunks labelled relevant, how many made the top k.
+    const rec3 = ranked.slice(0, 3).filter((x) => relevant.has(x.id)).length / relevant.size;
+    const rec5 = ranked.slice(0, 5).filter((x) => relevant.has(x.id)).length / relevant.size;
+    // MRR has no cutoff, so it cannot be gamed by choosing a friendly k.
+    const firstRank = ranked.findIndex((x) => relevant.has(x.id)) + 1;
+    const recip = firstRank > 0 ? 1 / firstRank : 0;
 
-    if (q.lang === "en") {
-      enP5Total += p5;
-      enCount++;
-    }
+    r3 += rec3;
+    r5 += rec5;
+    rr += recip;
 
     if (q.cross_lingual) {
-      clTotal++;
-      // Cross-lingual: top-3 must contain at least 1 English-primary chunk
-      const top3 = ranked.slice(0, 3).map((r) => r.id);
-      const crossHit = top3.some((id) => {
-        const chunk = corpus.find((c) => c.id === id);
-        return chunk?.primary_lang === "en";
-      });
-      if (crossHit) clHits++;
+      xr3 += rec3;
+      xrr += recip;
+      xN++;
     }
   }
 
+  const n = queries.length;
   return {
     modelId,
     notes,
@@ -213,10 +247,12 @@ async function benchmarkModel(
     coldStartMs,
     actualDims,
     warmRps,
-    meanP5: totalP5 / queries.length,
-    enP5: enCount > 0 ? enP5Total / enCount : 0,
-    crossLingualHitRate: clTotal > 0 ? clHits / clTotal : undefined,
-    crossLingualN: clTotal,
+    recall3: r3 / n,
+    recall5: r5 / n,
+    mrr: rr / n,
+    xRecall3: xN > 0 ? xr3 / xN : undefined,
+    xMrr: xN > 0 ? xrr / xN : undefined,
+    xN,
   };
 }
 
@@ -235,12 +271,23 @@ async function main() {
     readFileSync(join(__dirname, "fixtures/queries.json"), "utf8")
   );
 
+  const N = corpus.length;
   const crossLingualCount = queries.filter((q) => q.cross_lingual).length;
 
-  console.log("Scrybe Embedder Benchmark (M-D5 Phase 1)");
-  console.log("=".repeat(50));
+  console.log("Scrybe Embedder Benchmark");
+  console.log("=".repeat(56));
   console.log(
-    `Corpus: ${corpus.length} chunks | Queries: ${queries.length} (${crossLingualCount} cross-lingual)\n`
+    `Corpus: ${N} chunks | Queries: ${queries.length} (${crossLingualCount} cross-lingual)`
+  );
+  console.log("Embeddings go through the production embedLocalQuery / embedLocalBatched.");
+  console.log("\nRandom baselines (combinatorial — a metric near these discriminates nothing):");
+  console.log(`  recall@3 ${(3 / N * 100).toFixed(1)}%   recall@5 ${(5 / N * 100).toFixed(1)}%`);
+  const enShare = corpus.filter((c) => c.primary_lang === "en").length;
+  console.log(
+    `  The metric this harness used before Plan 126 — "top-3 holds any English chunk" —\n` +
+    `  scores ${((1 - comb(N - enShare, 3) / comb(N, 3)) * 100).toFixed(2)}% at random, so it had no floor. It still ranked the 2026-04\n` +
+    `  candidates correctly; it is gone because a proxy with no floor cannot be trusted\n` +
+    `  on a model it has not already been checked against.\n`
   );
 
   const candidates = filterModel
@@ -263,87 +310,93 @@ async function main() {
     try {
       const r = await benchmarkModel(cand.id, cand.notes, corpus, queries, skipSize);
       results.push(r);
-      process.stdout.write(`done\n`);
+      process.stdout.write("done\n");
       process.stdout.write(
         `  cold=${r.coldStartMs}ms  rps=${r.warmRps}  dims=${r.actualDims}  ` +
-        `P@5=${((r.meanP5 ?? 0) * 100).toFixed(0)}%  enP@5=${((r.enP5 ?? 0) * 100).toFixed(0)}%  ` +
-        `xLing=${r.crossLingualHitRate !== undefined ? ((r.crossLingualHitRate) * 100).toFixed(0) + "%" : "N/A"}\n`
+        `r@3=${((r.recall3 ?? 0) * 100).toFixed(0)}%  MRR=${(r.mrr ?? 0).toFixed(3)}  ` +
+        `xLing r@3=${r.xRecall3 !== undefined ? (r.xRecall3 * 100).toFixed(0) + "%" : "N/A"}\n`
       );
     } catch (err) {
       const msg = String(err);
       results.push({ modelId: cand.id, notes: cand.notes, error: msg });
       process.stdout.write(`FAILED\n  Error: ${msg.slice(0, 120)}\n`);
+    } finally {
+      // Each candidate loads its own pipeline; don't let five models accumulate.
+      resetLocalEmbedderCache();
     }
   }
 
   // Summary table
-  const W = {
-    model: 50,
-    mb: 6,
-    cold: 10,
-    rps: 6,
-    dims: 6,
-    p5: 6,
-    enp5: 7,
-    xl: 7,
-  };
-  const line = "─".repeat(Object.values(W).reduce((a, b) => a + b, 0) + 2);
+  const W = { model: 46, mb: 7, cold: 9, rps: 6, dims: 6, r3: 7, r5: 7, mrr: 7, xr3: 8, xmrr: 8 };
+  const line = "─".repeat(Object.values(W).reduce((a, b) => a + b, 0));
 
   console.log("\n\nRESULTS");
   console.log(line);
   console.log(
-    "Model".padEnd(W.model) +
-    "MB".padStart(W.mb) +
-    "Cold(ms)".padStart(W.cold) +
-    "RPS".padStart(W.rps) +
-    "Dims".padStart(W.dims) +
-    "P@5".padStart(W.p5) +
-    "enP@5".padStart(W.enp5) +
-    "xLing".padStart(W.xl)
+    "Model".padEnd(W.model) + "MB".padStart(W.mb) + "Cold(ms)".padStart(W.cold) +
+    "RPS".padStart(W.rps) + "Dims".padStart(W.dims) + "r@3".padStart(W.r3) +
+    "r@5".padStart(W.r5) + "MRR".padStart(W.mrr) + "xL r@3".padStart(W.xr3) + "xL MRR".padStart(W.xmrr)
   );
   console.log(line);
 
   for (const r of results) {
     if (r.error) {
       console.log(`${r.modelId.padEnd(W.model)} ERROR: ${r.error.slice(0, 50)}`);
-    } else {
-      console.log(
-        r.modelId.padEnd(W.model) +
-        (r.diskMb !== undefined ? String(r.diskMb) : "?").padStart(W.mb) +
-        String(r.coldStartMs ?? "?").padStart(W.cold) +
-        String(r.warmRps ?? "?").padStart(W.rps) +
-        String(r.actualDims ?? "?").padStart(W.dims) +
-        `${((r.meanP5 ?? 0) * 100).toFixed(0)}%`.padStart(W.p5) +
-        `${((r.enP5 ?? 0) * 100).toFixed(0)}%`.padStart(W.enp5) +
-        (r.crossLingualHitRate !== undefined
-          ? `${(r.crossLingualHitRate * 100).toFixed(0)}%`
-          : "N/A"
-        ).padStart(W.xl)
-      );
+      continue;
     }
+    console.log(
+      r.modelId.padEnd(W.model) +
+      (r.diskMb !== undefined ? String(r.diskMb) : "?").padStart(W.mb) +
+      String(r.coldStartMs ?? "?").padStart(W.cold) +
+      String(r.warmRps ?? "?").padStart(W.rps) +
+      String(r.actualDims ?? "?").padStart(W.dims) +
+      `${((r.recall3 ?? 0) * 100).toFixed(0)}%`.padStart(W.r3) +
+      `${((r.recall5 ?? 0) * 100).toFixed(0)}%`.padStart(W.r5) +
+      (r.mrr ?? 0).toFixed(3).padStart(W.mrr) +
+      (r.xRecall3 !== undefined ? `${(r.xRecall3 * 100).toFixed(0)}%` : "N/A").padStart(W.xr3) +
+      (r.xMrr !== undefined ? r.xMrr.toFixed(3) : "N/A").padStart(W.xmrr)
+    );
   }
 
   console.log(line);
-  console.log("\nThresholds: disk<150MB | cold<8000ms | RPS>50 | P@5(en)>60% | xLing>45%");
-
-  // Recommendation heuristic:
-  // Score = xLing*0.5 + meanP@5*0.3 - diskMb/1000*0.2 (penalise size)
-  // Filter: must pass xLing threshold (>0) and not have errored
-  const valid = results.filter(
-    (r) =>
-      !r.error &&
-      (r.crossLingualHitRate ?? 0) > 0 &&
-      (r.diskMb === undefined || r.diskMb < 300)
+  console.log("Thresholds: disk<150MB | cold<8000ms | RPS>50 | r@3>60% | cross-lingual r@3>45%");
+  console.log(
+    "\nNOTE: the RPS threshold predates Plan 126 and was set against the RAW pipeline.\n" +
+    "Production embedLocalBatched applies token-budget micro-batching, so it is slower by\n" +
+    "construction and the shipped default measures well under 50/s here. The threshold has\n" +
+    "NOT been rewritten to fit — inventing a passing number would repeat exactly the mistake\n" +
+    "Plan 126 found. Recalibrate it against a real indexing run before trusting it."
   );
 
-  if (valid.length > 0) {
+  // Saturation warning. A fixture every candidate solves cannot rank them, and
+  // silently picking a "winner" off a tie is how a fixture stops being a test.
+  const solved = results.filter((r) => !r.error && (r.recall3 ?? 0) >= 1);
+  if (solved.length > 1) {
+    console.log(
+      `\n!! ${solved.length} models scored 100% recall@3. The fixture is SATURATED and cannot\n` +
+      `   rank them. It needs harder negatives — topically adjacent distractors — not more\n` +
+      `   queries at this difficulty. See Plan 126 D3.`
+    );
+  }
+
+  const valid = results.filter(
+    (r) => !r.error && (r.diskMb === undefined || r.diskMb < 300)
+  );
+
+  if (valid.length === 1 && candidates.length === 1) {
+    // Naming a "recommended default" off a single-candidate run is how a
+    // filtered debugging run turns into a decision. Refuse.
+    console.log(
+      "\nNo recommendation: only one candidate ran (--model was given). Run the full set\n" +
+      "before treating any result here as a default-model decision."
+    );
+  } else if (valid.length > 0) {
+    // Weight cross-lingual MRR highest: it is the axis with real headroom and
+    // the one the default model exists to serve. Size is a mild penalty.
     const scored = valid
       .map((r) => ({
         r,
-        score:
-          (r.crossLingualHitRate ?? 0) * 0.5 +
-          (r.meanP5 ?? 0) * 0.3 -
-          (r.diskMb ?? 0) / 1000 * 0.2,
+        score: (r.xMrr ?? 0) * 0.5 + (r.mrr ?? 0) * 0.3 - (r.diskMb ?? 0) / 1000 * 0.2,
       }))
       .sort((a, b) => b.score - a.score);
 
@@ -351,8 +404,8 @@ async function main() {
     console.log(`\nRecommended default: ${best.modelId}`);
     console.log(`  ${best.notes}`);
     console.log(
-      `  xLing=${((best.crossLingualHitRate ?? 0) * 100).toFixed(0)}%  ` +
-      `meanP@5=${((best.meanP5 ?? 0) * 100).toFixed(0)}%  ` +
+      `  r@3=${((best.recall3 ?? 0) * 100).toFixed(0)}%  MRR=${(best.mrr ?? 0).toFixed(3)}  ` +
+      `xLing r@3=${((best.xRecall3 ?? 0) * 100).toFixed(0)}%  xLing MRR=${(best.xMrr ?? 0).toFixed(3)}  ` +
       `dims=${best.actualDims}  diskMb=${best.diskMb ?? "?"}  cold=${best.coldStartMs}ms`
     );
   } else {
