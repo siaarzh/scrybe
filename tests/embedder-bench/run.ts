@@ -69,7 +69,7 @@ interface Query {
   relevant_chunk_ids: string[];
 }
 
-interface BenchResult {
+export interface BenchResult {
   modelId: string;
   notes: string;
   error?: string;
@@ -175,6 +175,77 @@ function comb(n: number, k: number): number {
   let r = 1;
   for (let i = 0; i < k; i++) r = (r * (n - i)) / (i + 1);
   return r;
+}
+
+// ─── Decision logic (pure — exported so tests can exercise it without ────────
+// ─── running any model) ───────────────────────────────────────────────────
+
+export interface SaturationResult {
+  saturated: boolean;
+  solvedCount: number;
+  solvedModelIds: string[];
+}
+
+/**
+ * Decide whether the fixture is saturated: more than one candidate scoring
+ * 100% recall@3 means the fixture cannot rank them against each other, and
+ * silently picking a "winner" off that tie is how a fixture stops being a
+ * test. See Plan 126 D3.
+ */
+export function checkSaturation(results: BenchResult[]): SaturationResult {
+  const solved = results.filter((r) => !r.error && (r.recall3 ?? 0) >= 1);
+  return {
+    saturated: solved.length > 1,
+    solvedCount: solved.length,
+    solvedModelIds: solved.map((r) => r.modelId),
+  };
+}
+
+export type RecommendationReason =
+  | "single-candidate-run"
+  | "no-valid-candidates"
+  | "recommended";
+
+export interface RecommendationResult {
+  recommended: BenchResult | null;
+  reason: RecommendationReason;
+}
+
+/**
+ * Decide whether to name a recommended default model from this run.
+ *
+ * Guards:
+ * - A single-candidate run (`--model X` filtered the candidate list down to
+ *   exactly one) that also produced exactly one valid result must never
+ *   name a recommendation, even though that candidate cleared every
+ *   threshold — naming one is how a filtered debugging run quietly turns
+ *   into a decision. `candidatesRun` is the length of the filtered
+ *   candidate list, independent of whether that candidate ended up valid.
+ * - With zero valid candidates (whether from a single-candidate run or a
+ *   full run where everything failed/oversized), there is nothing to
+ *   recommend — reported as "no-valid-candidates", not folded into the
+ *   single-candidate guard above.
+ * - Otherwise, weight cross-lingual MRR highest (the axis with real
+ *   headroom and the one the default model exists to serve), overall MRR
+ *   next, and treat disk size as a mild penalty.
+ */
+export function pickRecommendation(
+  valid: BenchResult[],
+  candidatesRun: number
+): RecommendationResult {
+  if (valid.length === 1 && candidatesRun === 1) {
+    return { recommended: null, reason: "single-candidate-run" };
+  }
+  if (valid.length === 0) {
+    return { recommended: null, reason: "no-valid-candidates" };
+  }
+  const scored = valid
+    .map((r) => ({
+      r,
+      score: (r.xMrr ?? 0) * 0.5 + (r.mrr ?? 0) * 0.3 - ((r.diskMb ?? 0) / 1000) * 0.2,
+    }))
+    .sort((a, b) => b.score - a.score);
+  return { recommended: scored[0].r, reason: "recommended" };
 }
 
 // ─── Benchmark one model ─────────────────────────────────────────────────────
@@ -370,10 +441,10 @@ async function main() {
 
   // Saturation warning. A fixture every candidate solves cannot rank them, and
   // silently picking a "winner" off a tie is how a fixture stops being a test.
-  const solved = results.filter((r) => !r.error && (r.recall3 ?? 0) >= 1);
-  if (solved.length > 1) {
+  const saturation = checkSaturation(results);
+  if (saturation.saturated) {
     console.log(
-      `\n!! ${solved.length} models scored 100% recall@3. The fixture is SATURATED and cannot\n` +
+      `\n!! ${saturation.solvedCount} models scored 100% recall@3. The fixture is SATURATED and cannot\n` +
       `   rank them. It needs harder negatives — topically adjacent distractors — not more\n` +
       `   queries at this difficulty. See Plan 126 D3.`
     );
@@ -383,30 +454,21 @@ async function main() {
     (r) => !r.error && (r.diskMb === undefined || r.diskMb < 300)
   );
 
-  if (valid.length === 1 && candidates.length === 1) {
+  const { recommended, reason } = pickRecommendation(valid, candidates.length);
+  if (reason === "single-candidate-run") {
     // Naming a "recommended default" off a single-candidate run is how a
     // filtered debugging run turns into a decision. Refuse.
     console.log(
       "\nNo recommendation: only one candidate ran (--model was given). Run the full set\n" +
       "before treating any result here as a default-model decision."
     );
-  } else if (valid.length > 0) {
-    // Weight cross-lingual MRR highest: it is the axis with real headroom and
-    // the one the default model exists to serve. Size is a mild penalty.
-    const scored = valid
-      .map((r) => ({
-        r,
-        score: (r.xMrr ?? 0) * 0.5 + (r.mrr ?? 0) * 0.3 - (r.diskMb ?? 0) / 1000 * 0.2,
-      }))
-      .sort((a, b) => b.score - a.score);
-
-    const best = scored[0].r;
-    console.log(`\nRecommended default: ${best.modelId}`);
-    console.log(`  ${best.notes}`);
+  } else if (reason === "recommended" && recommended) {
+    console.log(`\nRecommended default: ${recommended.modelId}`);
+    console.log(`  ${recommended.notes}`);
     console.log(
-      `  r@3=${((best.recall3 ?? 0) * 100).toFixed(0)}%  MRR=${(best.mrr ?? 0).toFixed(3)}  ` +
-      `xLing r@3=${((best.xRecall3 ?? 0) * 100).toFixed(0)}%  xLing MRR=${(best.xMrr ?? 0).toFixed(3)}  ` +
-      `dims=${best.actualDims}  diskMb=${best.diskMb ?? "?"}  cold=${best.coldStartMs}ms`
+      `  r@3=${((recommended.recall3 ?? 0) * 100).toFixed(0)}%  MRR=${(recommended.mrr ?? 0).toFixed(3)}  ` +
+      `xLing r@3=${((recommended.xRecall3 ?? 0) * 100).toFixed(0)}%  xLing MRR=${(recommended.xMrr ?? 0).toFixed(3)}  ` +
+      `dims=${recommended.actualDims}  diskMb=${recommended.diskMb ?? "?"}  cold=${recommended.coldStartMs}ms`
     );
   } else {
     console.log("\nNo model cleared all thresholds. Review results above.");
@@ -415,7 +477,22 @@ async function main() {
   console.log("\nDone.");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only run the benchmark when this file is executed directly (`node --import
+// tsx/esm tests/embedder-bench/run.ts`). Without this guard, importing the
+// module just to reach `pickRecommendation` / `checkSaturation` (as
+// guards.test.ts does) would unconditionally kick off `main()` — loading
+// real ONNX models and calling `process.exit` from inside the test process.
+const isDirectRun = (() => {
+  try {
+    return import.meta.url === `file://${process.argv[1]}`;
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
