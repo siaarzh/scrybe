@@ -180,7 +180,7 @@ function cleanupAfterConfirmedDeath(pid: number): void {
   removePidfile();
 }
 
-type HealthProbeResult = "healthy" | "refused" | "timeout";
+export type HealthProbeResult = "healthy" | "refused" | "timeout";
 
 /**
  * Single /health probe that distinguishes three outcomes:
@@ -188,7 +188,7 @@ type HealthProbeResult = "healthy" | "refused" | "timeout";
  *   "refused"  — TCP connection refused / nothing listening (ECONNREFUSED, ENOTFOUND, EHOSTUNREACH)
  *   "timeout"  — port accepted the connection but /health did not respond in time
  */
-async function probeHealthOnce(port: number, timeoutMs: number): Promise<HealthProbeResult> {
+export async function probeHealthOnce(port: number, timeoutMs: number): Promise<HealthProbeResult> {
   // `port` originates from the on-disk pidfile (JSON.parse), so treat it as untrusted:
   // coerce to a bounded TCP port integer before it reaches fetch(). Anything outside the
   // valid range means there is no listener we can reach — report "refused".

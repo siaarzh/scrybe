@@ -152,6 +152,15 @@ When using Voyage AI, set only `SCRYBE_RERANK=true` — endpoint and model are a
 
 ---
 
+## Daemon HTTP (MCP over HTTP)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCRYBE_DAEMON_MCP_HTTP` | unset | Set to `1` or `true` (case-insensitive, trimmed) to enable the MCP Streamable HTTP endpoint at `/mcp`. When unset, `/mcp` returns `404`. Useful for containerized or remote clients. Requires the setting to be present before daemon startup; changes in `.env` require a daemon restart. See [mcp-reference.md](mcp-reference.md#mcp-over-http) for security notes. |
+| `SCRYBE_DAEMON_ALLOWED_HOSTS` | unset | Comma-separated list of hostnames to allow via the HTTP `Host` header only — it has no effect on the `Origin` header, which is refused whenever present, regardless of this setting. Hostnames only (no ports); case-insensitive; whitespace trimmed. An entry carrying a port, a colon, brackets, a slash, or a non-ASCII character is ignored with a one-time warning, so IPv6 literals cannot be allowlisted. Always includes the built-ins `localhost` and `127.0.0.1` and cannot remove them. Example: `my-proxy.internal,staging.example.com`. Lets a reverse proxy that forwards its own hostname reach the daemon. |
+
+---
+
 ## Vector index
 
 Above a row-count threshold, a source's vector column gets a native quantized ANN index instead of an exhaustive scan — several times faster on large tables while keeping recall at parity with an exact search (a wide search beam plus an exact re-score of the top candidates). Small tables (and anyone who disables it) stay on exact/flat search, which is already fast enough below the threshold.

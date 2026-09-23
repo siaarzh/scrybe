@@ -15,10 +15,12 @@ import { getWatcherHealth } from "./watcher.js";
 import { getGitWatcherHealth, getCachedBranch } from "./git-watcher.js";
 import { listJobRows, getJobRow, getQueueStatus } from "../jobs-store.js";
 import { cancelJob } from "../jobs.js";
-import { handleMcpRoute } from "./mcp-rpc.js";
+import { handleMcpRoute, sanitizeForLog } from "./mcp-rpc.js";
+import { handleMcpHttpRoute, setMcpHttpHeartbeat } from "./mcp-http.js";
 import { readPidfile } from "./pidfile.js";
 import { diagEmit } from "./events.js";
 import { isDegraded } from "./build-integrity.js";
+import { checkHostAndOrigin } from "./host-gate.js";
 
 // ─── Public types ──────────────────────────────────────────────────────────
 
@@ -253,6 +255,8 @@ export async function startHttpServer(opts: {
   _getClientCount = opts.getClientCount;
   _getMode = opts.getMode;
   _getGracePeriodRemainingMs = opts.getGracePeriodRemainingMs;
+  // Same wiring a stdio client's /clients/heartbeat POST uses (#102).
+  setMcpHttpHeartbeat((clientId, pid) => _onHeartbeat?.(clientId, pid));
   _state = "cold";
   _draining = false;
   _closing = false;
@@ -480,10 +484,19 @@ async function handle(
   res: http.ServerResponse
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://localhost");
-  const method = req.method?.toUpperCase() ?? "GET";
   const path = url.pathname;
 
-  if (method === "GET") res.setHeader("Access-Control-Allow-Origin", "*");
+  // Every route: reject unexpected hosts and web origins (#102).
+  const hostHeader = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
+  const originHeader = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+  const hostGate = checkHostAndOrigin(hostHeader, originHeader);
+  if (!hostGate.allowed) {
+    console.log(`[host-gate] rejected reason=${hostGate.reason} path=${sanitizeForLog(path)}`);
+    jsonRes(res, 403, { error: "forbidden" });
+    return;
+  }
+
+  const method = req.method?.toUpperCase() ?? "GET";
 
   if (method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
@@ -567,7 +580,6 @@ async function handle(
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
-      "Access-Control-Allow-Origin": "*",
     });
 
     // Initial comment confirms the connection and unblocks streaming clients
@@ -800,6 +812,9 @@ async function handle(
 
   // ── MCP-over-HTTP routes ───────────────────────────────────────────────
   if (await handleMcpRoute(req, res)) return;
+
+  // ── Spec MCP transport (#102) ──────────────────────────────────────────
+  if (await handleMcpHttpRoute(req, res)) return;
 
   jsonRes(res, 404, { error: "Not found" });
 }

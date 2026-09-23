@@ -140,6 +140,39 @@ Loads all modules (embedder, LanceDB, etc.) in the MCP process itself. No backgr
 
 Only use this if you do not want a background daemon (e.g., CI scripts, sandboxed environments).
 
+### MCP over HTTP
+
+The daemon can serve as a remote MCP endpoint over HTTP, useful for containerized or remote clients that cannot spawn the stdio shim. This mode is **off by default**; enable it with `SCRYBE_DAEMON_MCP_HTTP=1` (or `true`) in the daemon's environment or in `<DATA_DIR>/.env`. When disabled, `/mcp` answers `404 Not Found`. When enabled, it speaks the standard MCP Streamable HTTP protocol without any session management or state — each `POST` request to `/mcp` builds a fresh transport and handler, makes one JSON-RPC call, and returns the result.
+
+**Setup:**
+
+1. Add `SCRYBE_DAEMON_MCP_HTTP=1` to `<DATA_DIR>/.env`. Also set `SCRYBE_DAEMON_PORT=58451` there — this makes the daemon bind to that exact port with no fallback, so it never silently starts on a different port and leaves the client pointed at a dead URL. See [daemon.md](daemon.md) for how `SCRYBE_DAEMON_PORT` behaves.
+2. Run `scrybe daemon install` so the daemon runs as an always-on service, or `scrybe daemon restart` if it is already installed. The daemon reads `.env` only at startup.
+3. Point the client at the endpoint:
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:58451/mcp"
+}
+```
+
+**How it works:**
+
+- **Port:** `58451` when `SCRYBE_DAEMON_PORT` is set as above (exact, no fallback); otherwise the daemon may fall back to a different port, and the port is written to `<DATA_DIR>/daemon.pid`.
+- **HTTP methods:** `POST` carries JSON-RPC 2.0 requests; `GET` and `DELETE` answer `405 Method Not Allowed`. No session IDs.
+- **Response format:** Plain JSON, not SSE; one JSON-RPC response per request.
+- **Stateless:** Each HTTP request is independent — there is no session resumption or server push, and the transport is discarded after the response is sent. Clients should assume each request starts fresh.
+- **Tool surface:** Every MCP tool is exposed, the same set as stdio. This includes `add_source` with an unconstrained `root_path` parameter and destructive tools like `remove_project` and `gc`.
+- **Host and Origin validation:** Every HTTP request is checked against the `Host` header — it must match `localhost`, `127.0.0.1`, or a name listed in `SCRYBE_DAEMON_ALLOWED_HOSTS` (comma-separated hostnames, no ports, case-insensitive). Requests carrying an `Origin` header are rejected outright, so a web page cannot read the daemon's answers or send it anything but a plain GET. A mismatched `Host` or a present `Origin` gets `403 Forbidden` and `{ "error": "forbidden" }`, and the reason is printed to the daemon's standard output (see the daemon docs for where that goes).
+- **Daemon liveness:** Each HTTP request counts as a client heartbeat, so the daemon stays alive as long as traffic flows. With no traffic, the daemon will eventually idle out in on-demand mode. For always-on operation, use `scrybe daemon install` to run the daemon as a system service.
+
+**Security — read this before enabling:**
+
+Enabling `SCRYBE_DAEMON_MCP_HTTP` exposes every tool, including `add_source` (which can index any directory the daemon user can read) and destructive tools such as `remove_project` and `gc`. There is **no authentication inside scrybe**. The daemon binds to `127.0.0.1` only, but anything beyond the local machine **must sit behind a reverse proxy with authentication**. A reverse proxy that forwards its own public hostname in the `Host` header needs that hostname added to `SCRYBE_DAEMON_ALLOWED_HOSTS` (for example `SCRYBE_DAEMON_ALLOWED_HOSTS=my-proxy.internal`); a proxy that rewrites `Host` to `127.0.0.1` needs no configuration.
+
+**Cold start:** An HTTP-only client cannot start the daemon itself; if the daemon is not already running, the first HTTP request fails. Use `scrybe daemon install` to set up a system service that auto-restarts on crash and runs on login.
+
 ---
 
 ## Project tools

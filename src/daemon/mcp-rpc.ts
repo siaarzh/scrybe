@@ -80,7 +80,7 @@ async function readBody(req: http.IncomingMessage): Promise<unknown> {
   return JSON.parse(raw);
 }
 
-function getClientId(req: http.IncomingMessage): string {
+export function getClientId(req: http.IncomingMessage): string {
   const header = req.headers["x-scrybe-client-id"];
   if (typeof header === "string" && header.trim()) return header.trim();
   return "anon";
@@ -96,7 +96,7 @@ function getClientId(req: http.IncomingMessage): string {
 // replacement as a line-break barrier when the pattern is a literal "\r"/"\n" —
 // a character class with ranges is not matched by that model, so the sanitizer
 // was invisible to it. Keep these two passes first and separate.
-function sanitizeForLog(s: string): string {
+export function sanitizeForLog(s: string): string {
   return s
     .replace(/\r/g, "?")
     .replace(/\n/g, "?")
@@ -104,6 +104,11 @@ function sanitizeForLog(s: string): string {
 }
 
 const EXPOSE_INTERNAL_ERRORS = process.env["NODE_ENV"] === "development";
+
+/** Shared internal-error mask (#102): same gate for /mcp/rpc and /mcp. */
+export function maskInternalErrorMessage(message: string): string {
+  return EXPOSE_INTERNAL_ERRORS ? message : "internal error";
+}
 
 // ─── Boundary param validation ─────────────────────────────────────────────
 //
@@ -269,6 +274,117 @@ async function handleManifest(
   jsonRes(res, 200, buildManifest());
 }
 
+/** One tool dispatch outcome: either a handler result or a classified JSON-RPC error. */
+export type DispatchOutcome =
+  | { ok: true; result: unknown }
+  | { ok: false; error: { code: number; message: string } };
+
+/** Tool dispatch shared by /mcp/rpc and /mcp; each caller adds its own wire framing (#102). */
+export async function dispatchMcpTool(
+  method: string,
+  params: Record<string, unknown>,
+  clientId: string
+): Promise<DispatchOutcome> {
+  const tool = mcpTools.find((t) => t.spec.name === method);
+  const safeClientId = sanitizeForLog(clientId);
+  const safeMethod = sanitizeForLog(method);
+
+  if (!tool) {
+    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → method not found`);
+    return { ok: false, error: { code: METHOD_NOT_FOUND, message: `method not found: ${method}` } };
+  }
+
+  console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod}`);
+
+  // Activity span telemetry — capture start RSS and emit span record on completion.
+  const spanStart = Date.now();
+  const startSample = sampleNow();
+  // Per-span high-water-mark tracker (Plan 109 Phase 2). One tracker instance
+  // per call — concurrent in-flight calls each get their own closure, so an
+  // overlapping call can never book another call's peak.
+  const rssTracker = createSpanRssTracker(startSample.rssBytes);
+  const rssPollTimer = setInterval(() => rssTracker.sampleRss(), MCP_SPAN_RSS_POLL_MS);
+  rssPollTimer.unref();
+  let spanOutcome: "ok" | "error" = "ok";
+  // Carries the sanitized text to the activity-span emit below. Each
+  // console.log reads its own const local rather than this `let`.
+  //
+  // On CodeQL js/log-injection in this function: every value logged here goes
+  // through sanitizeForLog first, so the CR/LF barrier is real at runtime. The
+  // analyzer's barrier model does not consistently credit it. Three shapes were
+  // tried on the validation branch — read back from this `let` (169/170), the
+  // sanitizer inlined at the call site (180), and a const hoist mirroring the
+  // catch branch (181) — and it re-raised each time, only ever moving line.
+  // 181 is dismissed as an analyzer limitation. Do not contort this code
+  // further to chase it; verify sanitizeForLog itself instead.
+  let spanErrorMessage: string | undefined;
+  let outcome: DispatchOutcome;
+
+  try {
+    const validationError = validateParams(method, tool.spec.inputSchema, params);
+    if (validationError) {
+      spanOutcome = "error";
+      // Hoisted to a const before sanitizing, mirroring `message` in the catch
+      // branch below. Kept for symmetry and readability — it did NOT satisfy
+      // CodeQL (see the note above `spanErrorMessage`).
+      const validationMessage = validationError.message;
+      const safeValidationMessage = sanitizeForLog(validationMessage);
+      spanErrorMessage = safeValidationMessage;
+      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${safeValidationMessage}`);
+      outcome = { ok: false, error: { code: INVALID_PARAMS, message: validationError.message } };
+    } else {
+      const result = await tool.handler(params);
+      // Same masked-internal-error path as below (BigInt/circular can't serialize) — must run inside this try (#102).
+      JSON.stringify(result);
+      outcome = { ok: true, result };
+    }
+  } catch (err) {
+    spanOutcome = "error";
+    const message = err instanceof Error ? err.message : String(err);
+    spanErrorMessage = sanitizeForLog(message);
+    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(message)}`);
+
+    // Classify: caller-facing (bad-but-well-formed input, e.g. "project 'x' not
+    // found") echoes its message under INVALID_PARAMS; everything else keeps the
+    // masked INTERNAL_ERROR message — CodeQL-110 posture (info-exposure via error
+    // message) is unchanged for the internal-fault branch. EXPOSE_INTERNAL_ERRORS
+    // is NOT touched by this classification (Design constraint, Plan 94).
+    const callerFacing = isCallerFacing(err);
+    outcome = {
+      ok: false,
+      error: {
+        code: callerFacing ? INVALID_PARAMS : INTERNAL_ERROR,
+        message: callerFacing ? message : maskInternalErrorMessage(message),
+      },
+    };
+  } finally {
+    clearInterval(rssPollTimer);
+    // One last reading right at completion, on top of every poll tick taken
+    // during the call — peakRssBytes below is a true intra-span high-water
+    // mark, not a two-point max of start/end.
+    rssTracker.sample();
+    const endSample = sampleNow();
+    diagEmit({
+      event: "activity-span",
+      level: "info",
+      spanType: "mcp-call",
+      method: safeMethod,
+      clientId: safeClientId,
+      durationMs: Date.now() - spanStart,
+      outcome: spanOutcome,
+      startRssBytes: startSample.rssBytes,
+      peakRssBytes: rssTracker.peakRssBytes(),
+      endRssBytes: endSample.rssBytes,
+      // provider tag: not source-specific at the RPC layer; set to undefined here.
+      // Per-source provider info is tagged in the reindex activity span (queue.ts).
+      provider: undefined,
+      ...(spanOutcome === "error" && spanErrorMessage ? { error: spanErrorMessage } : {}),
+    });
+  }
+
+  return outcome;
+}
+
 async function handleRpc(
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -306,106 +422,11 @@ async function handleRpc(
     ? (raw["params"] as Record<string, unknown>)
     : {};
 
-  const tool = mcpTools.find((t) => t.spec.name === method);
-  const safeClientId = sanitizeForLog(clientId);
-  const safeMethod = sanitizeForLog(method);
-
-  if (!tool) {
-    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → method not found`);
-    jsonRes(res, 200, {
-      id,
-      error: { code: METHOD_NOT_FOUND, message: `method not found: ${method}` },
-    } satisfies RpcError);
-    return;
-  }
-
-  console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod}`);
-
-  // Activity span telemetry — capture start RSS and emit span record on completion.
-  const spanStart = Date.now();
-  const startSample = sampleNow();
-  // Per-span high-water-mark tracker (Plan 109 Phase 2). One tracker instance
-  // per call — concurrent in-flight calls each get their own closure, so an
-  // overlapping call can never book another call's peak.
-  const rssTracker = createSpanRssTracker(startSample.rssBytes);
-  const rssPollTimer = setInterval(() => rssTracker.sampleRss(), MCP_SPAN_RSS_POLL_MS);
-  rssPollTimer.unref();
-  let spanOutcome: "ok" | "error" = "ok";
-  // Carries the sanitized text to the activity-span emit below. Each
-  // console.log reads its own const local rather than this `let`.
-  //
-  // On CodeQL js/log-injection in this function: every value logged here goes
-  // through sanitizeForLog first, so the CR/LF barrier is real at runtime. The
-  // analyzer's barrier model does not consistently credit it. Three shapes were
-  // tried on the validation branch — read back from this `let` (169/170), the
-  // sanitizer inlined at the call site (180), and a const hoist mirroring the
-  // catch branch (181) — and it re-raised each time, only ever moving line.
-  // 181 is dismissed as an analyzer limitation. Do not contort this code
-  // further to chase it; verify sanitizeForLog itself instead.
-  let spanErrorMessage: string | undefined;
-
-  try {
-    const validationError = validateParams(method, tool.spec.inputSchema, params);
-    if (validationError) {
-      spanOutcome = "error";
-      // Hoisted to a const before sanitizing, mirroring `message` in the catch
-      // branch below. Kept for symmetry and readability — it did NOT satisfy
-      // CodeQL (see the note above `spanErrorMessage`).
-      const validationMessage = validationError.message;
-      const safeValidationMessage = sanitizeForLog(validationMessage);
-      spanErrorMessage = safeValidationMessage;
-      console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${safeValidationMessage}`);
-      jsonRes(res, 200, {
-        id,
-        error: { code: INVALID_PARAMS, message: validationError.message },
-      } satisfies RpcError);
-      return;
-    }
-
-    const result = await tool.handler(params);
-    jsonRes(res, 200, { id, result } satisfies RpcSuccess);
-  } catch (err) {
-    spanOutcome = "error";
-    const message = err instanceof Error ? err.message : String(err);
-    spanErrorMessage = sanitizeForLog(message);
-    console.log(`[mcp-rpc] client=${safeClientId} method=${safeMethod} → error: ${sanitizeForLog(message)}`);
-
-    // Classify: caller-facing (bad-but-well-formed input, e.g. "project 'x' not
-    // found") echoes its message under INVALID_PARAMS; everything else keeps the
-    // masked INTERNAL_ERROR message — CodeQL-110 posture (info-exposure via error
-    // message) is unchanged for the internal-fault branch. EXPOSE_INTERNAL_ERRORS
-    // is NOT touched by this classification (Design constraint, Plan 94).
-    const callerFacing = isCallerFacing(err);
-    jsonRes(res, 200, {
-      id,
-      error: {
-        code: callerFacing ? INVALID_PARAMS : INTERNAL_ERROR,
-        message: callerFacing ? message : (EXPOSE_INTERNAL_ERRORS ? message : "internal error"),
-      },
-    } satisfies RpcError);
-  } finally {
-    clearInterval(rssPollTimer);
-    // One last reading right at completion, on top of every poll tick taken
-    // during the call — peakRssBytes below is a true intra-span high-water
-    // mark, not a two-point max of start/end.
-    rssTracker.sample();
-    const endSample = sampleNow();
-    diagEmit({
-      event: "activity-span",
-      level: "info",
-      spanType: "mcp-call",
-      method: safeMethod,
-      clientId: safeClientId,
-      durationMs: Date.now() - spanStart,
-      outcome: spanOutcome,
-      startRssBytes: startSample.rssBytes,
-      peakRssBytes: rssTracker.peakRssBytes(),
-      endRssBytes: endSample.rssBytes,
-      // provider tag: not source-specific at the RPC layer; set to undefined here.
-      // Per-source provider info is tagged in the reindex activity span (queue.ts).
-      provider: undefined,
-      ...(spanOutcome === "error" && spanErrorMessage ? { error: spanErrorMessage } : {}),
-    });
+  const outcome = await dispatchMcpTool(method, params, clientId);
+  if (outcome.ok) {
+    jsonRes(res, 200, { id, result: outcome.result } satisfies RpcSuccess);
+  } else {
+    jsonRes(res, 200, { id, error: outcome.error } satisfies RpcError);
   }
 }
 

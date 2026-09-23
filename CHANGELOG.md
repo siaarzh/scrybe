@@ -7,6 +7,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- **MCP over HTTP** — the daemon can now serve as a remote MCP endpoint via the standard Streamable HTTP protocol, enabled with `SCRYBE_DAEMON_MCP_HTTP=1` (or `true`). Useful for containerized or remote clients that cannot spawn the stdio shim. Each HTTP request is stateless (no session resumption or server push). Every tool available over stdio is exposed, and there is no authentication, so put an authenticating reverse proxy in front of anything beyond the local machine. Off by default. See [mcp-reference.md](docs/mcp-reference.md#mcp-over-http).
+- `SCRYBE_DAEMON_ALLOWED_HOSTS` setting to add hostnames to the HTTP `Host` header allowlist, enabling reverse proxies to sit in front of the daemon with their own public hostname.
+
+### Security
+
+- The daemon now refuses any request a web page could read the answer to, every non-GET request from a web page, and requests addressed to unexpected host names. Allowed host names are `localhost`, `127.0.0.1` and anything listed in `SCRYBE_DAEMON_ALLOWED_HOSTS`; anything else gets `403`.
+
 ---
 
 ## [0.51.1] — 2026-08-27
