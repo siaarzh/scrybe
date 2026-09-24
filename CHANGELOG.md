@@ -7,14 +7,18 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.52.0] — 2026-09-24
+
 ### Added
 
-- **MCP over HTTP** — the daemon can now serve as a remote MCP endpoint via the standard Streamable HTTP protocol, enabled with `SCRYBE_DAEMON_MCP_HTTP=1` (or `true`). Useful for containerized or remote clients that cannot spawn the stdio shim. Each HTTP request is stateless (no session resumption or server push). Every tool available over stdio is exposed, and there is no authentication, so put an authenticating reverse proxy in front of anything beyond the local machine. Off by default. See [mcp-reference.md](docs/mcp-reference.md#mcp-over-http).
-- `SCRYBE_DAEMON_ALLOWED_HOSTS` setting to add hostnames to the HTTP `Host` header allowlist, enabling reverse proxies to sit in front of the daemon with their own public hostname.
+- **MCP over HTTP.** The daemon can serve the standard MCP Streamable HTTP transport at `/mcp`, so a client in a container or on another machine can connect without spawning the stdio server. It is off by default: set `SCRYBE_DAEMON_MCP_HTTP=1` (or `true`). Requests are stateless. Every tool available over stdio is exposed and there is no authentication, so put an authenticating reverse proxy in front of anything beyond the local machine. See [mcp-reference.md](docs/mcp-reference.md#mcp-over-http).
+- `SCRYBE_DAEMON_ALLOWED_HOSTS` lets a reverse proxy that forwards its own hostname reach the daemon.
 
 ### Security
 
-- The daemon now refuses any request a web page could read the answer to, every non-GET request from a web page, and requests addressed to unexpected host names. Allowed host names are `localhost`, `127.0.0.1` and anything listed in `SCRYBE_DAEMON_ALLOWED_HOSTS`; anything else gets `403`.
+- The daemon now refuses requests addressed to unexpected host names, any non-GET request from a web page, and any request whose answer a web page could read. Allowed host names are `localhost`, `127.0.0.1` and anything in `SCRYBE_DAEMON_ALLOWED_HOSTS`. Everything else gets `403`. Upgrading is recommended.
 
 ---
 
@@ -90,28 +94,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.47.1] — 2026-08-01
-
-### Security
-
-- Dependency updates carrying published security fixes: **fast-uri** (host confusion from a literal backslash in the URI authority), **tar** (uncontrolled recursion on crafted long-path archives), and **body-parser** (size limits silently ignored when given an invalid value). All three are transitive dependencies, and scrybe does not exercise the vulnerable paths. Precautionary.
-
-### Changed
-
-- Dependency updates: `@modelcontextprotocol/sdk` 1.30.0, `@parcel/watcher` 2.6.0, `ink` 7.1.1, `ignore` 7.0.6.
-
----
-
 ## Older releases
 
-For releases v0.47.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.47.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.51.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.52.0...HEAD
+[0.52.0]: https://github.com/siaarzh/scrybe/compare/v0.51.1...v0.52.0
 [0.51.1]: https://github.com/siaarzh/scrybe/compare/v0.51.0...v0.51.1
 [0.51.0]: https://github.com/siaarzh/scrybe/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/siaarzh/scrybe/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/siaarzh/scrybe/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/siaarzh/scrybe/compare/v0.47.1...v0.48.0
-[0.47.1]: https://github.com/siaarzh/scrybe/compare/v0.47.0...v0.47.1
