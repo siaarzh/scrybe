@@ -48,6 +48,8 @@ export interface InitInput {
   code_base_url?: string;
   /** Embedding dimensions (required when code_provider = "custom"). */
   code_dim?: number;
+  /** Embedding response encoding for a custom code provider. */
+  code_encoding_format?: "float";
 
   /**
    * Provider for text/knowledge sources.
@@ -62,6 +64,8 @@ export interface InitInput {
   text_base_url?: string;
   /** Embedding dimensions for custom text provider. */
   text_dim?: number;
+  /** Embedding response encoding for a custom text provider. */
+  text_encoding_format?: "float";
 
   /** Reranker provider (optional). Must match an embedding provider above. */
   rerank_provider?: string;
@@ -116,6 +120,7 @@ function resolveCodeSelection(input: InitInput): ProviderSelection {
       model: input.code_model,
       baseUrl: input.code_base_url,
       dim: input.code_dim,
+      encodingFormat: input.code_encoding_format,
     };
   }
 
@@ -161,6 +166,7 @@ function resolveTextSelection(input: InitInput, codeSel: ProviderSelection): Pro
       model: input.text_model,
       baseUrl: input.text_base_url,
       dim: input.text_dim,
+      encodingFormat: input.text_encoding_format,
     };
   }
 
@@ -244,6 +250,11 @@ export const initTool: Tool<InitInput, InitOutput> = {
           type: "number",
           description: "Embedding dimensions (required when code_provider = 'custom')",
         },
+        code_encoding_format: {
+          type: "string",
+          enum: ["float"],
+          description: "Response encoding for a custom code provider. Use float for compatible local servers returning JSON number arrays.",
+        },
         text_provider: {
           type: "string",
           enum: ["local", "voyage", "openai", "custom"],
@@ -264,6 +275,11 @@ export const initTool: Tool<InitInput, InitOutput> = {
         text_dim: {
           type: "number",
           description: "Dimensions for custom text provider.",
+        },
+        text_encoding_format: {
+          type: "string",
+          enum: ["float"],
+          description: "Response encoding for a custom text provider. Use float for compatible local servers returning JSON number arrays.",
         },
         rerank_provider: {
           type: "string",

@@ -276,6 +276,37 @@ describe("customKeyName — Scenario 5: slug collision", () => {
   });
 });
 
+describe("synthesizeWizardConfig — custom response encoding", () => {
+  it("persists float encoding for custom code and text presets", async () => {
+    const { synthesizeWizardConfig } = await import("../src/onboarding/wizard.js");
+
+    const output = synthesizeWizardConfig({
+      code: {
+        provider: "custom",
+        apiKey: "not-needed",
+        model: "local-qwen",
+        baseUrl: "http://127.0.0.1:11480/v1",
+        dim: 1024,
+        encodingFormat: "float",
+      },
+      text: {
+        provider: "custom",
+        apiKey: "not-needed",
+        model: "local-qwen",
+        baseUrl: "http://127.0.0.1:11480/v1",
+        dim: 1024,
+        encodingFormat: "float",
+      },
+      dataDir: "/tmp/fake",
+    });
+
+    const codePreset = output.config.embedding_presets[output.config.assignments.code_preset];
+    const textPreset = output.config.embedding_presets[output.config.assignments.text_preset];
+    expect(codePreset?.encoding_format).toBe("float");
+    expect(textPreset?.encoding_format).toBe("float");
+  });
+});
+
 // ─── Doctor checks ────────────────────────────────────────────────────────────
 
 describe("doctor — config.well_formed: malformed config.json", () => {
@@ -323,6 +354,31 @@ describe("doctor — config.well_formed: malformed config.json", () => {
     expect(check).toBeTruthy();
     expect(check!.status).toBe("fail");
     expect(check!.message).toMatch(/nonexistent-preset/);
+  });
+
+  it("emits config.well_formed fail when a catalog preset opts into float encoding", async () => {
+    writeConfig(dir, {
+      schema_version: 1,
+      embedding_presets: {
+        "voyage-code": {
+          provider: "voyage",
+          model: "voyage-code-3",
+          encoding_format: "float",
+        },
+      },
+      assignments: {
+        code_preset: "voyage-code",
+        text_preset: "voyage-code",
+      },
+    });
+
+    const { runDoctor } = await import("../src/onboarding/doctor.js");
+    const report = await runDoctor();
+    const check = report.checks.find((c) => c.id === "config.well_formed");
+
+    expect(check).toBeTruthy();
+    expect(check!.status).toBe("fail");
+    expect(check!.message).toMatch(/custom provider/i);
   });
 
   it("passes config.well_formed when rerank_preset resolves via reranker_presets (regression: v0.32.1 doctor false-positive)", async () => {

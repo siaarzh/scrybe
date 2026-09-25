@@ -431,22 +431,16 @@ async function detectDaemonUnavailable(): Promise<DaemonUnavailableState | null>
  * Returns config_present, daemon_running:false, and provider info from config.
  */
 async function degradedStatus(): Promise<unknown> {
-  const { config, VERSION: ver, readScrybeConfig } = await import("./config.js");
-  const configObj = readScrybeConfig();
+  const { VERSION: ver } = await import("./config.js");
+  const { configuredEmbeddingStatus } = await import("./embedding-status.js");
+  const embeddingStatus = configuredEmbeddingStatus();
   return {
     version: ver,
-    config_present: configObj !== null,
     daemon_running: false,
     daemon_pid: null,
     daemon_port: null,
     daemon_version: null,
-    code_provider_type: config.embeddingProviderType,
-    code_model: config.embeddingModel,
-    text_provider_type: config.textEmbeddingProviderType,
-    text_model: config.textEmbeddingModel,
-    api_key_present: !!config.embeddingApiKey,
-    config_error: !!config.embeddingConfigError,
-    config_error_message: config.embeddingConfigError ?? null,
+    ...embeddingStatus,
     setup_guide: "Run the scrybe 'setup' skill for a guided first-run walkthrough (status -> doctor -> init -> poll reindex_status). Non-skill clients: follow each tool's `remedy` output.",
   };
 }

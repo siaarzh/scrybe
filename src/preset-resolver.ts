@@ -23,6 +23,8 @@ export interface ResolvedEmbedding {
    * and `passage` to each passage text before embedding.
    */
   prompt_template?: { query: string; passage: string };
+  /** Optional OpenAI embeddings response encoding selected by this preset. */
+  encoding_format?: "float" | "base64";
   /**
    * Per-preset maximum input token budget (Plan 77).
    * When set, the chunker enforces a char cap of `max_input_tokens * 4` (heuristic).
@@ -128,5 +130,15 @@ export function resolvePreset(
     credentials = resolveEnvRef(preset.credentials);
   }
 
-  return { provider, model, dim, base_url, credentials, profile, prompt_template: preset.prompt_template, max_input_tokens: preset.max_input_tokens };
+  return {
+    provider,
+    model,
+    dim,
+    base_url,
+    credentials,
+    profile,
+    prompt_template: preset.prompt_template,
+    encoding_format: preset.encoding_format,
+    max_input_tokens: preset.max_input_tokens,
+  };
 }

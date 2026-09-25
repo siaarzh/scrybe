@@ -109,13 +109,14 @@ describe("Plan 23 Slice 4: MCP tools", () => {
       expect(result.error).toContain("not found");
     });
 
-    it("should accept custom provider with base_url and dim", async () => {
+    it("should persist a custom provider response encoding", async () => {
       const result = await addEmbeddingPresetTool.handler({
         name: "custom-bert",
         provider: "custom",
         model: "togethercomputer/m2-bert-80M-8k-retrieval",
         base_url: "https://api.together.xyz/v1",
         dim: 768,
+        encoding_format: "float",
         credentials: "${SCRYBE_TOGETHER_API_KEY}",
       }) as AddEmbeddingPresetOutput;
 
@@ -127,6 +128,7 @@ describe("Plan 23 Slice 4: MCP tools", () => {
       expect(preset.provider).toBe("custom");
       expect(preset.base_url).toBe("https://api.together.xyz/v1");
       expect(preset.dim).toBe(768);
+      expect(preset.encoding_format).toBe("float");
     });
 
     it("should reject custom provider without base_url", async () => {

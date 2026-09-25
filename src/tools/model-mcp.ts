@@ -19,6 +19,7 @@ export interface AddEmbeddingPresetInput {
   credentials_from?: string;
   base_url?: string;
   dim?: number;
+  encoding_format?: "float";
 }
 
 export interface AddEmbeddingPresetOutput {
@@ -36,7 +37,7 @@ export const addEmbeddingPresetTool: Tool<
     description:
       "Add a new embedding preset to the configuration. Presets are named references to embedding models with provider, model, and optional credentials. " +
       "Catalog providers (voyage, openai, local) derive base_url and dimensions from the catalog. " +
-      "Custom provider requires explicit base_url and dim. Returns ok:true and the preset name on success.",
+      "Custom provider requires explicit base_url and dim; it may specify the endpoint response encoding. Returns ok:true and the preset name on success.",
     inputSchema: {
       type: "object",
       properties: {
@@ -47,6 +48,11 @@ export const addEmbeddingPresetTool: Tool<
         credentials_from: { type: "string", description: "Reuse credentials from another preset (for rerank presets)" },
         base_url: { type: "string", description: "API base URL (required for custom provider only)" },
         dim: { type: "number", description: "Embedding dimensions (required for custom provider only)" },
+        encoding_format: {
+          type: "string",
+          enum: ["float"],
+          description: "Embedding response encoding for a custom provider. Use float for compatible local servers returning JSON number arrays.",
+        },
       },
       required: ["name", "provider", "model"],
     },
@@ -60,6 +66,7 @@ export const addEmbeddingPresetTool: Tool<
     credentials_from: credentialsFrom,
     base_url: baseUrl,
     dim,
+    encoding_format: encodingFormat,
   }) => {
     try {
       runPresetAdd({
@@ -70,6 +77,7 @@ export const addEmbeddingPresetTool: Tool<
         credentialsFrom,
         baseUrl,
         dim,
+        encodingFormat,
       });
       return { ok: true, preset_name: name };
     } catch (err: any) {

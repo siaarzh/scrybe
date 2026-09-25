@@ -298,6 +298,7 @@ export function resolveEmbeddingConfig(source: Source): EmbeddingConfig {
       api_key_env: _injectCredential(presetName, resolved.credentials),
       provider_type: resolved.provider === "local" ? "local" : "api",
       prompt_template: resolved.prompt_template,
+      encoding_format: resolved.encoding_format,
       max_input_tokens: resolved.max_input_tokens,
     };
   }

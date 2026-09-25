@@ -67,6 +67,10 @@ async function embedTextsOnce(texts: string[], embConfig: EmbeddingConfig): Prom
   const response = await client.embeddings.create({
     model: embConfig.model,
     input: texts.map((t) => truncate(t, maxChars)),
+    // The SDK defaults to base64 for backward compatibility. Some local
+    // OpenAI-compatible servers return JSON float arrays instead; presets can
+    // opt into that representation without changing catalog providers.
+    ...(embConfig.encoding_format === "float" ? { encoding_format: "float" } : {}),
   });
   const sorted = response.data
     .sort((a, b) => a.index - b.index)
