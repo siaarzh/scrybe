@@ -128,7 +128,7 @@ describe("OpenAI-compatible float embeddings", () => {
     })).rejects.toThrow(/encoding_format.*float.*numeric|numeric.*encoding_format.*float/i);
   });
 
-  it("suggests float encoding when the SDK decodes a float array to one quarter of its dimensions", async () => {
+  it("keeps full dimensions when a default request gets a float array reply", async () => {
     const server = http.createServer(async (_request, response) => {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
@@ -144,12 +144,13 @@ describe("OpenAI-compatible float embeddings", () => {
     const { port } = server.address() as AddressInfo;
     process.env[API_KEY_ENV] = "not-needed";
     const { embedQuery } = await import("../src/embedder.js");
-    await expect(embedQuery("synthetic query", {
+    const vector = await embedQuery("synthetic query", {
       base_url: `http://127.0.0.1:${port}/v1`,
       model: "local-qwen",
       dimensions: 1024,
       api_key_env: API_KEY_ENV,
       provider_type: "api",
-    })).rejects.toThrow(/256d.*1024d.*encoding_format.*float.*before.*dimensions/i);
+    });
+    expect(vector).toHaveLength(1024);
   });
 });
