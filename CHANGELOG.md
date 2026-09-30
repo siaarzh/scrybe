@@ -7,16 +7,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.53.0] — 2026-09-30
+
 ### Added
 
-- Custom embedding presets accept `encoding_format: "float"`, exposed as `--encoding-format float` for CLI preset creation and as encoding fields on MCP setup tools. Custom setup probes dimensions and float output instead of asking users to guess them.
+- Custom embedding presets accept `encoding_format: "float"`, for OpenAI-compatible servers that return plain number arrays instead of base64. It's `--encoding-format float` when creating a preset from the CLI, and an encoding field on the MCP setup tools. Custom setup now probes the dimensions and float output itself, so you don't have to guess them.
 
 ### Fixed
 
-- Searches across multiple sources of the same profile under one project reuse each identical query embedding once per search invocation.
-- `status` and `doctor` report assigned embedding presets. Missing credential environment variables retain model details and are reported separately from malformed configuration.
-- Provider validation sends the runtime's requested encoding. Invalid float replies report an encoding error instead of recommending incorrect dimensions. Legacy custom endpoint migration selects float output.
-- Adding an existing preset is rejected instead of dropping its hand-written settings.
+- A search across several sources that share an embedding setup now embeds the query once, not once per source.
+- `status` and `doctor` report the embedding preset each project is actually assigned. A missing credential variable no longer hides the model details, and it's reported separately from a malformed configuration.
+- Provider validation requests the same encoding the runtime uses. A bad float reply now reports an encoding error instead of suggesting the wrong dimensions. Migrating a legacy custom endpoint selects float output.
+- Adding a preset under a name that already exists is rejected, instead of silently dropping that preset's hand-written settings.
 
 ---
 
@@ -92,29 +96,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.48.0] — 2026-08-05
-
-### Added
-
-- **The daemon now starts under a kernel-enforced memory ceiling on Linux.** A runaway daemon is stopped by the kernel at the moment it asks for the memory, not noticed up to a minute later, and it can no longer take the host down with it. The limit defaults to 4096 MB and is set with `SCRYBE_DAEMON_CGROUP_MAX_MB` (`0` disables it). It applies where a systemd user session is available; on other platforms, in headless containers, and on hosts without systemd the daemon starts exactly as before, uncapped. An always-on service installed by an earlier version keeps its existing unit and stays uncapped until reinstalled with `scrybe daemon install --force`.
-- **`scrybe doctor` reports whether the daemon is memory-capped.** For a running daemon it reads the limit actually in force, distinguishing a cap set by scrybe's own unit from one imposed by an ancestor cgroup. With no daemon running it predicts what the next one would get, and explains in plain language why a cap would be missing and what to do about it.
-
-### Fixed
-
-- **A daemon that failed to restart after exceeding its memory ceiling is now forced to exit instead of lingering.** The self-restart could hang partway through, leaving a process that was over budget, no longer watching its own memory, and holding on to the lock the next daemon needs. Such a restart is now given a bounded window and then terminated, so a fresh daemon can take over. Tune the window with `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MS` (default 120 s, minimum 90 s) and its per-failure backoff ceiling `SCRYBE_DAEMON_RSS_GUARD_WATCHDOG_MAX_MS` (default 30 min); a healthy restart always completes well within the window.
-
----
-
 ## Older releases
 
-For releases v0.47.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.48.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.52.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.53.0...HEAD
+[0.53.0]: https://github.com/siaarzh/scrybe/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/siaarzh/scrybe/compare/v0.51.1...v0.52.0
 [0.51.1]: https://github.com/siaarzh/scrybe/compare/v0.51.0...v0.51.1
 [0.51.0]: https://github.com/siaarzh/scrybe/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/siaarzh/scrybe/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/siaarzh/scrybe/compare/v0.48.0...v0.49.0
-[0.48.0]: https://github.com/siaarzh/scrybe/compare/v0.47.1...v0.48.0
