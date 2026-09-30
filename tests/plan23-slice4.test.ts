@@ -111,11 +111,35 @@ describe("Plan 23 Slice 4: MCP tools", () => {
 
     it("should accept custom provider with base_url and dim", async () => {
       const result = await addEmbeddingPresetTool.handler({
+        name: "custom-bert", provider: "custom", model: "custom-bert",
+        base_url: "http://localhost/v1", dim: 768,
+      }) as AddEmbeddingPresetOutput;
+      expect(result.ok).toBe(true);
+      expect(readTestConfig(testDir)!.embedding_presets["custom-bert"]).toEqual({
+        provider: "custom", model: "custom-bert", base_url: "http://localhost/v1", dim: 768,
+      });
+    });
+
+    it("rejects replacing a preset without dropping its hand-written settings", async () => {
+      const original = { provider: "custom", model: "qwen", base_url: "http://localhost/v1", dim: 768,
+        prompt_template: { query: "query: ", passage: "passage: " }, max_input_tokens: 512 };
+      writeTestConfig(testDir, { schema_version: 1, embedding_presets: { qwen: original },
+        assignments: { code_preset: "qwen", text_preset: "qwen" } });
+      const result = await addEmbeddingPresetTool.handler({ name: "qwen", provider: "custom", model: "qwen",
+        base_url: "http://localhost/v1", dim: 768, encoding_format: "float" }) as AddEmbeddingPresetOutput;
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("already exists");
+      expect(readTestConfig(testDir)!.embedding_presets["qwen"]).toEqual(original);
+    });
+
+    it("should persist a custom provider response encoding", async () => {
+      const result = await addEmbeddingPresetTool.handler({
         name: "custom-bert",
         provider: "custom",
         model: "togethercomputer/m2-bert-80M-8k-retrieval",
         base_url: "https://api.together.xyz/v1",
         dim: 768,
+        encoding_format: "float",
         credentials: "${SCRYBE_TOGETHER_API_KEY}",
       }) as AddEmbeddingPresetOutput;
 
@@ -127,6 +151,7 @@ describe("Plan 23 Slice 4: MCP tools", () => {
       expect(preset.provider).toBe("custom");
       expect(preset.base_url).toBe("https://api.together.xyz/v1");
       expect(preset.dim).toBe(768);
+      expect(preset.encoding_format).toBe("float");
     });
 
     it("should reject custom provider without base_url", async () => {

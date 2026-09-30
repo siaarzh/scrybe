@@ -144,6 +144,8 @@ export interface ProviderSelection {
   baseUrl?: string;
   /** Custom providers only */
   dim?: number;
+  /** Custom providers only: response encoding expected from the endpoint. */
+  encodingFormat?: "float";
 }
 
 export interface WizardInput {
@@ -207,6 +209,7 @@ export function synthesizeWizardConfig(input: WizardInput, priorEnvKeys?: Set<st
     if (sel.provider === "custom") {
       if (sel.baseUrl) preset.base_url = sel.baseUrl;
       if (sel.dim !== undefined) preset.dim = sel.dim;
+      if (sel.encodingFormat) preset.encoding_format = sel.encodingFormat;
     }
     return preset;
   }
@@ -477,7 +480,6 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
 
     // Probe /models — retry on 401
     let model = "";
-    let dim: number | undefined;
 
     const probeResult = await probeModelsEndpoint(baseUrl, apiKey);
     if (probeResult && probeResult.status === 401) {
@@ -508,14 +510,24 @@ export async function runWizard(opts?: WizardOptions): Promise<void> {
       model = modelInput as string;
     }
 
-    const dimInput = await p.text({
-      message: "Embedding dimensions (e.g. 768)",
-      validate: (v) => (v && /^\d+$/.test(v) ? undefined : "Must be a positive integer"),
-    });
-    if (p.isCancel(dimInput)) return null;
-    dim = parseInt(dimInput as string, 10);
+    const spinner = p.spinner();
+    spinner.start("Validating embedding model...");
+    const result = await validateProvider({ baseUrl, model, apiKey, encodingFormat: "float" });
+    if (!result.ok) {
+      spinner.stop("Embedding validation failed");
+      p.log.warn(result.message ?? "The endpoint did not return valid embeddings.");
+      return null;
+    }
+    spinner.stop(`Embedding model valid — ${result.dimensions}d`);
 
-    return { provider: "custom", apiKey, model, baseUrl, dim };
+    return {
+      provider: "custom",
+      apiKey,
+      model,
+      baseUrl,
+      dim: result.dimensions,
+      encodingFormat: result.encodingFormat,
+    };
   }
 
   async function promptNewApiKey(

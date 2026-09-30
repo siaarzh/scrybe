@@ -67,18 +67,35 @@ async function embedTextsOnce(texts: string[], embConfig: EmbeddingConfig): Prom
   const response = await client.embeddings.create({
     model: embConfig.model,
     input: texts.map((t) => truncate(t, maxChars)),
+    // The SDK defaults to base64 for backward compatibility. Some local
+    // OpenAI-compatible servers return JSON float arrays instead; presets can
+    // opt into that representation without changing catalog providers.
+    ...(embConfig.encoding_format === "float" ? { encoding_format: "float" } : {}),
   });
   const sorted = response.data
     .sort((a, b) => a.index - b.index)
     .map((item) => item.embedding);
 
-  // Validate dimensions on first call
+  if (sorted.length === 0 || sorted.some((vector) =>
+    !Array.isArray(vector) || vector.length === 0 ||
+    vector.some((value) => typeof value !== "number" || !Number.isFinite(value))
+  )) {
+    throw new Error(
+      `Embedding encoding mismatch for model "${embConfig.model}". ` +
+      `Expected finite numeric arrays${embConfig.encoding_format === "float" ? ' for encoding_format:"float"' : " after base64 decoding"}. ` +
+      `Check the endpoint's response encoding before changing dimensions.`
+    );
+  }
+
   const actual = sorted[0]?.length;
   if (actual && actual !== embConfig.dimensions) {
+    const encodingHint = embConfig.encoding_format !== "float" && actual * 4 === embConfig.dimensions
+      ? 'The endpoint may have returned float arrays to the SDK\'s base64 request. Set encoding_format:"float" on this custom preset and retry before changing dimensions.'
+      : "Check the model and response encoding before changing the configured dimensions.";
     throw new Error(
       `Embedding model "${embConfig.model}" returned ${actual}d vectors ` +
       `but config expects ${embConfig.dimensions}d. ` +
-      `Update the source's embedding dimensions config to ${actual}.`
+      encodingHint
     );
   }
 

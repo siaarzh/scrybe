@@ -334,6 +334,8 @@ scrybe model show
 
 Add a new embedding preset to `config.json`.
 
+An existing preset name is rejected. To change a preset, edit its `config.json` entry, or add a new preset and assign it.
+
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--provider <key>` | ✓ | Provider: `voyage`, `openai`, `local`, or `custom` |
@@ -342,6 +344,7 @@ Add a new embedding preset to `config.json`.
 | `--credentials-from <preset>` | | Reuse credentials from another named preset |
 | `--base-url <url>` | custom only | API base URL (required for `custom` provider) |
 | `--dim <n>` | custom only | Embedding dimensions (required for `custom` provider) |
+| `--encoding-format <format>` | | Custom providers only. Accepts `float` to request JSON number arrays. Omit for the SDK base64 default. |
 
 ```bash
 # Catalog provider

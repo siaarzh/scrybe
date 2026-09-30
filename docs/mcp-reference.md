@@ -15,7 +15,7 @@ No parameters.
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Scrybe version |
-| `config_present` | boolean | `true` when `config.json` exists and is well-formed |
+| `config_present` | boolean | `true` when `config.json` exists, including a malformed file |
 | `daemon_running` | boolean | `true` when the daemon pidfile exists and the process is alive |
 | `daemon_pid` | number \| null | Daemon PID when running |
 | `daemon_port` | number \| null | Daemon HTTP port when running |
@@ -24,9 +24,10 @@ No parameters.
 | `code_model` | string | Embedding model for code sources |
 | `text_provider_type` | string | Embedding provider for knowledge sources: `"local"` or `"api"` |
 | `text_model` | string | Embedding model for knowledge sources |
-| `api_key_present` | boolean | `true` when an embedding API key is configured |
-| `config_error` | boolean | `true` when the provider is misconfigured |
+| `api_key_present` | boolean | `true` for a local code preset or when the selected code preset's credential resolves to a nonempty value. Local API endpoints may use a placeholder credential. |
+| `config_error` | boolean | `true` when the configuration is malformed or its selected presets are invalid. An unset credential environment variable is reported separately. |
 | `config_error_message` | string \| null | Error details when `config_error` is `true` |
+| `credential_error_message` | string \| null | Credential resolution error for a selected code or text preset, without hiding its model or provider |
 
 ---
 
@@ -76,12 +77,14 @@ Configure scrybe embedding providers and enqueue an initial index of all registe
 | `code_model` | string | | Model for code sources. Defaults to the provider's recommended code model when omitted. |
 | `code_api_key` | string | | API key for code provider. Required for `voyage`, `openai`, and `custom`. |
 | `code_base_url` | string | custom only | API base URL (required when `code_provider = "custom"`). |
-| `code_dim` | number | custom only | Embedding dimensions (required when `code_provider = "custom"`). |
+| `code_dim` | number | | Expected custom dimensions. Inferred from the float probe when omitted; a supplied mismatch is rejected. |
+| `code_encoding_format` | `"float"` | | Custom providers only. Defaults to `float`; setup validates and persists this encoding. |
 | `text_provider` | `"local"` \| `"voyage"` \| `"openai"` \| `"custom"` | | Provider for text/knowledge sources. Defaults to same as `code_provider`. |
 | `text_model` | string | | Model for text/knowledge sources. Defaults to provider text model. |
 | `text_api_key` | string | | API key for text provider. Only required when `text_provider` differs from `code_provider`. |
 | `text_base_url` | string | | Base URL for custom text provider. |
-| `text_dim` | number | | Dimensions for custom text provider. |
+| `text_dim` | number | | Expected custom text dimensions. Inferred from the float probe when omitted; a supplied mismatch is rejected. |
+| `text_encoding_format` | `"float"` | | Custom providers only. Defaults to `float`; setup validates and persists this encoding. |
 | `rerank_provider` | string | | Reranker provider. Must match one of the embedding providers above. |
 | `rerank_model` | string | | Reranker model name (required when `rerank_provider` is set). |
 | `reconfigure` | boolean | | When `true`, overwrite existing config even if already configured. Default: `false`. |
@@ -225,6 +228,8 @@ Embedding configuration is managed globally via presets stored in `<DATA_DIR>/co
 
 Add a new named embedding preset. Catalog providers (`voyage`, `openai`, `local`) derive `base_url` and dimensions from the built-in catalog — only `provider`, `model`, and optional `credentials` are needed. The `custom` provider requires explicit `base_url` and `dim`.
 
+An existing preset name is rejected so hand-written settings are preserved.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | ✓ | Unique preset name |
@@ -234,6 +239,7 @@ Add a new named embedding preset. Catalog providers (`voyage`, `openai`, `local`
 | `credentials_from` | string | | Reuse credentials from another named preset (useful for rerank presets that share an embedding key) |
 | `base_url` | string | custom only | API base URL |
 | `dim` | number | custom only | Embedding dimensions |
+| `encoding_format` | `"float"` | | Custom providers only. Requests JSON number arrays. Omit for the SDK base64 default. |
 | `prompt_template` | object | | Asymmetric `{ query, passage }` prefixes prepended before embedding (e.g. `{ "query": "query: ", "passage": "passage: " }` for e5-family models) |
 | `max_input_tokens` | number | | Cap input to the model's context window (e.g. `512` for `multilingual-e5-small`); the chunker fits chunks to this budget so content is not truncated at the model boundary |
 

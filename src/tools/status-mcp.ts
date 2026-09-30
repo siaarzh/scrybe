@@ -13,7 +13,7 @@ import type { Tool } from "./types.js";
 export interface StatusOutput {
   /** Scrybe version from package.json. */
   version: string;
-  /** True when config.json exists and is well-formed. */
+  /** True when config.json exists, including when it is malformed. */
   config_present: boolean;
   /** True when the daemon pidfile exists and the process is alive. */
   daemon_running: boolean;
@@ -31,12 +31,14 @@ export interface StatusOutput {
   text_provider_type: string;
   /** Embedding model for knowledge sources. */
   text_model: string;
-  /** True when SCRYBE_CODE_EMBEDDING_API_KEY is set (API providers only). */
+  /** True when the assigned code preset's credential resolves, or it uses the local embedder. */
   api_key_present: boolean;
   /** True when there is a config error (misconfigured provider). */
   config_error: boolean;
   /** Config error message when config_error is true, otherwise null. */
   config_error_message: string | null;
+  /** Credential resolution error, independent of JSON and preset validity. */
+  credential_error_message: string | null;
 }
 
 // ─── Tool definition ──────────────────────────────────────────────────────────
@@ -59,16 +61,11 @@ export const statusTool: Tool<Record<string, never>, StatusOutput> = {
 
   handler: async () => {
     // Lazy-load all state sources to avoid forcing heavy modules at parse time
-    const { config, VERSION, readScrybeConfig } = await import("../config.js");
+    const { VERSION } = await import("../config.js");
+    const { configuredEmbeddingStatus } = await import("../embedding-status.js");
     const { readPidfile, isDaemonRunning } = await import("../daemon/pidfile.js");
 
-    // Config presence
-    const configObj = readScrybeConfig();
-    const configPresent = configObj !== null;
-
-    // Config error
-    const configError = !!config.embeddingConfigError;
-    const configErrorMessage = config.embeddingConfigError ?? null;
+    const embeddingStatus = configuredEmbeddingStatus();
 
     // Daemon state (quick: pid alive check only, no HTTP probe)
     const pidData = readPidfile();
@@ -101,18 +98,11 @@ export const statusTool: Tool<Record<string, never>, StatusOutput> = {
 
     return {
       version: VERSION,
-      config_present: configPresent,
       daemon_running: daemonRunning,
       daemon_pid: daemonPid,
       daemon_port: daemonPort,
       daemon_version: daemonVersion,
-      code_provider_type: config.embeddingProviderType,
-      code_model: config.embeddingModel,
-      text_provider_type: config.textEmbeddingProviderType,
-      text_model: config.textEmbeddingModel,
-      api_key_present: !!config.embeddingApiKey,
-      config_error: configError,
-      config_error_message: configErrorMessage,
+      ...embeddingStatus,
     };
   },
 };

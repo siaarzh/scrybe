@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { validateProvider } from "../src/onboarding/validate-provider.js";
 
 // Mock global fetch for provider validation tests
 const mockFetch = vi.fn();
@@ -8,6 +7,16 @@ beforeEach(() => {
   vi.stubGlobal("fetch", mockFetch);
   mockFetch.mockReset();
 });
+
+async function validateProvider(spec: {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  encodingFormat?: "float";
+}) {
+  const { validateProvider: validate } = await import("../src/onboarding/validate-provider.js");
+  return validate(spec);
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -25,16 +34,57 @@ function makeResp(status: number, body: unknown): Response {
 }
 
 describe("validateProvider", () => {
-  it("returns ok with dimensions on 200 success", async () => {
+  it("validates the SDK's base64 request and decodes its dimensions", async () => {
     mockFetch.mockResolvedValueOnce(makeResp(200, {
-      data: [{ embedding: new Array(1024).fill(0.1) }],
+      data: [{ embedding: Buffer.alloc(1024 * Float32Array.BYTES_PER_ELEMENT).toString("base64") }],
       model: "voyage-code-3",
     }));
     const result = await validateProvider(SPEC);
     expect(result.ok).toBe(true);
     expect(result.dimensions).toBe(1024);
     expect(result.model).toBe("voyage-code-3");
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({
+      model: "voyage-code-3", input: ["ping"], encoding_format: "base64",
+    });
   });
+
+  it("infers dimensions and float encoding from a custom endpoint's actual float request", async () => {
+    mockFetch.mockResolvedValueOnce(makeResp(200, {
+      data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }],
+      model: "local-qwen",
+    }));
+    const result = await validateProvider({ ...SPEC, encodingFormat: "float" });
+    expect(result).toMatchObject({ ok: true, dimensions: 4, encodingFormat: "float", model: "local-qwen" });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).encoding_format).toBe("float");
+  });
+
+  it("rejects a float array from an endpoint that ignores the SDK's base64 request", async () => {
+    mockFetch.mockResolvedValueOnce(makeResp(200, { data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }));
+    const result = await validateProvider(SPEC);
+    expect(result).toMatchObject({ ok: false, errorType: "dimensions_unknown" });
+    expect(result.message).toMatch(/encoding_format.*float/i);
+  });
+
+  it.each([
+    ["base64", Buffer.alloc(16).toString("base64")],
+    ["string array", ["0.1", "0.2"]],
+    ["non-finite array", [0.1, Infinity]],
+    ["empty array", []],
+  ])("rejects %s returned for an explicit float request", async (_label, embedding) => {
+    mockFetch.mockResolvedValueOnce(makeResp(200, { data: [{ embedding }] }));
+    const result = await validateProvider({ ...SPEC, encodingFormat: "float" });
+    expect(result).toMatchObject({ ok: false, errorType: "dimensions_unknown" });
+    expect(result.message).toMatch(/encoding_format.*float.*numeric|numeric.*encoding_format.*float/i);
+  });
+
+  it.each(["not-base64!", "AA==", "AACAfw==", ""])(
+    "rejects malformed or non-finite base64 embedding %s",
+    async (embedding) => {
+      mockFetch.mockResolvedValueOnce(makeResp(200, { data: [{ embedding }] }));
+      const result = await validateProvider(SPEC);
+      expect(result).toMatchObject({ ok: false, errorType: "dimensions_unknown" });
+    },
+  );
 
   it("returns auth error on 401", async () => {
     mockFetch.mockResolvedValueOnce(makeResp(401, {}));

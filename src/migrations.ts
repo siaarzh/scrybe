@@ -234,7 +234,10 @@ export function synthesizeMigrationConfig(
       model: codeModel ?? (provider === "voyage" ? "voyage-code-3" : "text-embedding-3-small"),
       credentials: "${SCRYBE_CODE_EMBEDDING_API_KEY}",
     };
-    if (provider === "custom" && codeBaseUrl) preset.base_url = codeBaseUrl;
+    if (provider === "custom" && codeBaseUrl) {
+      preset.base_url = codeBaseUrl;
+      preset.encoding_format = "float";
+    }
     if (codeDims) preset.dim = parseInt(codeDims, 10);
     embeddingPresets[codePresetName] = preset;
   } else {
@@ -265,7 +268,10 @@ export function synthesizeMigrationConfig(
       model: knowledgeModel ?? (provider === "voyage" ? "voyage-4" : "text-embedding-3-small"),
       credentials: "${SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY}",
     };
-    if (provider === "custom" && effectiveBaseUrl) preset.base_url = effectiveBaseUrl;
+    if (provider === "custom" && effectiveBaseUrl) {
+      preset.base_url = effectiveBaseUrl;
+      preset.encoding_format = "float";
+    }
     if (knowledgeDims) preset.dim = parseInt(knowledgeDims, 10);
     embeddingPresets[textPresetName] = preset;
   } else if (!hasCode) {

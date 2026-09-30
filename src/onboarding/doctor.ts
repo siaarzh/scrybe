@@ -258,11 +258,12 @@ function describeLimitUnknownReason(reason: string): string {
 
 export async function runDoctor(): Promise<DoctorReport> {
   // Lazy imports — doctor.ts must not force-load heavy modules at module parse time
-  const { config, VERSION } = await import("../config.js");
+  const { config, VERSION, readScrybeConfig } = await import("../config.js");
   const { listProjects } = await import("../registry.js");
   const { readPidfile, isDaemonRunning } = await import("../daemon/pidfile.js");
   const { CURRENT_SCHEMA_VERSION } = await import("../schema-version.js");
   const { validateProvider, validateLocal } = await import("./validate-provider.js");
+  const { resolvePreset } = await import("../preset-resolver.js");
   const { detectMcpConfigs, readScrybeEntry, proposeScrybeEntry } = await import("./mcp-config.js");
 
   const checks: CheckResult[] = [];
@@ -496,26 +497,57 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   // ── 2. Embedding Provider ───────────────────────────────────────────────────
   const SEC_PROV = "Embedding Provider";
+  const presetConfigPresent = existsSync(join(dataDir, "config.json"));
+  let embedding: Pick<import("../preset-resolver.js").ResolvedEmbedding,
+    "provider" | "model" | "dim" | "base_url" | "credentials" | "encoding_format"> = {
+    provider: config.embeddingProviderType,
+    model: config.embeddingModel,
+    dim: config.embeddingDimensions,
+    base_url: config.embeddingBaseUrl ?? "https://api.openai.com/v1",
+    credentials: config.embeddingApiKey,
+  };
+  let providerConfigError = config.embeddingConfigError;
+  let credentialError: string | undefined;
+  let assignedPreset: string | undefined;
+  try {
+    const presetConfig = readScrybeConfig();
+    if (presetConfig) {
+      assignedPreset = presetConfig.assignments.code_preset;
+      embedding = resolvePreset(assignedPreset, "code_preset", presetConfig, { resolveCredentials: false });
+      providerConfigError = null;
+      try {
+        embedding = resolvePreset(assignedPreset, "code_preset", presetConfig);
+      } catch (err) {
+        credentialError = err instanceof Error ? err.message : String(err);
+      }
+    }
+  } catch (err) {
+    providerConfigError = err instanceof Error ? err.message : String(err);
+  }
 
-  if (config.embeddingConfigError) {
-    checks.push(fail("provider.config", SEC_PROV, "Provider config", config.embeddingConfigError,
-      "Set SCRYBE_CODE_EMBEDDING_BASE_URL, SCRYBE_CODE_EMBEDDING_MODEL, and SCRYBE_CODE_EMBEDDING_DIMENSIONS in your .env"));
+  if (providerConfigError) {
+    checks.push(fail("provider.config", SEC_PROV, "Provider config", providerConfigError,
+      presetConfigPresent
+        ? "Fix config.json without replacing the malformed file through init"
+        : "Set SCRYBE_CODE_EMBEDDING_BASE_URL, SCRYBE_CODE_EMBEDDING_MODEL, and SCRYBE_CODE_EMBEDDING_DIMENSIONS in your .env"));
     checks.push(skip("provider.key_present", SEC_PROV, "API key", "Skipped: provider config error"));
     checks.push(skip("provider.auth", SEC_PROV, "Auth", "Skipped: provider config error"));
     checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: provider config error"));
-  } else if (config.embeddingProviderType === "local") {
+  } else if (embedding.provider === "local") {
     // ── Local WASM provider — no API key needed ─────────────────────────────
-    const localModelId = config.embeddingModel;
+    const localModelId = embedding.model;
     checks.push(ok("provider.config", SEC_PROV, "Provider config",
-      `Local (offline) / ${localModelId} / ${config.embeddingDimensions}d`,
-      { model: localModelId, dimensions: config.embeddingDimensions, provider_type: "local" }));
+      `Local (offline) / ${localModelId} / ${embedding.dim}d`,
+      { model: localModelId, dimensions: embedding.dim, provider_type: "local" }));
     checks.push(ok("provider.key_present", SEC_PROV, "API key", "Local embedder — no API key needed"));
 
     const localResult = await validateLocal(localModelId);
     if (!localResult.ok) {
       checks.push(fail("provider.auth", SEC_PROV, "Auth",
         localResult.message ?? "Local embedder failed to load",
-        "Run `scrybe init` or set SCRYBE_LOCAL_EMBEDDER to a cached model ID"));
+        assignedPreset
+          ? `Run \`scrybe init\` or choose a cached model for preset "${assignedPreset}" in config.json`
+          : "Run `scrybe init` or set SCRYBE_LOCAL_EMBEDDER to a cached model ID"));
       checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: local embedder not ready"));
     } else {
       const coldMs = localResult.coldStartMs !== undefined ? ` (cold-start ${localResult.coldStartMs}ms)` : "";
@@ -523,44 +555,53 @@ export async function runDoctor(): Promise<DoctorReport> {
         `Local embedder loaded${coldMs}`, { dimensions: localResult.dimensions, coldStartMs: localResult.coldStartMs }));
 
       const actualDims = localResult.dimensions!;
-      if (actualDims !== config.embeddingDimensions) {
+      if (actualDims !== embedding.dim) {
         checks.push(fail("provider.dimensions_match", SEC_PROV, "Dimensions",
-          `Config expects ${config.embeddingDimensions}d but local model returns ${actualDims}d`,
-          `Set SCRYBE_CODE_EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
+          `Config expects ${embedding.dim}d but local model returns ${actualDims}d`,
+          assignedPreset
+            ? `Update preset "${assignedPreset}" to match the model's ${actualDims} dimensions, then rebuild affected indexes`
+            : `Set SCRYBE_CODE_EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
       } else {
         checks.push(ok("provider.dimensions_match", SEC_PROV, "Dimensions", `${actualDims}d — matches config`));
       }
     }
   } else {
     // ── API provider — existing logic ───────────────────────────────────────
-    const provName = config.embeddingBaseUrl ?? "OpenAI (default)";
+    const provName = embedding.base_url;
     checks.push(ok("provider.config", SEC_PROV, "Provider config",
-      `${provName} / ${config.embeddingModel} / ${config.embeddingDimensions}d`,
-      { baseUrl: config.embeddingBaseUrl, model: config.embeddingModel, dimensions: config.embeddingDimensions }));
+      `${provName} / ${embedding.model} / ${embedding.dim}d`,
+      { baseUrl: embedding.base_url, model: embedding.model, dimensions: embedding.dim }));
 
-    const keyPresent = !!config.embeddingApiKey;
+    const keyPresent = !!embedding.credentials;
     if (!keyPresent) {
       checks.push(fail("provider.key_present", SEC_PROV, "API key present",
-        "SCRYBE_CODE_EMBEDDING_API_KEY not set",
-        "Set SCRYBE_CODE_EMBEDDING_API_KEY in your .env file"));
+        credentialError ?? (assignedPreset ? `No credentials configured for preset "${assignedPreset}"` : "SCRYBE_CODE_EMBEDDING_API_KEY not set"),
+        assignedPreset
+          ? `Set the credential env reference or credentials for preset "${assignedPreset}" in config.json`
+          : "Set SCRYBE_CODE_EMBEDDING_API_KEY in your .env file"));
       checks.push(skip("provider.auth", SEC_PROV, "Auth", "Skipped: no API key"));
       checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: no API key"));
     } else {
       checks.push(ok("provider.key_present", SEC_PROV, "API key present", "Set"));
 
       const validateResult = await validateProvider({
-        baseUrl: config.embeddingBaseUrl ?? "https://api.openai.com/v1",
-        model: config.embeddingModel,
-        apiKey: config.embeddingApiKey,
+        baseUrl: embedding.base_url,
+        model: embedding.model,
+        apiKey: embedding.credentials,
+        encodingFormat: embedding.encoding_format,
       });
 
       if (!validateResult.ok) {
         checks.push(fail("provider.auth", SEC_PROV, "Auth",
           validateResult.message ?? `Error: ${validateResult.errorType}`,
           validateResult.errorType === "auth"
-            ? "Regenerate your API key and update SCRYBE_CODE_EMBEDDING_API_KEY in .env"
+            ? assignedPreset
+              ? `Update the credential for preset "${assignedPreset}" in config.json or its referenced env var`
+              : "Regenerate your API key and update SCRYBE_CODE_EMBEDDING_API_KEY in .env"
             : validateResult.errorType === "dns"
-              ? "Check network connectivity and SCRYBE_CODE_EMBEDDING_BASE_URL"
+              ? assignedPreset
+                ? `Check network connectivity and the base URL for preset "${assignedPreset}" in config.json`
+                : "Check network connectivity and SCRYBE_CODE_EMBEDDING_BASE_URL"
               : validateResult.message));
         checks.push(skip("provider.dimensions_match", SEC_PROV, "Dimensions", "Skipped: auth failed"));
       } else {
@@ -568,10 +609,12 @@ export async function runDoctor(): Promise<DoctorReport> {
           { dimensions: validateResult.dimensions }));
 
         const actualDims = validateResult.dimensions!;
-        if (actualDims !== config.embeddingDimensions) {
+        if (actualDims !== embedding.dim) {
           checks.push(fail("provider.dimensions_match", SEC_PROV, "Dimensions",
-            `Config expects ${config.embeddingDimensions}d but provider returns ${actualDims}d`,
-            `Set SCRYBE_CODE_EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
+            `Config expects ${embedding.dim}d but provider returns ${actualDims}d`,
+            assignedPreset
+              ? `Update preset "${assignedPreset}" to match the provider's ${actualDims} dimensions, then rebuild affected indexes`
+              : `Set SCRYBE_CODE_EMBEDDING_DIMENSIONS=${actualDims} in your .env`));
         } else {
           checks.push(ok("provider.dimensions_match", SEC_PROV, "Dimensions", `${actualDims}d — matches config`));
         }

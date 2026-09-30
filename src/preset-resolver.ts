@@ -7,14 +7,14 @@ export type PresetSlot = "code_preset" | "text_preset" | "rerank_preset";
 
 /**
  * Fully resolved embedding configuration derived from a named preset.
- * All `${VAR}` references in `credentials` are already expanded.
+ * Credentials are expanded unless metadata-only resolution was requested.
  */
 export interface ResolvedEmbedding {
   provider: string;
   model: string;
   dim: number;
   base_url: string;
-  /** Resolved credential value (not an env-var ref). May be empty for auth:none providers. */
+  /** Resolved credential value. Empty for auth:none or metadata-only resolution. */
   credentials: string;
   profile: "code" | "text";
   /**
@@ -23,6 +23,8 @@ export interface ResolvedEmbedding {
    * and `passage` to each passage text before embedding.
    */
   prompt_template?: { query: string; passage: string };
+  /** Optional OpenAI embeddings response encoding selected by this preset. */
+  encoding_format?: "float";
   /**
    * Per-preset maximum input token budget (Plan 77).
    * When set, the chunker enforces a char cap of `max_input_tokens * 4` (heuristic).
@@ -46,6 +48,7 @@ export function resolvePreset(
   presetName: string,
   slot: PresetSlot,
   cfg: ScrybeConfig,
+  options: { resolveCredentials?: boolean } = {},
 ): ResolvedEmbedding {
   if (slot === "rerank_preset") {
     throw new Error(
@@ -121,12 +124,22 @@ export function resolvePreset(
         `credentials_from chains deeper than 1 level are not supported`,
       );
     }
-    if (sourcePreset.credentials) {
+    if (sourcePreset.credentials && options.resolveCredentials !== false) {
       credentials = resolveEnvRef(sourcePreset.credentials);
     }
-  } else if (preset.credentials) {
+  } else if (preset.credentials && options.resolveCredentials !== false) {
     credentials = resolveEnvRef(preset.credentials);
   }
 
-  return { provider, model, dim, base_url, credentials, profile, prompt_template: preset.prompt_template, max_input_tokens: preset.max_input_tokens };
+  return {
+    provider,
+    model,
+    dim,
+    base_url,
+    credentials,
+    profile,
+    prompt_template: preset.prompt_template,
+    encoding_format: preset.encoding_format,
+    max_input_tokens: preset.max_input_tokens,
+  };
 }

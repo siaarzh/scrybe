@@ -72,6 +72,42 @@ function readTableMeta(dir: string, tableName: string): Record<string, unknown> 
 // ─── Test 1 — synthesizeMigrationConfig: SCRYBE_CODE_EMBEDDING_* vars ─────────
 
 describe("synthesizeMigrationConfig — code env vars set → migrated-code preset", () => {
+  it("requests float for custom legacy code and inherited knowledge endpoints", async () => {
+    const { synthesizeMigrationConfig } = await import("../src/migrations.js");
+    const cfg = synthesizeMigrationConfig(new Map([
+      ["SCRYBE_CODE_EMBEDDING_API_KEY", "local-key"],
+      ["SCRYBE_CODE_EMBEDDING_BASE_URL", "http://127.0.0.1:11480/v1"],
+      ["SCRYBE_CODE_EMBEDDING_MODEL", "local-qwen"],
+      ["SCRYBE_CODE_EMBEDDING_DIMENSIONS", "1024"],
+      ["SCRYBE_KNOWLEDGE_EMBEDDING_MODEL", "local-qwen"],
+      ["SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS", "1024"],
+    ]), false);
+
+    expect(cfg.embedding_presets[cfg.assignments.code_preset]).toMatchObject({
+      provider: "custom", base_url: "http://127.0.0.1:11480/v1", dim: 1024, encoding_format: "float",
+    });
+    expect(cfg.embedding_presets[cfg.assignments.text_preset]).toMatchObject({
+      provider: "custom", base_url: "http://127.0.0.1:11480/v1", dim: 1024, encoding_format: "float",
+    });
+  });
+
+  it("keeps catalog migration presets on the SDK default", async () => {
+    const { synthesizeMigrationConfig } = await import("../src/migrations.js");
+    const cfg = synthesizeMigrationConfig(new Map([
+      ["SCRYBE_CODE_EMBEDDING_API_KEY", "code-key"],
+      ["SCRYBE_CODE_EMBEDDING_BASE_URL", "https://api.voyageai.com/v1"],
+      ["SCRYBE_CODE_EMBEDDING_MODEL", "voyage-code-3"],
+      ["SCRYBE_KNOWLEDGE_EMBEDDING_API_KEY", "text-key"],
+      ["SCRYBE_KNOWLEDGE_EMBEDDING_BASE_URL", "https://api.openai.com/v1"],
+      ["SCRYBE_KNOWLEDGE_EMBEDDING_MODEL", "text-embedding-3-small"],
+    ]), false);
+
+    expect(cfg.embedding_presets[cfg.assignments.code_preset]?.provider).toBe("voyage");
+    expect(cfg.embedding_presets[cfg.assignments.code_preset]?.encoding_format).toBeUndefined();
+    expect(cfg.embedding_presets[cfg.assignments.text_preset]?.provider).toBe("openai");
+    expect(cfg.embedding_presets[cfg.assignments.text_preset]?.encoding_format).toBeUndefined();
+  });
+
   it("produces migrated-code preset with credentials referencing the existing var verbatim", async () => {
     const { synthesizeMigrationConfig } = await import("../src/migrations.js");
 

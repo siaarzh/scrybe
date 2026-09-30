@@ -2,11 +2,13 @@ export interface ProviderSpec {
   baseUrl: string;
   model: string;
   apiKey: string;
+  encodingFormat?: "float";
 }
 
 export interface ValidateResult {
   ok: boolean;
   dimensions?: number;
+  encodingFormat?: "float";
   model?: string;
   errorType?: "auth" | "rate_limit" | "network" | "dns" | "dimensions_unknown" | "bad_url" | "other";
   message?: string;
@@ -25,7 +27,11 @@ export async function validateProvider(spec: ProviderSpec): Promise<ValidateResu
     return { ok: false, errorType: "bad_url", message: `Invalid base URL: ${spec.baseUrl}` };
   }
 
-  const body = JSON.stringify({ model: spec.model, input: ["ping"] });
+  const body = JSON.stringify({
+    model: spec.model,
+    input: ["ping"],
+    encoding_format: spec.encodingFormat ?? "base64",
+  });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -73,13 +79,42 @@ export async function validateProvider(spec: ProviderSpec): Promise<ValidateResu
   }
 
   const vector = data?.data?.[0]?.embedding;
-  if (!Array.isArray(vector) || vector.length === 0) {
-    return { ok: false, errorType: "dimensions_unknown", message: "Response missing embedding array" };
+  let dimensions: number;
+  if (spec.encodingFormat === "float") {
+    if (!Array.isArray(vector) || vector.length === 0 ||
+      vector.some((value: unknown) => typeof value !== "number" || !Number.isFinite(value))) {
+      return {
+        ok: false,
+        errorType: "dimensions_unknown",
+        message: 'Expected finite numeric arrays for encoding_format:"float". Check the endpoint\'s response encoding before changing dimensions.',
+      };
+    }
+    dimensions = vector.length;
+  } else {
+    if (typeof vector !== "string" || vector.length === 0 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(vector)) {
+      return {
+        ok: false,
+        errorType: "dimensions_unknown",
+        message: 'Expected base64 float32 embeddings for encoding_format:"base64". If this custom endpoint returns numeric arrays, set encoding_format:"float" and retry before changing dimensions.',
+      };
+    }
+    const bytes = Buffer.from(vector, "base64");
+    if (bytes.length % Float32Array.BYTES_PER_ELEMENT !== 0) {
+      return { ok: false, errorType: "dimensions_unknown", message: "Base64 embedding has an invalid float32 byte length" };
+    }
+    dimensions = bytes.length / Float32Array.BYTES_PER_ELEMENT;
+    for (let offset = 0; offset < bytes.length; offset += Float32Array.BYTES_PER_ELEMENT) {
+      if (!Number.isFinite(bytes.readFloatLE(offset))) {
+        return { ok: false, errorType: "dimensions_unknown", message: "Base64 embedding contains non-finite numeric values" };
+      }
+    }
   }
 
   return {
     ok: true,
-    dimensions: vector.length,
+    dimensions,
+    ...(spec.encodingFormat === "float" ? { encodingFormat: "float" as const } : {}),
     model: data?.model ?? spec.model,
   };
 }

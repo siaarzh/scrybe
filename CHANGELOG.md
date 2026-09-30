@@ -7,6 +7,17 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- Custom embedding presets accept `encoding_format: "float"`, exposed as `--encoding-format float` for CLI preset creation and as encoding fields on MCP setup tools. Custom setup probes dimensions and float output instead of asking users to guess them.
+
+### Fixed
+
+- Searches across multiple sources of the same profile under one project reuse each identical query embedding once per search invocation.
+- `status` and `doctor` report assigned embedding presets. Missing credential environment variables retain model details and are reported separately from malformed configuration.
+- Provider validation sends the runtime's requested encoding. Invalid float replies report an encoding error instead of recommending incorrect dimensions. Legacy custom endpoint migration selects float output.
+- Adding an existing preset is rejected instead of dropping its hand-written settings.
+
 ---
 
 ## [0.52.0] — 2026-09-24

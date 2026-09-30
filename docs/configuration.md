@@ -1,6 +1,16 @@
 # Configuration Reference
 
-All configuration is via environment variables. Set them in `.env` or in the MCP server's `env` block in `~/.claude.json`.
+## Custom embedding response encoding
+
+A custom entry in `config.json` under `embedding_presets` accepts `encoding_format: "float"` to request JSON number arrays. An omitted field uses the OpenAI SDK's base64 request and decoding. Explicit `"base64"` is not a supported setting. Catalog presets do not accept this field.
+
+Custom provider setup through `scrybe init` or the MCP `init` tool probes float output and saves the returned dimensions and encoding. Migration from legacy custom endpoint environment variables also selects float. Manual preset creation uses `--encoding-format float` or `add_embedding_preset.encoding_format`.
+
+If an endpoint ignores a float request and returns base64, embedding fails with an encoding error. A quarter-sized vector returned by SDK decoding also points to an encoding mismatch. Check the endpoint's response encoding before changing the preset's dimensions.
+
+## Environment variables
+
+Environment variables supply credentials and legacy provider settings. Set them in `.env` or in the MCP server's `env` block in `~/.claude.json`. Named embedding presets and assignments in `config.json` select the embedding models.
 
 **Precedence (highest to lowest):**
 1. Shell environment / MCP `env` block

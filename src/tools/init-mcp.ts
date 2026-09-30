@@ -46,8 +46,10 @@ export interface InitInput {
   code_api_key?: string;
   /** Base URL for custom provider (required when code_provider = "custom"). */
   code_base_url?: string;
-  /** Embedding dimensions (required when code_provider = "custom"). */
+  /** Expected custom embedding dimensions. Inferred by the probe when omitted. */
   code_dim?: number;
+  /** Embedding response encoding for a custom code provider. */
+  code_encoding_format?: "float";
 
   /**
    * Provider for text/knowledge sources.
@@ -62,6 +64,8 @@ export interface InitInput {
   text_base_url?: string;
   /** Embedding dimensions for custom text provider. */
   text_dim?: number;
+  /** Embedding response encoding for a custom text provider. */
+  text_encoding_format?: "float";
 
   /** Reranker provider (optional). Must match an embedding provider above. */
   rerank_provider?: string;
@@ -95,6 +99,11 @@ export interface InitOutput {
 function resolveCodeSelection(input: InitInput): ProviderSelection {
   const provider = input.code_provider;
 
+  if (input.code_encoding_format !== undefined) {
+    if (provider !== "custom") throw new Error("code_encoding_format is only valid for a custom provider");
+    if (input.code_encoding_format !== "float") throw new Error('code_encoding_format must be "float"');
+  }
+
   if (provider === "local") {
     const provSpec = PROVIDERS["local"];
     const defaultModel = Object.keys(provSpec?.embedding_models ?? {})[0]
@@ -108,7 +117,6 @@ function resolveCodeSelection(input: InitInput): ProviderSelection {
 
   if (provider === "custom") {
     if (!input.code_base_url) throw new Error("code_base_url is required when code_provider is 'custom'");
-    if (!input.code_dim) throw new Error("code_dim is required when code_provider is 'custom'");
     if (!input.code_model) throw new Error("code_model is required when code_provider is 'custom'");
     return {
       provider: "custom",
@@ -116,6 +124,7 @@ function resolveCodeSelection(input: InitInput): ProviderSelection {
       model: input.code_model,
       baseUrl: input.code_base_url,
       dim: input.code_dim,
+      encodingFormat: input.code_encoding_format,
     };
   }
 
@@ -140,6 +149,11 @@ function resolveCodeSelection(input: InitInput): ProviderSelection {
 function resolveTextSelection(input: InitInput, codeSel: ProviderSelection): ProviderSelection {
   const textProvider = input.text_provider ?? codeSel.provider;
 
+  if (input.text_encoding_format !== undefined) {
+    if (textProvider !== "custom") throw new Error("text_encoding_format is only valid for a custom provider");
+    if (input.text_encoding_format !== "float") throw new Error('text_encoding_format must be "float"');
+  }
+
   if (textProvider === "local") {
     const provSpec = PROVIDERS["local"];
     const defaultModel = Object.keys(provSpec?.embedding_models ?? {})[0]
@@ -153,7 +167,6 @@ function resolveTextSelection(input: InitInput, codeSel: ProviderSelection): Pro
 
   if (textProvider === "custom") {
     if (!input.text_base_url) throw new Error("text_base_url is required when text_provider is 'custom'");
-    if (!input.text_dim) throw new Error("text_dim is required when text_provider is 'custom'");
     if (!input.text_model) throw new Error("text_model is required when text_provider is 'custom'");
     return {
       provider: "custom",
@@ -161,6 +174,7 @@ function resolveTextSelection(input: InitInput, codeSel: ProviderSelection): Pro
       model: input.text_model,
       baseUrl: input.text_base_url,
       dim: input.text_dim,
+      encodingFormat: input.text_encoding_format,
     };
   }
 
@@ -205,7 +219,16 @@ async function verifyIfApi(sel: ProviderSelection): Promise<ValidateResult | nul
   const baseUrl = sel.provider === "custom"
     ? (sel.baseUrl ?? "")
     : (provSpec?.embedding_base_url ?? "");
-  return validateProvider({ baseUrl, model: sel.model, apiKey: sel.apiKey });
+  const encodingFormat = sel.provider === "custom" ? (sel.encodingFormat ?? "float") : undefined;
+  const result = await validateProvider({ baseUrl, model: sel.model, apiKey: sel.apiKey, encodingFormat });
+  if (result.ok && sel.provider === "custom") {
+    if (sel.dim !== undefined && sel.dim !== result.dimensions) {
+      return { ok: false, errorType: "other", message: `Provider returned ${result.dimensions}d vectors, but the supplied dimensions are ${sel.dim}d. Check the model and encoding before changing dimensions.` };
+    }
+    sel.dim = result.dimensions;
+    sel.encodingFormat = encodingFormat;
+  }
+  return result;
 }
 
 // ─── Tool definition ───────────────────────────────────────────────────────────
@@ -242,7 +265,12 @@ export const initTool: Tool<InitInput, InitOutput> = {
         },
         code_dim: {
           type: "number",
-          description: "Embedding dimensions (required when code_provider = 'custom')",
+          description: "Expected dimensions for a custom code provider. Inferred from the float probe when omitted; a mismatch is rejected.",
+        },
+        code_encoding_format: {
+          type: "string",
+          enum: ["float"],
+          description: "Response encoding for a custom code provider. Defaults to float; setup verifies and persists this encoding.",
         },
         text_provider: {
           type: "string",
@@ -263,7 +291,12 @@ export const initTool: Tool<InitInput, InitOutput> = {
         },
         text_dim: {
           type: "number",
-          description: "Dimensions for custom text provider.",
+          description: "Expected dimensions for a custom text provider. Inferred from the float probe when omitted; a mismatch is rejected.",
+        },
+        text_encoding_format: {
+          type: "string",
+          enum: ["float"],
+          description: "Response encoding for a custom text provider. Defaults to float; setup verifies and persists this encoding.",
         },
         rerank_provider: {
           type: "string",
@@ -320,10 +353,9 @@ export const initTool: Tool<InitInput, InitOutput> = {
         };
       }
 
-      // Only validate text provider separately if it differs from code provider
-      // and is not local (local text provider is also deferred).
       const textProviderDiffers = textSel.provider !== codeSel.provider ||
-        (textSel.provider === "custom" && textSel.baseUrl !== codeSel.baseUrl);
+        textSel.model !== codeSel.model || textSel.apiKey !== codeSel.apiKey ||
+        textSel.provider === "custom";
       if (textProviderDiffers) {
         const textValidation = await verifyIfApi(textSel);
         if (textValidation !== null && !textValidation.ok) {
