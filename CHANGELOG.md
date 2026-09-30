@@ -9,6 +9,19 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
+## [0.53.1] — 2026-09-30
+
+### Security
+
+- Updated `hono`, `@hono/node-server`, `qs`, `fast-uri` and `ip-address` to pick up upstream security fixes. Upgrading is recommended.
+
+### Changed
+
+- Updated `@lancedb/lancedb` to 0.37.1. Existing indexes open, search and accept new chunks without a reindex.
+- Updated the `openai` client to 7.x. It now keeps full dimensions when an OpenAI-compatible server answers a default request with a plain number array, so those servers no longer need `encoding_format: "float"` to avoid truncated vectors. The setting still works.
+
+---
+
 ## [0.53.0] — 2026-09-30
 
 ### Added
@@ -78,34 +91,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.49.0] — 2026-08-05
-
-### Security
-
-- When a hosted embedding provider returns an error, its response body is logged to help diagnose the failure. If the provider echoed the API key back in that body, the key was written to the log in clear text. The key is now redacted before anything is logged.
-
-### Added
-
-- **Indexing jobs now record their memory use phase by phase.** A new `phase-log.jsonl` in the data directory records, for each stage of an indexing job (scan, diff, chunk/embed/upsert, compaction, and so on), the memory in use when it started, its peak while it ran, the memory left when it finished, how long it took, and how much work it did. Each record is written the moment its stage ends, so a daemon that runs out of memory partway through still leaves behind a trail showing exactly where it was — the previous per-job record was written only on completion, so the jobs that mattered most left nothing at all. The log rotates at 16 MB and keeps 3 backups; set `SCRYBE_PHASE_TELEMETRY=0` to turn it off.
-
-### Fixed
-
-- **Indexing with the built-in offline embedding model no longer spikes to several gigabytes.** The model processes a batch of texts as one rectangle, sized by the longest text in it, so a single long chunk made the whole batch expensive — and the cost of a batch grows with the square of its length. A full reindex of a mid-sized repository peaked around 6,900 MB. Batches are now assembled from texts of similar length and held to a fixed size budget, which caps the peak regardless of what lands in a batch: the same reindex now peaks around 1,250 MB. Long inputs are also cut down before the model sees them, using a limit derived from the model's own; because the model already ignored anything past that limit, the resulting search vectors are unchanged. Set `SCRYBE_LOCAL_EMBED_TOKEN_BUDGET` to trade memory for throughput (default 4096).
-
-  Vectors produced for a batch containing texts of very different lengths shift slightly, because the padding used to square off the old batches perturbed them; the new vectors are measurably closer to what the model produces for each text on its own. Existing indexes stay searchable and need no reindex.
-
----
-
 ## Older releases
 
-For releases v0.48.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.49.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.53.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.53.1...HEAD
+[0.53.1]: https://github.com/siaarzh/scrybe/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/siaarzh/scrybe/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/siaarzh/scrybe/compare/v0.51.1...v0.52.0
 [0.51.1]: https://github.com/siaarzh/scrybe/compare/v0.51.0...v0.51.1
 [0.51.0]: https://github.com/siaarzh/scrybe/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/siaarzh/scrybe/compare/v0.49.0...v0.50.0
-[0.49.0]: https://github.com/siaarzh/scrybe/compare/v0.48.0...v0.49.0
