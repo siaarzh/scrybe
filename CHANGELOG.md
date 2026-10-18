@@ -7,9 +7,13 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.53.2] — 2026-10-18
+
 ### Changed
 
-- Calling `search_code` on a project that only has knowledge sources (or `search_knowledge` on one that only has code sources) now fails with a message naming the tool to use instead.
+- Calling `search_code` on a project that only has knowledge sources now fails with a message that names `search_knowledge`, and `search_knowledge` on a code-only project names `search_code`. Before, the error only said what was missing. The `error_type` is unchanged.
 
 ---
 
@@ -77,34 +81,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.50.0] — 2026-08-09
-
-### Added
-
-- **The Claude Code plugin now ships a search guard.** When an agent runs a keyword search over issues — `gh search issues`, `gh issue list --search`, `glab issue list -S`, or the GitLab MCP tools that search — the hook refuses it and points at `search_knowledge` instead. Keyword search misses the ticket that words the same problem differently, and an empty result reads exactly like "nothing exists". The miss is silent. That is why this is a hook and not a line in a config file an agent can reason its way past.
-
-  **Listing issues is never refused, with or without a filter.** Listing and semantic search answer different questions, and only one of them has a semantic equivalent. A query made of search qualifiers rather than keywords runs too, as does `--help`.
-
-  It refuses only where Scrybe can actually answer. A repo whose issues are not indexed, and an index older than a day, both run untouched, because refusing them would offer a replacement that cannot help. The refusal keeps no state, so there is no wait to sit out and nothing that expires into an allowance.
-
-  Two softer modes are available per command: a timed wait, or a one-line note attached to the result while the command runs normally. Everything is configurable in `toll.json` in the data directory, including turning it off and adding your own commands. It fails open on any error and costs nothing in model context. See [docs/search-toll.md](docs/search-toll.md).
-
-### Fixed
-
-- **The plugin now actually ships its two skills.** They lived in a directory Claude Code never scanned, so installing the plugin added nothing to a session. The manifest now points at them explicitly.
-
----
-
 ## Older releases
 
-For releases v0.49.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.50.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.53.1...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.53.2...HEAD
+[0.53.2]: https://github.com/siaarzh/scrybe/compare/v0.53.1...v0.53.2
 [0.53.1]: https://github.com/siaarzh/scrybe/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/siaarzh/scrybe/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/siaarzh/scrybe/compare/v0.51.1...v0.52.0
 [0.51.1]: https://github.com/siaarzh/scrybe/compare/v0.51.0...v0.51.1
 [0.51.0]: https://github.com/siaarzh/scrybe/compare/v0.50.0...v0.51.0
-[0.50.0]: https://github.com/siaarzh/scrybe/compare/v0.49.0...v0.50.0
