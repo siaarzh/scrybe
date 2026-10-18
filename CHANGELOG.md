@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Changed
+
+- Calling `search_code` on a project that only has knowledge sources (or `search_knowledge` on one that only has code sources) now fails with a message naming the tool to use instead.
+
 ---
 
 ## [0.53.1] — 2026-09-30

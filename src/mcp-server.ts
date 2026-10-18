@@ -20,7 +20,7 @@ const TOOLS = mcpTools.map((t) => ({
 
 // ─── Error classifier ─────────────────────────────────────────────────────────
 
-function classifyError(err: unknown): { error: string; error_type?: string; details?: unknown } {
+export function classifyError(err: unknown): { error: string; error_type?: string; details?: unknown } {
   const status = (err as { status?: number })?.status;
   const message = err instanceof Error ? err.message : String(err);
 

@@ -805,7 +805,7 @@ When a tool call fails, the response includes an `error_type` field for programm
 | `dimensions_mismatch` | Indexed data uses different embedding dimensions than the current embedder (embedding-time error) — run a full reindex |
 | `table_corrupt` | The index for one or more sources is corrupt (manifest missing data files, dimensions mismatch after the fact, or unreadable schema). The `details` field includes `project_id`, `source_id`, `reasons[]`, and optional `expected_dimensions`/`actual_dimensions`. Run: `scrybe index -P <id> -S <id> --full` or `scrybe doctor --repair`. |
 | `unknown_provider` | `SCRYBE_CODE_EMBEDDING_BASE_URL` not recognised and `SCRYBE_CODE_EMBEDDING_MODEL` not set |
-| `no_code_sources` | Project has no indexed code sources |
-| `no_knowledge_sources` | Project has no indexed knowledge sources |
+| `no_code_sources` | Project has no indexed code sources. If it has knowledge sources, the message says to use `search_knowledge` |
+| `no_knowledge_sources` | Project has no indexed knowledge sources. If it has code sources, the message says to use `search_code` |
 
 **Invalid arguments.** Calling a tool with a missing/null required argument, a wrong-typed or out-of-enum value, or an unknown key returns a specific validation error that names the offending field — e.g. passing `project_ids` instead of `project_id` reports `unknown key 'project_ids' (did you mean 'project_id'?)`. This replaces the previous generic `internal error` for malformed calls; genuine internal faults are still reported as `internal error`. Use the field-naming message to correct the call rather than assuming the tool is unavailable.

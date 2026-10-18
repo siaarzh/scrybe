@@ -133,12 +133,16 @@ export async function searchCode(
   // SCRYBE_SKIP_MIGRATION=1 → read-only compat mode, no branch filter (old chunks lack tags)
   const skipBranchFilter = process.env.SCRYBE_SKIP_MIGRATION === "1";
 
-  let codeSources = getCodeSources(project.sources);
+  const allCodeSources = getCodeSources(project.sources);
+  let codeSources = allCodeSources;
   if (opts?.sources && opts.sources.length > 0) {
     codeSources = codeSources.filter((s) => opts.sources!.includes(s.source_id));
   }
   if (codeSources.length === 0) {
-    throw markCallerFacing(new Error("NO_CODE_SOURCES: Project has no indexed code sources"));
+    const hint = allCodeSources.length === 0 && getKnowledgeSources(project.sources).length > 0
+      ? `Project '${projectId}' has no code sources; it has knowledge sources: use search_knowledge`
+      : "Project has no indexed code sources";
+    throw markCallerFacing(new Error(`NO_CODE_SOURCES: ${hint}`));
   }
 
   const fetchCount = config.rerankEnabled
@@ -253,7 +257,10 @@ export async function searchKnowledge(
     }
   }
   if (knowledgeSources.length === 0) {
-    throw markCallerFacing(new Error("NO_KNOWLEDGE_SOURCES: Project has no indexed knowledge sources"));
+    const hint = getCodeSources(project.sources).length > 0
+      ? `Project '${projectId}' has no knowledge sources; it has code sources: use search_code`
+      : "Project has no indexed knowledge sources";
+    throw markCallerFacing(new Error(`NO_KNOWLEDGE_SOURCES: ${hint}`));
   }
 
   const fetchCount = config.rerankEnabled
