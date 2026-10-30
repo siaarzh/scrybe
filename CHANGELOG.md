@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Security
+
+- The image library pulled in by the local embedding stack (`sharp`) is now forced to 0.35.5, which bundles a patched librsvg (CVE-2026-96889). scrybe never decodes images, so the vulnerable code wasn't reachable, but installs no longer ship it. The older copy also downloaded native binaries during `npm install`; the new one doesn't, so about 45 helper packages drop out of the install.
+
 ---
 
 ## [0.53.2] — 2026-10-18
