@@ -7,6 +7,7 @@ import { loadCanonicalIgnoreRules } from "../ignore-rules.js";
 import { normalizeContent } from "../normalize.js";
 import { gitExec } from "../util/git-exec.js";
 import { config } from "../config.js";
+import { diagEmit } from "../daemon/events.js";
 
 function hashFile(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -40,7 +41,7 @@ interface TsTree {
 
 interface TsParser {
   setLanguage(lang: unknown): void;
-  parse(source: string): TsTree;
+  parse(source: string, oldTree?: undefined, options?: { bufferSize?: number }): TsTree;
 }
 
 interface TsParserCtor {
@@ -226,42 +227,109 @@ interface DeclEntry {
   content: string;
 }
 
-function walkDeclarations(
-  node: TsNode,
-  declTypes: Set<string>,
-  source: string,
-  lineOffset: number,
-  parentName?: string
-): DeclEntry[] {
-  const results: DeclEntry[] = [];
+/** Top-level code that is not a declaration; rows are 0-indexed and include lineOffset. */
+interface GapNode {
+  node: TsNode;
+  startRow: number;
+  endRow: number;
+  keep: boolean;
+}
 
-  if (declTypes.has(node.type)) {
+const COMMENT_TYPES = new Set(["comment", "line_comment", "block_comment"]);
+
+const IMPORT_TYPES: Record<LanguageKey, Set<string>> = {
+  typescript: new Set(["import_statement"]),
+  tsx: new Set(["import_statement"]),
+  javascript: new Set(["import_statement"]),
+  csharp: new Set(["using_directive", "extern_alias_directive"]),
+  python: new Set(["import_statement", "import_from_statement", "future_import_statement"]),
+  go: new Set(["package_clause", "import_declaration"]),
+  rust: new Set(["use_declaration", "extern_crate_declaration"]),
+  java: new Set(["package_declaration", "import_declaration"]),
+  ruby: new Set(),
+  c: new Set(["preproc_include"]),
+  cpp: new Set(["preproc_include"]),
+};
+
+function isNoiseNode(node: TsNode, langKey: LanguageKey): boolean {
+  if (COMMENT_TYPES.has(node.type)) return true;
+  if (IMPORT_TYPES[langKey].has(node.type)) return true;
+  if (node.type === "export_statement") {
+    return node.children.some((c) => c.type === "export_clause") || node.childForFieldName("source") !== null;
+  }
+  return false;
+}
+
+// Name/header tokens of a container (namespace, module) are not code of their own.
+function isHeaderToken(node: TsNode): boolean {
+  return node.type.endsWith("identifier") || node.type === "qualified_name" || node.type === "name";
+}
+
+interface WalkCtx {
+  declTypes: Set<string>;
+  langKey: LanguageKey;
+  source: string;
+  lineOffset: number;
+  decls: DeclEntry[];
+  gaps: GapNode[];
+}
+
+/** One pass: collects declarations (pre-order) and leftover gap nodes. Returns true if a declaration lies at or below `node`. */
+function walkNode(node: TsNode, ctx: WalkCtx, isRoot: boolean, collectGaps: boolean, parentName?: string): boolean {
+  if (ctx.declTypes.has(node.type)) {
     const name = getNodeName(node);
     const symbolName = parentName && name ? `${parentName}.${name}` : (name || "");
 
-    results.push({
+    ctx.decls.push({
       symbolName,
-      startLine: node.startPosition.row + lineOffset,
-      endLine: node.endPosition.row + lineOffset,
-      content: source.slice(node.startIndex, node.endIndex),
+      startLine: node.startPosition.row + ctx.lineOffset,
+      endLine: node.endPosition.row + ctx.lineOffset,
+      content: ctx.source.slice(node.startIndex, node.endIndex),
     });
 
     // For class-like nodes: recurse into body to pick up methods
     if (CLASS_LIKE_TYPES.has(node.type)) {
       for (const child of node.namedChildren) {
-        results.push(...walkDeclarations(child, declTypes, source, lineOffset, symbolName));
+        walkNode(child, ctx, false, false, symbolName);
       }
     }
     // Don't recurse into function bodies — avoids double-indexing nested helpers
-    return results;
+    return true;
   }
 
-  // Not a declaration — keep looking deeper
+  const mark = ctx.gaps.length;
+  let hasDecl = false;
   for (const child of node.namedChildren) {
-    results.push(...walkDeclarations(child, declTypes, source, lineOffset, parentName));
+    if (walkNode(child, ctx, false, collectGaps, parentName)) hasDecl = true;
   }
-  return results;
+
+  if (hasDecl) {
+    if (collectGaps) {
+      const direct = new Set(node.namedChildren);
+      let w = mark;
+      for (let r = mark; r < ctx.gaps.length; r++) {
+        const g = ctx.gaps[r];
+        if (!(direct.has(g.node) && isHeaderToken(g.node))) ctx.gaps[w++] = g;
+      }
+      ctx.gaps.length = w;
+    }
+    return true;
+  }
+
+  if (collectGaps && !isRoot) {
+    ctx.gaps.length = mark;
+    ctx.gaps.push({
+      node,
+      startRow: node.startPosition.row + ctx.lineOffset,
+      endRow: node.endPosition.row + ctx.lineOffset,
+      keep: !isNoiseNode(node, ctx.langKey),
+    });
+  }
+  return false;
 }
+
+// tree-sitter's default string input buffer throws at 32,768 chars.
+const MIN_PARSE_BUFFER = 32 * 1024;
 
 function astChunks(
   projectId: string,
@@ -276,12 +344,23 @@ function astChunks(
   const declTypes = DECLARATION_TYPES[langKey];
   let tree: TsTree;
   try {
-    tree = parser.parse(source);
-  } catch {
+    tree = parser.parse(source, undefined, { bufferSize: Math.max(MIN_PARSE_BUFFER, source.length * 2) });
+  } catch (err) {
+    diagEmit({
+      event: "chunker.parse_failed",
+      level: "warn",
+      projectId,
+      path: relPath,
+      language: langKey,
+      chars: source.length,
+      message: err instanceof Error ? err.message : String(err),
+    });
     return [];
   }
 
-  const decls = walkDeclarations(tree.rootNode, declTypes, source, lineOffset);
+  const ctx: WalkCtx = { declTypes, langKey, source, lineOffset, decls: [], gaps: [] };
+  walkNode(tree.rootNode, ctx, true, true);
+  const decls = ctx.decls;
   if (decls.length === 0) return [];
 
   const chunks: CodeChunk[] = [];
@@ -308,7 +387,7 @@ function astChunks(
       }) as CodeChunk);
     } else {
       // Too large — split with sliding window, keep symbol_name on first sub-chunk
-      const declLineSlice = lines.slice(decl.startLine, decl.endLine + 1);
+      const declLineSlice = lines.slice(decl.startLine - lineOffset, decl.endLine - lineOffset + 1);
       let first = true;
       for (const window of chunkLines(declLineSlice, decl.startLine, maxChars)) {
         chunks.push(stampChunkId({
@@ -328,7 +407,78 @@ function astChunks(
     }
   }
 
+  for (const region of gapRegions(ctx.gaps, decls)) {
+    const regionLines = lines.slice(region.start - lineOffset, region.end - lineOffset + 1);
+    for (const window of chunkLines(regionLines, region.start, maxChars)) {
+      chunks.push(stampChunkId({
+        project_id: projectId,
+        source_id: sourceId,
+        item_path: relPath,
+        item_url: "",
+        item_type: "code",
+        content: window.content,
+        start_line: window.start,
+        end_line: window.end,
+        language: langKey,
+        symbol_name: "",
+      }) as CodeChunk);
+    }
+  }
+
   return chunks;
+}
+
+/** Merges leftover nodes into whole-line regions (0-indexed, inclusive) that avoid declaration lines and hold at least one non-noise node. */
+function gapRegions(gaps: GapNode[], decls: DeclEntry[]): Array<{ start: number; end: number }> {
+  if (gaps.length === 0) return [];
+  const covered = new Set<number>();
+  for (const d of decls) for (let r = d.startLine; r <= d.endLine; r++) covered.add(r);
+
+  const sorted = [...gaps].sort((a, b) => a.startRow - b.startRow);
+  const groups: GapNode[][] = [];
+  let cur: GapNode[] = [];
+  let curEnd = -1;
+  for (const g of sorted) {
+    let separated = false;
+    if (cur.length > 0) {
+      for (let r = curEnd + 1; r < g.startRow; r++) {
+        if (covered.has(r)) { separated = true; break; }
+      }
+    }
+    if (cur.length > 0 && separated) {
+      groups.push(cur);
+      cur = [];
+      curEnd = -1;
+    }
+    cur.push(g);
+    curEnd = Math.max(curEnd, g.endRow);
+  }
+  if (cur.length > 0) groups.push(cur);
+
+  const regions: Array<{ start: number; end: number }> = [];
+  for (const group of groups) {
+    const first = Math.min(...group.map((g) => g.startRow));
+    const last = Math.max(...group.map((g) => g.endRow));
+    let runStart = -1;
+    const flush = (runEnd: number) => {
+      if (runStart < 0) return;
+      const rs = runStart;
+      runStart = -1;
+      const kept = group.filter((g) => g.keep && g.startRow <= runEnd && g.endRow >= rs);
+      if (kept.length === 0) return;
+      // Start and end on real code, so leading imports and comments stay out.
+      regions.push({
+        start: Math.max(rs, Math.min(...kept.map((g) => g.startRow))),
+        end: Math.min(runEnd, Math.max(...kept.map((g) => g.endRow))),
+      });
+    };
+    for (let r = first; r <= last; r++) {
+      if (covered.has(r)) flush(r - 1);
+      else if (runStart < 0) runStart = r;
+    }
+    flush(last);
+  }
+  return regions;
 }
 
 // ─── Sliding-window fallback ──────────────────────────────────────────────────
@@ -494,6 +644,23 @@ export class CodePlugin implements SourcePlugin {
 
 // ─── Exported chunker — used by daemon for non-HEAD branch indexing ───────────
 
+const GENERATED_MARKER = /auto-generated|@generated|code generated|do not edit/i;
+const GENERATED_NAME = /(\.designer\.cs|\.g\.cs|\.g\.i\.cs|\.min\.js|\.generated\.[^./\\]+)$/i;
+
+/** True for machine-written files (marker in the first 5 lines, or a generated-file name). */
+export function isGeneratedFile(relPath: string, source: string): boolean {
+  if (GENERATED_NAME.test(basename(relPath))) return true;
+  let head = "";
+  let pos = 0;
+  for (let i = 0; i < 5 && pos < source.length; i++) {
+    const nl = source.indexOf("\n", pos);
+    const end = nl === -1 ? source.length : nl + 1;
+    head += source.slice(pos, end);
+    pos = end;
+  }
+  return GENERATED_MARKER.test(head);
+}
+
 /**
  * Chunks file content into CodeChunk[].
  * Exported so the daemon can chunk content read from git objects (via scanRef)
@@ -508,6 +675,9 @@ export function chunkFileContent(
   maxChars?: number
 ): CodeChunk[] {
   tryInitTreeSitter();
+  if (isGeneratedFile(relPath, source)) {
+    return slidingWindowChunks(projectId, sourceId, relPath, source, language, maxChars);
+  }
   // Vue: extract <script> block, parse as TypeScript
   if (language === "vue") {
     const extracted = extractVueScript(source);

@@ -9,10 +9,12 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ### Changed
 
+- Code outside functions and classes (test bodies, top-level calls, config objects) is now searchable as its own chunks; imports and comments on their own are skipped. Generated files (marked `auto-generated`, `@generated`, `DO NOT EDIT`, or named `.Designer.cs`, `.g.cs`, `.min.js`, `.generated.*`) stay as plain text windows. An existing index picks this up for a file only when that file changes.
 - A pinned branch is now always indexed from its remote copy (`origin/<branch>`), including when it is also the branch you have checked out. Unpushed commits and uncommitted files on it are no longer searchable until pushed; the daemon logs a warning and `scrybe doctor` reports how many are left out. `search_code` notes this in its description. Unpinned checkouts still read your working tree.
 
 ### Fixed
 
+- Files of 32 KB and more now get symbols and function-level results instead of plain text windows. An existing index picks this up for a file only when that file changes.
 - A pinned branch that was also checked out could stay stale for weeks while reporting a fresh index time, because it was read from the local checkout instead of the remote. Background jobs now agree on the remote copy, and an unchanged remote is skipped without re-reading files.
 - `scrybe doctor` could never report the fetch-poller check as "in sync" for a pinned branch; it now looks the branch up under the name it is actually stored under.
 
