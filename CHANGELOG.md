@@ -7,6 +7,15 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Changed
+
+- A pinned branch is now always indexed from its remote copy (`origin/<branch>`), including when it is also the branch you have checked out. Unpushed commits and uncommitted files on it are no longer searchable until pushed; the daemon logs a warning and `scrybe doctor` reports how many are left out. `search_code` notes this in its description. Unpinned checkouts still read your working tree.
+
+### Fixed
+
+- A pinned branch that was also checked out could stay stale for weeks while reporting a fresh index time, because it was read from the local checkout instead of the remote. Background jobs now agree on the remote copy, and an unchanged remote is skipped without re-reading files.
+- `scrybe doctor` could never report the fetch-poller check as "in sync" for a pinned branch; it now looks the branch up under the name it is actually stored under.
+
 ### Security
 
 - The image library pulled in by the local embedding stack (`sharp`) is now forced to 0.35.5, which bundles a patched librsvg (CVE-2026-96889). scrybe never decodes images, so the vulnerable code wasn't reachable, but installs no longer ship it. The older copy also downloaded native binaries during `npm install`; the new one doesn't, so about 45 helper packages drop out of the install.

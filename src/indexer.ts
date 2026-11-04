@@ -25,11 +25,12 @@ import { appendFileSync, existsSync, readFileSync, rmSync, statSync } from "node
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { withBranchSession, resolveBranchForPath, setLastIndexedSha, type BranchTag } from "./branch-state.js";
+import { withBranchSession, resolveBranchForPath, setLastIndexedSha, getLastIndexedSha, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage, walkRepoFiles } from "./chunker.js";
 import { normalizeContent } from "./normalize.js";
 import { diagEmit } from "./daemon/events.js";
+import { warnLeftOutLocalEdits } from "./pinned-remote.js";
 import {
   withPhase,
   startSegmentedPhase,
@@ -77,7 +78,8 @@ export interface IndexOptions {
   /** Branch to index (label stored in branch_tags / branch_state). Defaults to current HEAD for code sources; "*" for non-code. */
   branch?: string;
   /**
-   * Git ref used to read content (git ls-tree, rev-parse). When absent, falls back to `branch`.
+   * Git ref used to read content (git ls-tree, rev-parse). When absent, a pinned branch reads
+   * `origin/<branch>` (if it resolves) and anything else falls back to `branch`.
    * Set this to `origin/<branch>` for pinned branches so the indexer reads from the
    * remote-tracking ref rather than a local branch that may not exist or may lag upstream.
    * The stored label in branch_tags and branch_state is always `branch`, never `contentRef`.
@@ -125,11 +127,7 @@ export async function indexSource(
   // Non-code sources always use "*" branch sentinel.
   const effectiveBranchInput = isCode ? options.branch : "*";
 
-  // contentRef is the git ref used to read content (ls-tree, rev-parse).
-  // For pinned branches the poller sets contentRef = "origin/<branch>" so the indexer
-  // reads from the remote-tracking ref; `branch` remains the logical label stored in
-  // branch_tags and branch_state.  When no contentRef is given, fall back to branch.
-  const effectiveContentRef = isCode ? (options.contentRef ?? options.branch) : undefined;
+  const pinnedBranches = source.pinned_branches ?? [];
 
   return withBranchSession(
     { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode },
@@ -146,33 +144,88 @@ export async function indexSource(
       };
       emitJobIntent(phaseCtx, "started", { is_code: isCode });
 
-      // The git ref used for content reads (SHA capture, ls-tree). Uses contentRef when
-      // provided (pinned branches read from origin/<branch>); falls back to the label branch.
-      const gitRef = effectiveContentRef ?? branch;
+      // Pinned branches always index the remote copy, whoever started the job. `branch`
+      // stays the label stored in branch_tags / branch_state; `contentRef` is only where
+      // content is read from.
+      const hasRoot = isCode && rootPath !== "";
+      const isPinned = hasRoot && pinnedBranches.includes(branch);
+      let contentRef = options.contentRef;
+      if (contentRef === undefined && isPinned) {
+        const remoteRef = `origin/${branch}`;
+        if (gitExec(["rev-parse", "--verify", "--quiet", remoteRef], { cwd: rootPath }) !== null) {
+          contentRef = remoteRef;
+        } else {
+          diagEmit({
+            event: "indexer.pinned.remote_ref_missing",
+            level: "warn",
+            projectId,
+            sourceId,
+            branch,
+            message: `pinned branch '${branch}' has no ${remoteRef} locally; falling back to the local branch`,
+          });
+        }
+      }
+
+      // The git ref used for content reads (SHA capture, ls-tree).
+      const gitRef = contentRef ?? branch;
 
       // Capture the SHA at indexer start (code sources only). Used to record the
       // last-indexed SHA in branch_state on successful completion.
-      const indexedShaAtStart: string | null = (isCode && rootPath !== "")
+      const indexedShaAtStart: string | null = hasRoot
         ? (gitExec(["rev-parse", gitRef], { cwd: rootPath }) ?? null)
         : null;
 
-      // For code sources: detect non-HEAD branch indexing (content from git objects).
-      const isNonHeadBranch = isCode && rootPath !== "" && branch !== resolveBranchForPath(rootPath);
+      // Content comes from git objects unless this is the checked-out branch with no content ref.
+      const readsFromRef = hasRoot && (contentRef !== undefined || branch !== resolveBranchForPath(rootPath));
+      const readsPinnedRemote = isPinned && readsFromRef;
+
+      if (readsPinnedRemote) warnLeftOutLocalEdits(projectId, sourceId, branch, rootPath);
 
       // Validate that the content ref is resolvable before doing any work.
       // git ls-tree silently returns nothing on an unknown ref — this catches that early.
-      if (isNonHeadBranch && rootPath !== "") {
-        const refToVerify = effectiveContentRef ?? options.branch;
-        if (refToVerify !== undefined) {
-          try {
-            gitExecOrThrow(["rev-parse", "--verify", refToVerify], { cwd: rootPath });
-          } catch {
-            const hint = refToVerify.startsWith("origin/")
-              ? "fetch the ref first"
-              : `try 'origin/${refToVerify}' or fetch the ref first`;
-            throw new Error(`branch '${refToVerify}' not found locally — ${hint}`);
-          }
+      if (readsFromRef) {
+        try {
+          gitExecOrThrow(["rev-parse", "--verify", gitRef], { cwd: rootPath });
+        } catch {
+          const hint = gitRef.startsWith("origin/")
+            ? "fetch the ref first"
+            : `try 'origin/${gitRef}' or fetch the ref first`;
+          throw new Error(`branch '${gitRef}' not found locally — ${hint}`);
         }
+      }
+
+      // A later slice can set this to force a re-read of an unchanged pinned ref.
+      const bypassShaShortCircuit = false;
+      if (
+        readsPinnedRemote &&
+        mode === "incremental" &&
+        !bypassShaShortCircuit &&
+        indexedShaAtStart !== null &&
+        getLastIndexedSha(projectId, sourceId, branch) === indexedShaAtStart
+      ) {
+        diagEmit({
+          event: "indexer.job.summary",
+          projectId,
+          sourceId,
+          branch,
+          mode,
+          files_scanned: 0,
+          files_reindexed: 0,
+          chunks_prepared: 0,
+          chunks_persisted: 0,
+          unchanged_sha: indexedShaAtStart,
+          total_ms: Date.now() - jobStart,
+        });
+        return {
+          status: "ok" as const,
+          project_id: projectId,
+          source_id: sourceId,
+          chunks_prepared: 0,
+          chunks_persisted: 0,
+          files_scanned: 0,
+          files_reindexed: 0,
+          files_removed: 0,
+        };
       }
 
       const nonHeadContentCache = new Map<string, string>();
@@ -273,7 +326,7 @@ export async function indexSource(
       //     For code sources it is a synchronous filesystem walk that blocks
       //     the event loop end to end — the peak there is max(entry, exit).
       const currentSources: Record<string, string> = await withPhase(phaseCtx, "scan", async (phase) => {
-        if (isNonHeadBranch) {
+        if (readsFromRef) {
           const scanned: Record<string, string> = {};
           let contentBytes = 0;
           // Use gitRef (contentRef ?? branch) so pinned branches read from origin/<branch>
@@ -304,7 +357,7 @@ export async function indexSource(
       // Code sources scan the full filesystem and detect deletions via hash diff —
       // the cursor is irrelevant for them. Only knowledge sources (e.g. GitLab issues)
       // use cursor-based incremental fetching where toRemove must stay empty.
-      const effectiveCursor = (isNonHeadBranch || isCode) ? null : cursor;
+      const effectiveCursor = (readsFromRef || isCode) ? null : cursor;
       const merged = effectiveCursor ? { ...oldHashes, ...currentSources } : currentSources;
 
       // Phase `diff` — decide what changed. Pure JS and fully synchronous, so
@@ -368,7 +421,7 @@ export async function indexSource(
         files_total: Object.keys(merged).length,
         files_to_reindex: mode === "full" ? Object.keys(currentSources).length : toReindex.size,
         files_to_remove: toRemove.size,
-        is_non_head_branch: isNonHeadBranch,
+        is_non_head_branch: readsFromRef,
         provider: embConfig.provider_type ?? "unknown",
       });
 
@@ -413,7 +466,7 @@ export async function indexSource(
       let sized: number | undefined;
       if (isCode && toReindex.size > 0) {
         let sum = 0;
-        if (isNonHeadBranch) {
+        if (readsFromRef) {
           for (const relPath of toReindex) {
             const content = nonHeadContentCache.get(relPath);
             if (content) sum += Buffer.byteLength(content, "utf8");
@@ -641,7 +694,7 @@ export async function indexSource(
       // still ends the phase (and clears its poll timer) rather than leaking it.
       try {
         const maxChars = isCode ? getCharCap(embConfig) : undefined;
-        const chunkIter = isNonHeadBranch
+        const chunkIter = readsFromRef
           ? fetchChunksFromRef(projectId, sourceId, toReindex, nonHeadContentCache, maxChars)
           : isCode
             ? fetchChunksFromWorkingTree(projectId, sourceId, rootPath, toReindex, maxChars)
@@ -720,7 +773,7 @@ export async function indexSource(
       // Stamp embedding_schema_version=2 on every successful reindex so the
       // cold-start migration scan can skip up-to-date sources (Plan 77 Slice 6).
       updateSource(projectId, sourceId, { last_indexed: now, embedding_schema_version: 2 });
-      if (!isNonHeadBranch) {
+      if (!readsFromRef) {
         saveCursor(projectId, sourceId, now);
       }
 

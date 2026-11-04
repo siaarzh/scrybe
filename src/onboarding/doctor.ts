@@ -1053,6 +1053,7 @@ export async function runDoctor(): Promise<DoctorReport> {
   {
     const { getLastIndexedSha, listBranches } = await import("../branch-state.js");
     const { gitExec } = await import("../util/git-exec.js");
+    const { countLeftOutLocalEdits } = await import("../pinned-remote.js");
 
     for (const project of projects) {
       for (const source of project.sources) {
@@ -1071,8 +1072,11 @@ export async function runDoctor(): Promise<DoctorReport> {
 
           try {
             const currentRemoteSha = gitExec(["rev-parse", qualifiedRef], { cwd: rootPath }) ?? null;
-            const lastIndexedSha = getLastIndexedSha(project.id, source.source_id, qualifiedRef);
-            const inBranchTags = indexedBranches.includes(qualifiedRef);
+            // Rows are stored under the plain name; the qualified form only exists in older databases.
+            const lastIndexedSha =
+              getLastIndexedSha(project.id, source.source_id, branch) ??
+              getLastIndexedSha(project.id, source.source_id, qualifiedRef);
+            const inBranchTags = indexedBranches.includes(branch) || indexedBranches.includes(qualifiedRef);
 
             if (currentRemoteSha === null) {
               checks.push(warn(checkId, SEC_DAEMON, title,
@@ -1097,6 +1101,15 @@ export async function runDoctor(): Promise<DoctorReport> {
                 `Transient: pinned but not yet indexed — daemon will queue first reindex on next poll`,
                 undefined,
                 { branch: qualifiedRef }));
+            }
+
+            const leftOut = countLeftOutLocalEdits(rootPath, branch);
+            if (leftOut && (leftOut.dirtyFiles > 0 || leftOut.localOnlyCommits > 0)) {
+              checks.push(warn(`${checkId}.local-edits`, SEC_DAEMON,
+                `Local edits not searchable (${project.id}/${source.source_id}/${branch})`,
+                `"${branch}" is pinned and checked out: ${leftOut.dirtyFiles} uncommitted file(s) and ${leftOut.localOnlyCommits} unpushed commit(s) are not in the index, which reflects origin/${branch}`,
+                `Commit and push; only pushed code is searchable on a pinned branch`,
+                { dirtyFiles: leftOut.dirtyFiles, localOnlyCommits: leftOut.localOnlyCommits }));
             }
           } catch (e: any) {
             checks.push(warn(checkId, SEC_DAEMON, title,

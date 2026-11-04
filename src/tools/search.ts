@@ -186,7 +186,7 @@ export const searchCodeTool: Tool<
   spec: {
     name: "search_code",
     cliName: "search code",
-    description: "Semantically search code in a project using natural language. Use list_projects first to confirm the project has an indexed code source.",
+    description: "Semantically search code in a project using natural language. Use list_projects first to confirm the project has an indexed code source. On a pinned branch, results reflect the remote, so unpushed local edits are not included.",
     inputSchema: {
       type: "object",
       properties: {

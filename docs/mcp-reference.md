@@ -385,6 +385,8 @@ Tuning knobs (`SCRYBE_HYBRID`, `SCRYBE_RRF_K`, `SCRYBE_RERANK*`) are documented 
 
 Semantic search over indexed code sources in a project.
 
+On a pinned branch, results reflect the remote (`origin/<branch>`), so unpushed local edits are not included.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `project_id` | string | ✓ | Project to search |
