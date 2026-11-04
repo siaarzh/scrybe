@@ -162,10 +162,12 @@ export function getDB(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_branch_state_lookup
       ON branch_state(project_id, source_id);
   `);
-  try {
-    db.exec("ALTER TABLE branch_state ADD COLUMN remote_indexed_sha TEXT");
-  } catch (err) {
-    if (!String(err).includes("duplicate column")) throw err;
+  for (const column of ["remote_indexed_sha", "ignore_fingerprint"]) {
+    try {
+      db.exec(`ALTER TABLE branch_state ADD COLUMN ${column} TEXT`);
+    } catch (err) {
+      if (!String(err).includes("duplicate column")) throw err;
+    }
   }
   db.prepare("INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1')").run();
 
@@ -267,24 +269,25 @@ export function getRemoteIndexedSha(projectId: string, sourceId: string, branch:
   return row?.remote_indexed_sha ?? null;
 }
 
-/** Sets or clears the remote-indexed SHA on an existing row; no row, no effect. */
+/** The ignore-file fingerprint recorded with the remote-indexed SHA, or null if none stands. */
+export function getIgnoreFingerprint(projectId: string, sourceId: string, branch: string): string | null {
+  const row = getDB().prepare(
+    "SELECT ignore_fingerprint FROM branch_state WHERE project_id=? AND source_id=? AND branch=?"
+  ).get(projectId, sourceId, branch) as { ignore_fingerprint: string | null } | undefined;
+  return row?.ignore_fingerprint ?? null;
+}
+
+/** Sets or clears the remote-indexed SHA and its ignore fingerprint together on an existing row; no row, no effect. */
 export function setRemoteIndexedSha(
   projectId: string,
   sourceId: string,
   branch: string,
-  sha: string | null
+  sha: string | null,
+  ignoreFingerprint: string | null = null
 ): void {
   getDB().prepare(
-    "UPDATE branch_state SET remote_indexed_sha=? WHERE project_id=? AND source_id=? AND branch=?"
-  ).run(sha, projectId, sourceId, branch);
-}
-
-/** When the job that last wrote this row started, in ms, or null if unknown. */
-export function getLastIndexedAt(projectId: string, sourceId: string, branch: string): number | null {
-  const row = getDB().prepare(
-    "SELECT last_indexed_at FROM branch_state WHERE project_id=? AND source_id=? AND branch=?"
-  ).get(projectId, sourceId, branch) as { last_indexed_at: number | null } | undefined;
-  return row?.last_indexed_at ?? null;
+    "UPDATE branch_state SET remote_indexed_sha=?, ignore_fingerprint=? WHERE project_id=? AND source_id=? AND branch=?"
+  ).run(sha, sha === null ? null : ignoreFingerprint, projectId, sourceId, branch);
 }
 
 /** Return the set of chunk IDs tagged for a specific branch. */

@@ -209,7 +209,7 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
 
     const { enqueue } = await import("../src/daemon/queue.js");
     const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
-    // Remote record holds an old SHA.  D1: keyed under logical name.
+    // Remote record holds an old SHA. Keyed under the logical name.
     vi.mocked(listBranches).mockReturnValue(["feat/example"]);
     vi.mocked(getRemoteIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 
@@ -316,7 +316,7 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     const { enqueue } = await import("../src/daemon/queue.js");
     const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
 
-    // Remote record holds an old SHA.  D1: keyed under logical name.
+    // Remote record holds an old SHA. Keyed under the logical name.
     vi.mocked(listBranches).mockReturnValue(["feat/example"]);
     vi.mocked(getRemoteIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 

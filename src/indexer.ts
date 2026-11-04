@@ -25,8 +25,8 @@ import { appendFileSync, existsSync, readFileSync, rmSync, statSync } from "node
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { withBranchSession, withSourceWriteLock, resolveBranchForPath, setLastIndexedSha, getRemoteIndexedSha, setRemoteIndexedSha, getLastIndexedAt, type BranchTag } from "./branch-state.js";
-import { ignoreFilesChangedSince } from "./ignore-rules.js";
+import { withBranchSession, withSourceWriteLock, resolveBranchForPath, setLastIndexedSha, getRemoteIndexedSha, setRemoteIndexedSha, getIgnoreFingerprint, type BranchTag } from "./branch-state.js";
+import { ignoreFingerprint } from "./ignore-rules.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage, walkRepoFiles } from "./chunker.js";
 import { normalizeContent } from "./normalize.js";
@@ -182,9 +182,12 @@ export async function indexSource(
 
       // Content comes from git objects unless this is the checked-out branch with no content ref.
       const readsFromRef = hasRoot && (contentRef !== undefined || branch !== resolveBranchForPath(rootPath));
-      const readsPinnedRemote = isPinned && readsFromRef;
+      const readsPinnedRemote = isPinned && contentRef === `origin/${branch}`;
 
       if (readsPinnedRemote) warnLeftOutLocalEdits(projectId, sourceId, branch, rootPath);
+
+      // Taken before the scan, so an edit made while this job runs forces a scan next time.
+      const ignoreFingerprintAtStart = readsPinnedRemote ? ignoreFingerprint(rootPath, projectId, sourceId) : null;
 
       // Validate that the content ref is resolvable before doing any work.
       // git ls-tree silently returns nothing on an unknown ref — this catches that early.
@@ -205,7 +208,7 @@ export async function indexSource(
         mode === "incremental" &&
         indexedShaAtStart !== null &&
         getRemoteIndexedSha(projectId, sourceId, branch) === indexedShaAtStart &&
-        !ignoreFilesChangedSince(rootPath, projectId, sourceId, getLastIndexedAt(projectId, sourceId, branch) ?? 0)
+        getIgnoreFingerprint(projectId, sourceId, branch) === ignoreFingerprintAtStart
       ) {
         diagEmit({
           event: "indexer.job.summary",
@@ -941,9 +944,8 @@ export async function indexSource(
       // Non-fatal: a write failure logs a warning but does not propagate.
       if (isCode && indexedShaAtStart !== null) {
         try {
-          // Stamped with the job's start, so an ignore edit made while it ran still counts as newer.
-          setLastIndexedSha(projectId, sourceId, branch, indexedShaAtStart, jobStart);
-          if (readsPinnedRemote) setRemoteIndexedSha(projectId, sourceId, branch, indexedShaAtStart);
+          setLastIndexedSha(projectId, sourceId, branch, indexedShaAtStart, Date.now());
+          if (readsPinnedRemote) setRemoteIndexedSha(projectId, sourceId, branch, indexedShaAtStart, ignoreFingerprintAtStart);
         } catch (shaWriteErr) {
           diagEmit({
             event: "indexer.branch_state.write_failed",

@@ -247,6 +247,50 @@ const ATTRIBUTE_TYPES = new Set([
   "marker_annotation",
 ]);
 
+const NOT_CODE_TYPES = new Set([
+  "hash_bang_line",
+  "shebang",
+  "shebang_directive",
+  "empty_statement",
+  "pass_statement",
+  "uninterpreted",
+]);
+
+// Noise when everything inside them is.
+const CONTAINER_TYPES = new Set([
+  "namespace_declaration",
+  "file_scoped_namespace_declaration",
+  "declaration_list",
+  "global_statement",
+  "mod_item",
+  "foreign_mod_item",
+  "namespace_definition",
+  "linkage_specification",
+  "internal_module",
+  "module",
+  "ambient_declaration",
+  "statement_block",
+]);
+
+const PREPROC_CONDITIONAL_TYPES = new Set([
+  "preproc_if",
+  "preproc_ifdef",
+  "preproc_elif",
+  "preproc_elifdef",
+  "preproc_else",
+]);
+
+const PY_BRANCH_TYPES = new Set([
+  "if_statement",
+  "elif_clause",
+  "else_clause",
+  "try_statement",
+  "except_clause",
+  "finally_clause",
+]);
+
+const STRING_LITERAL_TYPES = new Set(["string", "concatenated_string"]);
+
 const JS_FAMILY = new Set<LanguageKey>(["typescript", "tsx", "javascript"]);
 
 const IMPORT_TYPES: Record<LanguageKey, Set<string>> = {
@@ -260,7 +304,7 @@ const IMPORT_TYPES: Record<LanguageKey, Set<string>> = {
   java: new Set(["package_declaration", "import_declaration"]),
   ruby: new Set(),
   c: new Set(["preproc_include"]),
-  cpp: new Set(["preproc_include"]),
+  cpp: new Set(["preproc_include", "using_declaration", "namespace_alias_definition"]),
 };
 
 function isRequireDeclaration(node: TsNode): boolean {
@@ -276,21 +320,37 @@ function isRubyRequire(node: TsNode): boolean {
   return node.childForFieldName("receiver") === null && (method === "require" || method === "require_relative");
 }
 
+function holdsOnlyNoise(node: TsNode, langKey: LanguageKey): boolean {
+  return node.namedChildren.every((c) => isHeaderOf(node, c) || isNoiseNode(c, langKey));
+}
+
 function isNoiseNode(node: TsNode, langKey: LanguageKey): boolean {
-  if (COMMENT_TYPES.has(node.type) || ATTRIBUTE_TYPES.has(node.type)) return true;
-  if (IMPORT_TYPES[langKey].has(node.type)) return true;
-  if (node.type === "export_statement") {
-    return node.children.some((c) => c.type === "export_clause") || node.childForFieldName("source") !== null;
+  const { type } = node;
+  if (COMMENT_TYPES.has(type) || ATTRIBUTE_TYPES.has(type) || NOT_CODE_TYPES.has(type)) return true;
+  if (IMPORT_TYPES[langKey].has(type)) return true;
+  if (CONTAINER_TYPES.has(type)) return holdsOnlyNoise(node, langKey);
+  if (type === "expression_statement") {
+    return node.namedChildren.every((c) => STRING_LITERAL_TYPES.has(c.type) || isNoiseNode(c, langKey));
   }
+  if (type === "export_statement") {
+    return node.children.some((c) => c.type === "export_clause") || node.childForFieldName("source") !== null
+      || holdsOnlyNoise(node, langKey);
+  }
+  if (PREPROC_CONDITIONAL_TYPES.has(type)) return holdsOnlyNoise(node, langKey);
   if (JS_FAMILY.has(langKey)) {
-    return (node.type === "lexical_declaration" || node.type === "variable_declaration") && isRequireDeclaration(node);
+    return (type === "lexical_declaration" || type === "variable_declaration") && isRequireDeclaration(node);
   }
-  if (langKey === "ruby") return node.type === "call" && isRubyRequire(node);
+  if (langKey === "ruby") return type === "call" && isRubyRequire(node);
+  if (langKey === "csharp") return type.startsWith("preproc_");
   if (langKey === "c" || langKey === "cpp") {
-    if (node.type === "preproc_call") return true;
-    if (node.type === "preproc_def") return node.childForFieldName("value") === null;
-    if (node.type === "preproc_ifdef" || node.type === "preproc_else") {
-      return node.namedChildren.every((c) => isHeaderToken(c) || isNoiseNode(c, langKey));
+    return type === "preproc_call" || (type === "preproc_def" && node.childForFieldName("value") === null);
+  }
+  if (langKey === "python") {
+    if (type === "block") return node.namedChildren.every((c) => isNoiseNode(c, langKey));
+    if (PY_BRANCH_TYPES.has(type)) {
+      return node.namedChildren
+        .filter((c) => c.type === "block" || PY_BRANCH_TYPES.has(c.type))
+        .every((c) => isNoiseNode(c, langKey));
     }
   }
   return false;
@@ -299,7 +359,18 @@ function isNoiseNode(node: TsNode, langKey: LanguageKey): boolean {
 // Name/header tokens of a container (namespace, module, template) are not code of their own.
 function isHeaderToken(node: TsNode): boolean {
   return node.type.endsWith("identifier") || node.type === "qualified_name" || node.type === "name"
-    || node.type === "template_parameter_list";
+    || node.type === "nested_namespace_specifier" || node.type === "template_parameter_list"
+    || node.type === "visibility_modifier" || node.type === "extern_modifier";
+}
+
+function isHeaderOf(parent: TsNode, child: TsNode): boolean {
+  if (isHeaderToken(child)) return true;
+  const field = parent.type === "linkage_specification" ? "value"
+    : parent.type.startsWith("preproc_") ? "condition"
+    : "name";
+  const header = parent.childForFieldName(field);
+  return header !== null && header.startIndex === child.startIndex && header.endIndex === child.endIndex
+    && header.type === child.type;
 }
 
 interface WalkCtx {
@@ -346,7 +417,7 @@ function walkNode(node: TsNode, ctx: WalkCtx, isRoot: boolean, collectGaps: bool
       let w = mark;
       for (let r = mark; r < ctx.gaps.length; r++) {
         const g = ctx.gaps[r];
-        if (!(direct.has(g.node) && isHeaderToken(g.node))) ctx.gaps[w++] = g;
+        if (!(direct.has(g.node) && isHeaderOf(node, g.node))) ctx.gaps[w++] = g;
       }
       ctx.gaps.length = w;
     }
@@ -355,10 +426,12 @@ function walkNode(node: TsNode, ctx: WalkCtx, isRoot: boolean, collectGaps: bool
 
   if (collectGaps && !isRoot) {
     ctx.gaps.length = mark;
+    // A node that swallows its newline (preprocessor lines, Rust doc comments) ends at column 0 of the next row.
+    const swallowsNewline = node.endPosition.column === 0 && node.endPosition.row > node.startPosition.row;
     ctx.gaps.push({
       node,
       startRow: node.startPosition.row + ctx.lineOffset,
-      endRow: node.endPosition.row + ctx.lineOffset,
+      endRow: node.endPosition.row + ctx.lineOffset - (swallowsNewline ? 1 : 0),
       keep: !isNoiseNode(node, ctx.langKey),
     });
   }
@@ -380,12 +453,14 @@ function astChunks(
 ): CodeChunk[] {
   const declTypes = DECLARATION_TYPES[langKey];
   const ctx: WalkCtx = { declTypes, langKey, source, lineOffset, decls: [], gaps: [] };
+  // Tree-sitter counts rows by newline alone; /^/m also breaks on Unicode line separators.
+  const rowLines = source.split(/(?<=\n)/);
   let regions: Array<{ start: number; end: number }>;
   try {
     const tree = parser.parse(source, undefined, { bufferSize: Math.max(MIN_PARSE_BUFFER, source.length * 2) });
     // Very deep expressions overflow the stack in here; such a file goes to the sliding window.
     walkNode(tree.rootNode, ctx, true, true);
-    regions = ctx.decls.length > 0 ? gapRegions(ctx.gaps, ctx.decls) : [];
+    regions = ctx.decls.length === 0 ? [] : gapRegions(ctx.gaps, ctx.decls, rowLines, lineOffset);
   } catch (err) {
     diagEmit({
       event: "chunker.parse_failed",
@@ -400,8 +475,6 @@ function astChunks(
   }
 
   const decls = ctx.decls;
-  if (decls.length === 0) return [];
-
   const chunks: CodeChunk[] = [];
   const lines = source.split(/^/m);
 
@@ -447,7 +520,7 @@ function astChunks(
   }
 
   for (const region of regions) {
-    const regionLines = lines.slice(region.start - lineOffset, region.end - lineOffset + 1);
+    const regionLines = rowLines.slice(region.start - lineOffset, region.end - lineOffset + 1);
     for (const window of chunkLines(regionLines, region.start, maxChars)) {
       chunks.push(stampChunkId({
         project_id: projectId,
@@ -467,56 +540,36 @@ function astChunks(
   return chunks;
 }
 
-/** Merges leftover nodes into whole-line regions (0-indexed, inclusive) that avoid declaration lines and hold at least one non-noise node. */
-function gapRegions(gaps: GapNode[], decls: DeclEntry[]): Array<{ start: number; end: number }> {
-  if (gaps.length === 0) return [];
-  const covered = new Set<number>();
-  for (const d of decls) for (let r = d.startLine; r <= d.endLine; r++) covered.add(r);
+/** Runs of lines (0-indexed, inclusive) covered by kept nodes; anything but a blank line between two kept lines splits the run. */
+function gapRegions(
+  gaps: GapNode[],
+  decls: DeclEntry[],
+  rowLines: string[],
+  lineOffset: number
+): Array<{ start: number; end: number }> {
+  const declRows = new Set<number>();
+  for (const d of decls) for (let r = d.startLine; r <= d.endLine; r++) declRows.add(r);
 
-  const sorted = [...gaps].sort((a, b) => a.startRow - b.startRow);
-  const groups: GapNode[][] = [];
-  let cur: GapNode[] = [];
-  let curEnd = -1;
-  for (const g of sorted) {
-    let separated = false;
-    if (cur.length > 0) {
-      for (let r = curEnd + 1; r < g.startRow; r++) {
-        if (covered.has(r)) { separated = true; break; }
-      }
-    }
-    if (cur.length > 0 && separated) {
-      groups.push(cur);
-      cur = [];
-      curEnd = -1;
-    }
-    cur.push(g);
-    curEnd = Math.max(curEnd, g.endRow);
+  const keptRows = new Set<number>();
+  for (const g of gaps) {
+    if (!g.keep) continue;
+    for (let r = g.startRow; r <= g.endRow; r++) if (!declRows.has(r)) keptRows.add(r);
   }
-  if (cur.length > 0) groups.push(cur);
 
   const regions: Array<{ start: number; end: number }> = [];
-  for (const group of groups) {
-    const first = Math.min(...group.map((g) => g.startRow));
-    const last = Math.max(...group.map((g) => g.endRow));
-    let runStart = -1;
-    const flush = (runEnd: number) => {
-      if (runStart < 0) return;
-      const rs = runStart;
-      runStart = -1;
-      const kept = group.filter((g) => g.keep && g.startRow <= runEnd && g.endRow >= rs);
-      if (kept.length === 0) return;
-      // Start and end on real code, so leading imports and comments stay out.
-      regions.push({
-        start: Math.max(rs, Math.min(...kept.map((g) => g.startRow))),
-        end: Math.min(runEnd, Math.max(...kept.map((g) => g.endRow))),
-      });
-    };
-    for (let r = first; r <= last; r++) {
-      if (covered.has(r)) flush(r - 1);
-      else if (runStart < 0) runStart = r;
+  let start = -1;
+  let end = -1;
+  for (let r = lineOffset; r < lineOffset + rowLines.length; r++) {
+    if (rowLines[r - lineOffset].trim() === "") continue;
+    if (keptRows.has(r)) {
+      if (start < 0) start = r;
+      end = r;
+    } else if (start >= 0) {
+      regions.push({ start, end });
+      start = -1;
     }
-    flush(last);
   }
+  if (start >= 0) regions.push({ start, end });
   return regions;
 }
 
@@ -722,6 +775,7 @@ export function chunkFileContent(
     if (extracted && !skipParse(extracted.code)) {
       const parser = getParser("typescript");
       if (parser) {
+        // With no declaration, the whole-file window below also keeps the template searchable.
         const chunks = astChunks(projectId, sourceId, relPath, extracted.code, "typescript", extracted.lineOffset, parser, maxChars);
         if (chunks.length > 0) return chunks;
       }

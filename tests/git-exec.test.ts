@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { execSync } from "child_process";
@@ -48,6 +48,15 @@ describe("gitExec", () => {
   it("empty args array returns null (git with no args fails)", () => {
     const result = gitExec([], { cwd });
     expect(result).toBeNull();
+  });
+});
+
+describe("console windows", () => {
+  it("every git call in the module hides its window", () => {
+    const source = readFileSync(join(import.meta.dirname, "../src/util/git-exec.ts"), "utf8");
+    const calls = source.split("execFileSync(\"git\"").slice(1);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.slice(0, call.indexOf("});"))).toContain("windowsHide: true");
   });
 });
 

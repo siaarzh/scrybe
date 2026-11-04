@@ -176,7 +176,7 @@ async function pollProject(ps: PollerState): Promise<void> {
       continue;
     }
 
-    // Keyed under the logical branch name (D1: label = logical, source = origin/).
+    // Keyed under the logical branch name; content comes from origin/.
     const remoteIndexedSha = getRemoteIndexedSha(ps.projectId, ps.sourceId, branch);
     if (shaAfter === remoteIndexedSha) continue;
 

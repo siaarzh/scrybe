@@ -71,7 +71,7 @@ scrybe branch unpin --all --project-id cmx-ionic --yes
 
 Pinned branches are stored in `projects.json` under each source's `pinned_branches` field. The daemon fetches only those branches (narrow refspec) and queues a reindex whenever a pinned ref advances.
 
-**Pinned branches index the remote copy.** A pinned branch is always read from `origin/<branch>`, even when it is also the branch checked out in your working tree. Unpushed commits and uncommitted files on it are left out of the index; the daemon logs a warning and `scrybe doctor` reports how many files and commits are affected. Commit and push to make them searchable. Only unpinned checkouts read the working tree. If `origin/<branch>` does not exist locally, the checked-out branch falls back to the working tree. An unchanged remote is skipped without re-reading any files.
+**Pinned branches index the remote copy.** A pinned branch is always read from `origin/<branch>`, even when it is also the branch checked out in your working tree. Unpushed commits and uncommitted files on it are left out of the index; the daemon logs a warning and `scrybe doctor` reports how many files and commits are affected. Commit and push to make them searchable. Only unpinned checkouts read the working tree. If `origin/<branch>` does not exist locally, the checked-out branch falls back to the working tree. A job on an unchanged remote is skipped without re-reading any files, unless `.gitignore`, `.scrybeignore` or the private ignore file changed or was removed.
 
 **Limits:** there is no hard cap, but a warning is emitted when a source has more than 20 pinned branches (disk usage + fetch time).
 

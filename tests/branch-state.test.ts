@@ -52,6 +52,30 @@ describe("branch_state.remote_indexed_sha", () => {
   });
 });
 
+describe("branch_state.ignore_fingerprint", () => {
+  it("is added to a database that predates it, keeping the row", async () => {
+    const { getDB, closeDB, setLastIndexedSha, getRemoteIndexedSha, setRemoteIndexedSha, getIgnoreFingerprint } =
+      await import("../src/branch-state.js");
+    setLastIndexedSha(P, S, B, "sha1", 123);
+    setRemoteIndexedSha(P, S, B, "sha1");
+    getDB().exec("ALTER TABLE branch_state DROP COLUMN ignore_fingerprint");
+    closeDB();
+
+    expect(getIgnoreFingerprint(P, S, B)).toBeNull();
+    expect(getRemoteIndexedSha(P, S, B)).toBe("sha1");
+  });
+
+  it("is written with the remote SHA and cleared with it", async () => {
+    const { setLastIndexedSha, setRemoteIndexedSha, getIgnoreFingerprint } = await import("../src/branch-state.js");
+    setLastIndexedSha(P, S, B, "sha1", 123);
+    setRemoteIndexedSha(P, S, B, "sha1", "fp1");
+    expect(getIgnoreFingerprint(P, S, B)).toBe("fp1");
+
+    setRemoteIndexedSha(P, S, B, null, "ignored");
+    expect(getIgnoreFingerprint(P, S, B)).toBeNull();
+  });
+});
+
 describe("branch-state session CRUD", () => {
   it("embedded outcome: chunk_id appears in getChunkIdsForBranch", async () => {
     const { withBranchSession, getChunkIdsForBranch } = await import("../src/branch-state.js");

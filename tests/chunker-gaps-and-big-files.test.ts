@@ -296,6 +296,123 @@ describe("leftovers that are not code", () => {
   });
 });
 
+describe("noise inside a gap", () => {
+  const contents = (path: string, src: string, lang: string) => run(path, src, lang).map((c) => c.content);
+  const gapContents = (path: string, src: string, lang: string) => gaps(run(path, src, lang)).map((c) => c.content);
+  const fn = "function f() {\n  return 1;\n}\n";
+  const cFn = "int f(void) {\n  return 1;\n}\n";
+
+  it("C#: directives, usings and a file-scoped namespace leave only the class", () => {
+    const src = "#nullable enable\n\nusing System;\nusing System.Linq;\n\nnamespace Foo.Bar;\n\npublic class K {}";
+    expect(contents("K.cs", src, "csharp")).toEqual(["public class K {}"]);
+  });
+
+  it("TS: imports below real code are cut out, and vi.mock and const survive", () => {
+    const src = `import { vi } from 'vitest';\n// mock first\nvi.mock('./x');\nimport { a } from './x';\nimport { b } from './y';\nconst T = 1;\n\n${fn}`;
+    expect(gapContents("a.test.ts", src, "typescript")).toEqual(["vi.mock('./x');", "const T = 1;"]);
+  });
+
+  it("TS: comments and an import between two consts split them into two chunks", () => {
+    const chunks = gaps(run("b.ts", `const x = 1;\n// a comment\n// another\nimport c from 'c';\nconst y = 2;\n\n${fn}`, "typescript"));
+    expect(chunks.map((c) => [c.content, c.start_line, c.end_line])).toEqual([["const x = 1;", 1, 1], ["const y = 2;", 5, 5]]);
+  });
+
+  it("the same split happens beside a declaration", () => {
+    const src = `const x = 1;\n// note\nconst y = 2;\n\n${fn}`;
+    expect(gapContents("b.ts", src, "typescript")).toEqual(["const x = 1;", "const y = 2;"]);
+  });
+
+  it("blank lines between kept nodes stay in the run; regions never start or end on one", () => {
+    const chunks = gaps(run("b.ts", `\n\nconst x = 1;\n\n\nconst y = 2;\n\n\n${fn}`, "typescript"));
+    expect(chunks.map((c) => [c.content, c.start_line, c.end_line])).toEqual([["const x = 1;\n\n\nconst y = 2;", 3, 6]]);
+  });
+
+  it("a noise node sharing a line with kept code stays with it", () => {
+    expect(gapContents("b.ts", `const x = 1; // why\n// alone\nconst y = 2;\n\n${fn}`, "typescript")).toEqual(["const x = 1; // why", "const y = 2;"]);
+  });
+
+  it("a comment nested inside a kept node stays", () => {
+    const src = "describe('a', () => {\n  // nested note\n  it('b', () => {});\n});\n";
+    expect(contents("a.test.ts", src, "typescript")).toEqual([src.trim()]);
+  });
+
+  it("a file with nothing but noise still gets its text window", () => {
+    expect(contents("i.ts", "import a from 'a';\n// note\n", "typescript")).toEqual(["import a from 'a';\n// note"]);
+  });
+
+  it("a Vue script with no declarations keeps its whole-file window, template included", () => {
+    const src = "<template><div>unique-template-text</div></template>\n<script>\nimport a from 'a';\nconst b = 1;\n</script>\n";
+    expect(contents("a.vue", src, "vue")).toEqual([src.trim()]);
+  });
+
+  it("counts rows by newline, so a Unicode line separator does not shift a gap", () => {
+    const src = `const s = "a${String.fromCharCode(0x2028)}b";\nimport c from 'c';\nconst y = 2;\n\n${fn}`;
+    const g = gaps(run("u.ts", src, "typescript"));
+    expect(g.map((c) => [c.start_line, c.content.split("\n").length])).toEqual([[1, 1], [3, 1]]);
+    expect(g[1].content).toBe("const y = 2;");
+  });
+
+  it.each([
+    ["csharp", "A.cs", "#region R\n#pragma warning disable CS1\n#define X\n#undef Y\n#endregion\nclass A\n{\n}\n", "class A\n{\n}"],
+    ["csharp", "A.cs", "#if DEBUG\nusing A;\n#elif B\nusing C;\n#endif\nclass A\n{\n}\n", "class A\n{\n}"],
+    ["csharp", "A.cs", "namespace Empty { }\nnamespace Only { using Z; }\nclass A\n{\n}\n", "class A\n{\n}"],
+    ["typescript", "a.ts", `#!/usr/bin/env node\n'use strict';\n;\n${fn}`, fn.trim()],
+    ["typescript", "a.ts", `export default someIdentifier;\n${fn}`, fn.trim()],
+    ["typescript", "a.ts", `export = foo;\nexport as namespace Foo;\ndeclare module 'x';\nnamespace Empty {}\n${fn}`, fn.trim()],
+    ["typescript", "a.ts", "declare module 'y' {\n  function g() {}\n}\n", "function g() {}"],
+    ["javascript", "a.js", `"use strict";\n${fn};\n`, fn.trim()],
+    ["python", "a.py", '"""Module doc."""\n"stray"\npass\ndef f():\n    return 1\n', "def f():\n    return 1"],
+    ["python", "a.py", "if TYPE_CHECKING:\n    import a\ntry:\n    import b\nexcept ImportError:\n    pass\ndef f():\n    return 1\n", "def f():\n    return 1"],
+    ["rust", "a.rs", "mod foo;\npub mod bar;\npub(crate) mod baz;\nmod empty {}\nfn f() {}\n", "fn f() {}"],
+    ["cpp", "a.cpp", "using namespace std;\nusing std::string;\nnamespace al = std::chrono;\nextern \"C\" {\n#include <y.h>\n}\nint f() { return 1; }\n", "int f() { return 1; }"],
+    ["c", "a.c", `#if defined(A) && B\n#include <y.h>\n#elif C\n#define D\n#else\n#include <z.h>\n#endif\n${cFn}`, cFn.trim()],
+    ["c", "a.c", "#if ON\nint f(void) { return 1; }\n#endif\n", "int f(void) { return 1; }"],
+    ["ruby", "a.rb", "#!/usr/bin/env ruby\ndef f\n  1\nend\n__END__\ndata\n", "def f\n  1\nend"],
+  ])("leaves only the declaration (%s %s)", (lang, path, src, decl) => {
+    expect(contents(path, src, lang)).toEqual([decl]);
+  });
+
+  it.each([
+    ["rust", "a.rs", "pub mod inner {\n    use x::y;\n    fn g() {}\n}\n", "fn g() {}"],
+    ["cpp", "a.cpp", "namespace a::b {\n  void g() {}\n}\n", "void g() {}"],
+    ["cpp", "a.cpp", "extern \"C\" {\n  void g() {}\n}\n", "void g() {}"],
+    ["csharp", "A.cs", "namespace A.B\n{\n    #region X\n    class K\n    {\n    }\n    #endregion\n}\n", "class K\n    {\n    }"],
+  ])("a container header leaves nothing behind (%s %s)", (lang, path, src, decl) => {
+    expect(contents(path, src, lang)).toEqual([decl]);
+  });
+
+  it.each([
+    ["typescript", "const T = 1;"],
+    ["typescript", "vi.mock('./x');"],
+    ["typescript", "describe('x', () => {\n  it('y', () => {});\n});"],
+    ["javascript", "module.exports = { a: 1 };"],
+    ["typescript", "export default { a: 1 };"],
+    ["typescript", "export default a.b;"],
+    ["python", 'if __name__ == "__main__":\n    main()'],
+    ["python", "try:\n    import a\nexcept ImportError:\n    a = None"],
+    ["c", "#define MAX 10"],
+    ["cpp", "#define MAX(a, b) (a)"],
+    ["cpp", "using I = int;"],
+    ["csharp", "public enum E { A }"],
+    ["csharp", "namespace N { public enum E { A } }"],
+    ["rust", "mod m { const K: u32 = 1; }"],
+    ["go", "const K = 1"],
+    ["ruby", "puts 'hi'"],
+  ])("real code survives beside a declaration and alone (%s: %s)", (lang, code) => {
+    const decl = { c: cFn, cpp: cFn, python: "def f():\n    return 1\n", go: "func f() {}\n", rust: "fn f() {}\n", ruby: "def f\n  1\nend\n", csharp: "class A\n{\n}\n" }[lang] ?? fn;
+    const path = `a.${lang}`;
+    expect(contents(path, `${decl}\n${code}\n`, lang)).toContain(code);
+    expect(contents(path, `${code}\n`, lang)).toEqual([code]);
+  });
+
+  it("does not change declaration chunks: same content, same ids", () => {
+    const decl = "public class K\n{\n    public void M() { }\n}";
+    const plain = run("K.cs", `${decl}\n`, "csharp");
+    const noisy = run("K.cs", `#nullable enable\n\nusing System;\n\nnamespace Foo.Bar;\n\n${decl}\n`, "csharp");
+    expect(noisy.map((c) => [c.symbol_name, c.content, c.chunk_id])).toEqual(plain.map((c) => [c.symbol_name, c.content, c.chunk_id]));
+  });
+});
+
 describe("Vue line numbers", () => {
   it("slices an oversized declaration from the right lines and numbers a gap correctly", () => {
     const fnLines: string[] = ["function big() {"];

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, statSync } from "fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import ignore from "ignore";
 import { getPrivateIgnorePath, loadPrivateIgnore } from "./private-ignore.js";
@@ -16,20 +17,21 @@ export interface IgnoreRules {
   forcePatterns: string[];
 }
 
-/** True if any file read by loadCanonicalIgnoreRules was modified after `sinceMs`; a missing file does not count. */
-export function ignoreFilesChangedSince(
-  rootPath: string,
-  projectId: string,
-  sourceId: string,
-  sinceMs: number,
-): boolean {
-  const paths = [
-    join(rootPath, ".gitignore"),
-    join(rootPath, ".scrybeignore"),
-    getPrivateIgnorePath(projectId, sourceId),
-  ];
-  // Floored because `sinceMs` is whole ms: a file written just before it must not read as newer.
-  return paths.some((p) => Math.floor(statSync(p, { throwIfNoEntry: false })?.mtimeMs ?? 0) > sinceMs);
+/** sha256 over the contents of exactly the files loadCanonicalIgnoreRules reads; a missing file hashes as absent. */
+export function ignoreFingerprint(rootPath: string, projectId?: string, sourceId?: string): string {
+  const paths = [join(rootPath, ".gitignore"), join(rootPath, ".scrybeignore")];
+  if (projectId && sourceId) paths.push(getPrivateIgnorePath(projectId, sourceId));
+
+  const hash = createHash("sha256");
+  paths.forEach((path, i) => {
+    let content: Buffer | null = null;
+    try {
+      content = readFileSync(path);
+    } catch {}
+    hash.update(content === null ? `${i}:absent\n` : `${i}:${content.length}\n`);
+    if (content !== null) hash.update(content);
+  });
+  return hash.digest("hex");
 }
 
 /**

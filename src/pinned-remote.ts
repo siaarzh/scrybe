@@ -19,10 +19,11 @@ export function countLeftOutLocalEdits(rootPath: string, branch: string): LeftOu
   };
 }
 
-const WARN_EVERY_MS = 10 * 60 * 1000;
-const lastWarned = new Map<string, number>();
+const WAIT_AFTER_WARNING_MS = 10 * 60 * 1000;
+const WAIT_AFTER_CLEAN_CHECK_MS = 60 * 1000;
+const nextCheckAt = new Map<string, number>();
 
-/** Log (at most once per 10 minutes per project+source+branch) that local edits are not indexed. */
+/** Log that local edits are not indexed, at most once per 10 minutes per project+source+branch; a clean check waits 1 minute. */
 export function warnLeftOutLocalEdits(
   projectId: string,
   sourceId: string,
@@ -31,12 +32,14 @@ export function warnLeftOutLocalEdits(
 ): void {
   const key = `${projectId}\u0000${sourceId}\u0000${branch}`;
   const now = Date.now();
-  const prev = lastWarned.get(key);
-  if (prev !== undefined && now - prev < WARN_EVERY_MS) return;
-  lastWarned.set(key, now);
+  if (now < (nextCheckAt.get(key) ?? 0)) return;
 
   const edits = countLeftOutLocalEdits(rootPath, branch);
-  if (edits === null || (edits.dirtyFiles === 0 && edits.localOnlyCommits === 0)) return;
+  if (edits === null || (edits.dirtyFiles === 0 && edits.localOnlyCommits === 0)) {
+    nextCheckAt.set(key, now + WAIT_AFTER_CLEAN_CHECK_MS);
+    return;
+  }
+  nextCheckAt.set(key, now + WAIT_AFTER_WARNING_MS);
   diagEmit({
     event: "indexer.pinned.local_edits_left_out",
     level: "warn",

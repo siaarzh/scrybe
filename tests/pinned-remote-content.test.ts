@@ -1,5 +1,5 @@
 /** A pinned branch indexes origin/<branch> whoever starts the job; unpinned checkouts read the working tree. */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -321,5 +321,128 @@ describe("only a completed job from the remote counts as indexed", () => {
     writeFileSync(join(fx.clone, ".scrybeignore"), "remote.ts\n", "utf8");
     await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
     expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts"]);
+  });
+
+  it("deleting an ignore file rescans at the same SHA and brings the file back, then settles", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { savePrivateIgnore } = await import("../src/private-ignore.js");
+    savePrivateIgnore(p.projectId, p.sourceId, "remote.ts\n");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    const sha = tip(fx);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts"]);
+
+    savePrivateIgnore(p.projectId, p.sourceId, "");
+    const before = scans();
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+
+    expect(scans()).toBe(before + 1);
+    expect(tip(fx)).toBe(sha);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "remote.ts"]);
+
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(scans()).toBe(before + 1);
+  });
+
+  it("an ignore edit made after the job took its fingerprint forces a scan next time", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { savePrivateIgnore } = await import("../src/private-ignore.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", {
+      branch: fx.branch,
+      onProgress(r) {
+        if (r.phase === "embed_start") savePrivateIgnore(p.projectId, p.sourceId, "remote.ts\n");
+      },
+    });
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "remote.ts"]);
+
+    const before = scans();
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(scans()).toBe(before + 1);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts"]);
+  });
+
+  it("rewriting an ignore file with the same content does not scan", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    writeFileSync(join(fx.clone, ".scrybeignore"), "nothing.ts\n", "utf8");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    writeFileSync(join(fx.clone, ".scrybeignore"), "nothing.ts\n", "utf8");
+    const before = scans();
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(scans()).toBe(before);
+  });
+
+  it.each([
+    ["a tag", (fx: Fixture) => { git(fx.clone, "tag", "v1", `origin/${fx.branch}`); return "v1"; }],
+    ["another branch's remote", (fx: Fixture) => {
+      git(fx.other, "push", "origin", `HEAD:refs/heads/dev`);
+      git(fx.clone, "fetch", "origin");
+      return "origin/dev";
+    }],
+  ])("a job reading %s on a pinned label clears the record, and the next job corrects it", async (_name, makeRef) => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { getRemoteIndexedSha, getIgnoreFingerprint } = await import("../src/branch-state.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBe(tip(fx));
+    expect(getIgnoreFingerprint(p.projectId, p.sourceId, fx.branch)).not.toBeNull();
+
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch, contentRef: makeRef(fx) });
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBeNull();
+    expect(getIgnoreFingerprint(p.projectId, p.sourceId, fx.branch)).toBeNull();
+
+    const before = scans();
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch, contentRef: `origin/${fx.branch}` });
+    expect(scans()).toBe(before + 1);
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBe(tip(fx));
+  });
+
+  it("a pinned branch read from its local ref, with no remote copy, records nothing", async () => {
+    const { fx, p } = await setup(false);
+    const { indexSource } = await import("../src/indexer.js");
+    const { getRemoteIndexedSha } = await import("../src/branch-state.js");
+    git(fx.clone, "branch", "feature-local");
+    await pin(p, "feature-local");
+
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: "feature-local" });
+
+    expect(await indexedFiles(p, "feature-local")).toEqual(["a.ts", "local.ts"]);
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, "feature-local")).toBeNull();
+  });
+});
+
+describe("the local-edits warning", () => {
+  const warnings = () => logEvents(logPath).filter((e) => e["event"] === "indexer.pinned.local_edits_left_out");
+  const MINUTE = 60 * 1000;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a clean check waits one minute, not ten, and a warning waits ten", async () => {
+    const { fx, p } = await setup(true);
+    const { warnLeftOutLocalEdits } = await import("../src/pinned-remote.js");
+    rmSync(join(fx.clone, "dirty.ts"));
+    git(fx.clone, "reset", "--hard", `origin/${fx.branch}`);
+    const start = Date.now();
+    const at = (ms: number) => {
+      vi.spyOn(Date, "now").mockReturnValue(start + ms);
+      warnLeftOutLocalEdits(p.projectId, p.sourceId, fx.branch, fx.clone);
+    };
+
+    at(0);
+    expect(warnings()).toHaveLength(0);
+
+    writeFileSync(join(fx.clone, "dirty.ts"), "export const dirty = 1;\n", "utf8");
+    at(MINUTE - 1);
+    expect(warnings()).toHaveLength(0);
+    at(MINUTE);
+    expect(warnings()).toHaveLength(1);
+
+    at(MINUTE + 10 * MINUTE - 1);
+    expect(warnings()).toHaveLength(1);
+    at(MINUTE + 10 * MINUTE);
+    expect(warnings()).toHaveLength(2);
   });
 });

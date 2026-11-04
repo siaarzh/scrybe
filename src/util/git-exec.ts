@@ -40,6 +40,7 @@ export function gitExecOrThrow(args: string[], opts: GitExecOpts): string {
     cwd: opts.cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
     ...(opts.maxBuffer !== undefined ? { maxBuffer: opts.maxBuffer } : {}),
     ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
   });
