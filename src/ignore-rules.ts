@@ -1,7 +1,7 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { join } from "path";
 import ignore from "ignore";
-import { loadPrivateIgnore } from "./private-ignore.js";
+import { getPrivateIgnorePath, loadPrivateIgnore } from "./private-ignore.js";
 
 // CJS interop: `ignore` module.exports is the factory function
 type IgnoreManager = { add(patterns: string): void; ignores(path: string): boolean };
@@ -14,6 +14,22 @@ export interface IgnoreRules {
   isForceIncluded: (relPath: string) => boolean;
   /** Raw negation pattern strings collected from .scrybeignore + private ignore. */
   forcePatterns: string[];
+}
+
+/** True if any file read by loadCanonicalIgnoreRules was modified after `sinceMs`; a missing file does not count. */
+export function ignoreFilesChangedSince(
+  rootPath: string,
+  projectId: string,
+  sourceId: string,
+  sinceMs: number,
+): boolean {
+  const paths = [
+    join(rootPath, ".gitignore"),
+    join(rootPath, ".scrybeignore"),
+    getPrivateIgnorePath(projectId, sourceId),
+  ];
+  // Floored because `sinceMs` is whole ms: a file written just before it must not read as newer.
+  return paths.some((p) => Math.floor(statSync(p, { throwIfNoEntry: false })?.mtimeMs ?? 0) > sinceMs);
 }
 
 /**

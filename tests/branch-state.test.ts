@@ -21,6 +21,37 @@ function makeTag(overrides: Partial<BranchTag> = {}): BranchTag {
 }
 
 
+describe("branch_state.remote_indexed_sha", () => {
+  it("is added to a database that predates it, keeping the row, and reopening is harmless", async () => {
+    const { getDB, closeDB, setLastIndexedSha, getLastIndexedSha, getRemoteIndexedSha, setRemoteIndexedSha } =
+      await import("../src/branch-state.js");
+    setLastIndexedSha(P, S, B, "sha1", 123);
+    getDB().exec("ALTER TABLE branch_state DROP COLUMN remote_indexed_sha");
+    closeDB();
+
+    expect(getLastIndexedSha(P, S, B)).toBe("sha1");
+    expect(getRemoteIndexedSha(P, S, B)).toBeNull();
+    setRemoteIndexedSha(P, S, B, "sha1");
+    closeDB();
+
+    expect(getRemoteIndexedSha(P, S, B)).toBe("sha1");
+  });
+
+  it("setLastIndexedSha leaves it alone, and the setter clears it and ignores a missing row", async () => {
+    const { setLastIndexedSha, getRemoteIndexedSha, setRemoteIndexedSha } = await import("../src/branch-state.js");
+    setRemoteIndexedSha(P, S, B, "nothing-to-update");
+    expect(getRemoteIndexedSha(P, S, B)).toBeNull();
+
+    setLastIndexedSha(P, S, B, "sha1", 123);
+    setRemoteIndexedSha(P, S, B, "sha1");
+    setLastIndexedSha(P, S, B, "sha2", 456);
+    expect(getRemoteIndexedSha(P, S, B)).toBe("sha1");
+
+    setRemoteIndexedSha(P, S, B, null);
+    expect(getRemoteIndexedSha(P, S, B)).toBeNull();
+  });
+});
+
 describe("branch-state session CRUD", () => {
   it("embedded outcome: chunk_id appears in getChunkIdsForBranch", async () => {
     const { withBranchSession, getChunkIdsForBranch } = await import("../src/branch-state.js");

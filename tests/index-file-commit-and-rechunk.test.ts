@@ -1,8 +1,4 @@
-/**
- * A code file's tags and hash commit together once all its chunks are written, so an
- * interrupt cannot leave it truncated and it stays searchable meanwhile. `rechunk`
- * applies a chunker change to an existing index, touching only files that differ.
- */
+/** A code file's tags and hash commit together once all its chunks are written; `rechunk` touches only files that differ. */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";

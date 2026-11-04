@@ -38,12 +38,14 @@ const B = "main";
 
 describe("branch_state — wipeBranch clears row", () => {
   it("wipeBranch() removes the branch_state row", async () => {
-    const { withBranchSession, setLastIndexedSha, getLastIndexedSha } =
+    const { withBranchSession, setLastIndexedSha, getLastIndexedSha, setRemoteIndexedSha, getRemoteIndexedSha } =
       await import("../src/branch-state.js");
 
     // Seed a branch_state row directly.
     setLastIndexedSha(P, S, B, "deadbeef1234", Date.now());
+    setRemoteIndexedSha(P, S, B, "deadbeef1234");
     expect(getLastIndexedSha(P, S, B)).toBe("deadbeef1234");
+    expect(getRemoteIndexedSha(P, S, B)).toBe("deadbeef1234");
 
     // wipeBranch via a session.
     await withBranchSession(
@@ -54,6 +56,7 @@ describe("branch_state — wipeBranch clears row", () => {
     );
 
     expect(getLastIndexedSha(P, S, B)).toBeNull();
+    expect(getRemoteIndexedSha(P, S, B)).toBeNull();
   });
 });
 
@@ -95,10 +98,11 @@ describe("branch_state — wipeSource clears all rows", () => {
 
 describe("branch_state — deleteBranch clears row", () => {
   it("deleteBranch() removes the branch_state row for the branch", async () => {
-    const { deleteBranch, setLastIndexedSha, getLastIndexedSha } =
+    const { deleteBranch, setLastIndexedSha, getLastIndexedSha, setRemoteIndexedSha, getRemoteIndexedSha } =
       await import("../src/branch-state.js");
 
     setLastIndexedSha(P, S, B, "sha-delete-me", Date.now());
+    setRemoteIndexedSha(P, S, B, "sha-delete-me");
     setLastIndexedSha(P, S, "feat/other", "sha-keep-me", Date.now());
 
     expect(getLastIndexedSha(P, S, B)).toBe("sha-delete-me");
@@ -106,6 +110,7 @@ describe("branch_state — deleteBranch clears row", () => {
     deleteBranch(P, S, B);
 
     expect(getLastIndexedSha(P, S, B)).toBeNull();
+    expect(getRemoteIndexedSha(P, S, B)).toBeNull();
     // Other branch unaffected.
     expect(getLastIndexedSha(P, S, "feat/other")).toBe("sha-keep-me");
   });

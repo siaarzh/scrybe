@@ -162,6 +162,11 @@ export function getDB(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_branch_state_lookup
       ON branch_state(project_id, source_id);
   `);
+  try {
+    db.exec("ALTER TABLE branch_state ADD COLUMN remote_indexed_sha TEXT");
+  } catch (err) {
+    if (!String(err).includes("duplicate column")) throw err;
+  }
   db.prepare("INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1')").run();
 
   _db = db;
@@ -252,6 +257,34 @@ export function setLastIndexedSha(
      ON CONFLICT(project_id, source_id, branch)
      DO UPDATE SET last_indexed_sha=excluded.last_indexed_sha, last_indexed_at=excluded.last_indexed_at`
   ).run(projectId, sourceId, branch, sha, at);
+}
+
+/** The SHA a completed job really indexed from the remote, or null if no such job stands. */
+export function getRemoteIndexedSha(projectId: string, sourceId: string, branch: string): string | null {
+  const row = getDB().prepare(
+    "SELECT remote_indexed_sha FROM branch_state WHERE project_id=? AND source_id=? AND branch=?"
+  ).get(projectId, sourceId, branch) as { remote_indexed_sha: string | null } | undefined;
+  return row?.remote_indexed_sha ?? null;
+}
+
+/** Sets or clears the remote-indexed SHA on an existing row; no row, no effect. */
+export function setRemoteIndexedSha(
+  projectId: string,
+  sourceId: string,
+  branch: string,
+  sha: string | null
+): void {
+  getDB().prepare(
+    "UPDATE branch_state SET remote_indexed_sha=? WHERE project_id=? AND source_id=? AND branch=?"
+  ).run(sha, projectId, sourceId, branch);
+}
+
+/** When the job that last wrote this row started, in ms, or null if unknown. */
+export function getLastIndexedAt(projectId: string, sourceId: string, branch: string): number | null {
+  const row = getDB().prepare(
+    "SELECT last_indexed_at FROM branch_state WHERE project_id=? AND source_id=? AND branch=?"
+  ).get(projectId, sourceId, branch) as { last_indexed_at: number | null } | undefined;
+  return row?.last_indexed_at ?? null;
 }
 
 /** Return the set of chunk IDs tagged for a specific branch. */
@@ -565,11 +598,7 @@ class BranchSessionImpl implements BranchSession {
 
 const _sourceWriteTails = new Map<string, Promise<unknown>>();
 
-/**
- * Run `fn` with sole write access to a source within this process. The queue already
- * serialises its own jobs per project; this covers gc that runs outside it (the startup
- * ephemeral sweep, in-process fallbacks), which could delete chunks whose tags a job still holds.
- */
+/** Sole write access to a source within this process, so gc outside the queue cannot delete chunks a job still holds. */
 export function withSourceWriteLock<T>(
   projectId: string,
   sourceId: string,

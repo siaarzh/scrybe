@@ -10,7 +10,7 @@
  * Idle interval:   SCRYBE_DAEMON_FETCH_IDLE_MS   (default 30 min)
  * Disable all fetching: SCRYBE_DAEMON_NO_FETCH=1
  */
-import { listBranches, getLastIndexedSha, setLastIndexedSha } from "../branch-state.js";
+import { listBranches, getRemoteIndexedSha } from "../branch-state.js";
 import { gitExec, gitExecOrThrow } from "../util/git-exec.js";
 import { getSource } from "../registry.js";
 import { getState } from "./idle-state.js";
@@ -145,7 +145,7 @@ async function pollProject(ps: PollerState): Promise<void> {
     shasBefore.set(branch, resolveRemoteSha(ps.rootPath, `origin/${branch}`));
   }
 
-  // Which pinned branches have been indexed (used for bootstrap detection)
+  // Tells a branch with tags but no remote record apart from one never indexed
   const indexedBranches = new Set(listBranches(ps.projectId, ps.sourceId));
 
   try {
@@ -154,8 +154,9 @@ async function pollProject(ps: PollerState): Promise<void> {
     throw new Error(`git fetch failed for ${ps.projectId}`);
   }
 
-  // Queue reindex for branches that need it, using branch_state as the baseline
+  // Queue reindex for branches whose remote tip is not what a job really indexed
   const changed: string[] = [];
+  const rescans: string[] = [];
   for (const branch of pinned) {
     const remoteBranch = `origin/${branch}`;
     const shaAfter = resolveRemoteSha(ps.rootPath, remoteBranch);
@@ -175,56 +176,44 @@ async function pollProject(ps: PollerState): Promise<void> {
       continue;
     }
 
-    // lastIndexedSha is keyed under the logical branch name (D1: label = logical, source = origin/).
-    const lastIndexedSha = getLastIndexedSha(ps.projectId, ps.sourceId, branch);
+    // Keyed under the logical branch name (D1: label = logical, source = origin/).
+    const remoteIndexedSha = getRemoteIndexedSha(ps.projectId, ps.sourceId, branch);
+    if (shaAfter === remoteIndexedSha) continue;
 
-    if (lastIndexedSha === null) {
-      if (indexedBranches.has(branch)) {
-        // Bootstrap on upgrade: branch has chunks but no branch_state row yet.
-        // Write current SHA as baseline; skip enqueue — nothing new to index.
-        try {
-          setLastIndexedSha(ps.projectId, ps.sourceId, branch, shaAfter);
-        } catch { /* non-fatal */ }
-        continue;
-      }
-      // Truly never indexed — preserve neverIndexed semantics.
-      // branch = logical label (e.g. "dev"); contentRef = remote-tracking ref for content reads.
-      await enqueue({
+    // Out-of-band detection: shaBefore equals shaAfter means the daemon's own
+    // fetch did NOT advance the ref this cycle — something else fetched first.
+    if (remoteIndexedSha !== null && shaBefore === shaAfter) {
+      outOfBandCount++;
+      _push?.({
+        ts: new Date().toISOString(),
+        level: "info",
+        event: "watcher.event",
         projectId: ps.projectId,
-        sourceId: ps.sourceId,
-        branch,
-        contentRef: remoteBranch,
-        mode: "incremental",
+        detail: { phase: "fetch-poller", outOfBandFetch: true, branch: remoteBranch, lastSha: remoteIndexedSha, shaAfter },
       });
-      changed.push(branch);
-      deltasFound++;
-      continue;
     }
 
-    // lastIndexedSha is non-null — compare against shaAfter
-    if (shaAfter !== lastIndexedSha) {
-      // Out-of-band detection: shaBefore equals shaAfter means the daemon's own
-      // fetch did NOT advance the ref this cycle — something else fetched first.
-      if (shaBefore === shaAfter) {
-        outOfBandCount++;
-        _push?.({
-          ts: new Date().toISOString(),
-          level: "info",
-          event: "watcher.event",
-          projectId: ps.projectId,
-          detail: { phase: "fetch-poller", outOfBandFetch: true, branch: remoteBranch, lastSha: lastIndexedSha, shaAfter },
-        });
-      }
-      await enqueue({
-        projectId: ps.projectId,
-        sourceId: ps.sourceId,
-        branch,
-        contentRef: remoteBranch,
-        mode: "incremental",
-      });
-      changed.push(branch);
-      deltasFound++;
-    }
+    // branch = logical label (e.g. "dev"); contentRef = remote-tracking ref for content reads.
+    await enqueue({
+      projectId: ps.projectId,
+      sourceId: ps.sourceId,
+      branch,
+      contentRef: remoteBranch,
+      mode: "incremental",
+    });
+    if (remoteIndexedSha === null && indexedBranches.has(branch)) rescans.push(branch);
+    else changed.push(branch);
+    deltasFound++;
+  }
+
+  if (rescans.length > 0) {
+    _push?.({
+      ts: new Date().toISOString(),
+      level: "info",
+      event: "watcher.event",
+      projectId: ps.projectId,
+      detail: { phase: "fetch-poller", rescanFromRemote: rescans },
+    });
   }
 
   if (changed.length > 0) {

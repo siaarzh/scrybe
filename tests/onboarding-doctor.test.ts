@@ -173,10 +173,10 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
     };
     writeFileSync(join(tmp, "projects.json"), JSON.stringify([fixtureProject]), "utf8");
 
-    // branch-state mock: getLastIndexedSha returns per-branch SHAs
+    // branch-state mock: getRemoteIndexedSha returns per-branch SHAs
     vi.doMock("../src/branch-state.js", () => ({
       resolveBranchForPath: vi.fn(() => "*"),
-      getLastIndexedSha: vi.fn((_projectId: string, _sourceId: string, branch: string) => {
+      getRemoteIndexedSha: vi.fn((_projectId: string, _sourceId: string, branch: string) => {
         if (branch === "main") return "abc123abc123abc123abc123abc123abc123abc1";
         if (branch === "feature/x") return "old456old456old456old456old456old456old4";
         return null;
@@ -254,7 +254,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
 
     vi.doMock("../src/branch-state.js", () => ({
       resolveBranchForPath: vi.fn(() => "*"),
-      getLastIndexedSha: vi.fn(() => "someshasomeshasomeshasomeshasomeshasomes"),
+      getRemoteIndexedSha: vi.fn(() => "someshasomeshasomeshasomeshasomeshasomes"),
       listBranches: vi.fn(() => ["origin/gone/branch"]),
     }));
     vi.doMock("../src/util/git-exec.js", () => ({
@@ -292,7 +292,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
     expect(check!.message).toContain("no longer has");
   });
 
-  it("#11c — NO_SHA: indexed in branch_tags but no branch_state row → warn (transient, backfill on next poll)", async () => {
+  it("#11c — NO_SHA: indexed in branch_tags but no remote_indexed_sha → warn (re-index from the remote on next poll)", async () => {
     const fixtureProject = {
       id: "test-fp-nosha",
       description: "no sha in branch_state",
@@ -309,7 +309,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
 
     vi.doMock("../src/branch-state.js", () => ({
       resolveBranchForPath: vi.fn(() => "*"),
-      getLastIndexedSha: vi.fn(() => null),
+      getRemoteIndexedSha: vi.fn(() => null),
       listBranches: vi.fn(() => ["origin/legacy"]), // in branch_tags
     }));
     vi.doMock("../src/util/git-exec.js", () => ({
@@ -344,7 +344,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
     const check = report.checks.find((c) => c.id === "daemon.fetch-poller.test-fp-nosha.primary.legacy");
     expect(check).toBeDefined();
     expect(check!.status).toBe("warn");
-    expect(check!.message).toContain("backfill");
+    expect(check!.message).toContain("re-index it from origin/legacy on next poll");
   });
 
   it("#11d — NEVER_INDEXED: no branch_state AND no branch_tags → warn (transient, first reindex on next poll)", async () => {
@@ -364,7 +364,7 @@ describe("runDoctor — fetch-poller pinned-branch sync (#11)", () => {
 
     vi.doMock("../src/branch-state.js", () => ({
       resolveBranchForPath: vi.fn(() => "*"),
-      getLastIndexedSha: vi.fn(() => null),
+      getRemoteIndexedSha: vi.fn(() => null),
       listBranches: vi.fn(() => []), // NOT in branch_tags
     }));
     vi.doMock("../src/util/git-exec.js", () => ({

@@ -49,7 +49,7 @@ function mockDoctorInfra() {
     readTableMeta: () => null,
   }));
   vi.doMock("../src/branch-state.js", () => ({
-    getLastIndexedSha: vi.fn(() => null),
+    getRemoteIndexedSha: vi.fn(() => null),
     listBranches: vi.fn(() => []),
   }));
   vi.doMock("../src/util/git-exec.js", () => ({

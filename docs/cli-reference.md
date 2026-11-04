@@ -860,7 +860,7 @@ Trigger an immediate incremental reindex for a project by posting to the daemon'
 | `--project-id <id>` | | Project to kick (default: all projects) |
 | `--source-id <id>` | | Limit to a specific source |
 | `--branch <name>` | | Branch to reindex (default: current HEAD) |
-| `--mode <mode>` | | `full` or `incremental` (default: `incremental`) |
+| `--mode <mode>` | | `full`, `incremental` or `rechunk` (default: `incremental`). `rechunk` needs `--project-id` and `--source-id` |
 
 ```bash
 scrybe daemon refresh --project-id myrepo

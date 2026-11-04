@@ -25,7 +25,8 @@ import { appendFileSync, existsSync, readFileSync, rmSync, statSync } from "node
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { withBranchSession, withSourceWriteLock, resolveBranchForPath, setLastIndexedSha, getLastIndexedSha, type BranchTag } from "./branch-state.js";
+import { withBranchSession, withSourceWriteLock, resolveBranchForPath, setLastIndexedSha, getRemoteIndexedSha, setRemoteIndexedSha, getLastIndexedAt, type BranchTag } from "./branch-state.js";
+import { ignoreFilesChangedSince } from "./ignore-rules.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage, walkRepoFiles } from "./chunker.js";
 import { normalizeContent } from "./normalize.js";
@@ -150,9 +151,7 @@ export async function indexSource(
       };
       emitJobIntent(phaseCtx, "started", { is_code: isCode });
 
-      // Pinned branches always index the remote copy, whoever started the job. `branch`
-      // stays the label stored in branch_tags / branch_state; `contentRef` is only where
-      // content is read from.
+      // Pinned branches index the remote copy whoever started the job; `branch` stays the stored label.
       const hasRoot = isCode && rootPath !== "";
       const isPinned = hasRoot && pinnedBranches.includes(branch);
       let contentRef = options.contentRef;
@@ -205,7 +204,8 @@ export async function indexSource(
         readsPinnedRemote &&
         mode === "incremental" &&
         indexedShaAtStart !== null &&
-        getLastIndexedSha(projectId, sourceId, branch) === indexedShaAtStart
+        getRemoteIndexedSha(projectId, sourceId, branch) === indexedShaAtStart &&
+        !ignoreFilesChangedSince(rootPath, projectId, sourceId, getLastIndexedAt(projectId, sourceId, branch) ?? 0)
       ) {
         diagEmit({
           event: "indexer.job.summary",
@@ -231,6 +231,9 @@ export async function indexSource(
           files_removed: 0,
         };
       }
+
+      // Tags are about to change: the record only returns if this job finishes from the remote.
+      if (hasRoot) setRemoteIndexedSha(projectId, sourceId, branch, null);
 
       const nonHeadContentCache = new Map<string, string>();
 
@@ -394,9 +397,7 @@ export async function indexSource(
         return { filesScanned: scanned, toRemove: removing, toReindex: reindexing };
       });
 
-      // Phase `rechunk_select` — re-cut each unchanged file and keep those whose chunk
-      // ids no longer match their tags. Tree-sitter is synchronous, so yield regularly
-      // to let the daemon answer searches. Nothing is stored: a re-run finds what is left.
+      // Phase `rechunk_select`: keep unchanged files whose re-cut chunk ids differ from their tags.
       let rechunkCounts: { files_checked: number; files_selected: number } | null = null;
       if (mode === "rechunk") {
         rechunkCounts = await withPhase(phaseCtx, "rechunk_select", async (phase) => {
@@ -405,6 +406,7 @@ export async function indexSource(
           let visited = 0;
           for (const relPath of Object.keys(currentSources)) {
             checkAbort(signal);
+            // Tree-sitter is synchronous: yield so the daemon can answer searches.
             if (++visited % 20 === 0) {
               await new Promise((r) => setImmediate(r));
               phase.sample();
@@ -698,8 +700,7 @@ export async function indexSource(
           }
           filesCheckpointed = commitFinishedFiles();
         } else {
-          // For non-code, only update the hash (no branch tags).
-          // We pass empty tags — applyFile still saves the hash.
+          // Non-code has no branch tags; empty tags still save the hash.
           for (const { key } of keyBatches) {
             session.applyFile(key, { kind: "embedded", hash: merged[key], tags: [] });
           }
@@ -804,8 +805,7 @@ export async function indexSource(
         await flushBatch();
         onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
 
-        // Sweep "attempted but produced 0 chunks" files — clear any old tags and give them
-        // a hash so the scanner stops re-marking them next cycle.
+        // Files that produced 0 chunks: clear old tags and save a hash so the scanner stops re-marking them.
         if (isCode) {
           const noChunkFiles = [...toReindex].filter((p) => !filesSeenSoFar.has(p));
           embedPhase.setWork({ zero_chunk_files: noChunkFiles.length });
@@ -941,7 +941,9 @@ export async function indexSource(
       // Non-fatal: a write failure logs a warning but does not propagate.
       if (isCode && indexedShaAtStart !== null) {
         try {
-          setLastIndexedSha(projectId, sourceId, branch, indexedShaAtStart, Date.now());
+          // Stamped with the job's start, so an ignore edit made while it ran still counts as newer.
+          setLastIndexedSha(projectId, sourceId, branch, indexedShaAtStart, jobStart);
+          if (readsPinnedRemote) setRemoteIndexedSha(projectId, sourceId, branch, indexedShaAtStart);
         } catch (shaWriteErr) {
           diagEmit({
             event: "indexer.branch_state.write_failed",

@@ -1051,7 +1051,7 @@ export async function runDoctor(): Promise<DoctorReport> {
 
   // Fetch-poller branch sync — one check per pinned branch per code source
   {
-    const { getLastIndexedSha, listBranches } = await import("../branch-state.js");
+    const { getRemoteIndexedSha, listBranches } = await import("../branch-state.js");
     const { gitExec } = await import("../util/git-exec.js");
     const { countLeftOutLocalEdits } = await import("../pinned-remote.js");
 
@@ -1072,10 +1072,8 @@ export async function runDoctor(): Promise<DoctorReport> {
 
           try {
             const currentRemoteSha = gitExec(["rev-parse", qualifiedRef], { cwd: rootPath }) ?? null;
-            // Rows are stored under the plain name; the qualified form only exists in older databases.
-            const lastIndexedSha =
-              getLastIndexedSha(project.id, source.source_id, branch) ??
-              getLastIndexedSha(project.id, source.source_id, qualifiedRef);
+            const lastIndexedSha = getRemoteIndexedSha(project.id, source.source_id, branch);
+            // The qualified label only exists in older databases.
             const inBranchTags = indexedBranches.includes(branch) || indexedBranches.includes(qualifiedRef);
 
             if (currentRemoteSha === null) {
@@ -1093,7 +1091,7 @@ export async function runDoctor(): Promise<DoctorReport> {
                 { lastIndexedSha, currentRemoteSha, branch: qualifiedRef }));
             } else if (inBranchTags) {
               checks.push(warn(checkId, SEC_DAEMON, title,
-                `Transient: indexed but no last-SHA recorded yet — daemon will silently backfill on next poll`,
+                `Has indexed chunks, but no completed index from the remote is on record — daemon will re-index it from ${qualifiedRef} on next poll`,
                 undefined,
                 { branch: qualifiedRef }));
             } else {

@@ -1,9 +1,5 @@
-/**
- * A pinned branch indexes the remote copy (origin/<branch>) no matter who starts the job;
- * local commits and uncommitted files on that branch are left out, with a warning.
- * Unpinned checkouts keep reading the working tree.
- */
-import { describe, it, expect, afterEach } from "vitest";
+/** A pinned branch indexes origin/<branch> whoever starts the job; unpinned checkouts read the working tree. */
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -172,5 +168,158 @@ describe("pinned branch indexes the remote copy", () => {
     const warns = logEvents(logPath).filter((e) => e["event"] === "indexer.pinned.local_edits_left_out");
     expect(warns).toHaveLength(1);
     expect(warns[0]).toMatchObject({ level: "warn", branch: fx.branch, dirty_files: 1, local_only_commits: 1 });
+  });
+});
+
+describe("only a completed job from the remote counts as indexed", () => {
+  beforeEach(() => {
+    process.env["SCRYBE_EMBED_BATCH_SIZE"] = "2";
+  });
+  afterEach(() => {
+    delete process.env["SCRYBE_EMBED_BATCH_SIZE"];
+  });
+
+  const scans = () => logEvents(logPath).filter((e) => e["event"] === "indexer.scan.completed").length;
+  const tip = (fx: Fixture) => git(fx.clone, "rev-parse", `origin/${fx.branch}`);
+
+  // Enough chunks that a job is still going after its first flush.
+  function pushBigFile(fx: Fixture): void {
+    let body = "";
+    for (let i = 0; i < 8; i++) body += `export function big${i}(v: number): number {\n  return v + ${i};\n}\n\n`;
+    commitFile(fx.other, "big.ts", body);
+    git(fx.other, "push", "origin", `HEAD:${fx.branch}`);
+    git(fx.clone, "fetch", "origin");
+  }
+
+  async function interrupted(p: TempProject, branch: string): Promise<void> {
+    const { indexSource } = await import("../src/indexer.js");
+    const controller = new AbortController();
+    await expect(
+      indexSource(p.projectId, p.sourceId, "incremental", {
+        branch,
+        signal: controller.signal,
+        onProgress(r) {
+          if (r.phase === "embed_batch") controller.abort();
+        },
+      })
+    ).rejects.toThrow("INDEX_CANCELLED");
+  }
+
+  async function pin(p: TempProject, branch: string): Promise<void> {
+    const { updateSource } = await import("../src/registry.js");
+    updateSource(p.projectId, p.sourceId, { pinned_branches: [branch] });
+  }
+
+  it("(i) a last_indexed_sha at the tip with no remote record scans and replaces local content", async () => {
+    const { fx, p } = await setup(false);
+    const { indexSource } = await import("../src/indexer.js");
+    const { setLastIndexedSha, getRemoteIndexedSha } = await import("../src/branch-state.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "dirty.ts", "local.ts"]);
+    await pin(p, fx.branch);
+    setLastIndexedSha(p.projectId, p.sourceId, fx.branch, tip(fx));
+    const before = scans();
+
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch, contentRef: `origin/${fx.branch}` });
+
+    expect(scans()).toBe(before + 1);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "remote.ts"]);
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBe(tip(fx));
+  });
+
+  it("(ii) an interrupted first index resumes, even with a baseline row written at the tip", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { setLastIndexedSha, getRemoteIndexedSha } = await import("../src/branch-state.js");
+    pushBigFile(fx);
+    await interrupted(p, fx.branch);
+    expect(await indexedFiles(p, fx.branch)).not.toContain("big.ts");
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBeNull();
+    setLastIndexedSha(p.projectId, p.sourceId, fx.branch, tip(fx));
+    const before = scans();
+
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+
+    expect(scans()).toBe(before + 1);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "big.ts", "remote.ts"]);
+  });
+
+  it("(iii) after a successful job the next is a no-op", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { getRemoteIndexedSha } = await import("../src/branch-state.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBe(tip(fx));
+    const before = scans();
+
+    const result = await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+
+    expect(result).toMatchObject({ files_scanned: 0, chunks_prepared: 0 });
+    expect(scans()).toBe(before);
+  });
+
+  it("(iv) an interrupted job on a moved remote withdraws the record, so returning to the old tip still scans", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { getRemoteIndexedSha } = await import("../src/branch-state.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    const oldTip = tip(fx);
+
+    pushBigFile(fx);
+    await interrupted(p, fx.branch);
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBeNull();
+
+    git(fx.clone, "update-ref", `refs/remotes/origin/${fx.branch}`, oldTip);
+    const before = scans();
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(scans()).toBe(before + 1);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "remote.ts"]);
+  });
+
+  it("(v) a working-tree job withdraws the record, so pinning again re-reads the remote", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { updateSource } = await import("../src/registry.js");
+    const { getRemoteIndexedSha } = await import("../src/branch-state.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+
+    updateSource(p.projectId, p.sourceId, { pinned_branches: [] });
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "dirty.ts", "local.ts"]);
+    expect(getRemoteIndexedSha(p.projectId, p.sourceId, fx.branch)).toBeNull();
+
+    await pin(p, fx.branch);
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "remote.ts"]);
+  });
+
+  it("a changed private ignore rescans at the same SHA and drops the file's tags, then settles", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    const { savePrivateIgnore } = await import("../src/private-ignore.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    const sha = tip(fx);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts", "remote.ts"]);
+
+    savePrivateIgnore(p.projectId, p.sourceId, "remote.ts\n");
+    const before = scans();
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+
+    expect(scans()).toBe(before + 1);
+    expect(tip(fx)).toBe(sha);
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts"]);
+
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(scans()).toBe(before + 1);
+  });
+
+  it("a changed .scrybeignore at the root also rescans", async () => {
+    const { fx, p } = await setup(true);
+    const { indexSource } = await import("../src/indexer.js");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+
+    writeFileSync(join(fx.clone, ".scrybeignore"), "remote.ts\n", "utf8");
+    await indexSource(p.projectId, p.sourceId, "incremental", { branch: fx.branch });
+    expect(await indexedFiles(p, fx.branch)).toEqual(["a.ts"]);
   });
 });

@@ -237,6 +237,18 @@ interface GapNode {
 
 const COMMENT_TYPES = new Set(["comment", "line_comment", "block_comment"]);
 
+const ATTRIBUTE_TYPES = new Set([
+  "decorator",
+  "attribute_item",
+  "inner_attribute_item",
+  "attribute_list",
+  "global_attribute",
+  "annotation",
+  "marker_annotation",
+]);
+
+const JS_FAMILY = new Set<LanguageKey>(["typescript", "tsx", "javascript"]);
+
 const IMPORT_TYPES: Record<LanguageKey, Set<string>> = {
   typescript: new Set(["import_statement"]),
   tsx: new Set(["import_statement"]),
@@ -251,18 +263,43 @@ const IMPORT_TYPES: Record<LanguageKey, Set<string>> = {
   cpp: new Set(["preproc_include"]),
 };
 
+function isRequireDeclaration(node: TsNode): boolean {
+  const declarators = node.namedChildren.filter((c) => c.type === "variable_declarator");
+  return declarators.length > 0 && declarators.every((d) => {
+    const value = d.childForFieldName("value");
+    return value?.type === "call_expression" && value.childForFieldName("function")?.text === "require";
+  });
+}
+
+function isRubyRequire(node: TsNode): boolean {
+  const method = node.childForFieldName("method")?.text;
+  return node.childForFieldName("receiver") === null && (method === "require" || method === "require_relative");
+}
+
 function isNoiseNode(node: TsNode, langKey: LanguageKey): boolean {
-  if (COMMENT_TYPES.has(node.type)) return true;
+  if (COMMENT_TYPES.has(node.type) || ATTRIBUTE_TYPES.has(node.type)) return true;
   if (IMPORT_TYPES[langKey].has(node.type)) return true;
   if (node.type === "export_statement") {
     return node.children.some((c) => c.type === "export_clause") || node.childForFieldName("source") !== null;
   }
+  if (JS_FAMILY.has(langKey)) {
+    return (node.type === "lexical_declaration" || node.type === "variable_declaration") && isRequireDeclaration(node);
+  }
+  if (langKey === "ruby") return node.type === "call" && isRubyRequire(node);
+  if (langKey === "c" || langKey === "cpp") {
+    if (node.type === "preproc_call") return true;
+    if (node.type === "preproc_def") return node.childForFieldName("value") === null;
+    if (node.type === "preproc_ifdef" || node.type === "preproc_else") {
+      return node.namedChildren.every((c) => isHeaderToken(c) || isNoiseNode(c, langKey));
+    }
+  }
   return false;
 }
 
-// Name/header tokens of a container (namespace, module) are not code of their own.
+// Name/header tokens of a container (namespace, module, template) are not code of their own.
 function isHeaderToken(node: TsNode): boolean {
-  return node.type.endsWith("identifier") || node.type === "qualified_name" || node.type === "name";
+  return node.type.endsWith("identifier") || node.type === "qualified_name" || node.type === "name"
+    || node.type === "template_parameter_list";
 }
 
 interface WalkCtx {
@@ -342,9 +379,13 @@ function astChunks(
   maxChars?: number
 ): CodeChunk[] {
   const declTypes = DECLARATION_TYPES[langKey];
-  let tree: TsTree;
+  const ctx: WalkCtx = { declTypes, langKey, source, lineOffset, decls: [], gaps: [] };
+  let regions: Array<{ start: number; end: number }>;
   try {
-    tree = parser.parse(source, undefined, { bufferSize: Math.max(MIN_PARSE_BUFFER, source.length * 2) });
+    const tree = parser.parse(source, undefined, { bufferSize: Math.max(MIN_PARSE_BUFFER, source.length * 2) });
+    // Very deep expressions overflow the stack in here; such a file goes to the sliding window.
+    walkNode(tree.rootNode, ctx, true, true);
+    regions = ctx.decls.length > 0 ? gapRegions(ctx.gaps, ctx.decls) : [];
   } catch (err) {
     diagEmit({
       event: "chunker.parse_failed",
@@ -358,8 +399,6 @@ function astChunks(
     return [];
   }
 
-  const ctx: WalkCtx = { declTypes, langKey, source, lineOffset, decls: [], gaps: [] };
-  walkNode(tree.rootNode, ctx, true, true);
   const decls = ctx.decls;
   if (decls.length === 0) return [];
 
@@ -407,7 +446,7 @@ function astChunks(
     }
   }
 
-  for (const region of gapRegions(ctx.gaps, decls)) {
+  for (const region of regions) {
     const regionLines = lines.slice(region.start - lineOffset, region.end - lineOffset + 1);
     for (const window of chunkLines(regionLines, region.start, maxChars)) {
       chunks.push(stampChunkId({
@@ -675,13 +714,12 @@ export function chunkFileContent(
   maxChars?: number
 ): CodeChunk[] {
   tryInitTreeSitter();
-  if (isGeneratedFile(relPath, source)) {
-    return slidingWindowChunks(projectId, sourceId, relPath, source, language, maxChars);
-  }
+  // Generated code this size never got symbols; smaller generated files keep theirs.
+  const skipParse = (code: string) => code.length >= MIN_PARSE_BUFFER && isGeneratedFile(relPath, source);
   // Vue: extract <script> block, parse as TypeScript
   if (language === "vue") {
     const extracted = extractVueScript(source);
-    if (extracted) {
+    if (extracted && !skipParse(extracted.code)) {
       const parser = getParser("typescript");
       if (parser) {
         const chunks = astChunks(projectId, sourceId, relPath, extracted.code, "typescript", extracted.lineOffset, parser, maxChars);
@@ -692,7 +730,7 @@ export function chunkFileContent(
   }
 
   const langKey = LANGUAGE_TO_KEY[language];
-  if (langKey) {
+  if (langKey && !skipParse(source)) {
     const parser = getParser(language);
     if (parser) {
       const chunks = astChunks(projectId, sourceId, relPath, source, langKey, 0, parser, maxChars);

@@ -28,8 +28,7 @@ vi.mock("../src/branch-state.js", () => ({
   getChunkIdsForBranch: vi.fn().mockReturnValue(new Set()),
   resolveBranch: vi.fn().mockReturnValue("main"),
   resolveBranchForPath: vi.fn().mockReturnValue("main"),
-  getLastIndexedSha: vi.fn().mockReturnValue(null),
-  setLastIndexedSha: vi.fn(),
+  getRemoteIndexedSha: vi.fn().mockReturnValue(null),
 }));
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -93,11 +92,11 @@ describe("fetch poller — backfill", () => {
 describe("fetch poller — SHA delta detection", () => {
   it("queues reindex when a pinned branch advances on the remote", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
-    const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
+    const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
     // Pretend the branch was already indexed with an old SHA — SHA delta should trigger enqueue.
     // D1: branch_tags and branch_state use logical names, not origin/-prefixed refs.
     vi.mocked(listBranches).mockReturnValue(["feat/example"]);
-    vi.mocked(getLastIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
+    vi.mocked(getRemoteIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 
     // Commit to feat/example on the remote BEFORE starting the poller
     // (so the poller's first snapshot captures the pre-commit SHA,
@@ -194,7 +193,7 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     // Arrange: commit to remote, then pre-fetch the local clone so the ref is
     // already at the new SHA before the poller runs its own git fetch.
     // This means shaBefore === shaAfter (daemon's fetch is a no-op), yet
-    // lastIndexedSha differs → out-of-band detection triggers.
+    // remote_indexed_sha differs → out-of-band detection triggers.
     const { execSync: exec } = await import("child_process");
 
     try {
@@ -209,10 +208,10 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     exec(`git -C "${local.path}" fetch origin`, { stdio: "ignore" });
 
     const { enqueue } = await import("../src/daemon/queue.js");
-    const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
-    // Branch is in branch_state with an old SHA.  D1: keyed under logical name.
+    const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
+    // Remote record holds an old SHA.  D1: keyed under logical name.
     vi.mocked(listBranches).mockReturnValue(["feat/example"]);
-    vi.mocked(getLastIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
+    vi.mocked(getRemoteIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 
     const pushedEvents: unknown[] = [];
     const pushEvent = vi.fn((ev: unknown) => { pushedEvents.push(ev); });
@@ -253,49 +252,73 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     expect(oobEvents.length).toBeGreaterThan(0);
   });
 
-  it("#2 — bootstrap on upgrade: no enqueue, setLastIndexedSha called with current SHA under logical name", async () => {
+  it("#2 — tags but no remote record: enqueues a real scan, writes no baseline, reports no out-of-band fetch", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
-    const { listBranches, getLastIndexedSha, setLastIndexedSha } = await import("../src/branch-state.js");
-    // branch_state empty (getLastIndexedSha returns null) but branch_tags has rows.
+    const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
     // D1: branch_tags uses the logical name, not origin/-prefixed.
     vi.mocked(listBranches).mockReturnValue(["feat/example"]);
-    vi.mocked(getLastIndexedSha).mockReturnValue(null);
+    vi.mocked(getRemoteIndexedSha).mockReturnValue(null);
 
     const { addProject, addSource, updateSource, listProjects } = await import("../src/registry.js");
-    addProject({ id: "fp-boot2", description: "bootstrap test" });
+    addProject({ id: "fp-boot2", description: "upgrade rescan test" });
     addSource("fp-boot2", {
       source_id: "primary",
       source_config: { type: "code", root_path: local.path, languages: ["typescript"] },
     });
     updateSource("fp-boot2", "primary", { pinned_branches: ["feat/example"] });
 
+    const details: Record<string, unknown>[] = [];
+    const { initFetchPoller, startFetchPoller } = await import("../src/daemon/fetch-poller.js");
+    initFetchPoller({ pushEvent: vi.fn((ev: { detail?: Record<string, unknown> }) => { if (ev.detail) details.push(ev.detail); }) });
+    startFetchPoller(listProjects());
+
+    await vi.waitUntil(() => details.length > 0, { timeout: 5_000, interval: 50 });
+
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "fp-boot2",
+        sourceId: "primary",
+        branch: "feat/example",
+        contentRef: "origin/feat/example",
+        mode: "incremental",
+      })
+    );
+    expect(details[0]).toMatchObject({ phase: "fetch-poller", rescanFromRemote: ["feat/example"] });
+    expect(details.some((d) => d["outOfBandFetch"] === true || d["shaChanged"] !== undefined)).toBe(false);
+  });
+
+  it("#2b — settled: remote record equals the remote tip, nothing is enqueued", async () => {
+    const { execSync: exec } = await import("child_process");
+    const { enqueue } = await import("../src/daemon/queue.js");
+    const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
+    const sha = exec(`git -C "${remote.path}" rev-parse feat/example`, { encoding: "utf8" }).trim();
+    vi.mocked(listBranches).mockReturnValue(["feat/example"]);
+    vi.mocked(getRemoteIndexedSha).mockReturnValue(sha);
+
+    const { addProject, addSource, updateSource, listProjects } = await import("../src/registry.js");
+    addProject({ id: "fp-settled", description: "settled test" });
+    addSource("fp-settled", {
+      source_id: "primary",
+      source_config: { type: "code", root_path: local.path, languages: ["typescript"] },
+    });
+    updateSource("fp-settled", "primary", { pinned_branches: ["feat/example"] });
+
     const { initFetchPoller, startFetchPoller } = await import("../src/daemon/fetch-poller.js");
     initFetchPoller({ pushEvent: vi.fn() });
     startFetchPoller(listProjects());
 
-    // Wait long enough for the first cycle to complete
     await new Promise<void>((r) => setTimeout(r, 2_000));
-
-    // No enqueue should have been called (bootstrap skips it)
     expect(enqueue).not.toHaveBeenCalled();
-
-    // setLastIndexedSha should be keyed under the logical branch name (D1)
-    expect(setLastIndexedSha).toHaveBeenCalledWith(
-      "fp-boot2",
-      "primary",
-      "feat/example",
-      expect.stringMatching(/^[0-9a-f]{40}$/)
-    );
   });
 
   it("#3 — happy-path delta: daemon's own fetch advances ref, enqueue called", async () => {
     const { execSync: exec } = await import("child_process");
     const { enqueue } = await import("../src/daemon/queue.js");
-    const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
+    const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
 
-    // branch_state has an old SHA.  D1: keyed under logical name.
+    // Remote record holds an old SHA.  D1: keyed under logical name.
     vi.mocked(listBranches).mockReturnValue(["feat/example"]);
-    vi.mocked(getLastIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
+    vi.mocked(getRemoteIndexedSha).mockReturnValue("aaaa000000000000000000000000000000000000");
 
     // Advance the remote BEFORE starting the poller, but do NOT pre-fetch locally.
     // The daemon's own git fetch will be the one that advances origin/feat/example.
@@ -338,10 +361,10 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
 
   it("#4 — truly never indexed: branch_state empty AND no branch_tags rows → enqueue", async () => {
     const { enqueue } = await import("../src/daemon/queue.js");
-    const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
+    const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
     // Both empty — completely new branch
     vi.mocked(listBranches).mockReturnValue([]);
-    vi.mocked(getLastIndexedSha).mockReturnValue(null);
+    vi.mocked(getRemoteIndexedSha).mockReturnValue(null);
 
     const { addProject, addSource, updateSource, listProjects } = await import("../src/registry.js");
     addProject({ id: "fp-new4", description: "truly never indexed test" });
@@ -387,11 +410,11 @@ describe("fetch poller — out-of-band race fix (Plan 50)", () => {
     exec(`git -C "${local.path}" fetch origin`, { stdio: "ignore" });
 
     const { enqueue } = await import("../src/daemon/queue.js");
-    const { listBranches, getLastIndexedSha } = await import("../src/branch-state.js");
+    const { listBranches, getRemoteIndexedSha } = await import("../src/branch-state.js");
     const oldSha = "bbbb000000000000000000000000000000000000";
     // D1: branch_tags stores the logical name, not origin/-prefixed
     vi.mocked(listBranches).mockReturnValue(["feat/example"]);
-    vi.mocked(getLastIndexedSha).mockReturnValue(oldSha);
+    vi.mocked(getRemoteIndexedSha).mockReturnValue(oldSha);
 
     const pushedEvents: unknown[] = [];
     const pushEvent = vi.fn((ev: unknown) => { pushedEvents.push(ev); });

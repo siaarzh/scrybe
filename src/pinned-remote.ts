@@ -7,10 +7,7 @@ export interface LeftOutLocalEdits {
   localOnlyCommits: number;
 }
 
-/**
- * Local work that a pinned branch's remote-only index leaves out. Null when the
- * branch is not the checked-out one or git cannot answer.
- */
+/** Local work a pinned branch's index leaves out; null if it is not checked out or git cannot answer. */
 export function countLeftOutLocalEdits(rootPath: string, branch: string): LeftOutLocalEdits | null {
   if (rootPath === "" || resolveBranchForPath(rootPath) !== branch) return null;
   const status = gitExec(["status", "--porcelain"], { cwd: rootPath, trim: false });
