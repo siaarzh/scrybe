@@ -173,8 +173,8 @@ export function submitJob(
   preJobId?: string,
   contentRef?: string
 ): string | { error: "already_running"; job_id: string } {
-  if (mode === "full" && !sourceIds?.length) {
-    throw new Error("full reindex requires explicit source_ids");
+  if (mode !== "incremental" && !sourceIds?.length) {
+    throw new Error(`${mode} reindex requires explicit source_ids`);
   }
 
   const existingJobId = findRunningJobForProject(projectId);

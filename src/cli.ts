@@ -409,12 +409,15 @@ export async function runCli(): Promise<void> {
     .option("-a, --all", "Incrementally reindex all registered projects", false)
     .option("-f, --full", "Full reindex (clears and rebuilds from scratch)", false)
     .option("-I, --incremental", "Incremental reindex (default)", false)
+    .option("--rechunk", "Re-cut files whose chunks would differ under the current version; only those re-embed. Requires one code source in --source-ids", false)
     .option("--branch <name>", "Branch name to index (default: current HEAD for code sources)")
     .option("--content-ref <ref>", "Git ref to read content from (e.g. 'origin/dev'). When set, content is read from this ref while --branch remains the stored label. Defaults to --branch.")
     .option("--detach", "Submit to daemon and return immediately (prints job_id, no progress stream)", false)
     .addHelpText("after", "\nExamples:\n  scrybe index -P myrepo\n  scrybe index -P myrepo -S primary,gitlab-issues\n  scrybe index --all\n  scrybe index -P myrepo -f -S primary\n  scrybe index -P myrepo --detach  # submit and exit (CI use)")
-    .action(async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean; branch?: string; contentRef?: string; detach: boolean }) => {
+    .action(async (opts: { projectId?: string; sourceIds?: string; all: boolean; full: boolean; incremental: boolean; rechunk: boolean; branch?: string; contentRef?: string; detach: boolean }) => {
       if (config.embeddingConfigError) { console.error(`[scrybe] ${config.embeddingConfigError}`); process.exit(1); }
+      if (opts.rechunk && opts.full) { console.error("Error: --rechunk and --full are mutually exclusive"); process.exit(1); }
+      if (opts.rechunk && opts.all) { console.error("Error: --rechunk cannot be combined with --all"); process.exit(1); }
       if (opts.all) {
         if (opts.projectId) console.warn("Warning: --project-id is ignored when --all is specified");
         if (opts.sourceIds) console.warn("Warning: --source-ids is ignored when --all is specified");
@@ -438,9 +441,10 @@ export async function runCli(): Promise<void> {
         return;
       }
       if (!opts.projectId) { console.error("--project-id is required (or use --all to reindex everything)"); process.exit(1); }
-      const mode = opts.full ? "full" : "incremental";
+      const mode: IndexMode = opts.full ? "full" : opts.rechunk ? "rechunk" : "incremental";
       const sourceIds = opts.sourceIds?.split(",").map((s: string) => s.trim()).filter(Boolean);
       if (opts.full && !sourceIds?.length) { console.error("Error: --full requires --source-ids (e.g. --source-ids primary,gitlab-issues)"); process.exit(1); }
+      if (opts.rechunk && sourceIds?.length !== 1) { console.error("Error: --rechunk requires exactly one source in --source-ids (e.g. --source-ids primary)"); process.exit(1); }
 
       // Route through daemon when available — prevents cross-process write races.
       const daemon = await ensureRunning();
@@ -1018,7 +1022,7 @@ export async function runCli(): Promise<void> {
     .option("-P, --project-id <id>", "Project to reindex (omit for all projects)")
     .option("-S, --source-id <id>", "Source to reindex (default: all sources)")
     .option("--branch <branch>", "Branch to index (default: HEAD)")
-    .option("--mode <mode>", "Index mode: incremental | full", "incremental")
+    .option("--mode <mode>", "Index mode: incremental | full | rechunk", "incremental")
     .addHelpText("after", "\nExamples:\n  scrybe daemon refresh\n  scrybe daemon refresh -P myrepo")
     .action(async (opts: { projectId?: string; sourceId?: string; branch?: string; mode?: string }) => {
       const { readPidfile } = await import("./daemon/pidfile.js");

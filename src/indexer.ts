@@ -25,7 +25,7 @@ import { appendFileSync, existsSync, readFileSync, rmSync, statSync } from "node
 import { basename, join } from "node:path";
 import { config } from "./config.js";
 import type { IndexMode, IndexResult, CodeChunk, KnowledgeChunk } from "./types.js";
-import { withBranchSession, resolveBranchForPath, setLastIndexedSha, getLastIndexedSha, type BranchTag } from "./branch-state.js";
+import { withBranchSession, withSourceWriteLock, resolveBranchForPath, setLastIndexedSha, getLastIndexedSha, type BranchTag } from "./branch-state.js";
 import { scanRef, chunkFileContent } from "./plugins/code.js";
 import { getLanguage, walkRepoFiles } from "./chunker.js";
 import { normalizeContent } from "./normalize.js";
@@ -118,6 +118,12 @@ export async function indexSource(
 
   const plugin = getPlugin(source.source_config.type);
   const isCode = plugin.embeddingProfile === "code";
+  if (mode === "rechunk" && !isCode) {
+    throw new Error(
+      `rechunk only applies to code sources; '${projectId}/${sourceId}' is a ${source.source_config.type} source`
+    );
+  }
+  const baseMode: "full" | "incremental" = mode === "rechunk" ? "incremental" : mode;
   const embConfig = resolveEmbeddingConfig(source);
 
   const rootPath = isCode
@@ -129,8 +135,8 @@ export async function indexSource(
 
   const pinnedBranches = source.pinned_branches ?? [];
 
-  return withBranchSession(
-    { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode },
+  return withSourceWriteLock(projectId, sourceId, () => withBranchSession(
+    { projectId, sourceId, branch: effectiveBranchInput, rootPath: rootPath || undefined, mode: baseMode },
     async (session, branch) => {
       const jobStart = Date.now();
 
@@ -194,12 +200,10 @@ export async function indexSource(
         }
       }
 
-      // A later slice can set this to force a re-read of an unchanged pinned ref.
-      const bypassShaShortCircuit = false;
+      // Not for rechunk: its whole point is to re-read an unchanged ref.
       if (
         readsPinnedRemote &&
         mode === "incremental" &&
-        !bypassShaShortCircuit &&
         indexedShaAtStart !== null &&
         getLastIndexedSha(projectId, sourceId, branch) === indexedShaAtStart
       ) {
@@ -231,7 +235,7 @@ export async function indexSource(
       const nonHeadContentCache = new Map<string, string>();
 
       // --- Pre-flight corruption check (full mode only) ---
-      if (mode === "full") {
+      if (baseMode === "full") {
         checkAbort(signal);
         // Phase `preflight_health`. NOTE: every expensive step in here
         // (getTableHealth, restoreToVersion, dropTable, rmSync) is a single
@@ -312,9 +316,9 @@ export async function indexSource(
       // --- Phase 1: Scan and diff ---
       checkAbort(signal);
 
-      const oldHashes = mode === "full" ? {} : { ...session.priorHashes };
-      if (mode === "full") deleteCursor(projectId, sourceId);
-      const cursor = mode === "full" ? null : loadCursor(projectId, sourceId);
+      const oldHashes = baseMode === "full" ? {} : { ...session.priorHashes };
+      if (baseMode === "full") deleteCursor(projectId, sourceId);
+      const cursor = baseMode === "full" ? null : loadCursor(projectId, sourceId);
 
       // Phase `scan` — enumerate the source's current state. Two shapes:
       //   - non-HEAD branch: streams every blob out of the git ref and keeps
@@ -390,6 +394,43 @@ export async function indexSource(
         return { filesScanned: scanned, toRemove: removing, toReindex: reindexing };
       });
 
+      // Phase `rechunk_select` — re-cut each unchanged file and keep those whose chunk
+      // ids no longer match their tags. Tree-sitter is synchronous, so yield regularly
+      // to let the daemon answer searches. Nothing is stored: a re-run finds what is left.
+      let rechunkCounts: { files_checked: number; files_selected: number } | null = null;
+      if (mode === "rechunk") {
+        rechunkCounts = await withPhase(phaseCtx, "rechunk_select", async (phase) => {
+          const maxChars = getCharCap(embConfig);
+          const counts = { files_checked: 0, files_selected: 0 };
+          let visited = 0;
+          for (const relPath of Object.keys(currentSources)) {
+            checkAbort(signal);
+            if (++visited % 20 === 0) {
+              await new Promise((r) => setImmediate(r));
+              phase.sample();
+            }
+            if (toReindex.has(relPath)) continue;
+            const content = readsFromRef
+              ? nonHeadContentCache.get(relPath)
+              : readWorkingTreeContent(join(rootPath, relPath));
+            if (content == null) continue;
+            const lang = getLanguage(basename(relPath)) ?? "";
+            const wanted = new Set(
+              chunkFileContent(projectId, sourceId, relPath, content, lang, maxChars).map((c) => c.chunk_id)
+            );
+            const tagged = session.snapshotChunkIdsForFile(relPath);
+            counts.files_checked++;
+            if (tagged.length !== wanted.size || tagged.some((id) => !wanted.has(id))) {
+              toReindex.add(relPath);
+              counts.files_selected++;
+            }
+          }
+          phase.setWork(counts);
+          return counts;
+        });
+        diagEmit({ event: "indexer.rechunk.selected", projectId, sourceId, branch, ...rechunkCounts });
+      }
+
       debugEmit({
         event: "indexer.phase1",
         projectId,
@@ -419,10 +460,11 @@ export async function indexSource(
       // could write anything".
       emitJobIntent(phaseCtx, "planned", {
         files_total: Object.keys(merged).length,
-        files_to_reindex: mode === "full" ? Object.keys(currentSources).length : toReindex.size,
+        files_to_reindex: baseMode === "full" ? Object.keys(currentSources).length : toReindex.size,
         files_to_remove: toRemove.size,
         is_non_head_branch: readsFromRef,
         provider: embConfig.provider_type ?? "unknown",
+        ...rechunkCounts,
       });
 
       // Phase `stale_apply` — wipe (full) or un-tag (incremental) whatever the
@@ -431,7 +473,7 @@ export async function indexSource(
       // branch is a SQLite write loop. Neither yields to the event loop, so the
       // samples below are placed in the loops themselves.
       const bytesTotal: number | undefined = await withPhase(phaseCtx, "stale_apply", async (phase) => {
-      if (mode === "full") {
+      if (baseMode === "full") {
         if (isCode) {
           await deleteProject(projectId, tableName);
         } else {
@@ -448,12 +490,13 @@ export async function indexSource(
           phase.sample();
           debugEmit({ event: "indexer.applyFile", projectId, sourceId, branch, path: p, kind: "removed" });
         }
-        // Remove only tags (not hashes) for files that will be re-embedded.
-        // Hash will be updated by the "embedded" outcome in flushBatch.
-        for (const p of toReindex) {
-          checkAbort(signal);
-          session.applyFile(p, { kind: "stale-tags-only" });
-          phase.sample();
+        // A code file keeps its old tags, and stays searchable, until its replacement commits.
+        if (!isCode) {
+          for (const p of toReindex) {
+            checkAbort(signal);
+            session.applyFile(p, { kind: "stale-tags-only" });
+            phase.sample();
+          }
         }
       }
 
@@ -492,7 +535,7 @@ export async function indexSource(
       onProgress?.({ phase: "embed_start", projectId, sourceId, bytesTotal, filesTotal: toReindex.size });
 
       let chunksIndexed = 0;
-      let filesReindexed = 0;
+      const filesWritten = new Set<string>();
       let bytesEmbedded = 0;
       const filesSeenSoFar = new Set<string>();
       let chunksPersisted = 0;
@@ -526,8 +569,26 @@ export async function indexSource(
       const embedPhase = startSegmentedPhase(phaseCtx, "chunk_embed");
       embedPhase.setWork({ batch_size: batchSize, provider: embConfig.provider_type ?? "unknown" });
 
+      // Code files span flushes: tags wait here until every chunk of the file is written.
+      const heldTags = new Map<string, BranchTag[]>();
+      const lastChunkSeen = new Set<string>();
+
+      function commitFinishedFiles(): number {
+        let committed = 0;
+        for (const key of lastChunkSeen) {
+          session.applyFile(key, { kind: "replace-all", hash: merged[key], tags: heldTags.get(key) ?? [] });
+          heldTags.delete(key);
+          lastChunkSeen.delete(key);
+          committed++;
+        }
+        return committed;
+      }
+
       async function flushBatch(): Promise<void> {
-        if (keyBatches.length === 0) return;
+        if (keyBatches.length === 0) {
+          commitFinishedFiles();
+          return;
+        }
 
         const batchStart = Date.now();
         const persistedAtBatchStart = chunksPersisted;
@@ -607,7 +668,10 @@ export async function indexSource(
             chunks_actually_added: actuallyAdded,
             cumulative_chunks_persisted: chunksPersisted,
           });
-          filesReindexed += keyBatches.filter((kb) => kb.chunks.some((c) => vectorMap.has(c.chunk_id))).length;
+          for (const kb of keyBatches) {
+            if (kb.chunks.some((c) => vectorMap.has(c.chunk_id))) filesWritten.add(kb.key);
+          }
+          if (isCode) session.markChunksWritten(allChunksToWrite.map((c) => c.chunk_id));
           // Bracket the upsert. countTableRows + mergeInsert are blocking
           // native LanceDB calls; nothing in JS can see inside them.
           embedPhase.sample();
@@ -617,22 +681,26 @@ export async function indexSource(
         const writeDelayMs = parseInt(process.env["SCRYBE_TEST_WRITE_DELAY_MS"] ?? "0", 10);
         if (writeDelayMs > 0) await new Promise((r) => setTimeout(r, writeDelayMs));
 
-        // Per-file checkpoint: save hash + add branch tags atomically.
-        // Runs after the single batched upsert — LanceDB write before SQLite checkpoint.
-        for (const { key, chunks } of keyBatches) {
-          // Checkpoint: save hash + add branch tags atomically.
-          // For non-code sources, no tags are recorded (they're branch-agnostic).
-          if (isCode) {
-            const tags: BranchTag[] = chunks.map((c) => ({
-              chunkId: c.chunk_id,
-              filePath: (c as CodeChunk).item_path,
-              startLine: (c as CodeChunk).start_line,
-              endLine: (c as CodeChunk).end_line,
-            }));
-            session.applyFile(key, { kind: "embedded", hash: merged[key], tags });
-          } else {
-            // For non-code, only update the hash (no branch tags).
-            // We pass empty tags — applyFile still saves the hash.
+        // Per-file checkpoint, after the single batched upsert — LanceDB write before SQLite.
+        let filesCheckpointed = keyBatches.length;
+        if (isCode) {
+          for (const { key, chunks } of keyBatches) {
+            const held = heldTags.get(key) ?? [];
+            for (const c of chunks) {
+              held.push({
+                chunkId: c.chunk_id,
+                filePath: (c as CodeChunk).item_path,
+                startLine: (c as CodeChunk).start_line,
+                endLine: (c as CodeChunk).end_line,
+              });
+            }
+            heldTags.set(key, held);
+          }
+          filesCheckpointed = commitFinishedFiles();
+        } else {
+          // For non-code, only update the hash (no branch tags).
+          // We pass empty tags — applyFile still saves the hash.
+          for (const { key } of keyBatches) {
             session.applyFile(key, { kind: "embedded", hash: merged[key], tags: [] });
           }
         }
@@ -672,7 +740,7 @@ export async function indexSource(
           chunks_embedded: toEmbed.length,
           chunks_persisted: chunksPersisted - persistedAtBatchStart,
           bytes_embedded: batchBytes,
-          files_checkpointed: keyBatches.length,
+          files_checkpointed: filesCheckpointed,
         });
         embedPhase.setWork({
           cumulative_chunks_prepared: chunksIndexed,
@@ -708,8 +776,15 @@ export async function indexSource(
             : (chunk as KnowledgeChunk).item_path;
 
           if (key !== currentKey) {
-            keyBatches.push({ key, chunks: [] });
+            if (isCode && currentKey !== null) {
+              lastChunkSeen.add(currentKey);
+              // Its final chunk may have gone out in the flush just before this one.
+              if (totalPending === 0) commitFinishedFiles();
+            }
             currentKey = key;
+            keyBatches.push({ key, chunks: [] });
+          } else if (keyBatches.length === 0) {
+            keyBatches.push({ key, chunks: [] });
           }
           keyBatches[keyBatches.length - 1].chunks.push(chunk);
           totalPending++;
@@ -723,22 +798,21 @@ export async function indexSource(
 
           if (totalPending >= batchSize) {
             await flushBatch();
-            currentKey = null;
           }
         }
+        if (isCode && currentKey !== null) lastChunkSeen.add(currentKey);
         await flushBatch();
         onProgress?.({ phase: "embed_done", projectId, sourceId, chunksIndexed, bytesEmbedded });
 
-        // Sweep "attempted but produced 0 chunks" files — give them a hash so the scanner
-        // stops re-marking them next cycle. Uses the existing "embedded" outcome with empty
-        // tags (knowledge sources already use this path at line 423 / similar).
+        // Sweep "attempted but produced 0 chunks" files — clear any old tags and give them
+        // a hash so the scanner stops re-marking them next cycle.
         if (isCode) {
           const noChunkFiles = [...toReindex].filter((p) => !filesSeenSoFar.has(p));
           embedPhase.setWork({ zero_chunk_files: noChunkFiles.length });
           for (const p of noChunkFiles) {
             if (merged[p] === undefined) continue; // defensive
             try {
-              session.applyFile(p, { kind: "embedded", hash: merged[p], tags: [] });
+              session.applyFile(p, { kind: "replace-all", hash: merged[p], tags: [] });
             } catch (err) {
               // non-fatal — log warn, continue
               debugEmit({
@@ -820,7 +894,7 @@ export async function indexSource(
       // table's rows in one go, so always request an idle-gated rebuild after
       // one completes rather than waiting for the incremental accumulator
       // (recordUpsertForRebuildCadence) to cross its threshold.
-      if (didWork && mode === "full") {
+      if (didWork && baseMode === "full") {
         markFullReindexForRebuild(tableName);
       }
 
@@ -834,7 +908,7 @@ export async function indexSource(
         chunks_prepared: chunksIndexed,
         chunks_persisted: chunksPersisted,
         files_scanned: filesScanned,
-        files_reindexed: filesReindexed,
+        files_reindexed: filesWritten.size,
         files_removed: toRemove.size,
       };
 
@@ -846,7 +920,7 @@ export async function indexSource(
         mode,
         chunksIndexed,
         filesScanned,
-        filesReindexed,
+        filesReindexed: filesWritten.size,
         filesRemoved: toRemove.size,
       });
 
@@ -857,7 +931,7 @@ export async function indexSource(
         branch,
         mode,
         files_scanned: filesScanned,
-        files_reindexed: filesReindexed,
+        files_reindexed: filesWritten.size,
         chunks_prepared: chunksIndexed,
         chunks_persisted: chunksPersisted,
         total_ms: Date.now() - jobStart,
@@ -881,7 +955,7 @@ export async function indexSource(
 
       return result;
     }
-  );
+  ));
 }
 
 // ─── Exported dedup helper (also used in flushBatch above) ───────────────────
@@ -916,6 +990,14 @@ export function dedupeChunkBatch<C extends { chunk_id: string }>(
   return { chunks: dedupedChunks, vectors: dedupedVectors, dupesRemoved };
 }
 
+function readWorkingTreeContent(absPath: string): string | null {
+  try {
+    return normalizeContent(readFileSync(absPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 async function* fetchChunksFromRef(
   projectId: string,
   sourceId: string,
@@ -940,12 +1022,8 @@ async function* fetchChunksFromWorkingTree(
 ): AsyncGenerator<AnyChunk> {
   for (const { relPath, absPath } of walkRepoFiles(rootPath, projectId, sourceId)) {
     if (!toReindex.has(relPath)) continue;
-    let content: string;
-    try {
-      content = normalizeContent(readFileSync(absPath, "utf8"));
-    } catch {
-      continue;
-    }
+    const content = readWorkingTreeContent(absPath);
+    if (content === null) continue;
     const lang = getLanguage(basename(relPath)) ?? "";
     yield* chunkFileContent(projectId, sourceId, relPath, content, lang, maxChars) as AnyChunk[];
   }

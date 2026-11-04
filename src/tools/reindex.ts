@@ -105,13 +105,13 @@ export const reindexSourceTool: Tool<
 > = {
   spec: {
     name: "reindex_source",
-    description: "Trigger background reindexing of a single source. Returns a job_id to poll with reindex_status.",
+    description: "Trigger background reindexing of a single source. Returns a job_id to poll with reindex_status. Mode 'rechunk' (code sources only) re-cuts files whose chunks would differ under the current version and re-embeds only those; files stay searchable meanwhile, and it is safe to cancel and re-run.",
     inputSchema: {
       type: "object",
       properties: {
         project_id: { type: "string" },
         source_id: { type: "string" },
-        mode: { type: "string", enum: ["full", "incremental"], default: "incremental" },
+        mode: { type: "string", enum: ["full", "incremental", "rechunk"], default: "incremental" },
         branch: { type: "string", description: "Branch to index for code sources (default: current HEAD)" },
         content_ref: { type: "string", description: "Git ref to read content from (e.g. 'origin/dev'). When set, content is read from this ref while 'branch' remains the stored label. Defaults to 'branch'." },
       },
@@ -122,7 +122,7 @@ export const reindexSourceTool: Tool<
   handler: async ({ project_id, source_id, mode, branch, content_ref }) => {
     const embErr = requireEmbedding();
     if (embErr) throw new Error(embErr);
-    const m: IndexMode = mode === "full" ? "full" : "incremental";
+    const m: IndexMode = mode === "full" || mode === "rechunk" ? mode : "incremental";
     if (!getProject(project_id)) throw new Error(`Project '${project_id}' not found`);
 
     // Route through daemon when available

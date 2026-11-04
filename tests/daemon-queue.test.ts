@@ -254,3 +254,33 @@ describe("stopQueue", () => {
     await expect(pending).rejects.toThrow("Queue stopped");
   });
 });
+
+describe("rechunk in the pending queue", () => {
+  it("survives a later incremental for the same source and runs with its own mode", async () => {
+    const { submitSourceJob, getJobStatus } = await import("../src/jobs.js");
+    const running = new Set<string>(["job-first"]);
+    vi.mocked(submitSourceJob).mockReturnValueOnce("job-first").mockReturnValue("job-next");
+    vi.mocked(getJobStatus).mockImplementation((id: string) => ({
+      job_id: id, project_id: "proj", mode: "incremental" as const,
+      status: running.has(id) ? "running" as const : "done" as const,
+      tasks: [], started_at: Date.now(), finished_at: Date.now(), error: null,
+    }));
+
+    const { initQueue, submitToQueue, getPending } = await import("../src/daemon/queue.js");
+    initQueue({ pushEvent: vi.fn() });
+
+    submitToQueue({ projectId: "proj", sourceId: "primary", mode: "incremental" }); // active
+    const rechunk = submitToQueue({ projectId: "proj", sourceId: "primary", mode: "rechunk" });
+    const incremental = submitToQueue({ projectId: "proj", sourceId: "primary", mode: "incremental" });
+
+    expect(rechunk.status).toBe("queued");
+    expect(incremental.duplicateOfPending).toBe(false);
+    expect(getPending().map((p) => p.mode)).toEqual(["rechunk", "incremental"]);
+
+    running.clear();
+    running.add("job-next");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(vi.mocked(submitSourceJob).mock.calls.at(-1)?.[2]).toBe("rechunk");
+    expect(getPending().map((p) => p.mode)).toEqual(["incremental"]);
+  });
+});

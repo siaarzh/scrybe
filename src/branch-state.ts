@@ -18,6 +18,8 @@ export interface BranchTag {
 
 export type FileOutcome =
   | { kind: "embedded"; hash: string; tags: BranchTag[] }
+  /** Swap the file's whole tag set in one transaction, then save its hash. */
+  | { kind: "replace-all"; hash: string; tags: BranchTag[] }
   | { kind: "removed" }
   | { kind: "stale-tags-only" };
 
@@ -28,9 +30,11 @@ export interface BranchSession {
   readonly knownChunkIds: ReadonlySet<string>;
   /** Apply a per-file outcome: update hashes + branch tags atomically. */
   applyFile(path: string, outcome: FileOutcome): void;
+  /** Record chunks written to LanceDB whose tags are still held, so a later flush does not embed them again. */
+  markChunksWritten(chunkIds: Iterable<string>): void;
   /** Delete all tags + hashes for the branch (full-reindex reset). */
   wipeBranch(): void;
-  /** Return chunk IDs currently tagged for a file on this branch (for diagnostics). */
+  /** Return chunk IDs currently tagged for a file on this branch. */
   snapshotChunkIdsForFile(path: string): string[];
 }
 
@@ -474,6 +478,36 @@ class BranchSessionImpl implements BranchSession {
       ).run(this._projectId, this._sourceId, this._branch, normPath);
       // Hash is not updated here — it will be overwritten by a subsequent "embedded" outcome.
 
+    } else if (outcome.kind === "replace-all") {
+      const { hash, tags } = outcome;
+      const del = db.prepare(
+        "DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=? AND file_path=?"
+      );
+      const ins = db.prepare(
+        `INSERT OR IGNORE INTO branch_tags
+           (project_id, source_id, branch, file_path, chunk_id, start_line, end_line)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      );
+      db.exec("BEGIN");
+      try {
+        del.run(this._projectId, this._sourceId, this._branch, normPath);
+        for (const t of tags) {
+          ins.run(
+            this._projectId, this._sourceId, this._branch,
+            normPath, t.chunkId, t.startLine, t.endLine
+          );
+        }
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      for (const t of tags) this.knownChunkIds.add(t.chunkId);
+
+      // Hashes live in a JSON file: saved after the commit, so a crash between the two only re-runs the file.
+      this._hashes[path] = hash;
+      saveBranchHashesAtomic(this._projectId, this._sourceId, this._branch, this._hashes);
+
     } else { // "embedded"
       const { hash, tags } = outcome;
 
@@ -504,6 +538,10 @@ class BranchSessionImpl implements BranchSession {
     }
   }
 
+  markChunksWritten(chunkIds: Iterable<string>): void {
+    for (const id of chunkIds) this.knownChunkIds.add(id);
+  }
+
   wipeBranch(): void {
     getDB().prepare(
       "DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=?"
@@ -523,6 +561,27 @@ class BranchSessionImpl implements BranchSession {
     ) as { chunk_id: string }[];
     return rows.map((r) => r.chunk_id);
   }
+}
+
+const _sourceWriteTails = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `fn` with sole write access to a source within this process. The queue already
+ * serialises its own jobs per project; this covers gc that runs outside it (the startup
+ * ephemeral sweep, in-process fallbacks), which could delete chunks whose tags a job still holds.
+ */
+export function withSourceWriteLock<T>(
+  projectId: string,
+  sourceId: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const key = `${projectId}\0${sourceId}`;
+  const run = (_sourceWriteTails.get(key) ?? Promise.resolve()).then(fn);
+  const tail = run.catch(() => {}).finally(() => {
+    if (_sourceWriteTails.get(key) === tail) _sourceWriteTails.delete(key);
+  });
+  _sourceWriteTails.set(key, tail);
+  return run;
 }
 
 export async function withBranchSession<T>(

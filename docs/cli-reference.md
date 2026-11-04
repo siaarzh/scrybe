@@ -545,6 +545,7 @@ Index or reindex a project (all sources), specific sources, or all registered pr
 | `--all` | | Incrementally reindex all registered projects |
 | `--full` | | Full reindex — clears and rebuilds from scratch. Requires `--source-ids` |
 | `--incremental` | | Only process changed files / updated issues since last run (default) |
+| `--rechunk` | | Re-cuts files whose chunks would differ under the current version; only those re-embed. Safe to cancel and re-run, and files stay searchable meanwhile. Requires exactly one code source in `--source-ids`. Cannot be combined with `--full` or `--all` |
 | `--branch <name>` | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources. Errors if `<name>` is not a resolvable git ref (use `origin/<name>` for remote-only branches) |
 | `--detach` | | Submit the job to the daemon and return immediately with the job_id (no progress stream). For CI/scripted use. |
 
@@ -562,6 +563,9 @@ scrybe index --project-id myrepo
 # Full reindex of specific sources
 scrybe index --project-id myrepo --source-ids primary --full
 scrybe index --project-id myrepo --source-ids primary,gitlab-issues --full
+
+# Apply a chunker change from a new version without a full reindex
+scrybe index --project-id myrepo --source-ids primary --rechunk
 
 # Incremental reindex of one source
 scrybe index --project-id myrepo --source-ids gitlab-issues

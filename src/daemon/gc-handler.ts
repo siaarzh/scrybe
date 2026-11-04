@@ -6,7 +6,7 @@
  */
 import { getProject } from "../registry.js";
 import { listChunkIds, deleteChunks, compactTable, compactTableWithGrace } from "../vector-store.js";
-import { getAllChunkIdsForSource } from "../branch-state.js";
+import { getAllChunkIdsForSource, withSourceWriteLock } from "../branch-state.js";
 
 export interface GcJobInput {
   projectId: string;
@@ -36,23 +36,26 @@ export async function runGcJobHandler(req: GcJobInput): Promise<GcJobOutput> {
 
   for (const source of sources) {
     if (!source.table_name || source.source_config.type !== "code") continue;
+    const tableName = source.table_name;
 
-    // 1. Compute orphans
-    const lanceIds = await listChunkIds(req.projectId, source.table_name);
-    const taggedIds = getAllChunkIdsForSource(req.projectId, source.source_id);
-    const orphans = lanceIds.filter((id) => !taggedIds.has(id));
+    await withSourceWriteLock(req.projectId, source.source_id, async () => {
+      // 1. Compute orphans
+      const lanceIds = await listChunkIds(req.projectId, tableName);
+      const taggedIds = getAllChunkIdsForSource(req.projectId, source.source_id);
+      const orphans = lanceIds.filter((id) => !taggedIds.has(id));
 
-    // 2. Delete orphan chunks
-    if (orphans.length > 0) {
-      await deleteChunks(orphans, source.table_name);
-      orphansDeleted += orphans.length;
-    }
+      // 2. Delete orphan chunks
+      if (orphans.length > 0) {
+        await deleteChunks(orphans, tableName);
+        orphansDeleted += orphans.length;
+      }
 
-    // 3. Compact
-    const result = req.mode === "purge"
-      ? await compactTable(source.table_name)
-      : await compactTableWithGrace(source.table_name);
-    bytesFreed += result.bytesFreed;
+      // 3. Compact
+      const result = req.mode === "purge"
+        ? await compactTable(tableName)
+        : await compactTableWithGrace(tableName);
+      bytesFreed += result.bytesFreed;
+    });
   }
 
   return {

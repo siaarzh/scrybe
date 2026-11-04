@@ -7,14 +7,20 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Added
+
+- `scrybe index --rechunk` (and `mode: "rechunk"` on `reindex_source`) applies a chunker change to an existing index without a full reindex. It re-cuts only the files whose chunks would differ under the current version and re-embeds only those. It is safe to cancel and re-run, and files stay searchable meanwhile.
+
 ### Changed
 
-- Code outside functions and classes (test bodies, top-level calls, config objects) is now searchable as its own chunks; imports and comments on their own are skipped. Generated files (marked `auto-generated`, `@generated`, `DO NOT EDIT`, or named `.Designer.cs`, `.g.cs`, `.min.js`, `.generated.*`) stay as plain text windows. An existing index picks this up for a file only when that file changes.
+- Code outside functions and classes (test bodies, top-level calls, config objects) is now searchable as its own chunks; imports and comments on their own are skipped. Generated files (marked `auto-generated`, `@generated`, `DO NOT EDIT`, or named `.Designer.cs`, `.g.cs`, `.min.js`, `.generated.*`) stay as plain text windows. An existing index picks this up when a file changes, or at once with `scrybe index --rechunk`.
 - A pinned branch is now always indexed from its remote copy (`origin/<branch>`), including when it is also the branch you have checked out. Unpushed commits and uncommitted files on it are no longer searchable until pushed; the daemon logs a warning and `scrybe doctor` reports how many are left out. `search_code` notes this in its description. Unpinned checkouts still read your working tree.
 
 ### Fixed
 
-- Files of 32 KB and more now get symbols and function-level results instead of plain text windows. An existing index picks this up for a file only when that file changes.
+- Files of 32 KB and more now get symbols and function-level results instead of plain text windows. An existing index picks this up when a file changes, or at once with `scrybe index --rechunk`.
+- A file interrupted mid-reindex could stay truncated in search for good, because it was marked finished before all its chunks were in. It now keeps its old search results until the whole file is done, and the next run picks it up.
+- Files no longer disappear from search while they are being reindexed.
 - A pinned branch that was also checked out could stay stale for weeks while reporting a fresh index time, because it was read from the local checkout instead of the remote. Background jobs now agree on the remote copy, and an unchanged remote is skipped without re-reading files.
 - `scrybe doctor` could never report the fetch-poller check as "in sync" for a pinned branch; it now looks the branch up under the name it is actually stored under.
 

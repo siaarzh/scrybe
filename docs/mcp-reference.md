@@ -541,7 +541,7 @@ Trigger background reindexing of a single source. Routes through the daemon queu
 |-----------|------|----------|-------------|
 | `project_id` | string | ✓ | Project identifier |
 | `source_id` | string | ✓ | Source to reindex |
-| `mode` | string | | `"full"` or `"incremental"` (default: `"incremental"`) |
+| `mode` | string | | `"full"`, `"incremental"` (default) or `"rechunk"`. `"rechunk"` applies to code sources only: it re-cuts files whose chunks would differ under the current version and re-embeds only those. Files stay searchable meanwhile, and it is safe to cancel and re-run. |
 | `branch` | string | | Branch to index for code sources (default: current HEAD). Ignored for ticket sources. |
 
 ---

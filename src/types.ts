@@ -141,7 +141,7 @@ export interface KnowledgeSearchResult {
   confidential: string; // "true" | "false" | ""
 }
 
-export type IndexMode = "full" | "incremental";
+export type IndexMode = "full" | "incremental" | "rechunk";
 
 /**
  * Health flags that can appear in the `flags` array on a `ps --json` source row.

@@ -6,6 +6,7 @@
 import http from "node:http";
 import { VERSION, config } from "../config.js";
 import { listProjects } from "../registry.js";
+import type { IndexMode } from "../types.js";
 import {
   addPinned, removePinned, clearPinned, listPinned,
   InvalidSourceTypeError, ProjectNotFoundError, SourceNotFoundError,
@@ -94,7 +95,7 @@ export interface KickRequest {
    * reads from this ref while `branch` is the stored label in branch_tags/branch_state.
    */
   contentRef?: string;
-  mode?: "full" | "incremental";
+  mode?: IndexMode;
 }
 
 export interface KickResponse {
@@ -616,6 +617,10 @@ async function handle(
   // ── POST /kick ─────────────────────────────────────────────────────────
   if (method === "POST" && path === "/kick") {
     const body = (await readBody(req)) as KickRequest;
+    if (body.mode === "rechunk" && (!body.projectId || !body.sourceId)) {
+      jsonRes(res, 400, { error: "rechunk requires projectId and sourceId" });
+      return;
+    }
     const result = _onKick ? await _onKick(body) : { jobs: [] };
     jsonRes(res, 200, result);
     return;
