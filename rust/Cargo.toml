@@ -1,0 +1,74 @@
+[package]
+name = "scrybe-rs"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.92"
+description = "Unfinished Rust port of scrybe."
+publish = false
+
+[[bin]]
+name = "scrybe-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "scrybe-relay"
+path = "src/relay.rs"
+
+[features]
+default = []
+mimalloc = ["dep:mimalloc"]
+# Parity experiment: load an onnxruntime shared library from ORT_DYLIB_PATH.
+ort-dynamic = ["ort/load-dynamic"]
+
+[dependencies]
+# Pinned to the version the TypeScript code uses, so on-disk format and ranking stay comparable.
+lancedb = { version = "=0.37.1", default-features = false }
+arrow-array = "58"
+arrow-schema = "58"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+libc = "0.2"
+chrono = "0.4"
+rusqlite = { version = "0.41", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-native"] }
+ndarray = "0.17"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+mimalloc = { version = "0.1", default-features = false, optional = true }
+regex = "1"
+sha2 = "0.11"
+ignore = "0.4"
+tree-sitter = "0.27"
+# Same grammar versions as package.json, so parse trees match.
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-javascript = "=0.23.1"
+tree-sitter-c-sharp = "=0.23.1"
+tree-sitter-python = "=0.23.4"
+tree-sitter-go = "=0.23.4"
+tree-sitter-rust = "=0.23.1"
+tree-sitter-java = "=0.23.5"
+tree-sitter-ruby = "=0.23.1"
+tree-sitter-c = "=0.23.2"
+tree-sitter-cpp = "=0.23.4"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+opt-level = 3
+debug = 0
+lto = false
+codegen-units = 16
+incremental = false
+strip = true
+
+# Generated parsers are huge C files. Lower optimisation keeps the compile cool on small machines.
+[profile.release.package.tree-sitter-c-sharp]
+opt-level = 1
+[profile.release.package.tree-sitter-cpp]
+opt-level = 1
+[profile.release.package.tree-sitter-typescript]
+opt-level = 1

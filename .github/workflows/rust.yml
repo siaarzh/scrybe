@@ -1,0 +1,69 @@
+name: Rust
+
+on:
+  push:
+    branches: ["rust/rewrite"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc --no-progress -y
+
+      - name: Cache cargo and build output
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: Build
+        run: cargo build --locked --bins
+
+      - name: Unit tests
+        run: cargo test --locked --bins

@@ -1,0 +1,3 @@
+# Keeps builds gentle on small machines. CI overrides this with CARGO_BUILD_JOBS.
+[build]
+jobs = 2
