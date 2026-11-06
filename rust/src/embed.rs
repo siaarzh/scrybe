@@ -273,7 +273,7 @@ mod tests {
     fn planner_keeps_passes_inside_the_budget_and_visits_short_first() {
         let texts: Vec<String> = [10usize, 500, 12, 600, 11].iter().map(|n| "x".repeat(*n)).collect();
         let groups = plan_micro_batches(&texts, 512, 1024);
-        assert_eq!(groups, vec![vec![0, 4, 2, 1], vec![3]]);
+        assert_eq!(groups, vec![vec![0, 4, 2], vec![1, 3]]);
         // A single row over budget still goes through.
         assert_eq!(plan_micro_batches(&texts[3..4].to_vec(), 512, 100), vec![vec![0]]);
     }

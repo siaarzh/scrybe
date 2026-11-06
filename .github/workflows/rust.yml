@@ -51,13 +51,12 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc --no-progress -y
 
-      - name: Cache cargo and build output
+      - name: Cache cargo downloads
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            rust/target
           key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
             rust-${{ runner.os }}-
