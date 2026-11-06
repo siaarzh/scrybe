@@ -80,7 +80,7 @@ async fn handle(mut s: TcpStream, store: Arc<Store>) -> Result<()> {
                 return respond(&mut s, "400 Bad Request", "application/json", &err.to_string()).await;
             };
             if path == "/mcp/rpc" {
-                return respond(&mut s, "200 OK", "application/json", &mcp::rpc(&store, &req).await.to_string()).await;
+                return respond(&mut s, "200 OK", "application/json", &mcp::rpc(&store, &req).await).await;
             }
             match mcp::handle(&store, &req).await {
                 Some(answer) => respond(&mut s, "200 OK", "application/json", &answer.to_string()).await,

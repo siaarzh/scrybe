@@ -79,17 +79,13 @@ pub fn manifest() -> Value {
     json!({ "daemon_version": VERSION, "tools": tool_list() })
 }
 
-/// Answers the shared-client call route. The result is the tool's JSON, with no text wrapping.
-pub async fn rpc(store: &Store, req: &Value) -> Value {
+/// Answers the shared-client call route. The tool's JSON goes out as written, with no text wrapping.
+pub async fn rpc(store: &Store, req: &Value) -> String {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let params = json!({ "name": req.get("method").cloned().unwrap_or(Value::Null), "arguments": req.get("params").cloned().unwrap_or_else(|| json!({})) });
     match call_tool(store, &params).await {
-        Ok(result) => {
-            let text = result["content"][0]["text"].as_str().unwrap_or("null");
-            let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-            json!({ "id": id, "result": body })
-        }
-        Err((code, message)) => json!({ "id": id, "error": { "code": code, "message": message } }),
+        Ok(result) => format!(r#"{{"id":{id},"result":{}}}"#, result["content"][0]["text"].as_str().unwrap_or("null")),
+        Err((code, message)) => json!({ "id": id, "error": { "code": code, "message": message } }).to_string(),
     }
 }
 

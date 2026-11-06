@@ -18,11 +18,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const COLD_START_DEFAULT_MS: u64 = 15_000;
 const COLD_START_CEILING_MS: u64 = 20_000;
-const CALL_START_BUDGET: Duration = Duration::from_secs(5);
+const CALL_START_BUDGET: Duration = Duration::from_secs(15);
 const INIT_START_BUDGET: Duration = Duration::from_secs(30);
 const POLL_EVERY: Duration = Duration::from_secs(2);
 const POLL_FOR: Duration = Duration::from_secs(300);
-const RESTART_START_AFTER: Duration = Duration::from_secs(10);
+const RESTART_START_AFTER: Duration = Duration::from_secs(2);
 
 fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("SCRYBE_DATA_DIR").filter(|d| !d.is_empty()) {
@@ -52,6 +52,8 @@ fn pidfile_port() -> Option<u16> {
 enum HttpError {
     /// Nothing reached the server, so trying again can't repeat work.
     Connect(String),
+    /// The connection died with no answer, so the server may or may not have done the work.
+    Lost(String),
     Other(String),
 }
 
@@ -78,7 +80,7 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
 }
 
 fn parse_reply(raw: &[u8]) -> Result<Reply, HttpError> {
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| HttpError::Other("scrybe server closed the connection without answering".to_string()))?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| HttpError::Lost("scrybe server closed the connection without answering".to_string()))?;
     let head = String::from_utf8_lossy(&raw[..split]).to_lowercase();
     let status = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or_else(|| HttpError::Other("malformed response from scrybe server".to_string()))?;
     let chunked = head.lines().any(|l| l.starts_with("transfer-encoding:") && l.contains("chunked"));
@@ -95,11 +97,11 @@ fn http(port: u16, method: &str, path: &str, extra_header: &str, body: &str, tim
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n{extra_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    s.write_all(request.as_bytes()).map_err(|e| HttpError::Other(e.to_string()))?;
+    s.write_all(request.as_bytes()).map_err(|e| HttpError::Lost(e.to_string()))?;
     let mut raw = Vec::new();
     s.read_to_end(&mut raw).map_err(|e| match e.kind() {
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => HttpError::Other(format!("scrybe server didn't answer within {} s", timeout.as_secs())),
-        _ => HttpError::Other(e.to_string()),
+        _ => HttpError::Lost(e.to_string()),
     })?;
     parse_reply(&raw)
 }
@@ -156,6 +158,11 @@ struct Relay<W: Write + Send> {
     start_gate: Mutex<Option<Instant>>,
     starter_running: Arc<AtomicBool>,
     resolved: AtomicBool,
+}
+
+/// These only read, so one lost with its server can go to the replacement without repeating any work.
+fn resend_is_safe(name_raw: &str) -> bool {
+    matches!(json::bare(name_raw), Some("search_code" | "search_knowledge" | "lookup_symbol" | "list_projects"))
 }
 
 fn default_start_cmd() -> Vec<String> {
@@ -340,6 +347,8 @@ impl<W: Write + Send> Relay<W> {
         let body = format!(r#"{{"id":"relay","method":{name},"params":{args}}}"#);
         let r = http(port, "POST", "/mcp/rpc", &header, &body, CALL_TIMEOUT).map_err(|e| match e {
             HttpError::Connect(m) => RpcFail::Unreachable(m),
+            HttpError::Lost(m) if resend_is_safe(name) => RpcFail::Unreachable(m),
+            HttpError::Lost(m) => RpcFail::Failed(m),
             HttpError::Other(m) => RpcFail::Failed(m),
         })?;
         if !(200..300).contains(&r.status) {
@@ -379,7 +388,7 @@ impl<W: Write + Send> Relay<W> {
         self.offline_answer(json::bare(name_raw).unwrap_or(""), &failure)
     }
 
-    /// A call got through, so a degraded session is back. The poller re-reads the tool list.
+    /// A call got through, so a degraded session is back and the client gets told to re-list.
     fn set_mode_after_call(&self) {
         let degraded = self.state.lock().unwrap_or_else(|e| e.into_inner()).mode == Mode::Degraded;
         if degraded {
@@ -617,6 +626,14 @@ mod tests {
     fn an_answerless_close_is_an_error_not_a_panic() {
         assert!(parse_reply(b"").is_err());
         assert!(parse_reply(b"HTTP/1.1 nope\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn only_read_tools_are_resent_after_a_lost_connection() {
+        assert!(resend_is_safe(r#""search_code""#) && resend_is_safe(r#""lookup_symbol""#));
+        assert!(!resend_is_safe(r#""reindex_project""#) && !resend_is_safe(r#""gc""#) && !resend_is_safe("7"));
+        assert!(matches!(parse_reply(b""), Err(HttpError::Lost(_))));
+        assert!(matches!(parse_reply(b"HTTP/1.1 nope\r\n\r\n"), Err(HttpError::Other(_))));
     }
 
     #[test]
