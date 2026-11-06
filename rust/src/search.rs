@@ -129,13 +129,13 @@ struct QueryVectors<'a> {
 
 impl QueryVectors<'_> {
     async fn get(&self, source: &Source) -> Result<Vec<f32>> {
-        let (model, prefix) = registry::resolve_local_model(source)?;
-        let key = format!("{model}\0{prefix}");
+        let emb = registry::resolve_embedding(source)?;
+        let key = format!("{}\0{}\0{}", emb.base_url, emb.model, emb.query_prefix);
         let mut cache = self.cache.lock().await;
         if let Some(v) = cache.get(&key) {
             return Ok(v.clone());
         }
-        let v = embed::embed_query(&model, &prefix, self.query).await?;
+        let v = embed::embed_query_for(&emb, self.query).await?;
         cache.insert(key, v.clone());
         Ok(v)
     }
@@ -341,7 +341,8 @@ pub async fn debug_lists(store: &Store, query: &str, project_id: &str, top_k: us
                 }
             }
         }
-        let (model, prefix) = registry::resolve_local_model(source)?;
+        let emb = registry::resolve_embedding(source)?;
+        let (model, prefix) = (emb.model, emb.query_prefix);
         let tokens = embed::tokens(&model, &format!("{prefix}{query}"))?;
         let vec = embed::embed_query(&model, &prefix, query).await?;
         let v = store.vector_search(table, &vec, &where_, top_k).await?;

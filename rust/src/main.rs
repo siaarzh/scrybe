@@ -4,6 +4,8 @@ mod chunk;
 mod collate;
 mod config;
 mod embed;
+mod embed_api;
+mod git;
 mod index;
 mod jsstr;
 mod mcp;
@@ -64,6 +66,12 @@ enum Command {
         source_id: String,
         #[arg(long)]
         full: bool,
+        /// Branch label to store (default: the checked-out branch)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Git ref to read content from, such as origin/dev (default: the branch)
+        #[arg(long = "content-ref")]
+        content_ref: Option<String>,
     },
     /// Chunk every file of a code source and print one line per chunk (parity checks)
     DebugChunks { #[arg(short = 'P', long = "project-id")] project_id: String, #[arg(short = 'S', long = "source-id")] source_id: String },
@@ -142,9 +150,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let ids: Vec<Vec<u32>> = texts.iter().map(|t| embed::tokens(&model, t)).collect::<anyhow::Result<_>>()?;
             println!("{}", serde_json::to_string(&ids)?);
         }
-        Command::Index { project_id, source_id, full } => {
+        Command::Index { project_id, source_id, full, branch, content_ref } => {
             let mode = if full { index::Mode::Full } else { index::Mode::Incremental };
-            let summary = index::index_source(&store, &project_id, &source_id, mode).await?;
+            let summary = index::index_source(&store, &project_id, &source_id, mode, &index::Options { branch, content_ref }).await?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::DebugChunks { project_id, source_id } => {
@@ -179,7 +187,7 @@ fn debug_chunks(project_id: &str, source_id: &str) -> anyhow::Result<()> {
     let source = project.sources.iter().find(|s| s.source_id == source_id).ok_or_else(|| anyhow::anyhow!("no source"))?;
     let root = std::path::PathBuf::from(source.root_path().ok_or_else(|| anyhow::anyhow!("not a code source"))?);
     let sizes = chunk::Sizes::from_env();
-    let max = Some(registry::char_cap(source)?);
+    let max = Some(registry::resolve_embedding(source)?.char_cap());
     let mut out = std::io::BufWriter::new(std::io::stdout());
     for (rel, abs) in scan::walk_repo_files(&root, Some(project_id), Some(source_id)) {
         let Ok(bytes) = std::fs::read(&abs) else { continue };

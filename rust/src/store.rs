@@ -116,6 +116,52 @@ impl Row<'_> {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum Health {
+    Healthy,
+    Corrupt(String),
+    /// A passing IO error: say nothing about the table.
+    Unknown,
+}
+
+fn is_commit_conflict(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("commit conflict") || m.contains("cannot be automatically resolved")
+}
+
+fn classify_probe_error(msg: &str) -> Health {
+    if ["EBUSY", "EIO", "EAGAIN"].iter().any(|t| msg.to_uppercase().contains(t)) {
+        return Health::Unknown;
+    }
+    let missing_data = msg.to_lowercase().contains("not found") && regex::Regex::new(r"(?i)data[\\/][0-9a-f-]+\.lance").is_ok_and(|r| r.is_match(msg));
+    Health::Corrupt(if missing_data { "manifest_missing_data" } else { "schema_unreadable" }.into())
+}
+
+fn newest_manifest_is_empty(versions: &std::path::Path) -> bool {
+    let Ok(dir) = std::fs::read_dir(versions) else { return false };
+    let newest = dir.flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        Some((name.strip_suffix(".manifest")?.parse::<u64>().ok()?, e.path()))
+    }).max_by_key(|(n, _)| *n);
+    newest.is_some_and(|(_, p)| std::fs::metadata(p).is_ok_and(|m| m.len() == 0))
+}
+
+/// Any `0a 10` followed by 16 bytes reads as a uuid, the scan `pruneIndexOrphans` uses. It over-collects,
+/// which only ever keeps an extra folder.
+fn uuids_in_manifest(buf: &[u8]) -> Vec<String> {
+    let mut out = vec![];
+    if buf.len() < 18 {
+        return out;
+    }
+    for i in 0..buf.len() - 17 {
+        if buf[i] == 0x0a && buf[i + 1] == 0x10 {
+            let h: String = buf[i + 2..i + 18].iter().map(|b| format!("{b:02x}")).collect();
+            out.push(format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]));
+        }
+    }
+    out
+}
+
 fn code_schema(dimensions: i32) -> Arc<Schema> {
     let text = |n: &str| Field::new(n, DataType::Utf8, false);
     Arc::new(Schema::new(vec![
@@ -223,8 +269,102 @@ impl Store {
         Ok(table)
     }
 
-    /// `upsert`: mergeInsert on chunk_id.
+    /// `countTableRows`.
+    pub async fn count_rows(&self, name: &str) -> Result<usize> {
+        match self.open(name).await? {
+            Some(t) => Ok(t.count_rows(None).await?),
+            None => Ok(0),
+        }
+    }
+
+    /// `upsert` through `writeWithRetry`: a commit conflict means a stale handle, so reopen and try once more.
     pub async fn upsert_code(&self, name: &str, rows: &[(Chunk, Vec<f32>)]) -> Result<()> {
+        match self.upsert_once(name, rows).await {
+            Err(e) if is_commit_conflict(&format!("{e:#}")) => {
+                self.tables.lock().unwrap().remove(name);
+                eprintln!("[scrybe] commit conflict on '{name}' — evicting cached table handle and retrying");
+                self.upsert_once(name, rows).await
+            }
+            other => other,
+        }
+    }
+
+    /// `dropTable` plus removing a directory Lance may leave behind.
+    pub async fn drop_table_and_files(&self, name: &str) -> Result<()> {
+        self.tables.lock().unwrap().remove(name);
+        self.has_vector_index.lock().unwrap().remove(name);
+        let _ = self.conn().await?.drop_table(name, &[]).await;
+        let dir = db_path().join(format!("{name}.lance"));
+        if dir.exists() {
+            std::fs::remove_dir_all(dir)?;
+        }
+        Ok(())
+    }
+
+    /// `probeTableHealth`: one retry after 100 ms, because a compaction can hide a file briefly.
+    pub async fn table_health(&self, name: &str, expected_dim: Option<i32>) -> Health {
+        let first = self.probe_once(name, expected_dim).await;
+        if !matches!(first, Health::Corrupt(_)) {
+            return first;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.probe_once(name, expected_dim).await
+    }
+
+    async fn probe_once(&self, name: &str, expected_dim: Option<i32>) -> Health {
+        let dir = db_path().join(format!("{name}.lance"));
+        if !dir.exists() {
+            return Health::Healthy;
+        }
+        if newest_manifest_is_empty(&dir.join("_versions")) {
+            return Health::Corrupt("schema_unreadable".into());
+        }
+        // A fresh handle: a cached one can keep reading a table that has changed underneath it.
+        self.tables.lock().unwrap().remove(name);
+        let read = async {
+            let Some(table) = self.open(name).await? else { return anyhow::Ok(None) };
+            let rows = table.count_rows(None).await?;
+            let mut dim = None;
+            if rows > 0 {
+                let probe: Vec<RecordBatch> = table.query().select(lancedb::query::Select::columns(&["chunk_id"])).limit(1).execute().await?.try_collect().await?;
+                drop(probe);
+                let schema = table.schema().await?;
+                if let Ok(DataType::FixedSizeList(_, n)) = schema.field_with_name("vector").map(|f| f.data_type()) {
+                    dim = Some(*n);
+                }
+            }
+            anyhow::Ok(Some(dim))
+        }
+        .await;
+        match read {
+            Ok(Some(Some(actual))) if expected_dim.is_some_and(|e| e != actual) => Health::Corrupt("dimensions_mismatch".into()),
+            Ok(_) => Health::Healthy,
+            Err(e) => classify_probe_error(&format!("{e:#}")),
+        }
+    }
+
+    /// `pruneIndexOrphans`: removes index folders no retained manifest mentions.
+    pub fn prune_index_orphans(&self, name: &str) -> usize {
+        let table_dir = db_path().join(format!("{name}.lance"));
+        let (indices, versions) = (table_dir.join("_indices"), table_dir.join("_versions"));
+        let (Ok(entries), Ok(manifests)) = (std::fs::read_dir(&indices), std::fs::read_dir(&versions)) else { return 0 };
+        let mut referenced = std::collections::HashSet::new();
+        for m in manifests.flatten() {
+            if let Ok(buf) = std::fs::read(m.path()) {
+                referenced.extend(uuids_in_manifest(&buf));
+            }
+        }
+        let mut removed = 0;
+        for e in entries.flatten() {
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir && !referenced.contains(&*e.file_name().to_string_lossy()) && std::fs::remove_dir_all(e.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    async fn upsert_once(&self, name: &str, rows: &[(Chunk, Vec<f32>)]) -> Result<()> {
         let Some(dim) = rows.first().map(|(_, v)| v.len() as i32) else { return Ok(()) };
         let table = self.open_or_create_code(name, dim).await?;
         let schema = code_schema(dim);

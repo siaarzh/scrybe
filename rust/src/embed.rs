@@ -260,6 +260,15 @@ pub fn tokens(model: &str, text: &str) -> Result<Vec<u32>> {
     embedder(model)?.encode_ids(text)
 }
 
+/// `embedQuery`: the local model or the API, as the preset says.
+pub async fn embed_query_for(cfg: &crate::registry::EmbedConfig, query: &str) -> Result<Vec<f32>> {
+    if cfg.local {
+        return embed_query(&cfg.model, &cfg.query_prefix, query).await;
+    }
+    let vectors = crate::embed_api::embed_texts(cfg, &[query.to_string()]).await.map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    vectors.into_iter().next().ok_or_else(|| anyhow::anyhow!("the embedding endpoint returned no vector"))
+}
+
 pub async fn embed_query(model: &str, prefix: &str, query: &str) -> Result<Vec<f32>> {
     let (model, text) = (model.to_string(), format!("{prefix}{}", cap_text(query)));
     tokio::task::spawn_blocking(move || embedder(&model)?.embed(&text)).await?

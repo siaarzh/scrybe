@@ -147,6 +147,32 @@ impl IgnoreRules {
 }
 
 /// `walkRepoFiles`. Symlinks are neither files nor directories here, as with Node's dirent.
+/// `scanRef` with a branch: every indexable blob of a git ref, as (path, normalized content), in git's order.
+pub fn scan_ref(root: &Path, git_ref: &str, project: Option<&str>, source: Option<&str>) -> Vec<(String, String)> {
+    let rules = IgnoreRules::load(root, project, source);
+    let Some(listing) = crate::git::output(root, &["ls-tree", "--full-tree", "-r", "-z", git_ref], Some(50 << 20)) else { return vec![] };
+    let max_bytes = std::env::var("SCRYBE_MAX_FILE_BYTES").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(1 << 20);
+    let mut out = vec![];
+    for entry in listing.split('\0').filter(|e| !e.is_empty()) {
+        let Some((meta, rel)) = entry.split_once('\t') else { continue };
+        // Symlinks and submodules have no content to index.
+        if matches!(meta.split(' ').next(), Some("120000" | "160000")) {
+            continue;
+        }
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        if language_of(name).is_none() || rules.should_ignore(rel) {
+            continue;
+        }
+        let Some(raw) = crate::git::output(root, &["show", &format!("{git_ref}:{rel}")], Some(max_bytes)) else { continue };
+        let content = crate::jsstr::normalize_content(&raw);
+        if content.len() > max_bytes {
+            continue;
+        }
+        out.push((rel.to_string(), content));
+    }
+    out
+}
+
 pub fn walk_repo_files(root: &Path, project: Option<&str>, source: Option<&str>) -> Vec<(String, PathBuf)> {
     let rules = IgnoreRules::load(root, project, source);
     let mut out = vec![];

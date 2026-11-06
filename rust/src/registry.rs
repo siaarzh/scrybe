@@ -4,6 +4,7 @@ use crate::config::data_dir;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -74,6 +75,12 @@ pub struct Preset {
     pub credentials: Option<String>,
     #[serde(default)]
     pub credentials_from: Option<String>,
+    #[serde(default)]
+    pub dim: Option<i32>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub encoding_format: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -97,8 +104,61 @@ fn slot(source: &Source) -> &'static str {
     if source.profile() == Some("text") { "text_preset" } else { "code_preset" }
 }
 
-/// Local embedding settings for a source. API providers aren't ported yet.
-pub fn resolve_local_model(source: &Source) -> Result<(String, String)> {
+/// What `resolveEmbeddingConfig` returns, for a config.json setup. The legacy env-only setup isn't ported.
+#[derive(Clone, Debug)]
+pub struct EmbedConfig {
+    pub local: bool,
+    pub base_url: String,
+    pub model: String,
+    pub dimensions: i32,
+    pub credentials: String,
+    pub encoding_float: bool,
+    pub max_input_tokens: Option<usize>,
+    pub query_prefix: String,
+    pub passage_prefix: String,
+}
+
+impl EmbedConfig {
+    /// `getCharCap`: 4 characters per token, or the 8,000-token default.
+    pub fn char_cap(&self) -> usize {
+        self.max_input_tokens.map_or(8000 * 4, |t| t * 4)
+    }
+}
+
+/// The catalog in `src/providers.ts`: base URL and dimensions.
+fn catalog(provider: &str, model: &str) -> Result<(String, i32)> {
+    let (base, models): (&str, &[(&str, i32)]) = match provider {
+        "voyage" => ("https://api.voyageai.com/v1", &[("voyage-code-3", 1024), ("voyage-3", 1024), ("voyage-3-large", 1024), ("voyage-3.5", 1024), ("voyage-3.5-lite", 1024), ("voyage-4", 1024), ("voyage-4-lite", 1024), ("voyage-4-large", 1024)]),
+        "openai" => ("https://api.openai.com/v1", &[("text-embedding-3-small", 1536), ("text-embedding-3-large", 3072)]),
+        "local" => ("", &[("Xenova/multilingual-e5-small", 384), ("Xenova/all-MiniLM-L6-v2", 384)]),
+        other => anyhow::bail!("unknown provider \"{other}\""),
+    };
+    let Some((_, dim)) = models.iter().find(|(m, _)| *m == model) else {
+        anyhow::bail!("model \"{model}\" not found in provider \"{provider}\"");
+    };
+    Ok((base.to_string(), *dim))
+}
+
+/// `resolveEnvRef`: every `${VAR}` must be set.
+fn resolve_env_ref(value: &str) -> Result<String> {
+    let re = regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}")?;
+    let mut out = String::new();
+    let mut last = 0;
+    for cap in re.captures_iter(value) {
+        let (whole, name) = (cap.get(0).context("match")?, &cap[1]);
+        let Ok(v) = std::env::var(name) else {
+            anyhow::bail!("env var {name} not set (referenced in scrybe config)");
+        };
+        out.push_str(&value[last..whole.start()]);
+        out.push_str(&v);
+        last = whole.end();
+    }
+    out.push_str(&value[last..]);
+    Ok(out)
+}
+
+/// `resolveEmbeddingConfig` plus `resolvePreset`.
+pub fn resolve_embedding(source: &Source) -> Result<EmbedConfig> {
     let Some(cfg) = read_config()? else {
         anyhow::bail!("scrybe is not configured — run 'scrybe init'");
     };
@@ -106,26 +166,77 @@ pub fn resolve_local_model(source: &Source) -> Result<(String, String)> {
         anyhow::bail!("scrybe is not configured — run 'scrybe init'");
     };
     let Some(preset) = cfg.embedding_presets.get(name) else {
-        anyhow::bail!("Preset \"{name}\" not found in config — run 'scrybe init'");
+        anyhow::bail!("embedding preset \"{name}\" not found in config");
     };
-    if preset.provider != "local" {
-        anyhow::bail!("Unknown embedding provider: the Rust read path only serves local embedding so far (preset \"{name}\" uses \"{}\")", preset.provider);
+    let (base_url, dimensions) = if preset.provider == "custom" {
+        let Some(dim) = preset.dim else { anyhow::bail!("custom preset \"{name}\" is missing required field \"dim\"") };
+        let Some(url) = preset.base_url.clone().filter(|u| !u.is_empty()) else { anyhow::bail!("custom preset \"{name}\" is missing required field \"base_url\"") };
+        (url, dim)
+    } else {
+        catalog(&preset.provider, &preset.model)?
+    };
+    let raw = match &preset.credentials_from {
+        Some(from) => {
+            let Some(other) = cfg.embedding_presets.get(from) else {
+                anyhow::bail!("preset \"{name}\" references credentials_from \"{from}\", but that preset does not exist");
+            };
+            if let Some(next) = &other.credentials_from {
+                anyhow::bail!("preset \"{name}\" references credentials_from \"{from}\", which itself has credentials_from \"{next}\". credentials_from chains deeper than 1 level are not supported");
+            }
+            other.credentials.clone()
+        }
+        None => preset.credentials.clone(),
+    };
+    let credentials = raw.map(|r| resolve_env_ref(&r)).transpose()?.unwrap_or_default();
+    let local = preset.provider == "local";
+    if !local && credentials.is_empty() {
+        anyhow::bail!("No API key found for model \"{}\".", preset.model);
     }
-    let prefix = preset.prompt_template.as_ref().map(|t| t.query.clone()).unwrap_or_default();
-    Ok((preset.model.clone(), prefix))
+    let template = preset.prompt_template.clone().unwrap_or_default();
+    Ok(EmbedConfig {
+        local,
+        base_url,
+        model: preset.model.clone(),
+        dimensions,
+        credentials,
+        encoding_float: preset.encoding_format.as_deref() == Some("float"),
+        max_input_tokens: preset.max_input_tokens,
+        query_prefix: template.query,
+        passage_prefix: template.passage,
+    })
 }
 
-pub fn passage_prefix(source: &Source) -> Result<String> {
-    let cfg = read_config()?.unwrap_or_default();
-    let preset = cfg.assignments.get(slot(source)).and_then(|n| cfg.embedding_presets.get(n));
-    Ok(preset.and_then(|p| p.prompt_template.as_ref()).map(|t| t.passage.clone()).unwrap_or_default())
+fn sha256_hex(text: &str) -> String {
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `getCharCap`: 4 characters per token, or the 8,000-token default.
-pub fn char_cap(source: &Source) -> Result<usize> {
-    let cfg = read_config()?.unwrap_or_default();
-    let tokens = cfg.assignments.get(slot(source)).and_then(|n| cfg.embedding_presets.get(n)).and_then(|p| p.max_input_tokens);
-    Ok(tokens.map(|t| t * 4).unwrap_or(8000 * 4))
+/// The name `assignTableName` gives a source that has none.
+pub fn table_name_for(project: &str, source: &Source, emb: &EmbedConfig) -> String {
+    let prefix = if source.profile() == Some("text") { "knowledge" } else { "code" };
+    let hash = sha256_hex(&format!("{project}:{}:{}:{}", source.source_id, emb.model, emb.dimensions));
+    format!("{prefix}_{}", &hash[..12])
+}
+
+/// `updateSource`: patches the registry as JSON so fields this code doesn't know survive.
+pub fn update_source(project: &str, source: &str, patch: &[(&str, Value)]) -> Result<()> {
+    let path = data_dir().join("projects.json");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    for p in doc.as_array_mut().context("projects.json is not a list")? {
+        if p["id"] != project {
+            continue;
+        }
+        for s in p["sources"].as_array_mut().into_iter().flatten() {
+            if s["source_id"] == source {
+                for (k, v) in patch {
+                    s[*k] = v.clone();
+                }
+            }
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&doc)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 /// Mirrors `isSearchable`.
