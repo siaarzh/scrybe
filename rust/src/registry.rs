@@ -206,6 +206,44 @@ pub fn resolve_embedding(source: &Source) -> Result<EmbedConfig> {
     })
 }
 
+/// `configuredEmbeddingStatus`, for a config.json setup.
+pub fn embedding_status() -> Value {
+    let failed = |message: String| serde_json::json!({ "config_present": true, "code_provider_type": "", "code_model": "", "text_provider_type": "", "text_model": "", "api_key_present": false, "config_error": true, "config_error_message": message, "credential_error_message": null });
+    let cfg = match read_config() {
+        Ok(Some(c)) => c,
+        Ok(None) => return serde_json::json!({ "config_present": false, "code_provider_type": "", "code_model": "", "text_provider_type": "", "text_model": "", "api_key_present": false, "config_error": false, "config_error_message": null, "credential_error_message": null }),
+        Err(e) => return failed(e.to_string()),
+    };
+    let provider_type = |p: &str| if p == "local" { "local" } else { "api" };
+    let (Some(code), Some(text)) = (cfg.assignments.get("code_preset").and_then(|n| cfg.embedding_presets.get(n)), cfg.assignments.get("text_preset").and_then(|n| cfg.embedding_presets.get(n))) else {
+        return failed("scrybe is not configured — run 'scrybe init'".to_string());
+    };
+    let mut key_present = code.provider == "local";
+    let mut errors = vec![];
+    for (slot, preset) in [("code_preset", code), ("text_preset", text)] {
+        let raw = preset.credentials_from.as_ref().and_then(|f| cfg.embedding_presets.get(f)).map_or(&preset.credentials, |o| &o.credentials);
+        match raw.as_deref().map(resolve_env_ref).transpose() {
+            Ok(value) => {
+                if slot == "code_preset" {
+                    key_present = preset.provider == "local" || value.is_some_and(|v| !v.is_empty());
+                }
+            }
+            Err(e) => errors.push(format!("{slot}: {e}")),
+        }
+    }
+    serde_json::json!({
+        "config_present": true,
+        "code_provider_type": provider_type(&code.provider),
+        "code_model": code.model,
+        "text_provider_type": provider_type(&text.provider),
+        "text_model": text.model,
+        "api_key_present": key_present,
+        "config_error": false,
+        "config_error_message": null,
+        "credential_error_message": if errors.is_empty() { None } else { Some(errors.join("; ")) },
+    })
+}
+
 fn sha256_hex(text: &str) -> String {
     Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }

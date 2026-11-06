@@ -154,7 +154,7 @@ async fn with_halving(cfg: &EmbedConfig, texts: &[String], session: &mut Halving
     match embed_texts(cfg, texts).await {
         Ok(v) => Ok(v),
         Err(e) if !too_large(&e) => bail!("{}", e.message),
-        Err(e) => {
+        Err(_) => {
             if texts.len() == 1 {
                 bail!("bad_chunk: single chunk rejected by embedding API");
             }

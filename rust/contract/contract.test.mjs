@@ -2,13 +2,17 @@
 // the Rust build can be held to it. A tool a build doesn't have yet shows as skipped, not passed.
 import assert from "node:assert/strict";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { after, before, describe, test } from "node:test";
 import { BUILD, CLI, RELAY, SERVER, makeWorld, sleep, until } from "./harness.mjs";
 
 // Behaviour the Rust build doesn't match yet. Listed as todo, so they run and report without failing the run.
 const RUST_GAPS = new Set([]);
 const gap = (name) => (BUILD === "rust" && RUST_GAPS.has(name) ? { todo: "not matched by the Rust build yet" } : {});
+
+const post = async (base, path) => (await fetch(base + path, { method: "POST" })).json();
 
 const hasFields = (obj, fields) => {
   for (const f of fields) assert.ok(f in obj, `missing field ${f}: ${JSON.stringify(obj).slice(0, 300)}`);
@@ -172,6 +176,82 @@ describe("the tools", () => {
       if (fields) hasFields(r.value, fields);
     });
   }
+
+  test("a job can be followed, listed and looked up", async (t) => {
+    if (skipUnlessPorted(t, "reindex_source")) return;
+    const started = await c.call("reindex_source", { project_id: "demo", source_id: "primary" });
+    assert.equal(started.value.project_id, "demo");
+    assert.equal(started.value.source_id, "primary");
+    assert.equal(started.value.mode, "incremental");
+    const id = started.value.job_id;
+    const done = await until(async () => {
+      const s = (await c.call("reindex_status", { job_id: id })).value;
+      return ["done", "failed"].includes(s?.status) && s;
+    }, 60_000, "the job");
+    assert.equal(done.status, "done", JSON.stringify(done));
+    assert.equal(done.tasks[0].source_id, "primary");
+    assert.equal(done.tasks[0].status, "done");
+    assert.ok(done.finished_at >= done.started_at);
+    const listed = (await c.call("list_jobs")).value;
+    assert.equal(listed.count, listed.jobs.length);
+    assert.ok(listed.jobs.some((j) => j.job_id === id));
+    assert.equal((await c.call("cancel_reindex", { job_id: id })).value.cancelled, false);
+    const q = (await c.call("queue_status", { project_id: "demo" })).value;
+    assert.deepEqual(q.running, []);
+    assert.deepEqual(q.queued, []);
+    assert.deepEqual(q.awaiting_migration, []);
+  });
+
+  test("a full reindex without sources is refused, and a job for no project is masked", async (t) => {
+    if (skipUnlessPorted(t, "reindex_project")) return;
+    assert.ok((await c.call("reindex_project", { project_id: "demo", mode: "full" })).isError);
+    assert.ok((await c.call("reindex_status", { job_id: "nope" })).isError);
+  });
+
+  test("status reports the server and the configured model", async (t) => {
+    if (skipUnlessPorted(t, "status")) return;
+    const s = (await c.call("status")).value;
+    assert.equal(s.daemon_running, true);
+    assert.equal(s.daemon_pid, w.pidfile().pid);
+    assert.equal(s.daemon_port, w.pidfile().port);
+    assert.equal(s.code_model, "fake-model");
+    assert.equal(s.code_provider_type, "api");
+    assert.equal(s.api_key_present, true);
+    assert.equal(s.config_present, true);
+  });
+
+  test("the HTTP routes the extension and hooks use answer in the same shapes", async (t) => {
+    if (skipUnlessPorted(t, "status")) return;
+    const base = `http://127.0.0.1:${w.pidfile().port}`;
+    const get = async (p) => (await fetch(base + p)).json();
+    const health = await get("/health");
+    assert.equal(health.ready, true);
+    assert.equal(health.draining, false);
+    assert.equal(health.pid, w.pidfile().pid);
+    const status = await get("/status");
+    for (const f of ["version", "pid", "port", "uptimeMs", "state", "startedAt", "dataDir", "projects", "queue", "recentEvents", "draining", "clientCount", "mode", "runningJobs"]) assert.ok(f in status, f);
+    assert.equal(status.projects[0].projectId, "demo");
+    assert.equal(status.mode, "always-on");
+    assert.equal(typeof status.clientCount, "number");
+    assert.equal((await get("/projects")).projects[0].id, "demo");
+    assert.deepEqual(Object.keys(await get("/queue-status")).sort(), ["awaiting_migration", "queued", "running"]);
+    assert.equal((await get("/jobs")).count >= 1, true);
+    assert.equal((await fetch(`${base}/jobs/nope`)).status, 404);
+    assert.equal((await fetch(`${base}/nope`)).status, 404);
+    assert.equal((await fetch(`${base}/mcp`)).status, 404);
+    const kicked = await (await fetch(`${base}/kick`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId: "demo" }) })).json();
+    assert.equal(kicked.jobs[0].projectId, "demo");
+    assert.equal(kicked.jobs[0].sourceId, "all");
+    assert.equal(kicked.jobs[0].branch, "HEAD");
+    assert.equal((await post(base, "/pause")).state, "paused");
+    assert.equal((await post(base, "/resume")).state, "hot");
+    const refused = await new Promise((resolve) => {
+      const r = httpRequest(`${base}/status`, { headers: { Host: "evil.example" } }, (res) => { res.resume(); resolve(res.statusCode); });
+      r.end();
+    });
+    assert.equal(refused, 403);
+    assert.equal((await fetch(`${base}/status`, { headers: { Origin: "http://evil.example" } })).status, 403);
+  });
 
   test("pin_branches and unpin_branches change the list", async (t) => {
     if (skipUnlessPorted(t, "pin_branches")) return;
@@ -338,6 +418,47 @@ describe("the tiny client and the server's lifetime", () => {
     await c.rpc("tools/list");
     await sleep(1000);
     assert.equal(w.pidfile(), null);
+  });
+});
+
+describe("the server's own lifetime", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.index("--full"); });
+  after(() => w.stop());
+  const running = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+  test("with no client it leaves by itself, and an idle client keeps it", async () => {
+    const short = { SCRYBE_DAEMON_KEEP_ALIVE: "", SCRYBE_DAEMON_NO_CLIENT_TIMEOUT_MS: "3000", SCRYBE_DAEMON_IDLE_GRACE_MS: "2000", SCRYBE_DAEMON_HEARTBEAT_STALE_MS: "4000", SCRYBE_DAEMON_HEARTBEAT_MS: "1000" };
+    const c = w.client({ extraEnv: short });
+    await c.hello();
+    await c.rpc("tools/list");
+    const pid = w.pidfile().pid;
+    await sleep(6000);
+    assert.ok(running(pid), "an idle client should keep it up past the 3 s limit");
+    c.close();
+    await until(() => !running(pid), 20_000, "the server to leave after its client");
+    assert.equal(w.pidfile(), null, "a clean exit removes the pidfile");
+  });
+
+  test("SIGTERM exits cleanly and removes the pidfile", { skip: process.platform === "win32" ? "no SIGTERM on Windows" : false }, async () => {
+    const c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    const pid = w.pidfile().pid;
+    process.kill(pid, "SIGTERM");
+    await until(() => !running(pid), 20_000, "the server to exit");
+    assert.equal(w.pidfile(), null);
+  });
+
+  test("a second server on the same data dir exits at once and leaves the first alone", async () => {
+    const c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    const first = w.pidfile();
+    const second = spawn(SERVER[0], SERVER.slice(1), { env: w.env, stdio: "ignore", windowsHide: true });
+    await new Promise((resolve) => second.on("exit", resolve));
+    assert.equal(w.pidfile().pid, first.pid);
+    assert.ok(await w.health());
   });
 });
 

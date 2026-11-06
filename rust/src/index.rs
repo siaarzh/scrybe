@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Mode {
@@ -27,6 +29,18 @@ pub enum Mode {
 pub struct Options {
     pub branch: Option<String>,
     pub content_ref: Option<String>,
+    /// Set by a job's cancel: checked between files and batches.
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+/// The error a cancelled run ends with.
+pub const CANCELLED: &str = "INDEX_CANCELLED";
+
+fn check_cancel(options: &Options) -> Result<()> {
+    if options.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
+        bail!(CANCELLED);
+    }
+    Ok(())
 }
 
 /// Writes must never reach a real data dir while this port is unfinished.
@@ -213,6 +227,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         }
     }
 
+    check_cancel(options)?;
     if mode == Mode::Full {
         repair_if_corrupt(store, &table, project_id, source_id, &embedding).await;
     }
@@ -281,6 +296,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         if !to_index.contains(&rel) {
             continue;
         }
+        check_cancel(options)?;
         let text = match content {
             Content::Text(text) => text,
             Content::File(abs) => {
@@ -302,6 +318,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
             }
             pending += 1;
             if pending >= batch_size {
+                check_cancel(options)?;
                 run.flush(&mut batches).await?;
                 pending = 0;
             }

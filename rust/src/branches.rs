@@ -96,7 +96,7 @@ pub fn branches_for_chunks(project: &str, source: &str, chunk_ids: &[String]) ->
     Ok(map)
 }
 
-const SCHEMA: &str = "
+pub const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS branch_tags (
       project_id  TEXT NOT NULL,
       source_id   TEXT NOT NULL,

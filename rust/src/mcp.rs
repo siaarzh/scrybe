@@ -9,7 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const LATEST_PROTOCOL: &str = "2025-06-18";
 
-fn tool_list() -> Value {
+pub fn tool_list() -> Value {
     json!([
         {
             "name": "list_projects",
@@ -74,11 +74,6 @@ fn text_result<T: Serialize>(v: &T) -> Value {
     json!({ "content": [{ "type": "text", "text": text }] })
 }
 
-/// The manifest shared clients read: same tools as tools/list.
-pub fn manifest() -> Value {
-    json!({ "daemon_version": VERSION, "tools": tool_list() })
-}
-
 /// Suggests a known key for an unknown one: a shared prefix first, then a small edit distance.
 fn suggest_key(unknown: &str, known: &[&str]) -> Option<String> {
     if let Some(k) = known.iter().find(|k| **k != unknown && (k.starts_with(unknown) || unknown.starts_with(**k))) {
@@ -121,7 +116,7 @@ fn json_type_of(v: &Value) -> &'static str {
 }
 
 /// `validateParams`: unknown keys first, then missing required, then types and enums.
-fn validate_params(tool: &str, schema: &Value, params: &Value) -> Result<(), String> {
+pub fn validate_params(tool: &str, schema: &Value, params: &Value) -> Result<(), String> {
     let empty = serde_json::Map::new();
     let properties = schema["properties"].as_object().unwrap_or(&empty);
     let known: Vec<&str> = properties.keys().map(String::as_str).collect();

@@ -1,0 +1,193 @@
+[
+ {
+  "name": "reindex_all",
+  "description": "Incrementally reindex all registered projects (all sources) in the background. Returns a job_id to poll with reindex_status.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "required": []
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": true
+  }
+ },
+ {
+  "name": "reindex_project",
+  "description": "Trigger background reindexing of all sources in a project. Returns a job_id to poll with reindex_status.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "mode": {
+     "type": "string",
+     "enum": [
+      "full",
+      "incremental"
+     ],
+     "default": "incremental"
+    },
+    "source_ids": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "description": "Sources to reindex. Required when mode is 'full'."
+    },
+    "branch": {
+     "type": "string",
+     "description": "Branch to index for code sources (default: current HEAD)"
+    },
+    "content_ref": {
+     "type": "string",
+     "description": "Git ref to read content from (e.g. 'origin/dev'). When set, content is read from this ref while 'branch' remains the stored label. Defaults to 'branch'."
+    }
+   },
+   "required": [
+    "project_id"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": true
+  }
+ },
+ {
+  "name": "reindex_source",
+  "description": "Trigger background reindexing of a single source. Returns a job_id to poll with reindex_status.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string"
+    },
+    "mode": {
+     "type": "string",
+     "enum": [
+      "full",
+      "incremental"
+     ],
+     "default": "incremental"
+    },
+    "branch": {
+     "type": "string",
+     "description": "Branch to index for code sources (default: current HEAD)"
+    },
+    "content_ref": {
+     "type": "string",
+     "description": "Git ref to read content from (e.g. 'origin/dev'). When set, content is read from this ref while 'branch' remains the stored label. Defaults to 'branch'."
+    }
+   },
+   "required": [
+    "project_id",
+    "source_id"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": true
+  }
+ },
+ {
+  "name": "reindex_status",
+  "description": "Get the status of a background reindex job",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "job_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "job_id"
+   ]
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "cancel_reindex",
+  "description": "Cancel a running reindex job",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "job_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Cancel only this source (omit to cancel entire job)"
+    }
+   },
+   "required": [
+    "job_id"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "list_jobs",
+  "description": "List background reindex jobs. Like 'docker ps' — shows all jobs or filter by status.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "status": {
+     "type": "string",
+     "enum": [
+      "queued",
+      "running",
+      "done",
+      "failed",
+      "cancelled",
+      "interrupted"
+     ],
+     "description": "Filter by status (omit for all jobs)"
+    }
+   }
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "queue_status",
+  "description": "Check what is currently running or queued in the reindex queue. Before triggering a reindex, call this to see if the daemon already has a pending or in-flight job for the project — polling reindex_status on the existing job is cheaper than submitting a duplicate. The awaiting_migration array lists large local-embedder sources that need a manual full reindex after an embedding-config upgrade.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string",
+     "description": "Filter to a specific project (omit for all)"
+    }
+   }
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "status",
+  "description": "Return a quick scrybe status snapshot: config present, daemon running, embedding provider/model, and API key presence. This is a lightweight read-only call — it does not validate credentials or run checks. For a full health check with remediation advice, use the `doctor` tool instead.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "required": []
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
+ }
+]
