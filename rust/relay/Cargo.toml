@@ -1,0 +1,14 @@
+[package]
+name = "scrybe-relay"
+version = "0.53.2"
+edition = "2021"
+rust-version = "1.92"
+description = "The small process an MCP client starts: carries calls to the shared scrybe server."
+publish = false
+
+[[bin]]
+name = "scrybe-relay"
+path = "src/main.rs"
+
+# Standard library only, so it stays a few MB and builds in seconds without the server's dependencies.
+[dependencies]

@@ -58,7 +58,10 @@ async fn handle(mut s: TcpStream, store: Arc<Store>) -> Result<()> {
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     match (method, path) {
         ("GET", "/health") => respond(&mut s, "200 OK", "application/json", &json!({ "status": "ok", "ready": true, "version": VERSION }).to_string()).await,
-        ("POST", "/mcp") => {
+        ("GET", "/mcp/manifest") => respond(&mut s, "200 OK", "application/json", &mcp::manifest().to_string()).await,
+        // Nothing here shuts down when clients leave, so there's nothing to track yet.
+        ("POST", "/clients/heartbeat" | "/clients/unregister") => respond(&mut s, "200 OK", "application/json", "{}").await,
+        ("POST", "/mcp" | "/mcp/rpc") => {
             let len: usize = header(&head, "content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
             if len > MAX_BODY {
                 return respond(&mut s, "413 Payload Too Large", "text/plain", "too large").await;
@@ -76,6 +79,9 @@ async fn handle(mut s: TcpStream, store: Arc<Store>) -> Result<()> {
                 let err = json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } });
                 return respond(&mut s, "400 Bad Request", "application/json", &err.to_string()).await;
             };
+            if path == "/mcp/rpc" {
+                return respond(&mut s, "200 OK", "application/json", &mcp::rpc(&store, &req).await.to_string()).await;
+            }
             match mcp::handle(&store, &req).await {
                 Some(answer) => respond(&mut s, "200 OK", "application/json", &answer.to_string()).await,
                 None => respond(&mut s, "202 Accepted", "text/plain", "").await,
@@ -89,6 +95,13 @@ async fn handle(mut s: TcpStream, store: Arc<Store>) -> Result<()> {
 pub async fn serve(store: Store) -> Result<()> {
     // daemon.pid would point real clients at this unfinished server.
     refuse_live_data_dir()?;
+    // Same lock file as the TypeScript daemon: the operating system drops it if this process dies.
+    let owner = rusqlite::Connection::open(data_dir().join("daemon-owner.lock.db"))?;
+    owner.busy_timeout(std::time::Duration::ZERO)?;
+    if owner.execute_batch("BEGIN IMMEDIATE").is_err() {
+        eprintln!("another server owns this data dir");
+        return Ok(());
+    }
     let port: u16 = std::env::var("SCRYBE_DAEMON_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let bound = listener.local_addr()?.port();
@@ -96,6 +109,7 @@ pub async fn serve(store: Store) -> Result<()> {
     std::fs::write(data_dir().join("daemon.pid"), pid.to_string())?;
     eprintln!("scrybe-rs serving on 127.0.0.1:{bound}");
     let store = Arc::new(store);
+    let _owner = owner;
     loop {
         let (socket, _) = listener.accept().await?;
         let store = store.clone();

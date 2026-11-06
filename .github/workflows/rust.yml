@@ -62,7 +62,7 @@ jobs:
             rust-${{ runner.os }}-
 
       - name: Build
-        run: cargo build --locked --bins
+        run: cargo build --locked --workspace --bins
 
       - name: Unit tests
-        run: cargo test --locked --bins
+        run: cargo test --locked --workspace --bins

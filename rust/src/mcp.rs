@@ -74,6 +74,25 @@ fn text_result<T: Serialize>(v: &T) -> Value {
     json!({ "content": [{ "type": "text", "text": text }] })
 }
 
+/// The manifest shared clients read: same tools as tools/list.
+pub fn manifest() -> Value {
+    json!({ "daemon_version": VERSION, "tools": tool_list() })
+}
+
+/// Answers the shared-client call route. The result is the tool's JSON, with no text wrapping.
+pub async fn rpc(store: &Store, req: &Value) -> Value {
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    let params = json!({ "name": req.get("method").cloned().unwrap_or(Value::Null), "arguments": req.get("params").cloned().unwrap_or_else(|| json!({})) });
+    match call_tool(store, &params).await {
+        Ok(result) => {
+            let text = result["content"][0]["text"].as_str().unwrap_or("null");
+            let body: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+            json!({ "id": id, "result": body })
+        }
+        Err((code, message)) => json!({ "id": id, "error": { "code": code, "message": message } }),
+    }
+}
+
 fn missing(field: &str, tool: &str) -> (i64, String) {
     (-32602, format!("Invalid params for {tool}: '{field}' is required"))
 }

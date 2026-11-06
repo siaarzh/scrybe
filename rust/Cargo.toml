@@ -10,9 +10,8 @@ publish = false
 name = "scrybe-rs"
 path = "src/main.rs"
 
-[[bin]]
-name = "scrybe-relay"
-path = "src/relay.rs"
+[workspace]
+members = ["relay"]
 
 [features]
 default = []
