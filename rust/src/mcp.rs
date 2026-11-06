@@ -79,13 +79,117 @@ pub fn manifest() -> Value {
     json!({ "daemon_version": VERSION, "tools": tool_list() })
 }
 
+/// Suggests a known key for an unknown one: a shared prefix first, then a small edit distance.
+fn suggest_key(unknown: &str, known: &[&str]) -> Option<String> {
+    if let Some(k) = known.iter().find(|k| **k != unknown && (k.starts_with(unknown) || unknown.starts_with(**k))) {
+        return Some(k.to_string());
+    }
+    let distance = |a: &str, b: &str| {
+        let (a, b): (Vec<u16>, Vec<u16>) = (a.encode_utf16().collect(), b.encode_utf16().collect());
+        let mut row: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.iter().enumerate() {
+            let mut diagonal = row[0];
+            row[0] = i + 1;
+            for (j, cb) in b.iter().enumerate() {
+                let cost = usize::from(ca != cb);
+                let next = (row[j + 1] + 1).min(row[j] + 1).min(diagonal + cost);
+                diagonal = row[j + 1];
+                row[j + 1] = next;
+            }
+        }
+        row[b.len()]
+    };
+    let mut best: Option<(&str, usize)> = None;
+    for k in known {
+        let d = distance(unknown, k);
+        if best.is_none_or(|(_, b)| d < b) {
+            best = Some((k, d));
+        }
+    }
+    best.filter(|(_, d)| *d <= 3).map(|(k, _)| k.to_string())
+}
+
+fn json_type_of(v: &Value) -> &'static str {
+    match v {
+        Value::Array(_) => "array",
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Object(_) => "object",
+    }
+}
+
+/// `validateParams`: unknown keys first, then missing required, then types and enums.
+fn validate_params(tool: &str, schema: &Value, params: &Value) -> Result<(), String> {
+    let empty = serde_json::Map::new();
+    let properties = schema["properties"].as_object().unwrap_or(&empty);
+    let known: Vec<&str> = properties.keys().map(String::as_str).collect();
+    let given = params.as_object().unwrap_or(&empty);
+    for key in given.keys() {
+        if !properties.contains_key(key) {
+            let hint = suggest_key(key, &known).map_or(String::new(), |s| format!(" (did you mean '{s}'?)"));
+            return Err(format!("invalid params for {tool}: unknown key '{key}'{hint}"));
+        }
+    }
+    for key in schema["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        if given.get(key).is_none_or(Value::is_null) {
+            return Err(format!("invalid params for {tool}: missing required '{key}'"));
+        }
+    }
+    for (key, value) in given {
+        if value.is_null() {
+            continue;
+        }
+        let prop = &properties[key];
+        if let Some(expected) = prop["type"].as_str() {
+            let actual = json_type_of(value);
+            if actual != expected {
+                return Err(format!("invalid params for {tool}: '{key}' must be of type {expected}, got {actual}"));
+            }
+        }
+        if let (Some(allowed), Some(text)) = (prop["enum"].as_array(), value.as_str()) {
+            if !allowed.iter().any(|a| a.as_str() == Some(text)) {
+                let list: Vec<&str> = allowed.iter().filter_map(Value::as_str).collect();
+                return Err(format!("invalid params for {tool}: '{key}' must be one of [{}], got '{text}'", list.join(", ")));
+            }
+        }
+        if let (Some(want), Some(items)) = (prop["items"]["type"].as_str(), value.as_array()) {
+            if let Some(bad) = items.iter().map(json_type_of).find(|t| *t != want) {
+                return Err(format!("invalid params for {tool}: '{key}' elements must be of type {want}, got {bad}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bad content from the caller is safe to echo. Anything else stays masked, like the daemon's RPC route.
+/// Only the two search tools mark their errors this way today.
+fn caller_facing(tool: &str, message: &str) -> bool {
+    matches!(tool, "search_code" | "search_knowledge") && ((message.starts_with("Project '") && message.ends_with("not found")) || message.starts_with("NO_CODE_SOURCES") || message.starts_with("NO_KNOWLEDGE_SOURCES"))
+}
+
 /// Answers the shared-client call route. The tool's JSON goes out as written, with no text wrapping.
 pub async fn rpc(store: &Store, req: &Value) -> String {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let params = json!({ "name": req.get("method").cloned().unwrap_or(Value::Null), "arguments": req.get("params").cloned().unwrap_or_else(|| json!({})) });
-    match call_tool(store, &params).await {
-        Ok(result) => format!(r#"{{"id":{id},"result":{}}}"#, result["content"][0]["text"].as_str().unwrap_or("null")),
-        Err((code, message)) => json!({ "id": id, "error": { "code": code, "message": message } }).to_string(),
+    let fail = |code: i64, message: &str| json!({ "id": id, "error": { "code": code, "message": message } }).to_string();
+    let name = req.get("method").and_then(Value::as_str).unwrap_or("");
+    let args = req.get("params").cloned().unwrap_or_else(|| json!({}));
+    let tools = tool_list();
+    let Some(tool) = tools.as_array().and_then(|t| t.iter().find(|x| x["name"] == name)) else {
+        return fail(-32601, &format!("method not found: {name}"));
+    };
+    if let Err(message) = validate_params(name, &tool["inputSchema"], &args) {
+        return fail(-32602, &message);
+    }
+    match run_tool(store, name, &args).await {
+        Ok(Ok(text)) => format!(r#"{{"id":{id},"result":{text}}}"#),
+        Ok(Err(e)) if caller_facing(name, &e.message) => fail(-32602, &e.message),
+        Ok(Err(e)) => {
+            eprintln!("tool {name} failed: {}", e.message);
+            fail(-32603, "internal error")
+        }
+        Err((code, message)) => fail(code, &message),
     }
 }
 
@@ -101,9 +205,19 @@ async fn call_tool(store: &Store, params: &Value) -> Result<Value, (i64, String)
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let empty = json!({});
     let a = params.get("arguments").unwrap_or(&empty);
+    Ok(match run_tool(store, name, a).await? {
+        Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
+        Err(e) => text_result(&e.to_json()),
+    })
+}
+
+/// The tool's result as pretty JSON text, or its error, or a problem with the call itself.
+async fn run_tool(store: &Store, name: &str, a: &Value) -> Result<Result<String, tools::ToolError>, (i64, String)> {
+    let pretty = |v: String| Ok::<String, tools::ToolError>(v);
+    let text_of = |v: &Value| v["content"][0]["text"].as_str().unwrap_or("null").to_string();
     let top_k = a.get("top_k").and_then(Value::as_f64).map(|n| n as usize).unwrap_or(10);
     let result: Result<Value, tools::ToolError> = match name {
-        "list_projects" => return Ok(text_result(&tools::list_projects())),
+        "list_projects" => return Ok(pretty(text_of(&text_result(&tools::list_projects())))),
         "search_code" => {
             let project = str_arg(a, "project_id").ok_or_else(|| missing("project_id", name))?;
             let query = str_arg(a, "query").ok_or_else(|| missing("query", name))?;
@@ -129,9 +243,38 @@ async fn call_tool(store: &Store, params: &Value) -> Result<Value, (i64, String)
             };
             tools::lookup_symbol(store, input).await.map(|r| text_result(&r))
         }
-        other => return Ok(text_result(&json!({ "error": format!("Unknown tool: {other}") }))),
+        other => return Ok(pretty(text_of(&text_result(&json!({ "error": format!("Unknown tool: {other}") }))))),
     };
-    Ok(result.unwrap_or_else(|e| text_result(&e.to_json())))
+    Ok(result.map(|v| text_of(&v)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema() -> Value {
+        json!({ "properties": { "project_id": { "type": "string" }, "top_k": { "type": "number" }, "match": { "type": "string", "enum": ["suffix", "exact"] }, "item_types": { "type": "array", "items": { "type": "string" } } }, "required": ["project_id"] })
+    }
+
+    #[test]
+    fn argument_errors_match_the_daemon_word_for_word() {
+        let check = |args: Value| validate_params("t", &schema(), &args).unwrap_err();
+        assert_eq!(check(json!({ "project_ids": ["a"] })), "invalid params for t: unknown key 'project_ids' (did you mean 'project_id'?)");
+        assert_eq!(check(json!({ "project_id": "a", "zzzzzzzzzzzzz": 1 })), "invalid params for t: unknown key 'zzzzzzzzzzzzz'");
+        assert_eq!(check(json!({ "top_k": 1 })), "invalid params for t: missing required 'project_id'");
+        assert_eq!(check(json!({ "project_id": null })), "invalid params for t: missing required 'project_id'");
+        assert_eq!(check(json!({ "project_id": 5 })), "invalid params for t: 'project_id' must be of type string, got number");
+        assert_eq!(check(json!({ "project_id": "a", "match": "x" })), "invalid params for t: 'match' must be one of [suffix, exact], got 'x'");
+        assert_eq!(check(json!({ "project_id": "a", "item_types": [1] })), "invalid params for t: 'item_types' elements must be of type string, got number");
+        assert!(validate_params("t", &schema(), &json!({ "project_id": "a", "top_k": null, "match": "exact" })).is_ok());
+    }
+
+    #[test]
+    fn suggestions_prefer_prefixes_then_small_typos() {
+        assert_eq!(suggest_key("symbol", &["project_id", "symbol_name"]).as_deref(), Some("symbol_name"));
+        assert_eq!(suggest_key("qeury", &["project_id", "query"]).as_deref(), Some("query"));
+        assert_eq!(suggest_key("completely_different", &["query"]), None);
+    }
 }
 
 /// Answers one JSON-RPC message. None for a notification, which has no reply.
