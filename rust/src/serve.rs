@@ -1,7 +1,8 @@
 //! The one shared server. Mirrors `src/daemon/main.ts` and `http-server.ts`: data-dir ownership, a sticky
 //! port, the Host and Origin gate on every route, jobs, heartbeats, and a shutdown that drains.
 //! A small HTTP reader on purpose: one request per connection, no new compile cost.
-//! Not yet: ticket polling, auto-gc, the vector index backfill, pinned-branch routes, the RSS guard, install.
+//! Not yet: ticket polling, the vector index backfill, pinned-branch routes, the RSS guard, install.
+use crate::autogc::{self, AutoGc};
 use crate::config::{data_dir, VERSION};
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
@@ -26,6 +27,7 @@ const DAEMON_TOOLS: &str = include_str!("daemon_tools.json");
 struct Daemon {
     store: Arc<Store>,
     queue: Arc<Queue>,
+    autogc: Arc<AutoGc>,
     lifecycle: Mutex<Lifecycle>,
     idle: Arc<Idle>,
     health: Arc<WatchHealth>,
@@ -147,6 +149,9 @@ impl Daemon {
     /// The `/gc` route: replace any waiting gc in scope, then queue one for each project.
     fn gc(&self, scope: Vec<String>, source: Option<String>, purge: bool) -> Value {
         let cancelled = self.queue.cancel_pending_gc(&scope);
+        for project in &scope {
+            self.autogc.reset(project);
+        }
         let jobs: Vec<Value> = scope
             .into_iter()
             .map(|project| {
@@ -603,9 +608,11 @@ pub async fn serve(store: Store) -> Result<()> {
 
     let now = Instant::now();
     let (idle, health) = (Arc::new(Idle::from_env()), Arc::new(WatchHealth::default()));
-    let d = Arc::new(Daemon { store, queue: queue.clone(), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
+    let d = Arc::new(Daemon { store, queue: queue.clone(), autogc: AutoGc::new(queue.clone()), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
     let _owner = owner;
-    watch::start(queue, idle, health, &registry::list_projects());
+    d.autogc.start();
+    watch::start(queue.clone(), idle, health, &registry::list_projects());
+    autogc::sweep_ephemeral(&queue);
 
     let ticking = d.clone();
     tokio::spawn(async move {

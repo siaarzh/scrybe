@@ -69,7 +69,7 @@ fn slug(branch: &str) -> String {
     if branch == "*" { "_all_".to_string() } else { branch.replace('/', "__") }
 }
 
-fn hashes_path(project: &str, source: &str, branch: &str) -> PathBuf {
+pub fn hashes_path(project: &str, source: &str, branch: &str) -> PathBuf {
     data_dir().join("hashes").join(format!("{project}__{source}__{}.json", slug(branch)))
 }
 

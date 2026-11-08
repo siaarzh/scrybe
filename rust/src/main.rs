@@ -1,4 +1,5 @@
 //! scrybe-rs: an unfinished Rust port of scrybe. Search over existing scrybe data.
+mod autogc;
 mod branches;
 mod chunk;
 mod collate;

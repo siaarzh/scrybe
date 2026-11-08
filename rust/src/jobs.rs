@@ -1,6 +1,6 @@
 //! The job queue and its durable rows. Mirrors `src/daemon/queue.ts`, `src/jobs.ts` and `src/jobs-store.ts`:
 //! no two jobs for one project at once, a cap across projects, and rows other processes can read.
-//! Not yet: gc jobs, and ticket sources, which fail as unsupported.
+//! Not yet: ticket sources, which fail as unsupported.
 use crate::branches::SCHEMA;
 use crate::config::data_dir;
 use crate::index::{self, Mode, Options};
@@ -119,10 +119,35 @@ impl Rows {
         );
     }
 
-    fn tagged_chunk_ids(&self, project: &str, source: &str) -> HashSet<String> {
+    pub fn tagged_chunk_ids(&self, project: &str, source: &str) -> HashSet<String> {
         let conn = self.lock();
         let Ok(mut stmt) = conn.prepare("SELECT DISTINCT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?") else { return HashSet::new() };
         stmt.query_map([project, source], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// `getLastGcTime` with `ignoreDebounceForFailed`: a failed last gc counts as none.
+    pub fn last_gc_time(&self, project: &str) -> Option<i64> {
+        let conn = self.lock();
+        let last: Option<String> = conn.query_row("SELECT status FROM jobs WHERE project_id = ? AND type = 'gc' AND status IN ('done', 'failed') ORDER BY finished_at DESC LIMIT 1", [project], |r| r.get(0)).ok();
+        if last.as_deref() == Some("failed") {
+            return None;
+        }
+        conn.query_row("SELECT MAX(finished_at) FROM jobs WHERE project_id = ? AND type = 'gc' AND status = 'done'", [project], |r| r.get::<_, Option<i64>>(0)).ok().flatten()
+    }
+
+    /// `listEphemeralBranches`.
+    pub fn ephemeral_branches(&self, project: &str, source: &str) -> Vec<String> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT DISTINCT branch FROM branch_tags WHERE project_id=? AND source_id=? AND branch LIKE ? ESCAPE '\\'") else { return vec![] };
+        stmt.query_map([project, source, "\\_ephemeral/%"], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// `deleteBranch`, minus the hashes file.
+    pub fn delete_branch(&self, project: &str, source: &str, branch: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=?", [project, source, branch])?;
+        conn.execute("DELETE FROM branch_state WHERE project_id=? AND source_id=? AND branch=?", [project, source, branch])?;
+        Ok(())
     }
 
     fn cancel_queued_gc(&self, project: &str) {
@@ -251,6 +276,17 @@ pub struct Request {
     pub gc_purge: Option<bool>,
 }
 
+/// What a job did, for `onQueueJobEvent` listeners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobEvent {
+    Submitted,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+pub type Hook = Arc<dyn Fn(JobEvent, &Item) + Send + Sync>;
+
 pub struct Submitted {
     pub job_id: String,
     pub status: &'static str,
@@ -274,6 +310,7 @@ pub struct Queue {
     max_concurrent: usize,
     max_depth: usize,
     pub events: broadcast::Sender<String>,
+    hook: std::sync::OnceLock<Hook>,
     // Watcher threads submit jobs from outside the runtime, so spawn through a stored handle.
     rt: tokio::runtime::Handle,
 }
@@ -302,6 +339,7 @@ impl Queue {
             max_concurrent: env_num("SCRYBE_DAEMON_MAX_CONCURRENT").unwrap_or((cpus / 2).max(1)),
             max_depth: env_num("SCRYBE_DAEMON_MAX_QUEUE_DEPTH").unwrap_or(1000),
             events,
+            hook: std::sync::OnceLock::new(),
             rt: tokio::runtime::Handle::current(),
         }))
     }
@@ -310,7 +348,14 @@ impl Queue {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Logged, kept in the ring and streamed.
     pub fn emit(&self, event: Value) {
+        append_log(&event.to_string());
+        self.push(event);
+    }
+
+    /// Kept in the ring and streamed, not logged: how today's server publishes the events outside the queue.
+    pub fn push(&self, event: Value) {
         let line = event.to_string();
         {
             let mut st = self.lock();
@@ -319,8 +364,27 @@ impl Queue {
                 st.ring.pop_front();
             }
         }
-        append_log(&line);
         let _ = self.events.send(line);
+    }
+
+    /// `onQueueJobEvent`: one listener is all the server needs.
+    pub fn set_hook(&self, hook: Hook) {
+        let _ = self.hook.set(hook);
+    }
+
+    fn fire(&self, event: JobEvent, item: &Item) {
+        if let Some(hook) = self.hook.get() {
+            hook(event, item);
+        }
+    }
+
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
+    /// Runs a task on the server's runtime from a plain thread.
+    pub fn spawn<F: std::future::Future<Output = ()> + Send + 'static>(&self, f: F) {
+        self.rt.spawn(f);
     }
 
     pub fn recent_events(&self, last: usize) -> Vec<Value> {
@@ -362,7 +426,8 @@ impl Queue {
         } else {
             self.rows.insert_queued(&item);
         }
-        self.lock().pending.push_back(item);
+        self.lock().pending.push_back(item.clone());
+        self.fire(JobEvent::Submitted, &item);
         self.drain();
         let st = self.lock();
         if st.active.contains_key(&job_id) || st.jobs.contains_key(&job_id) {
@@ -388,6 +453,7 @@ impl Queue {
             if registry::get_project(&item.project).is_none() && data_dir().join("projects.json").exists() {
                 self.rows.finish(&item.job_id, "failed", now_ms(), Some("project no longer exists"));
                 self.emit(json!({ "ts": ts, "level": "warn", "event": "job.failed", "projectId": item.project, "detail": { "jobId": item.job_id, "type": "reindex", "skippedOrphan": true, "reason": "project no longer exists" } }));
+                self.fire(JobEvent::Failed, &item);
                 continue;
             }
             if item.gc_purge.is_some() {
@@ -432,6 +498,7 @@ impl Queue {
             if let Some(s) = &item.source {
                 event["sourceId"] = json!(s);
             }
+            let auto;
             match outcome {
                 Ok((orphans, freed)) => {
                     let ms = started.elapsed().as_millis() as u64;
@@ -441,6 +508,8 @@ impl Queue {
                     event["event"] = json!("job.completed");
                     event["durationMs"] = json!(ms);
                     event["detail"] = json!({ "jobId": item.job_id, "type": "gc", "orphans_deleted": orphans, "bytes_freed": freed });
+                    auto = Some(json!({ "ts": now_iso(), "level": "info", "event": "auto-gc.completed", "projectId": item.project, "durationMs": ms, "detail": { "orphans_deleted": orphans, "bytes_freed": freed, "duration_ms": ms } }));
+                    me.fire(JobEvent::Completed, &item);
                 }
                 Err(e) => {
                     let message = format!("{e:#}");
@@ -449,16 +518,21 @@ impl Queue {
                     event["event"] = json!("job.failed");
                     event["error"] = json!({ "message": message });
                     event["detail"] = json!({ "jobId": item.job_id, "type": "gc" });
+                    auto = Some(json!({ "ts": now_iso(), "level": "error", "event": "auto-gc.failed", "projectId": item.project, "error": { "message": message }, "detail": { "error": message } }));
+                    me.fire(JobEvent::Failed, &item);
                 }
             }
             me.emit(event);
+            if let Some(a) = auto.filter(|_| !purge) {
+                me.emit(a);
+            }
             me.lock().active.remove(&item.job_id);
             me.drain();
         });
     }
 
     /// `runGcJobHandler`: rows no branch refers to go, then the table is compacted.
-    async fn collect_garbage(&self, item: &Item, purge: bool) -> Result<(usize, u64)> {
+    pub async fn collect_garbage(&self, item: &Item, purge: bool) -> Result<(usize, u64)> {
         let project = registry::get_project(&item.project).ok_or_else(|| anyhow::anyhow!("Project '{}' not found", item.project))?;
         let (mut orphans, mut freed) = (0, 0);
         for source in project.sources.iter().filter(|s| item.source.as_ref().is_none_or(|want| *want == s.source_id)) {
@@ -607,6 +681,7 @@ impl Queue {
             event["error"] = json!({ "message": e });
         }
         event["detail"] = json!({ "jobId": item.job_id });
+        self.fire(match status { "done" => JobEvent::Completed, "failed" => JobEvent::Failed, _ => JobEvent::Cancelled }, &item);
         self.emit(event);
         self.drain();
     }

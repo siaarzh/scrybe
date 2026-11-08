@@ -5,6 +5,7 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
 import { BUILD, CLI, RELAY, SERVER, makeWorld, sleep, until } from "./harness.mjs";
 
@@ -480,6 +481,155 @@ describe("indexing by itself", () => {
     assert.equal(done.type, "gc");
     const result = JSON.parse(done.result);
     for (const f of ["orphans_deleted", "bytes_freed", "duration_ms"]) assert.equal(typeof result[f], "number");
+  });
+});
+
+/** Collects the server's event stream from the start of its memory. */
+async function watchEvents(base) {
+  const events = [];
+  const ctl = new AbortController();
+  const res = await fetch(`${base}/events?since=1970-01-01T00:00:00.000Z`, { signal: ctl.signal });
+  (async () => {
+    let buf = "";
+    try {
+      for await (const chunk of res.body) {
+        buf += Buffer.from(chunk).toString("utf8");
+        for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
+          const frame = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          if (frame.startsWith("data: ")) events.push(JSON.parse(frame.slice(6)));
+        }
+      }
+    } catch { /* stopped */ }
+  })();
+  return { events, stop: () => ctl.abort() };
+}
+
+// With a branch, rows no branch tags are hidden even before a gc removes them.
+const symbolGone = (c, name, branch) => async () => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: name, branch })).value?.length === 0;
+
+describe("automatic garbage collection after quiet", () => {
+  let w, c, feed;
+  before(async () => {
+    w = await makeWorld({ serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_AUTO_GC_IDLE_MS: "1500", SCRYBE_AUTO_GC_RATIO: "2" } });
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    await until(() => w.pidfile(), 10_000, "the pidfile");
+    feed = await watchEvents(`http://127.0.0.1:${w.pidfile().port}`);
+    await sleep(1500);
+  });
+  after(() => { feed?.stop(); return w.stop(); });
+  const seen = (name, pick = () => true) => () => feed.events.find((e) => e.event === name && pick(e));
+
+  test("a quiet project with orphans gets a gc job, then a quiet one without is skipped", async () => {
+    rmSync(join(w.repo, "src/widget.ts"));
+    await until(symbolGone(c, "frobnicateWidget", w.main), 30_000, "the deletion to be noticed");
+    const scheduled = await until(seen("auto-gc.scheduled", (e) => e.detail.trigger === "idle"), 30_000, "auto-gc.scheduled");
+    assert.equal(scheduled.projectId, "demo");
+    assert.equal(scheduled.level, "info");
+    const done = await until(seen("auto-gc.completed"), 30_000, "auto-gc.completed");
+    assert.equal(done.projectId, "demo");
+    for (const f of ["orphans_deleted", "bytes_freed", "duration_ms"]) assert.equal(typeof done.detail[f], "number");
+    assert.ok(done.detail.orphans_deleted > 0);
+    const jobs = (await c.call("list_jobs")).value;
+    assert.ok(JSON.stringify(jobs).includes('"gc"'), "the gc job is recorded");
+    const skipped = await until(seen("auto-gc.skipped", (e) => e.detail.reason === "no-orphans"), 30_000, "auto-gc.skipped");
+    assert.equal(skipped.detail.trigger, "idle");
+    assert.equal(skipped.projectId, "demo");
+  });
+});
+
+describe("automatic garbage collection by orphan share", () => {
+  let w, c, feed;
+  before(async () => {
+    w = await makeWorld({ serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_AUTO_GC_IDLE_MS: "3600000", SCRYBE_AUTO_GC_RATIO: "0.01" } });
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    await until(() => w.pidfile(), 10_000, "the pidfile");
+    feed = await watchEvents(`http://127.0.0.1:${w.pidfile().port}`);
+    await sleep(1500);
+  });
+  after(() => { feed?.stop(); return w.stop(); });
+  const scheduled = () => feed.events.filter((e) => e.event === "auto-gc.scheduled");
+
+  test("an index run that leaves many orphans queues a gc, and the debounce holds back the next", async () => {
+    rmSync(join(w.repo, "src/widget.ts"));
+    await until(symbolGone(c, "frobnicateWidget", w.main), 30_000, "the deletion to be noticed");
+    const first = await until(() => scheduled()[0], 30_000, "auto-gc.scheduled");
+    assert.equal(first.detail.trigger, "ratio");
+    await until(() => feed.events.find((e) => e.event === "auto-gc.completed"), 30_000, "auto-gc.completed");
+    rmSync(join(w.repo, "src/gadget.py"));
+    await until(symbolGone(c, "calibrate_gadget", w.main), 30_000, "the second deletion to be noticed");
+    await sleep(2500);
+    assert.equal(scheduled().length, 1, JSON.stringify(scheduled()));
+  });
+});
+
+describe("automatic garbage collection switched off", () => {
+  let w, c, feed;
+  before(async () => {
+    w = await makeWorld({ serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_AUTO_GC: "0", SCRYBE_AUTO_GC_IDLE_MS: "500", SCRYBE_AUTO_GC_RATIO: "0.01" } });
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    await until(() => w.pidfile(), 10_000, "the pidfile");
+    feed = await watchEvents(`http://127.0.0.1:${w.pidfile().port}`);
+    await sleep(1500);
+  });
+  after(() => { feed?.stop(); return w.stop(); });
+
+  test("SCRYBE_AUTO_GC=0 queues nothing", async () => {
+    rmSync(join(w.repo, "src/widget.ts"));
+    await until(symbolGone(c, "frobnicateWidget", w.main), 30_000, "the deletion to be noticed");
+    await sleep(3000);
+    assert.deepEqual(feed.events.filter((e) => e.event.startsWith("auto-gc.")), []);
+  });
+});
+
+describe("the startup sweep of leaked ephemeral labels", () => {
+  let w, c, feed;
+  const label = "_ephemeral/review-1";
+  const hashFile = () => join(w.data, "hashes", "demo__primary___ephemeral__review-1.json");
+  before(async () => {
+    w = await makeWorld({});
+    await w.index("--full");
+    // Pretend a crashed review left its label behind, holding the only tags of one file's rows.
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"));
+    const moved = db.prepare("UPDATE branch_tags SET branch=? WHERE file_path LIKE '%gadget.py'").run(label);
+    assert.ok(moved.changes > 0, "the fixture has rows to leak");
+    db.prepare("INSERT INTO branch_state (project_id, source_id, branch, last_indexed_sha, last_indexed_at) VALUES ('demo','primary',?,'abc',0)").run(label);
+    db.close();
+    writeFileSync(hashFile(), "{}");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    await until(() => w.pidfile(), 10_000, "the pidfile");
+    feed = await watchEvents(`http://127.0.0.1:${w.pidfile().port}`);
+  });
+  after(() => { feed?.stop(); return w.stop(); });
+
+  test("the label, its state and its orphaned rows are reclaimed once, and announced", async () => {
+    const swept = await until(() => feed.events.find((e) => e.event === "ephemeral.swept"), 30_000, "ephemeral.swept");
+    assert.equal(swept.level, "info");
+    assert.equal(swept.detail.count, 1);
+    const [entry] = swept.detail.entries;
+    assert.equal(entry.projectId, "demo");
+    assert.equal(entry.sourceId, "primary");
+    assert.equal(entry.label, label);
+    assert.ok(entry.orphansDeleted > 0);
+    assert.equal(typeof entry.bytesFreed, "number");
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"), { readOnly: true });
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM branch_tags WHERE branch LIKE '%ephemeral%'").get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM branch_state WHERE branch LIKE '%ephemeral%'").get().n, 0);
+    db.close();
+    assert.throws(() => readFileSync(hashFile()), /ENOENT/);
+    const found = (await c.call("lookup_symbol", { project_id: "demo", symbol_name: "frobnicateWidget" })).value;
+    assert.ok(found.length > 0, "the main branch is untouched");
   });
 });
 
