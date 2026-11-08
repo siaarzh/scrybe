@@ -1,8 +1,9 @@
 //! The one shared server. Mirrors `src/daemon/main.ts` and `http-server.ts`: data-dir ownership, a sticky
 //! port, the Host and Origin gate on every route, jobs, heartbeats, and a shutdown that drains.
 //! A small HTTP reader on purpose: one request per connection, no new compile cost.
-//! Not yet: ticket polling, the vector index backfill, pinned-branch routes, the RSS guard, install.
+//! Not yet: ticket polling, the RSS guard, install.
 use crate::autogc::{self, AutoGc};
+use crate::pinned;
 use crate::vecindex;
 use crate::config::{data_dir, VERSION};
 use crate::index::refuse_live_data_dir;
@@ -87,7 +88,32 @@ fn allowed(head: &str) -> bool {
 }
 
 fn work_accepting(method: &str, path: &str) -> bool {
-    matches!((method, path), ("POST", "/kick" | "/gc")) || (method == "DELETE" && path.starts_with("/jobs/")) || (matches!(method, "POST" | "DELETE") && path.starts_with("/projects/") && path.ends_with("/pinned-branches"))
+    matches!((method, path), ("POST", "/kick" | "/gc")) || (method == "DELETE" && path.starts_with("/jobs/")) || (method != "GET" && pinned_ids(path).is_some())
+}
+
+/// `PINNED_RE`: the two raw (still encoded) ids in `/projects/:p/sources/:s/pinned-branches`.
+fn pinned_ids(path: &str) -> Option<(&str, &str)> {
+    let (project, rest) = path.strip_prefix("/projects/")?.split_once("/sources/")?;
+    let source = rest.strip_suffix("/pinned-branches")?;
+    (!project.is_empty() && !project.contains('/') && !source.is_empty() && !source.contains('/')).then_some((project, source))
+}
+
+/// `decodeURIComponent`: strict, and a plus stays a plus.
+fn decode_component(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = b.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).filter(|h| h.bytes().all(|c| c.is_ascii_hexdigit()))?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 async fn respond(s: &mut TcpStream, status: &str, kind: &str, body: &str) -> Result<()> {
@@ -299,8 +325,82 @@ impl Daemon {
             "queue_status" => self.queue.rows.queue_status(a["project_id"].as_str()).map(|(running, queued)| json!({ "running": running, "queued": queued, "awaiting_migration": [] })),
             "status" => Ok(self.status_tool()),
             "gc" => self.gc_tool(a),
+            "list_pinned_branches" | "pin_branches" | "unpin_branches" => self.pin_tool(name, a),
             _ => return None,
         })
+    }
+
+    /// The pinned-branches route. A bad body is a 500 with the error text, as the server's catch-all gives.
+    fn pinned_route(&self, method: &str, ids: (&str, &str), query: &str, body: &[u8]) -> (&'static str, Value) {
+        let boom = |m: &str| ("500 Internal Server Error", json!({ "error": m }));
+        let (Some(project), Some(source)) = (decode_component(ids.0), decode_component(ids.1)) else { return boom("URIError: URI malformed") };
+        let (project, source) = (project.as_str(), source.as_str());
+        let failed = |e: pinned::PinError| (e.status(), json!({ "error": e.message(), "error_type": e.error_type() }));
+        if method == "GET" {
+            return match pinned::list(project, source) {
+                Ok(branches) => ("200 OK", json!({ "branches": branches })),
+                Err(e) => failed(e),
+            };
+        }
+        let all = method == "DELETE" && query_param(query, "all").as_deref() == Some("true");
+        let mut parsed = json!({});
+        if !all && !body.iter().all(u8::is_ascii_whitespace) {
+            parsed = match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(e) => return boom(&format!("SyntaxError: {e}")),
+            };
+            if parsed.is_null() {
+                return boom("TypeError: Cannot read properties of null (reading 'branches')");
+            }
+        }
+        let event = |action: &str, branches: &[String]| {
+            self.queue.push(json!({ "ts": jobs::now_iso(), "level": "info", "event": "pinned.changed", "projectId": project, "sourceId": source, "detail": { "action": action, "branches": branches } }));
+        };
+        if all {
+            return match pinned::clear(project, source) {
+                Ok(r) => {
+                    event("remove", &r.removed);
+                    ("200 OK", r.to_json())
+                }
+                Err(e) => failed(e),
+            };
+        }
+        if let Err(e) = pinned::list(project, source) {
+            return failed(e);
+        }
+        let branches: Vec<String> = match &parsed["branches"] {
+            Value::Null => vec![],
+            Value::Array(a) if a.iter().all(Value::is_string) => a.iter().filter_map(Value::as_str).map(String::from).collect(),
+            _ => return boom("TypeError: branches.filter is not a function"),
+        };
+        if method == "POST" {
+            return match pinned::add(project, source, &branches, parsed["mode"] == "set") {
+                Ok(r) => {
+                    event("add", &r.added);
+                    ("200 OK", r.to_json())
+                }
+                Err(e) => failed(e),
+            };
+        }
+        match pinned::remove(project, source, &branches) {
+            Ok(r) => {
+                event("remove", &r.removed);
+                ("200 OK", r.to_json())
+            }
+            Err(e) => failed(e),
+        }
+    }
+
+    fn pin_tool(&self, name: &str, a: &Value) -> Result<Value> {
+        let project = a["project_id"].as_str().unwrap_or("");
+        let source = a["source_id"].as_str().unwrap_or("primary");
+        let branches: Vec<String> = a["branches"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
+        let out = match name {
+            "list_pinned_branches" => pinned::list_tool(project, a["source_id"].as_str()),
+            "pin_branches" => pinned::pin_tool(project, source, &branches, a["mode"] == "set"),
+            _ => pinned::remove(project, source, &branches).map(|r| r.to_json()).map_err(|e| e.message()),
+        };
+        out.map_err(|m| anyhow::anyhow!(m))
     }
 
     fn status_tool(&self) -> Value {
@@ -490,6 +590,10 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
                 d.lifecycle.lock().unwrap().unregister(id, Instant::now());
             }
             json_res(&mut s, "200 OK", &json!({ "ok": true })).await
+        }
+        (m @ ("GET" | "POST" | "DELETE"), p) if pinned_ids(p).is_some() => {
+            let (status, answer) = d.pinned_route(m, pinned_ids(p).unwrap_or_default(), query, &body);
+            json_res(&mut s, status, &answer).await
         }
         ("GET", "/mcp/manifest") => json_res(&mut s, "200 OK", &d.manifest()).await,
         ("POST", "/mcp/rpc") => {
@@ -687,6 +791,19 @@ mod tests {
         assert!(work_accepting("POST", "/projects/a/sources/b/pinned-branches"));
         assert!(!work_accepting("GET", "/jobs/abc"));
         assert!(!work_accepting("POST", "/mcp/rpc"));
+    }
+
+    #[test]
+    fn pinned_paths_match_only_the_exact_shape() {
+        assert_eq!(pinned_ids("/projects/a/sources/b/pinned-branches"), Some(("a", "b")));
+        assert_eq!(pinned_ids("/projects/a/pinned-branches"), None);
+        assert_eq!(pinned_ids("/projects/a/sources/b/c/pinned-branches"), None);
+        assert_eq!(pinned_ids("/projects//sources/b/pinned-branches"), None);
+        assert!(!work_accepting("GET", "/projects/a/sources/b/pinned-branches"));
+        assert!(!work_accepting("POST", "/projects/a/pinned-branches"));
+        assert_eq!(decode_component("a%20b+c").as_deref(), Some("a b+c"));
+        assert_eq!(decode_component("%zz"), None);
+        assert_eq!(decode_component("%ff"), None);
     }
 
     #[test]

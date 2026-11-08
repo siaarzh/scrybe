@@ -262,6 +262,72 @@ describe("the tools", () => {
     assert.doesNotMatch((await c.call("list_pinned_branches", { project_id: "demo" })).text, /side/);
   });
 
+  test("the pinned-branches HTTP routes list, add, remove and refuse in the same shapes", async () => {
+    const base = `http://127.0.0.1:${w.pidfile().port}`;
+    const url = (p = "demo", s = "primary") => `${base}/projects/${p}/sources/${s}/pinned-branches`;
+    const send = async (method, u, body) => {
+      const res = await fetch(u, { method, headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+      return { status: res.status, body: await res.json() };
+    };
+    const feed = await watchEvents(base);
+    try {
+      assert.deepEqual(await send("GET", url()), { status: 200, body: { branches: [] } });
+      const added = await send("POST", url(), { branches: ["zeta", "side"] });
+      assert.equal(added.status, 200);
+      assert.deepEqual(added.body.branches, ["zeta", "side"]);
+      assert.deepEqual(added.body.added, ["zeta", "side"]);
+      assert.deepEqual(added.body.warnings, []);
+      assert.deepEqual((await send("POST", url(), { branches: ["side", "extra"] })).body.added, ["extra"]);
+      assert.deepEqual((await send("POST", url(), { branches: ["only"], mode: "set" })).body.branches, ["only"]);
+      assert.deepEqual((await send("GET", url())).body, { branches: ["only"] });
+      assert.deepEqual((await send("DELETE", url(), { branches: ["only", "never"] })).body, { branches: [], removed: ["only"] });
+      await send("POST", url(), { branches: ["a", "b"] });
+      assert.deepEqual((await send("DELETE", `${url()}?all=true`)).body, { branches: [], removed: ["a", "b"] });
+      const noProject = await send("GET", url("nope"));
+      assert.equal(noProject.status, 404);
+      assert.equal(noProject.body.error_type, "project_not_found");
+      assert.equal(noProject.body.error, "Project 'nope' not found");
+      const noSource = await send("POST", url("demo", "nope"), { branches: ["x"] });
+      assert.equal(noSource.status, 404);
+      assert.equal(noSource.body.error_type, "source_not_found");
+      assert.equal(noSource.body.error, "Source 'nope' not found in project 'demo'");
+      assert.equal((await send("PUT", url(), {})).status, 404);
+      const changes = await until(async () => {
+        const seen = feed.events.filter((e) => e.event === "pinned.changed");
+        return seen.length >= 6 && seen;
+      }, 10_000, "the pinned.changed events");
+      assert.deepEqual(changes.slice(0, 2).map((e) => e.detail), [{ action: "add", branches: ["zeta", "side"] }, { action: "add", branches: ["extra"] }]);
+      assert.equal(changes[0].projectId, "demo");
+      assert.equal(changes[0].sourceId, "primary");
+      assert.equal(changes[0].level, "info");
+      assert.deepEqual(changes[5].detail, { action: "remove", branches: ["a", "b"] });
+    } finally {
+      feed.stop();
+    }
+  });
+
+  test("pin_branches reports a branch with no ignore rules, and a long list", async (t) => {
+    if (skipUnlessPorted(t, "pin_branches")) return;
+    const first = (await c.call("pin_branches", { project_id: "demo", source_id: "primary", branches: ["warned"] })).value;
+    assert.deepEqual(first.branches, ["warned"]);
+    assert.deepEqual(first.added, ["warned"]);
+    assert.equal(first.ignore_warnings.length, 1);
+    assert.match(first.ignore_warnings[0], /^warning: branch 'warned' has no \.scrybeignore and source 'demo\/primary' has no private ignore\.\n/);
+    const many = Array.from({ length: 21 }, (_, i) => `b${i}`);
+    const set = (await c.call("pin_branches", { project_id: "demo", branches: many, mode: "set" })).value;
+    assert.equal(set.branches.length, 21);
+    assert.equal(set.warnings.length, 1);
+    assert.match(set.warnings[0], /has 21 pinned branches\./);
+    const gone = (await c.call("unpin_branches", { project_id: "demo", branches: [...many, "warned"] })).value;
+    assert.deepEqual(gone.branches, []);
+    assert.equal(gone.removed.length, 21);
+    const listed = (await c.call("list_pinned_branches", { project_id: "demo", source_id: "primary" })).value;
+    assert.deepEqual(listed, [{ source_id: "primary", branches: [] }]);
+    assert.deepEqual((await c.call("list_pinned_branches", { project_id: "demo", source_id: "nope" })).value, []);
+    const bad = await c.call("pin_branches", { project_id: "nope", branches: ["x"] });
+    assert.ok(bad.isError || bad.rpcError, JSON.stringify(bad));
+  });
+
   test("private ignore rules can be set, read and cleared", async (t) => {
     if (skipUnlessPorted(t, "set_private_ignore")) return;
     await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "secret/\n" });

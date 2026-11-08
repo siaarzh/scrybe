@@ -211,5 +211,98 @@
    "idempotentHint": true,
    "openWorldHint": false
   }
+ },
+ {
+  "name": "list_pinned_branches",
+  "description": "List branches pinned for background daemon indexing on a project's code source(s). Pinned branches are kept current by the daemon without requiring a manual scrybe index --branch call.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Specific source (omit to list all code sources)"
+    }
+   },
+   "required": [
+    "project_id"
+   ]
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "pin_branches",
+  "description": "Add (or replace) pinned branches on a code source. mode='add' (default) merges with the existing list; mode='set' replaces it. Returns warnings if pinned count exceeds 20 or if a branch has no ignore coverage.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Source identifier (default: primary)"
+    },
+    "branches": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "description": "Branch names to pin"
+    },
+    "mode": {
+     "type": "string",
+     "enum": [
+      "add",
+      "set"
+     ],
+     "description": "add (default) or set (replace)"
+    }
+   },
+   "required": [
+    "project_id",
+    "branches"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "unpin_branches",
+  "description": "Remove branches from the pinned list. Silently no-ops on branches not currently pinned. Does NOT delete indexed data — run scrybe gc to remove orphan chunks.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Source identifier (default: primary)"
+    },
+    "branches": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "description": "Branch names to unpin"
+    }
+   },
+   "required": [
+    "project_id",
+    "branches"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
  }
 ]

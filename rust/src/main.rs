@@ -13,6 +13,7 @@ mod jobs;
 mod jsstr;
 mod lifecycle;
 mod mcp;
+mod pinned;
 mod registry;
 mod scan;
 mod search;
