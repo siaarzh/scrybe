@@ -1,5 +1,5 @@
 //! Indexes one code source. Mirrors the code path of `indexSource` in `src/indexer.ts`, from the working
-//! tree or from a git ref. Not yet: ticket sources, phase telemetry.
+//! tree or from a git ref. Not yet: ticket sources.
 use crate::branches::{self, Writer};
 use crate::chunk::{self, Chunk, Sizes};
 use crate::config::{data_dir, Settings};
@@ -7,6 +7,7 @@ use crate::embed;
 use crate::embed_api::{self, Entry, Halving};
 use crate::git;
 use crate::jsstr::normalize_content;
+use crate::phase::{self, Outcome, Phase};
 use crate::registry::{self, EmbedConfig, Source};
 use crate::scan;
 use crate::store::{Health, Store};
@@ -32,6 +33,8 @@ pub struct Options {
     pub content_ref: Option<String>,
     /// Set by a job's cancel: checked between files and batches.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// The job this run belongs to, stamped on its phase records.
+    pub job_id: Option<String>,
 }
 
 /// The error a cancelled run ends with.
@@ -108,19 +111,31 @@ fn expected_dimensions(cfg: &EmbedConfig) -> i32 {
 
 /// The full-index health check. A corrupt table is dropped and rebuilt by the index that follows. Today's
 /// code also tries a version rollback, but it calls a method the LanceDB package doesn't have, so it never
-/// runs and that branch isn't ported.
-async fn repair_if_corrupt(store: &Store, table: &str, project: &str, source: &str, cfg: &EmbedConfig) {
-    if let Health::Corrupt(reason) = store.table_health(table, Some(expected_dimensions(cfg))).await {
-        eprintln!("[scrybe] table {table} is corrupt ({reason}): rebuilding");
-        if store.drop_table_and_files(table).await.is_ok() {
-            let line = json!({ "ts": now_iso(), "event": "health.repaired-via-rebuild", "projectId": project, "sourceId": source });
-            let log = std::env::var_os("SCRYBE_DAEMON_LOG_PATH").map_or_else(|| data_dir().join("daemon-log.jsonl"), PathBuf::from);
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
-                use std::io::Write;
-                let _ = writeln!(f, "{line}");
+/// runs and that branch isn't ported. Returns the table's state and how it was repaired.
+async fn repair_if_corrupt(store: &Store, table: &str, project: &str, source: &str, cfg: &EmbedConfig) -> (&'static str, &'static str) {
+    match store.table_health(table, Some(expected_dimensions(cfg))).await {
+        Health::Corrupt(reason) => {
+            eprintln!("[scrybe] table {table} is corrupt ({reason}): rebuilding");
+            let mut repaired = "none";
+            if store.drop_table_and_files(table).await.is_ok() {
+                repaired = "rebuild";
+                let line = json!({ "ts": now_iso(), "event": "health.repaired-via-rebuild", "projectId": project, "sourceId": source });
+                let log = std::env::var_os("SCRYBE_DAEMON_LOG_PATH").map_or_else(|| data_dir().join("daemon-log.jsonl"), PathBuf::from);
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{line}");
+                }
             }
+            ("corrupt", repaired)
         }
+        Health::Healthy => ("healthy", "none"),
+        Health::Unknown => ("unknown", "none"),
     }
+}
+
+fn cursor_present(project: &str, source: &str) -> bool {
+    let text = std::fs::read_to_string(cursor_path(project, source)).ok();
+    text.and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v["updated_after"].is_string())
 }
 
 struct Run<'a> {
@@ -141,6 +156,8 @@ struct Run<'a> {
     files_reindexed: usize,
     seen_files: HashSet<String>,
     started: std::time::Instant,
+    bytes_embedded: u64,
+    phase: Phase,
 }
 
 impl Run<'_> {
@@ -156,6 +173,8 @@ impl Run<'_> {
         if batches.is_empty() {
             return Ok(());
         }
+        let chunk_count: usize = batches.iter().map(|(_, chunks)| chunks.len()).sum();
+        let persisted_before = self.persisted;
         let mut texts = vec![];
         let mut owners = vec![];
         for (_, chunks) in batches.iter() {
@@ -166,8 +185,11 @@ impl Run<'_> {
                 }
             }
         }
+        let embedded = texts.len();
+        let batch_bytes: u64 = texts.iter().map(|t| t.len() as u64).sum();
         if !texts.is_empty() {
             let vectors = self.embed(texts).await?;
+            self.phase.sample();
             let new_ids: HashSet<&str> = owners.iter().map(|c| c.chunk_id.as_str()).collect();
             self.files_reindexed += batches.iter().filter(|(_, chunks)| chunks.iter().any(|c| new_ids.contains(c.chunk_id.as_str()))).count();
             let rows = dedupe(owners.iter().cloned().zip(vectors).collect());
@@ -177,6 +199,7 @@ impl Run<'_> {
             let added = after.saturating_sub(before);
             self.persisted += added;
             vecindex::record_upsert(&self.table, added, after);
+            self.phase.sample();
         }
         for (key, chunks) in batches.iter() {
             self.writer.add_tags(key, chunks)?;
@@ -188,6 +211,22 @@ impl Run<'_> {
             self.prepared += chunks.len();
         }
         save_hashes(&self.hash_path, &self.hashes)?;
+        self.bytes_embedded += batch_bytes;
+        self.phase.add_work(&[
+            ("batches", 1),
+            ("chunks_prepared", chunk_count as u64),
+            ("chunks_embedded", embedded as u64),
+            ("chunks_persisted", (self.persisted - persisted_before) as u64),
+            ("bytes_embedded", batch_bytes),
+            ("files_checkpointed", batches.len() as u64),
+        ]);
+        self.phase.set_work(json!({
+            "cumulative_chunks_prepared": self.prepared,
+            "cumulative_chunks_persisted": self.persisted,
+            "cumulative_bytes_embedded": self.bytes_embedded,
+            "cumulative_files_seen": self.seen_files.len(),
+        }));
+        self.phase.maybe_roll();
         batches.clear();
         eprintln!("chunks {} persisted {} files {} after {:.0}s", self.prepared, self.persisted, self.seen_files.len(), self.started.elapsed().as_secs_f64());
         Ok(())
@@ -218,6 +257,10 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     let sizes = Sizes::from_env();
     let settings = Settings::from_env();
 
+    let ctx = phase::Ctx { project_id: project_id.to_string(), source_id: source_id.to_string(), job_id: options.job_id.clone(), branch: branch.clone(), mode: if mode == Mode::Full { "full" } else { "incremental" } };
+    phase::emit_job_intent(&ctx, "started", json!({ "is_code": true }));
+    let provider = if embedding.local { "local" } else { "api" };
+
     // Same SHA capture point as the TypeScript: before any work starts.
     let sha = git::trimmed(&root, &["rev-parse", &git_ref]);
     let non_head = branch != branches::resolve_branch_for_path(&root);
@@ -232,7 +275,11 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
 
     check_cancel(options)?;
     if mode == Mode::Full {
-        repair_if_corrupt(store, &table, project_id, source_id, &embedding).await;
+        let mut phase = Phase::begin(&ctx, "preflight_health");
+        phase.set_work(json!({ "table_state": "unknown", "repaired": "none" }));
+        let (table_state, repaired) = repair_if_corrupt(store, &table, project_id, source_id, &embedding).await;
+        phase.set_work(json!({ "table_state": table_state, "repaired": repaired }));
+        phase.end(Outcome::Ok);
     }
 
     let hash_path = hashes_path(project_id, source_id, &branch);
@@ -247,6 +294,8 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         File(PathBuf),
         Text(String),
     }
+    let cursor_used = mode == Mode::Incremental && cursor_present(project_id, source_id);
+    let mut scan_phase = Phase::begin(&ctx, "scan");
     let entries: Vec<(String, Content)> = if non_head {
         scan::scan_ref(&root, &git_ref, Some(project_id), Some(source_id)).into_iter().map(|(rel, text)| (rel, Content::Text(text))).collect()
     } else {
@@ -261,10 +310,33 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         if let Some(h) = hash {
             current.insert(rel.clone(), h);
         }
+        if non_head {
+            scan_phase.sample();
+        }
     }
+    if non_head {
+        let cached_bytes: usize = entries.iter().map(|(_, c)| if let Content::Text(t) = c { t.len() } else { 0 }).sum();
+        scan_phase.set_work(json!({ "scan_kind": "git-ref", "sources_found": current.len(), "cached_content_bytes": cached_bytes }));
+    } else {
+        scan_phase.set_work(json!({ "scan_kind": "working-tree", "sources_found": current.len(), "cursor_used": cursor_used }));
+    }
+    scan_phase.end(Outcome::Ok);
+
+    let mut diff_phase = Phase::begin(&ctx, "diff");
     let to_remove: Vec<String> = old_hashes.keys().filter(|p| !current.contains_key(*p)).cloned().collect();
     let mut to_index: HashSet<String> = current.iter().filter(|(p, h)| old_hashes.get(*p) != Some(*h)).map(|(p, _)| p.clone()).collect();
+    diff_phase.sample();
+    diff_phase.set_work(json!({ "files_total": current.len(), "prior_hashes": old_hashes.len(), "files_to_reindex": to_index.len(), "files_to_remove": to_remove.len() }));
+    diff_phase.end(Outcome::Ok);
+    phase::emit_job_intent(&ctx, "planned", json!({
+        "files_total": current.len(),
+        "files_to_reindex": if mode == Mode::Full { current.len() } else { to_index.len() },
+        "files_to_remove": to_remove.len(),
+        "is_non_head_branch": non_head,
+        "provider": provider,
+    }));
 
+    let mut stale_phase = Phase::begin(&ctx, "stale_apply");
     let mut known = HashSet::new();
     let mut hashes = old_hashes.clone();
     if mode == Mode::Full {
@@ -278,12 +350,27 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         for p in &to_remove {
             writer.remove_file(p)?;
             hashes.remove(p);
+            stale_phase.sample();
         }
         for p in &to_index {
             writer.remove_file(p)?;
+            stale_phase.sample();
         }
         save_hashes(&hash_path, &hashes)?;
     }
+    let bytes_to_read: u64 = entries
+        .iter()
+        .filter(|(rel, _)| to_index.contains(rel))
+        .map(|(_, content)| match content {
+            Content::Text(text) => text.len() as u64,
+            Content::File(abs) => {
+                stale_phase.sample();
+                std::fs::metadata(abs).map_or(0, |m| m.len())
+            }
+        })
+        .sum();
+    stale_phase.set_work(json!({ "files_to_reindex": to_index.len(), "files_to_remove": to_remove.len(), "known_chunk_ids": known.len(), "bytes_to_read": bytes_to_read }));
+    stale_phase.end(Outcome::Ok);
 
     let ceiling: usize = std::env::var("SCRYBE_EMBED_BATCH_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
     let delay_ms: u64 = std::env::var("SCRYBE_EMBED_BATCH_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -292,44 +379,60 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     let batch_size = if embedding.local { ceiling } else { embed_api::probe_size(state, ceiling) };
     let halving = (!embedding.local).then_some(Halving { effective: batch_size, max_failed: state.map(|s| s.max_failed), halved: false });
 
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started };
+    let mut phase = Phase::begin(&ctx, "chunk_embed");
+    phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase };
     let mut batches: Vec<(String, Vec<Chunk>)> = vec![];
     let mut pending = 0;
-    for (rel, content) in entries {
-        if !to_index.contains(&rel) {
-            continue;
+    let mut chunks_seen = 0usize;
+    let streamed: Result<()> = async {
+        for (rel, content) in entries {
+            if !to_index.contains(&rel) {
+                continue;
+            }
+            check_cancel(options)?;
+            let text = match content {
+                Content::Text(text) => text,
+                Content::File(abs) => {
+                    let Ok(bytes) = std::fs::read(&abs) else { continue };
+                    String::from_utf8_lossy(&bytes).into_owned()
+                }
+            };
+            let lang = scan::language_of(&rel).unwrap_or("").to_string();
+            let (p, s, r) = (project_id.to_string(), source_id.to_string(), rel.clone());
+            let chunks = tokio::task::spawn_blocking(move || {
+                let text = normalize_content(&text);
+                chunk::chunk_file(&p, &s, &r, &text, &lang, Some(max_chars), sizes)
+            })
+            .await?;
+            for c in chunks {
+                match batches.last_mut() {
+                    Some((key, list)) if *key == rel => list.push(c),
+                    _ => batches.push((rel.clone(), vec![c])),
+                }
+                pending += 1;
+                chunks_seen += 1;
+                if chunks_seen & 0x3f == 0 {
+                    run.phase.sample();
+                }
+                if pending >= batch_size {
+                    check_cancel(options)?;
+                    run.flush(&mut batches).await?;
+                    pending = 0;
+                }
+            }
         }
-        check_cancel(options)?;
-        let text = match content {
-            Content::Text(text) => text,
-            Content::File(abs) => {
-                let Ok(bytes) = std::fs::read(&abs) else { continue };
-                String::from_utf8_lossy(&bytes).into_owned()
-            }
-        };
-        let lang = scan::language_of(&rel).unwrap_or("").to_string();
-        let (p, s, r) = (project_id.to_string(), source_id.to_string(), rel.clone());
-        let chunks = tokio::task::spawn_blocking(move || {
-            let text = normalize_content(&text);
-            chunk::chunk_file(&p, &s, &r, &text, &lang, Some(max_chars), sizes)
-        })
-        .await?;
-        for c in chunks {
-            match batches.last_mut() {
-                Some((key, list)) if *key == rel => list.push(c),
-                _ => batches.push((rel.clone(), vec![c])),
-            }
-            pending += 1;
-            if pending >= batch_size {
-                check_cancel(options)?;
-                run.flush(&mut batches).await?;
-                pending = 0;
-            }
-        }
+        run.flush(&mut batches).await
     }
-    run.flush(&mut batches).await?;
+    .await;
+    if let Err(e) = streamed {
+        run.phase.end(Outcome::of(&e));
+        return Err(e);
+    }
 
     // Files that produced no chunks still get a hash, or every run re-marks them.
+    let zero_chunk_files = to_index.iter().filter(|p| !run.seen_files.contains(*p)).count();
+    run.phase.set_work(json!({ "zero_chunk_files": zero_chunk_files }));
     for p in &to_index {
         if !run.seen_files.contains(p) {
             if let Some(h) = current.get(p) {
@@ -338,6 +441,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         }
     }
     save_hashes(&run.hash_path, &run.hashes)?;
+    run.phase.end(Outcome::Ok);
 
     if let Some(session) = &run.halving {
         let existing = state.map_or(0, |s| s.max_failed);
@@ -355,14 +459,27 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
 
     let did_work = !to_index.is_empty() || !to_remove.is_empty();
     if did_work && settings.hybrid_enabled {
-        if let Err(e) = store.create_fts_index(&table).await {
-            eprintln!("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only): {e:#}");
-        }
+        let mut fts_phase = Phase::begin(&ctx, "fts_index");
+        let built = match store.create_fts_index(&table).await {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[scrybe] FTS index creation failed (hybrid search will fall back to vector-only): {e:#}");
+                false
+            }
+        };
+        fts_phase.set_work(json!({ "built": built }));
+        fts_phase.end(Outcome::Ok);
     }
     if did_work {
         // Housekeeping: a failure here must not fail an index that has already been written.
-        let _ = store.compact_with_grace(&table).await;
-        store.prune_index_orphans(&table);
+        let mut compact_phase = Phase::begin(&ctx, "compact");
+        let compacted = store.compact_with_grace(&table).await.is_ok();
+        compact_phase.set_work(json!({ "compacted": compacted }));
+        compact_phase.end(Outcome::Ok);
+        let mut prune_phase = Phase::begin(&ctx, "prune_orphans");
+        let removed = store.prune_index_orphans(&table);
+        prune_phase.set_work(json!({ "orphans_removed": removed }));
+        prune_phase.end(Outcome::Ok);
         if mode == Mode::Full {
             vecindex::mark_full_reindex(&table);
         }

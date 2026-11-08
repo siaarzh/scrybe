@@ -602,7 +602,7 @@ impl Queue {
 
     /// `runTasks`, then the finishing half of `drain`.
     async fn run(self: Arc<Self>, item: Item, sources: Vec<String>, cancel: Arc<AtomicBool>) {
-        let options = Options { branch: item.branch.clone(), content_ref: item.content_ref.clone(), cancel: Some(cancel.clone()) };
+        let options = Options { branch: item.branch.clone(), content_ref: item.content_ref.clone(), cancel: Some(cancel.clone()), job_id: Some(item.job_id.clone()) };
         for (i, source) in sources.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 self.update_job(&item.job_id, |job| {

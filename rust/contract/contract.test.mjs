@@ -834,6 +834,105 @@ describe("the command line", () => {
   });
 });
 
+describe("per-phase memory records", () => {
+  const PHASE_KEYS = ["branch", "durationMs", "endRssBytes", "event", "final", "jobId", "level", "mode", "outcome", "peakRssBytes", "phase", "pid", "projectId", "seq", "sourceId", "startRssBytes", "ts", "work"];
+  const INTENT_KEYS = ["branch", "event", "jobId", "level", "mode", "pid", "projectId", "rssBytes", "sourceId", "stage", "ts"];
+  const read = (w) => readFileSync(join(w.data, "phase-log.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const phases = (records) => records.filter((r) => r.event === "indexer.phase");
+  const finals = (records) => phases(records).filter((r) => r.final).map((r) => r.phase);
+
+  function assertPhaseShape(r) {
+    assert.deepEqual(Object.keys(r).sort(), PHASE_KEYS);
+    assert.equal(r.level, "info");
+    assert.ok(["ok", "error", "cancelled"].includes(r.outcome));
+    assert.equal(typeof r.work, "object");
+    assert.ok(Number.isInteger(r.seq) && Number.isInteger(r.durationMs) && r.durationMs >= 0);
+    assert.equal(typeof r.final, "boolean");
+    if (process.platform === "linux") {
+      for (const k of ["startRssBytes", "peakRssBytes", "endRssBytes"]) assert.ok(Number.isInteger(r[k]) && r[k] > 1_000_000, `${k}: ${r[k]}`);
+      assert.ok(r.peakRssBytes >= r.startRssBytes && r.peakRssBytes >= r.endRssBytes);
+    }
+  }
+
+  describe("a full index from the command line", () => {
+    let w, records;
+    before(async () => {
+      w = await makeWorld();
+      await w.index("--full");
+      records = read(w);
+    });
+    after(() => w.stop());
+
+    test("writes one record per phase, in order, with the same keys", () => {
+      for (const r of phases(records)) assertPhaseShape(r);
+      const order = finals(records);
+      for (const name of ["preflight_health", "scan", "diff", "stale_apply", "chunk_embed", "compact", "prune_orphans"]) assert.ok(order.includes(name), `${name} missing from ${order}`);
+      const at = (n) => order.indexOf(n);
+      assert.ok(at("preflight_health") < at("scan") && at("scan") < at("diff") && at("diff") < at("stale_apply") && at("stale_apply") < at("chunk_embed") && at("chunk_embed") < at("compact") && at("compact") < at("prune_orphans"), order.join(","));
+      assert.ok(phases(records).every((r) => r.jobId === null && r.projectId === "demo" && r.sourceId === "primary" && r.mode === "full" && r.branch === w.main));
+      assert.equal(new Set(records.map((r) => r.pid)).size, 1);
+      assert.ok(Number.isInteger(records[0].pid) && records[0].pid > 0);
+    });
+
+    test("says what the job was told to do, before and after the scan", () => {
+      const intents = records.filter((r) => r.event === "indexer.job.intent");
+      assert.deepEqual(intents.map((r) => r.stage), ["started", "planned"]);
+      const [started, planned] = intents;
+      assert.deepEqual(Object.keys(started).sort(), [...INTENT_KEYS, "is_code"].sort());
+      assert.equal(started.is_code, true);
+      assert.deepEqual(Object.keys(planned).sort(), [...INTENT_KEYS, "files_total", "files_to_reindex", "files_to_remove", "is_non_head_branch", "provider"].sort());
+      assert.equal(planned.files_total, 2);
+      assert.equal(planned.files_to_reindex, 2);
+      assert.equal(planned.provider, "api");
+      assert.ok(records.indexOf(started) < records.findIndex((r) => r.phase === "scan"));
+      assert.ok(records.indexOf(planned) > records.findIndex((r) => r.phase === "diff"));
+      if (process.platform === "linux") assert.ok(started.rssBytes > 1_000_000);
+    });
+
+    test("carries each phase's own counters", () => {
+      const work = (name) => phases(records).find((r) => r.phase === name && r.final).work;
+      assert.deepEqual(work("preflight_health"), { table_state: "healthy", repaired: "none" });
+      assert.deepEqual(work("scan"), { scan_kind: "working-tree", sources_found: 2, cursor_used: false });
+      assert.deepEqual(work("diff"), { files_total: 2, prior_hashes: 0, files_to_reindex: 2, files_to_remove: 0 });
+      assert.equal(work("stale_apply").files_to_reindex, 2);
+      assert.ok(work("stale_apply").bytes_to_read > 0);
+      assert.equal(work("compact").compacted, true);
+      assert.ok(Number.isInteger(work("prune_orphans").orphans_removed));
+      const embed = work("chunk_embed");
+      assert.equal(embed.provider, "api");
+      assert.equal(embed.zero_chunk_files, 0);
+      assert.ok(embed.cumulative_chunks_prepared > 0 && embed.cumulative_files_seen === 2 && embed.cumulative_bytes_embedded > 0);
+      assert.ok(Object.keys(embed).includes("batch_size"));
+    });
+  });
+
+  describe("a job on the server", () => {
+    let w, c, names, id;
+    before(async () => {
+      w = await makeWorld();
+      c = w.client();
+      await c.hello();
+      names = await c.toolNames();
+    });
+    after(() => w.stop());
+
+    test("stamps the job id and the server's pid", async (t) => {
+      if (!names.includes("reindex_source")) return t.skip(`${BUILD} has no reindex_source yet`);
+      const started = await c.call("reindex_source", { project_id: "demo", source_id: "primary" });
+      id = started.value.job_id;
+      assert.ok(id, JSON.stringify(started));
+      await until(async () => ["done", "failed"].includes((await c.call("reindex_status", { job_id: id })).value?.status), 60_000, "the job");
+      const records = read(w);
+      assert.ok(phases(records).length >= 5);
+      for (const r of phases(records)) assertPhaseShape(r);
+      assert.ok(records.every((r) => r.jobId === id), JSON.stringify(records.map((r) => r.jobId)));
+      assert.ok(finals(records).includes("chunk_embed"));
+      assert.equal(records[0].pid, w.pidfile().pid);
+      assert.ok(phases(records).every((r) => r.mode === "incremental"));
+    });
+  });
+});
+
 test("the run's commands", () => {
   assert.ok(SERVER.length && CLI.length && RELAY.length);
 });

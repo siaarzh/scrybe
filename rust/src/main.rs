@@ -13,6 +13,7 @@ mod jobs;
 mod jsstr;
 mod lifecycle;
 mod mcp;
+mod phase;
 mod pinned;
 mod registry;
 mod scan;
@@ -158,7 +159,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Index { project_id, source_id, full, branch, content_ref } => {
             let mode = if full { index::Mode::Full } else { index::Mode::Incremental };
-            let summary = index::index_source(&store, &project_id, &source_id, mode, &index::Options { branch, content_ref, cancel: None }).await?;
+            let summary = index::index_source(&store, &project_id, &source_id, mode, &index::Options { branch, content_ref, cancel: None, job_id: None }).await?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Command::DebugChunks { project_id, source_id } => {
