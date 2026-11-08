@@ -8,13 +8,16 @@ import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { BUILD, CLI, GITLAB_PROJECT, GITLAB_TOKEN, RELAY, SERVER, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
+import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, RELAY, SERVER, fakeGithub, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
 
-// Rows the TypeScript build wrote for the fixture tracker below, with the second one's addition after an edit.
+// Rows the TypeScript build wrote for the fixture trackers below, with the second one's addition after an edit.
 const GITLAB_ROWS = JSON.parse(readFileSync(new URL("./gitlab-rows.json", import.meta.url), "utf8"));
+const GITHUB_ROWS = JSON.parse(readFileSync(new URL("./github-rows.json", import.meta.url), "utf8"));
 const byId = (a, b) => (a.chunk_id < b.chunk_id ? -1 : a.chunk_id > b.chunk_id ? 1 : 0);
 const EXPECTED_FULL = [...GITLAB_ROWS.full].sort(byId);
 const EXPECTED_AFTER_CHANGE = [...GITLAB_ROWS.full, ...GITLAB_ROWS.addedByChange].sort(byId);
+const GITHUB_FULL = [...GITHUB_ROWS.full].sort(byId);
+const GITHUB_AFTER_CHANGE = [...GITHUB_ROWS.full, ...GITHUB_ROWS.addedByChange].sort(byId);
 
 // Behaviour the Rust build doesn't match yet. Listed as todo, so they run and report without failing the run.
 const RUST_GAPS = new Set([]);
@@ -1105,6 +1108,188 @@ describe("GitLab issues, when the token fails", () => {
     const r = await indexIssues(w, "--full");
     assert.notEqual(r.status, 0);
     assert.ok((r.stderr + r.stdout).includes('GitLab token for project "demo" is expired or invalid (HTTP 401). Update it with: scrybe update-source --project-id demo --source-id <source-id> --gitlab-token <new-token>'), r.stderr + r.stdout);
+  });
+});
+
+// ─── GitHub issues ────────────────────────────────────────────────────────────
+
+const ghUrl = (n) => `https://github.example.invalid/acme/widgets/issues/${n}`;
+const ghIssue = (number, o) => ({
+  number, title: "", body: "", user: { login: "alice" }, state: "open", updated_at: "2026-01-05T10:00:00Z", html_url: ghUrl(number),
+  labels: [], milestone: null, assignees: [], ...o,
+});
+const ghComment = (id, body, o = {}) => ({ id, body, user: { login: "bob" }, created_at: "2026-01-06T09:30:00Z", ...o });
+
+const GH_PAGED_COMMENTS = Array.from({ length: 100 }, (_, i) => ghComment(i + 1, "   "));
+GH_PAGED_COMMENTS[6] = ghComment(7, "Page one comment.", { user: { login: "dave" } });
+GH_PAGED_COMMENTS[99] = ghComment(100, "Last on page one.", { user: { login: "erin" } });
+GH_PAGED_COMMENTS.push(ghComment(101, "Page two comment.", { user: { login: "frank" } }), ghComment(102, null));
+
+function seedGithub(gh) {
+  gh.state.issues = [
+    ghIssue(1, {
+      title: "Widget misaligned on resize", body: "The widget drifts left.\n\n- resize the window\n- watch the margin\n", labels: [{ name: "Bug" }, { name: "UI" }],
+      assignees: [{ login: "alice" }, { login: "carol" }], milestone: { title: "Sprint 1", due_on: "2026-12-01T00:00:00Z" },
+    }),
+    ghIssue(2, { title: "Long checklist", body: LONG_DESCRIPTION, state: "closed", user: { login: "bob" }, updated_at: "2026-01-04T10:00:00Z" }),
+    ghIssue(3, { title: "Überprüfung der Größe – 日本語 😀", body: "  Zeile eins\r\n\r\nЗвёздочка ★\rletzte Zeile  ", labels: [{ name: "größe" }], user: null, updated_at: "2026-01-03T10:00:00Z" }),
+    ghIssue(4, { title: "Fix the widget margin", body: "A pull request, not an issue.", pull_request: { url: "https://api.github.example.invalid/repos/acme/widgets/pulls/4" }, updated_at: "2026-01-03T11:00:00Z" }),
+    ghIssue(5, { title: "Pagination check", body: null, updated_at: "2026-01-02T10:00:00Z" }),
+  ];
+  gh.state.comments = {
+    1: [
+      ghComment(101, "Reproduced on the latest build.\r\nSee attached log.\r\n"),
+      ghComment(102, "Same here.", { user: null }),
+      ghComment(103, "   \n "),
+      ghComment(104, "Fixed in the next release ✓ — thanks!", { user: { login: "carol" }, created_at: "" }),
+    ],
+    4: [ghComment(201, "Looks good to me.")],
+    5: GH_PAGED_COMMENTS,
+  };
+}
+
+const githubSource = (gh) => ({ source_id: "issues", source_config: { type: "ticket", provider: "github", base_url: gh.url, project_id: GITHUB_PROJECT, token: "${CONTRACT_GITHUB_TOKEN}" } });
+const SCOPES = "Ensure the token has Issues: Read-only and Metadata: Read-only scopes (fine-grained PAT) or repo/public_repo (classic PAT).";
+const GH_LIST = "/repos/acme/widgets/issues";
+
+describe("GitHub issues", () => {
+  let gh, w, rows1;
+  before(async () => {
+    gh = await fakeGithub();
+    seedGithub(gh);
+    w = await makeWorld({ extraSources: [githubSource(gh)], serverEnv: { CONTRACT_GITHUB_TOKEN: GITHUB_TOKEN } });
+  });
+  after(async () => { await w.stop(); gh.close(); });
+
+  test("a full index writes the same rows, ids and metadata as today's build, pull requests left out", async (t) => {
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const log = gh.state.log;
+    assert.ok(log.every((l) => l.auth === `Bearer ${GITHUB_TOKEN}` && l.accept === "application/vnd.github+json" && l.version === "2022-11-28"));
+    assert.equal(log[0].url, `${GH_LIST}?state=all&per_page=100&page=1`);
+    for (const n of [1, 2, 3, 5]) {
+      assert.ok(log.some((l) => l.url === `${GH_LIST}/${n}`), `no request for issue ${n}`);
+      assert.ok(log.some((l) => l.url === `${GH_LIST}/${n}/comments?per_page=100&page=1`), `no comments request for issue ${n}`);
+    }
+    assert.ok(log.some((l) => l.url === `${GH_LIST}/5/comments?per_page=100&page=2`), "the second page of comments was not read");
+    assert.ok(log.every((l) => !l.url.includes("/issues/4")), "the pull request was fetched");
+    rows1 = await knowledgeRows(w);
+    if (!rows1) return t.skip("no LanceDB module to read the table with: set SCRYBE_CONTRACT_NODE_MODULES");
+    assert.deepEqual(summarize(rows1), GITHUB_FULL);
+    assert.ok(rows1.every(sameVector), "a row's vector is not the embedding of its content");
+  });
+
+  test("the source is registered and its cursor saved", () => {
+    const source = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources.find((s) => s.source_id === "issues");
+    assert.match(source.table_name, /^knowledge_[0-9a-f]{12}$/);
+    assert.ok(source.last_indexed);
+    assert.equal(source.source_config.token, "${CONTRACT_GITHUB_TOKEN}");
+    assert.match(JSON.parse(readFileSync(join(w.data, "cursors", "demo__issues.json"), "utf8")).updated_after, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/);
+    const hashes = JSON.parse(readFileSync(join(w.data, "hashes", "demo__issues___all_.json"), "utf8"));
+    assert.deepEqual(Object.keys(hashes).sort(), ["issues/1", "issues/2", "issues/3", "issues/5"]);
+  });
+
+  test("an incremental run asks for what changed and updates only that issue", async (t) => {
+    const cursor = JSON.parse(readFileSync(join(w.data, "cursors", "demo__issues.json"), "utf8")).updated_after;
+    const since = new Date(Date.parse(cursor) - 60_000).toISOString();
+    const changed = gh.state.issues.find((i) => i.number === 3);
+    changed.body = "Zeile eins, now rewritten.";
+    changed.updated_at = "2099-01-01T00:00:00Z";
+    gh.state.log.length = 0;
+    const r = await indexIssues(w);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const log = gh.state.log.map((l) => l.url);
+    assert.equal(log[0], `${GH_LIST}?state=all&since=${encodeURIComponent(since)}&per_page=100&page=1`);
+    assert.deepEqual(log.slice(1).sort(), [`${GH_LIST}/3`, `${GH_LIST}/3/comments?per_page=100&page=1`]);
+    assert.notEqual(JSON.parse(readFileSync(join(w.data, "cursors", "demo__issues.json"), "utf8")).updated_after, cursor);
+    const rows2 = await knowledgeRows(w);
+    if (!rows2) return t.skip("no LanceDB module to read the table with: set SCRYBE_CONTRACT_NODE_MODULES");
+    // The old rows of a changed issue stay until garbage collection.
+    assert.deepEqual(summarize(rows2), GITHUB_AFTER_CHANGE);
+  });
+
+  test("an unchanged tracker is read again but nothing is embedded", async () => {
+    const before = w.fake.log.length;
+    gh.state.log.length = 0;
+    const r = await indexIssues(w);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(w.fake.log.length, before);
+    assert.ok(gh.state.log.every((l) => !/issues\/\d/.test(l.url)), JSON.stringify(gh.state.log));
+  });
+});
+
+describe("GitHub issues, when the API pushes back", () => {
+  let gh, w;
+  const listHits = () => gh.state.log.filter((l) => l.url.startsWith(`${GH_LIST}?`)).length;
+  before(async () => {
+    gh = await fakeGithub();
+    seedGithub(gh);
+    w = await makeWorld({ extraSources: [githubSource(gh)], serverEnv: { CONTRACT_GITHUB_TOKEN: GITHUB_TOKEN } });
+  });
+  after(async () => { await w.stop(); gh.close(); });
+
+  test("a rate-limited first answer is waited out and retried", async (t) => {
+    let left = 1;
+    gh.state.intercept = (url) => (url.startsWith(`${GH_LIST}?`) && left-- > 0 ? { code: 429, headers: { "Retry-After": "1" } } : null);
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(listHits(), 2);
+    const rows = await knowledgeRows(w);
+    if (!rows) return t.skip("no LanceDB module to read the table with: set SCRYBE_CONTRACT_NODE_MODULES");
+    assert.deepEqual(summarize(rows), GITHUB_FULL);
+  });
+
+  test("an exhausted quota with a reset time is waited out too", async () => {
+    let left = 1;
+    const reset = String(Math.floor(Date.now() / 1000));
+    gh.state.intercept = (url) => (url.startsWith(`${GH_LIST}?`) && left-- > 0 ? { code: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": reset } } : null);
+    gh.state.log.length = 0;
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(listHits(), 2);
+  });
+
+  test("a limit that never lifts stops after three retries, naming the wait", async () => {
+    gh.state.intercept = (url) => (url.startsWith(`${GH_LIST}?`) ? { code: 429, headers: { "Retry-After": "1" } } : null);
+    gh.state.log.length = 0;
+    const r = await indexIssues(w, "--full");
+    assert.notEqual(r.status, 0);
+    assert.ok((r.stderr + r.stdout).includes('GitHub API rate limit exceeded for project "demo". Retry after 1s.'), r.stderr + r.stdout);
+    assert.equal(listHits(), 4);
+  });
+
+  test("a forbidden token without a rate limit fails at once", async () => {
+    gh.state.intercept = (url) => (url.startsWith(`${GH_LIST}?`) ? { code: 403 } : null);
+    gh.state.log.length = 0;
+    const r = await indexIssues(w, "--full");
+    assert.notEqual(r.status, 0);
+    assert.ok((r.stderr + r.stdout).includes(`GitHub token for project "demo" lacks required permissions (HTTP 403). ${SCOPES}`), r.stderr + r.stdout);
+    assert.equal(listHits(), 1);
+  });
+});
+
+describe("GitHub issues, when the token fails", () => {
+  let gh, w;
+  before(async () => {
+    gh = await fakeGithub();
+    seedGithub(gh);
+  });
+  after(async () => { await w?.stop(); gh.close(); });
+
+  test("an unset token variable fails before any request", async () => {
+    w = await makeWorld({ extraSources: [githubSource(gh)] });
+    const r = await indexIssues(w, "--full");
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr + r.stdout, /env var CONTRACT_GITHUB_TOKEN not set \(referenced in scrybe config\)/);
+    assert.equal(gh.state.log.length, 0);
+    await w.stop();
+  });
+
+  test("a rejected token names the project and the scopes", async () => {
+    w = await makeWorld({ extraSources: [githubSource(gh)], serverEnv: { CONTRACT_GITHUB_TOKEN: "not-the-token" } });
+    const r = await indexIssues(w, "--full");
+    assert.notEqual(r.status, 0);
+    assert.ok((r.stderr + r.stdout).includes(`GitHub token for project "demo" is invalid or expired (HTTP 401). ${SCOPES}`), r.stderr + r.stdout);
   });
 });
 

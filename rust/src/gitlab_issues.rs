@@ -25,13 +25,13 @@ pub struct KnowledgeChunk {
     pub confidential: String,
 }
 
-struct TicketConfig {
-    base_url: String,
-    project_id: String,
-    token: String,
+pub(crate) struct TicketConfig {
+    pub base_url: String,
+    pub project_id: String,
+    pub token: String,
 }
 
-fn ticket_config(source: &Source) -> Result<TicketConfig> {
+pub(crate) fn ticket_config(source: &Source) -> Result<TicketConfig> {
     if source.kind() != "ticket" {
         bail!("Source \"{}\" is not a ticket source", source.source_id);
     }
@@ -40,7 +40,7 @@ fn ticket_config(source: &Source) -> Result<TicketConfig> {
 }
 
 /// `encodeURIComponent`.
-fn encode_uri_component(s: &str) -> String {
+pub(crate) fn encode_uri_component(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
@@ -92,7 +92,7 @@ async fn fetch_all_pages(base_url: &str, token: &str, project_id: &str) -> Resul
 }
 
 /// JS truthiness of a JSON value.
-fn truthy(v: &Value) -> bool {
+pub(crate) fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -103,7 +103,7 @@ fn truthy(v: &Value) -> bool {
 }
 
 /// `${value}` in a JS template literal.
-fn js_str(v: &Value) -> String {
+pub(crate) fn js_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => "null".into(),
@@ -111,7 +111,7 @@ fn js_str(v: &Value) -> String {
     }
 }
 
-fn field_str(v: &Value, key: &str) -> String {
+pub(crate) fn field_str(v: &Value, key: &str) -> String {
     v.get(key).map_or_else(|| "undefined".to_string(), js_str)
 }
 
@@ -123,12 +123,12 @@ fn username(v: &Value) -> Result<String> {
     }
 }
 
-struct Meta {
-    state: String,
-    labels: String,
-    assignees: String,
-    milestone: String,
-    confidential: String,
+pub(crate) struct Meta {
+    pub state: String,
+    pub labels: String,
+    pub assignees: String,
+    pub milestone: String,
+    pub confidential: String,
 }
 
 /// `serializeIssueMetadata`: everything is a string, the multi-value fields JSON-encoded.
@@ -188,15 +188,15 @@ pub async fn scan_sources(project_id: &str, source: &Source, cursor: Option<&str
     Ok(map)
 }
 
-struct Emit<'a> {
-    project_id: &'a str,
-    source_id: &'a str,
-    meta: &'a Meta,
-    sizes: Sizes,
+pub(crate) struct Emit<'a> {
+    pub project_id: &'a str,
+    pub source_id: &'a str,
+    pub meta: &'a Meta,
+    pub sizes: Sizes,
 }
 
 impl Emit<'_> {
-    fn chunks(&self, item_path: &str, content: &str, author: &str, timestamp: &str, item_type: &str, item_url: &str) -> Vec<KnowledgeChunk> {
+    pub fn chunks(&self, item_path: &str, content: &str, author: &str, timestamp: &str, item_type: &str, item_url: &str) -> Vec<KnowledgeChunk> {
         let lines: Vec<String> = content.split('\n').map(|l| format!("{l}\n")).collect();
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         chunk_lines(&refs, 0, None, self.sizes)

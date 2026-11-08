@@ -1,17 +1,18 @@
 //! Indexes one ticket source. Mirrors the non-code path of `indexSource` in `src/indexer.ts`, with the
-//! GitLab plugin behind it. Not yet: the ticket poller, GitHub issues.
+//! GitLab or GitHub plugin behind it. Not yet: the ticket poller.
 use crate::branches::{self, Writer};
 use crate::chunk::Sizes;
 use crate::config::Settings;
 use crate::embed;
 use crate::embed_api::{self, Entry, Halving};
+use crate::github_issues;
 use crate::gitlab_issues::{self, KnowledgeChunk};
 use crate::index::{check_cancel, cursor_path, hashes_path, now_iso, repair_if_corrupt, Mode, Options};
 use crate::phase::{self, Outcome, Phase};
 use crate::registry::{self, EmbedConfig, Source};
 use crate::store::Store;
 use crate::vecindex;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -181,9 +182,8 @@ impl Run<'_> {
 pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Source, mode: Mode, options: &Options) -> Result<Value> {
     let source_id = source.source_id.as_str();
     let started = std::time::Instant::now();
-    if source.source_config.get("provider").and_then(Value::as_str) == Some("github") {
-        bail!("GitHub ticket sources are not supported by this build yet");
-    }
+    // Anything but "github" goes to the GitLab plugin.
+    let github = source.source_config.get("provider").and_then(Value::as_str) == Some("github");
     let embedding = registry::resolve_embedding(source)?;
     let table = match &source.table_name {
         Some(t) => t.clone(),
@@ -221,7 +221,8 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     let cursor = if mode == Mode::Full { None } else { load_cursor(project_id, source_id) };
 
     let mut scan_phase = Phase::begin(&ctx, "scan");
-    let scanned = match gitlab_issues::scan_sources(project_id, source, cursor.as_deref()).await {
+    let scan = if github { github_issues::scan_sources(project_id, source, cursor.as_deref()).await } else { gitlab_issues::scan_sources(project_id, source, cursor.as_deref()).await };
+    let scanned = match scan {
         Ok(s) => Ordered(s),
         Err(e) => {
             scan_phase.end(Outcome::of(&e));
@@ -297,7 +298,8 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     let streamed: Result<()> = async {
         for key in &to_index {
             check_cancel(options)?;
-            let Some(chunks) = gitlab_issues::fetch_issue_chunks(project_id, source, key, sizes).await? else { continue };
+            let fetched = if github { github_issues::fetch_issue_chunks(project_id, source, key, sizes).await? } else { gitlab_issues::fetch_issue_chunks(project_id, source, key, sizes).await? };
+            let Some(chunks) = fetched else { continue };
             for c in chunks {
                 match batches.last_mut() {
                     Some((k, list)) if *k == c.item_path => list.push(c),
@@ -314,7 +316,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
                     pending = 0;
                 }
             }
-            // GitLab allows about 10 requests a second.
+            // Keeps clear of the trackers' rate limits.
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         run.flush(&mut batches).await

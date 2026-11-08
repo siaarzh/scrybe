@@ -95,6 +95,41 @@ export async function fakeGitlab({ token = GITLAB_TOKEN } = {}) {
   return { url: `http://127.0.0.1:${server.address().port}`, state, close: () => server.close() };
 }
 
+export const GITHUB_TOKEN = "contract-github-token";
+export const GITHUB_PROJECT = "acme/widgets";
+
+/** A minimal GitHub issues API: list (pull requests included), one issue and its comments, 100 per page, `since`, bearer auth. `intercept(url)` may answer instead. */
+export async function fakeGithub({ token = GITHUB_TOKEN } = {}) {
+  const state = { issues: [], comments: {}, log: [], intercept: null };
+  const server = http.createServer((req, res) => {
+    state.log.push({ url: req.url, auth: req.headers.authorization, accept: req.headers.accept, version: req.headers["x-github-api-version"] });
+    const send = (code, body, headers = {}) => {
+      res.writeHead(code, { "Content-Type": "application/json", ...headers });
+      res.end(JSON.stringify(body));
+    };
+    const forced = state.intercept?.(req.url);
+    if (forced) return send(forced.code, forced.body ?? { message: "pushed back" }, forced.headers);
+    if (req.headers.authorization !== `Bearer ${token}`) return send(401, { message: "Bad credentials" });
+    const url = new URL(req.url, "http://localhost");
+    const m = url.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/issues(?:\/(\d+)(\/comments)?)?$/);
+    if (!m || m[1] !== GITHUB_PROJECT) return send(404, { message: "Not Found" });
+    const page = (all) => {
+      const per = Number(url.searchParams.get("per_page") ?? 30);
+      const n = Number(url.searchParams.get("page") ?? 1);
+      return all.slice((n - 1) * per, n * per);
+    };
+    if (m[2] === undefined) {
+      const since = url.searchParams.get("since");
+      return send(200, page(state.issues.filter((i) => since === null || Date.parse(i.updated_at) >= Date.parse(since))));
+    }
+    const issue = state.issues.find((i) => i.number === Number(m[2]));
+    if (!issue) return send(404, { message: "Not Found" });
+    return send(200, m[3] ? page(state.comments[issue.number] ?? []) : issue);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}`, state, close: () => server.close() };
+}
+
 export const FILES = {
   "src/widget.ts": "export function frobnicateWidget(size: number): number {\n  // widens the widget by a fixed margin\n  return size + 12;\n}\n\nexport class WidgetStore {\n  count = 0;\n  addWidget(): number {\n    this.count += 1;\n    return this.count;\n  }\n}\n",
   "src/gadget.py": "def calibrate_gadget(level):\n    \"\"\"Sets the gadget to a level.\"\"\"\n    return level * 3\n\n\nclass GadgetRack:\n    def mount(self, gadget):\n        return gadget\n",
