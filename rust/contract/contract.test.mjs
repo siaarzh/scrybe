@@ -7,7 +7,14 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
-import { BUILD, CLI, RELAY, SERVER, makeWorld, sleep, until } from "./harness.mjs";
+import { pathToFileURL } from "node:url";
+import { BUILD, CLI, GITLAB_PROJECT, GITLAB_TOKEN, RELAY, SERVER, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
+
+// Rows the TypeScript build wrote for the fixture tracker below, with the second one's addition after an edit.
+const GITLAB_ROWS = JSON.parse(readFileSync(new URL("./gitlab-rows.json", import.meta.url), "utf8"));
+const byId = (a, b) => (a.chunk_id < b.chunk_id ? -1 : a.chunk_id > b.chunk_id ? 1 : 0);
+const EXPECTED_FULL = [...GITLAB_ROWS.full].sort(byId);
+const EXPECTED_AFTER_CHANGE = [...GITLAB_ROWS.full, ...GITLAB_ROWS.addedByChange].sort(byId);
 
 // Behaviour the Rust build doesn't match yet. Listed as todo, so they run and report without failing the run.
 const RUST_GAPS = new Set([]);
@@ -930,6 +937,174 @@ describe("per-phase memory records", () => {
       assert.equal(records[0].pid, w.pidfile().pid);
       assert.ok(phases(records).every((r) => r.mode === "incremental"));
     });
+  });
+});
+
+// ─── GitLab issues ────────────────────────────────────────────────────────────
+
+const issueUrl = (iid) => `https://tracker.example.invalid/demo/tracker/-/issues/${iid}`;
+const gitlabIssue = (iid, o) => ({
+  iid, title: "", description: "", author: { username: "alice" }, updated_at: "2026-01-05T10:00:00.000Z", web_url: issueUrl(iid),
+  state: "opened", labels: [], milestone: null, assignees: [], confidential: false, ...o,
+});
+const gitlabNote = (id, body, o = {}) => ({ id, body, author: { username: "bob" }, system: false, created_at: "2026-01-06T09:30:00.000Z", ...o });
+
+const LONG_DESCRIPTION = Array.from({ length: 130 }, (_, i) => `Step ${i + 1}: check the gadget alignment`).join("\n");
+const PAGED_NOTES = Array.from({ length: 100 }, (_, i) => gitlabNote(i + 1, `status changed ${i + 1}`, { system: true }));
+PAGED_NOTES[6] = gitlabNote(7, "Page one note.", { author: { username: "dave" } });
+PAGED_NOTES[99] = gitlabNote(100, "Last on page one.", { author: { username: "erin" } });
+PAGED_NOTES.push(gitlabNote(101, "Page two note.", { author: { username: "frank" } }), gitlabNote(102, ""));
+
+function seedGitlab(gl) {
+  gl.state.issues = [
+    gitlabIssue(1, {
+      title: "Widget misaligned on resize", description: "The widget drifts left.\n\n- resize the window\n- watch the margin\n", labels: ["Bug", "UI"],
+      assignees: [{ username: "alice" }, { username: "carol" }], milestone: { title: "Sprint 1", due_date: "2026-12-01" }, updated_at: "2026-01-05T10:00:00.000Z",
+    }),
+    gitlabIssue(2, { title: "Long checklist", description: LONG_DESCRIPTION, state: "closed", confidential: true, author: { username: "bob" }, updated_at: "2026-01-04T10:00:00.000Z" }),
+    gitlabIssue(3, { title: "Überprüfung der Größe – 日本語 😀", description: "  Zeile eins\r\n\r\nЗвёздочка ★\rletzte Zeile  ", labels: ["größe"], milestone: { title: "Später", due_date: null }, updated_at: "2026-01-03T10:00:00.000Z" }),
+    gitlabIssue(4, { title: "Pagination check", description: null, updated_at: "2026-01-02T10:00:00.000Z" }),
+  ];
+  gl.state.notes = {
+    1: [
+      gitlabNote(101, "Reproduced on the latest build.\r\nSee attached log.\r\n"),
+      gitlabNote(102, "changed the description", { system: true }),
+      gitlabNote(103, "   \n "),
+      gitlabNote(104, "Fixed in the next release ✓ — thanks!", { author: { username: "carol" }, created_at: "" }),
+    ],
+    4: PAGED_NOTES,
+  };
+}
+
+async function lanceModule() {
+  const nm = process.env.SCRYBE_CONTRACT_NODE_MODULES ?? (CLI[1]?.endsWith("index.js") ? join(CLI[1], "..", "..", "..") : null);
+  if (!nm) return null;
+  try { return await import(pathToFileURL(join(nm, "@lancedb/lancedb/dist/index.js")).href); } catch { return null; }
+}
+
+/** Every row of the issues table, vectors included, in a stable order. */
+async function knowledgeRows(w) {
+  const lance = await lanceModule();
+  if (!lance) return null;
+  const table = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources.find((s) => s.source_id === "issues").table_name;
+  const t = await (await lance.connect(join(w.data, "lancedb"))).openTable(table);
+  const cols = ["chunk_id", "project_id", "source_id", "item_path", "item_url", "item_type", "author", "timestamp", "content", "state", "labels", "assignees", "milestone", "confidential"];
+  return (await t.query().toArray()).map((r) => ({ ...Object.fromEntries(cols.map((c) => [c, r[c]])), vector: Array.from(r.vector) })).sort(byId);
+}
+
+const summarize = (rows) => rows.map((r) => ({
+  chunk_id: r.chunk_id, item_path: r.item_path, item_url: r.item_url, item_type: r.item_type, author: r.author, timestamp: r.timestamp,
+  state: r.state, labels: r.labels, assignees: r.assignees, milestone: r.milestone, confidential: r.confidential,
+  length: r.content.length, head: r.content.slice(0, 32),
+}));
+
+const sameVector = (row) => {
+  const want = Array.from(Float32Array.from(vectorFor(row.content)));
+  return row.vector.length === want.length && row.vector.every((x, i) => Math.abs(x - want[i]) < 1e-6);
+};
+
+const ticketSource = (gl) => ({ source_id: "issues", source_config: { type: "ticket", provider: "gitlab", base_url: gl.url, project_id: GITLAB_PROJECT, token: "${CONTRACT_GITLAB_TOKEN}" } });
+const indexIssues = (w, ...extra) => w.cli("index", "-P", "demo", "-S", "issues", ...extra);
+
+describe("GitLab issues", () => {
+  let gl, w, rows1;
+  const listUrl = (page, extra = "") => `/api/v4/projects/demo%2Ftracker/issues?state=all${extra}&per_page=100&page=${page}`;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN } });
+  });
+  after(async () => { await w.stop(); gl.close(); });
+
+  test("a full index writes the same rows, ids and metadata as today's build", async (t) => {
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const log = gl.state.log;
+    assert.ok(log.every((l) => l.auth === `Bearer ${GITLAB_TOKEN}` && l.contentType === "application/json"));
+    assert.equal(log[0].url, listUrl(1));
+    for (const iid of [1, 2, 3, 4]) {
+      assert.ok(log.some((l) => l.url === `/api/v4/projects/demo%2Ftracker/issues/${iid}`), `no request for issue ${iid}`);
+      assert.ok(log.some((l) => l.url === `/api/v4/projects/demo%2Ftracker/issues/${iid}/notes?per_page=100&page=1`), `no notes request for issue ${iid}`);
+    }
+    assert.ok(log.some((l) => l.url === "/api/v4/projects/demo%2Ftracker/issues/4/notes?per_page=100&page=2"), "the second page of notes was not read");
+    rows1 = await knowledgeRows(w);
+    if (!rows1) return t.skip("no LanceDB module to read the table with: set SCRYBE_CONTRACT_NODE_MODULES");
+    assert.deepEqual(summarize(rows1), EXPECTED_FULL);
+    assert.ok(rows1.every(sameVector), "a row's vector is not the embedding of its content");
+  });
+
+  test("the source is registered and its cursor saved", () => {
+    const source = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources.find((s) => s.source_id === "issues");
+    assert.match(source.table_name, /^knowledge_[0-9a-f]{12}$/);
+    assert.ok(source.last_indexed);
+    assert.equal(source.source_config.token, "${CONTRACT_GITLAB_TOKEN}");
+    assert.match(JSON.parse(readFileSync(join(w.data, "cursors", "demo__issues.json"), "utf8")).updated_after, /^\d{4}-\d\d-\d\dT[\d:.]+Z$/);
+    const hashes = JSON.parse(readFileSync(join(w.data, "hashes", "demo__issues___all_.json"), "utf8"));
+    assert.deepEqual(Object.keys(hashes).sort(), ["issues/1", "issues/2", "issues/3", "issues/4"]);
+  });
+
+  test("search_knowledge finds the indexed issues", async () => {
+    const c = w.client();
+    await c.hello();
+    const { value, isError } = await c.call("search_knowledge", { project_id: "demo", query: "Pagination check", top_k: 20, source_id: "issues" });
+    assert.equal(isError, false);
+    const hit = value.find((h) => h.item_path === "issues/4");
+    assert.equal(hit.item_type, "ticket");
+    assert.equal(hit.item_url, issueUrl(4));
+    assert.ok(value.some((h) => h.item_path === "issues/1#note_104" && h.item_type === "ticket_comment"));
+  });
+
+  test("an incremental run asks for what changed and updates only that issue", async (t) => {
+    const cursor = JSON.parse(readFileSync(join(w.data, "cursors", "demo__issues.json"), "utf8")).updated_after;
+    const since = new Date(Date.parse(cursor) - 60_000).toISOString();
+    const changed = gl.state.issues.find((i) => i.iid === 3);
+    changed.description = "Zeile eins, now rewritten.";
+    changed.updated_at = "2099-01-01T00:00:00.000Z";
+    gl.state.log.length = 0;
+    const r = await indexIssues(w);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const log = gl.state.log.map((l) => l.url);
+    assert.equal(log[0], listUrl(1, `&updated_after=${encodeURIComponent(since)}`));
+    assert.deepEqual(log.slice(1), ["/api/v4/projects/demo%2Ftracker/issues/3", "/api/v4/projects/demo%2Ftracker/issues/3/notes?per_page=100&page=1"]);
+    assert.notEqual(JSON.parse(readFileSync(join(w.data, "cursors", "demo__issues.json"), "utf8")).updated_after, cursor);
+    const rows2 = await knowledgeRows(w);
+    if (!rows2) return t.skip("no LanceDB module to read the table with: set SCRYBE_CONTRACT_NODE_MODULES");
+    // The old rows of a changed issue stay until garbage collection.
+    assert.deepEqual(summarize(rows2), EXPECTED_AFTER_CHANGE);
+  });
+
+  test("an unchanged tracker is read again but nothing is embedded", async () => {
+    const before = w.fake.log.length;
+    gl.state.log.length = 0;
+    const r = await indexIssues(w);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    assert.equal(w.fake.log.length, before);
+    assert.ok(gl.state.log.every((l) => !/issues\/\d/.test(l.url)), JSON.stringify(gl.state.log));
+  });
+});
+
+describe("GitLab issues, when the token fails", () => {
+  let gl, w;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+  });
+  after(async () => { await w?.stop(); gl.close(); });
+
+  test("an unset token variable fails before any request", async () => {
+    w = await makeWorld({ extraSources: [ticketSource(gl)] });
+    const r = await indexIssues(w, "--full");
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr + r.stdout, /env var CONTRACT_GITLAB_TOKEN not set \(referenced in scrybe config\)/);
+    assert.equal(gl.state.log.length, 0);
+    await w.stop();
+  });
+
+  test("a rejected token names the project and the fix", async () => {
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { CONTRACT_GITLAB_TOKEN: "not-the-token" } });
+    const r = await indexIssues(w, "--full");
+    assert.notEqual(r.status, 0);
+    assert.ok((r.stderr + r.stdout).includes('GitLab token for project "demo" is expired or invalid (HTTP 401). Update it with: scrybe update-source --project-id demo --source-id <source-id> --gitlab-token <new-token>'), r.stderr + r.stdout);
   });
 });
 

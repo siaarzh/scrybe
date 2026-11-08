@@ -32,7 +32,7 @@ export async function until(cond, ms = 30_000, what = "condition") {
   }
 }
 
-function vectorFor(text) {
+export function vectorFor(text) {
   const d = createHash("sha256").update(text).digest();
   const v = Array.from(d.subarray(0, DIM), (b) => b / 255);
   const n = Math.hypot(...v) || 1;
@@ -60,6 +60,39 @@ export async function fakeEmbedder() {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   return { url: `http://127.0.0.1:${server.address().port}/v1`, log, close: () => server.close() };
+}
+
+export const GITLAB_TOKEN = "contract-gitlab-token";
+export const GITLAB_PROJECT = "demo/tracker";
+
+/** A minimal GitLab issues API: list, one issue and its notes, 100 per page, `updated_after`, bearer auth. */
+export async function fakeGitlab({ token = GITLAB_TOKEN } = {}) {
+  const state = { issues: [], notes: {}, log: [] };
+  const server = http.createServer((req, res) => {
+    state.log.push({ url: req.url, auth: req.headers.authorization, contentType: req.headers["content-type"] });
+    const send = (code, body) => {
+      res.writeHead(code, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.headers.authorization !== `Bearer ${token}`) return send(401, { message: "401 Unauthorized" });
+    const url = new URL(req.url, "http://localhost");
+    const m = url.pathname.match(/^\/api\/v4\/projects\/([^/]+)\/issues(?:\/(\d+)(\/notes)?)?$/);
+    if (!m || decodeURIComponent(m[1]) !== GITLAB_PROJECT) return send(404, { message: "404 Not Found" });
+    const page = (all) => {
+      const per = Number(url.searchParams.get("per_page") ?? 20);
+      const n = Number(url.searchParams.get("page") ?? 1);
+      return all.slice((n - 1) * per, n * per);
+    };
+    if (m[2] === undefined) {
+      const since = url.searchParams.get("updated_after");
+      return send(200, page(state.issues.filter((i) => since === null || Date.parse(i.updated_at) >= Date.parse(since))));
+    }
+    const issue = state.issues.find((i) => i.iid === Number(m[2]));
+    if (!issue) return send(404, { message: "404 Not found" });
+    return send(200, m[3] ? page(state.notes[issue.iid] ?? []) : issue);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}`, state, close: () => server.close() };
 }
 
 export const FILES = {
@@ -94,7 +127,7 @@ export function makeRepo(root) {
 }
 
 /** Everything one test group needs. `stop()` leaves nothing running. */
-export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin = false } = {}) {
+export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin = false, extraSources = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "scrybe-contract-"));
   const fake = embedder ?? (await fakeEmbedder());
   const repo = join(dir, "repo");
@@ -112,7 +145,7 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
   const presets = { fake: { provider: "custom", model: "fake-model", dim: DIM, base_url: fake.url, credentials: "${CONTRACT_EMBED_KEY}" } };
   writeFileSync(join(data, "config.json"), JSON.stringify({ schema_version: 1, embedding_presets: presets, assignments: { code_preset: "fake", text_preset: "fake" } }, null, 2));
   const source = { source_id: "primary", source_config: { type: "code", root_path: repo, languages: [] }, ...(pinned ? { pinned_branches: pinned } : {}) };
-  writeFileSync(join(data, "projects.json"), JSON.stringify([{ id: "demo", description: "A demo", sources: [source] }], null, 2));
+  writeFileSync(join(data, "projects.json"), JSON.stringify([{ id: "demo", description: "A demo", sources: [source, ...extraSources] }], null, 2));
   const env = {
     ...process.env,
     SCRYBE_DATA_DIR: data,

@@ -23,7 +23,7 @@ pub struct ApiError {
     pub message: String,
 }
 
-fn client() -> &'static reqwest::Client {
+pub fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(600)).build().expect("HTTP client"))
 }

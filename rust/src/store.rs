@@ -2,6 +2,7 @@
 use crate::config::{data_dir, Settings};
 use anyhow::Result;
 use crate::chunk::Chunk;
+use crate::gitlab_issues::KnowledgeChunk;
 use arrow_array::{Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeStringArray, RecordBatch, RecordBatchIterator, StringArray, StringViewArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
@@ -187,6 +188,13 @@ fn code_schema(dimensions: i32) -> Arc<Schema> {
     ]))
 }
 
+fn knowledge_schema(dimensions: i32) -> Arc<Schema> {
+    let text = |n: &str| Field::new(n, DataType::Utf8, false);
+    let mut fields: Vec<Field> = ["chunk_id", "project_id", "source_id", "item_path", "item_url", "item_type", "author", "timestamp", "content", "state", "labels", "assignees", "milestone", "confidential"].iter().map(|n| text(n)).collect();
+    fields.push(Field::new("vector", DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, false)), dimensions), false));
+    Arc::new(Schema::new(fields))
+}
+
 impl Store {
     pub fn new(settings: Settings) -> Self {
         Store { db: OnceCell::new(), tables: Mutex::default(), has_vector_index: Mutex::default(), settings }
@@ -277,6 +285,69 @@ impl Store {
         std::fs::write(db_path().join(format!("{name}-meta.json")), serde_json::to_string_pretty(&meta)? + "\n")?;
         self.tables.lock().unwrap().insert(name.to_string(), table.clone());
         Ok(table)
+    }
+
+    /// `getProjectTable` for a knowledge write: also stamps the metadata-schema version.
+    async fn open_or_create_knowledge(&self, name: &str, dimensions: i32) -> Result<Table> {
+        if let Some(t) = self.open(name).await? {
+            return Ok(t);
+        }
+        std::fs::create_dir_all(db_path())?;
+        let table = self.conn().await?.create_empty_table(name, knowledge_schema(dimensions)).execute().await?;
+        let meta = serde_json::json!({
+            "chunk_id_scheme": CURRENT_CHUNK_ID_SCHEME,
+            "chunk_id_scheme_introduced_in": "0.31.0",
+            "knowledge_schema_version": 2,
+            "knowledge_schema_version_introduced_in": "0.41.0",
+        });
+        std::fs::write(db_path().join(format!("{name}-meta.json")), serde_json::to_string_pretty(&meta)? + "\n")?;
+        self.tables.lock().unwrap().insert(name.to_string(), table.clone());
+        Ok(table)
+    }
+
+    /// `upsertKnowledge` through `writeWithRetry`.
+    pub async fn upsert_knowledge(&self, name: &str, rows: &[(KnowledgeChunk, Vec<f32>)]) -> Result<()> {
+        match self.upsert_knowledge_once(name, rows).await {
+            Err(e) if is_commit_conflict(&format!("{e:#}")) => {
+                self.tables.lock().unwrap().remove(name);
+                eprintln!("[scrybe] commit conflict on '{name}' — evicting cached table handle and retrying");
+                self.upsert_knowledge_once(name, rows).await
+            }
+            other => other,
+        }
+    }
+
+    async fn upsert_knowledge_once(&self, name: &str, rows: &[(KnowledgeChunk, Vec<f32>)]) -> Result<()> {
+        let Some(dim) = rows.first().map(|(_, v)| v.len() as i32) else { return Ok(()) };
+        let table = self.open_or_create_knowledge(name, dim).await?;
+        let schema = knowledge_schema(dim);
+        let text = |f: &dyn Fn(&KnowledgeChunk) -> &str| -> ArrayRef { Arc::new(StringArray::from_iter_values(rows.iter().map(|(c, _)| f(c)))) };
+        let flat: Vec<f32> = rows.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+        let vectors = FixedSizeListArray::try_new(Arc::new(Field::new("item", DataType::Float32, false)), dim, Arc::new(Float32Array::from(flat)), None)?;
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                text(&|c| &c.chunk_id),
+                text(&|c| &c.project_id),
+                text(&|c| &c.source_id),
+                text(&|c| &c.item_path),
+                text(&|c| &c.item_url),
+                text(&|c| &c.item_type),
+                text(&|c| &c.author),
+                text(&|c| &c.timestamp),
+                text(&|c| &c.content),
+                text(&|c| &c.state),
+                text(&|c| &c.labels),
+                text(&|c| &c.assignees),
+                text(&|c| &c.milestone),
+                text(&|c| &c.confidential),
+                Arc::new(vectors),
+            ],
+        )?;
+        let mut merge = table.merge_insert(&["chunk_id"]);
+        merge.when_matched_update_all(None).when_not_matched_insert_all();
+        merge.execute(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema))).await?;
+        Ok(())
     }
 
     /// `countTableRows`.

@@ -1,6 +1,6 @@
 //! The job queue and its durable rows. Mirrors `src/daemon/queue.ts`, `src/jobs.ts` and `src/jobs-store.ts`:
 //! no two jobs for one project at once, a cap across projects, and rows other processes can read.
-//! Not yet: ticket sources, which fail as unsupported.
+//! Not yet: the ticket poller.
 use crate::branches::SCHEMA;
 use crate::config::data_dir;
 use crate::index::{self, Mode, Options};

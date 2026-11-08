@@ -8,7 +8,9 @@ mod config;
 mod embed;
 mod embed_api;
 mod git;
+mod gitlab_issues;
 mod index;
+mod index_ticket;
 mod jobs;
 mod jsstr;
 mod lifecycle;
@@ -65,7 +67,7 @@ enum Command {
     },
     /// Print token ids for a JSON list of texts in a file (parity checks)
     DebugTokens { file: String, #[arg(long, default_value = "Xenova/multilingual-e5-small")] model: String },
-    /// Index one code source into a scratch data dir (refuses the live one)
+    /// Index one code or GitLab issues source into a scratch data dir (refuses the live one)
     Index {
         #[arg(short = 'P', long = "project-id")]
         project_id: String,

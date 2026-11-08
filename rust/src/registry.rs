@@ -142,7 +142,7 @@ fn catalog(provider: &str, model: &str) -> Result<(String, i32)> {
 }
 
 /// `resolveEnvRef`: every `${VAR}` must be set.
-fn resolve_env_ref(value: &str) -> Result<String> {
+pub fn resolve_env_ref(value: &str) -> Result<String> {
     let re = regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}")?;
     let mut out = String::new();
     let mut last = 0;

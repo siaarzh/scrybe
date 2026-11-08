@@ -1,5 +1,5 @@
 //! Indexes one code source. Mirrors the code path of `indexSource` in `src/indexer.ts`, from the working
-//! tree or from a git ref. Not yet: ticket sources.
+//! tree or from a git ref. Ticket sources go to `index_ticket`.
 use crate::branches::{self, Writer};
 use crate::chunk::{self, Chunk, Sizes};
 use crate::config::{data_dir, Settings};
@@ -40,7 +40,7 @@ pub struct Options {
 /// The error a cancelled run ends with.
 pub const CANCELLED: &str = "INDEX_CANCELLED";
 
-fn check_cancel(options: &Options) -> Result<()> {
+pub(crate) fn check_cancel(options: &Options) -> Result<()> {
     if options.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
         bail!(CANCELLED);
     }
@@ -89,11 +89,11 @@ fn save_hashes(path: &Path, hashes: &HashMap<String, String>) -> Result<()> {
     Ok(())
 }
 
-fn cursor_path(project: &str, source: &str) -> PathBuf {
+pub(crate) fn cursor_path(project: &str, source: &str) -> PathBuf {
     data_dir().join("cursors").join(format!("{project}__{source}.json"))
 }
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
@@ -103,17 +103,21 @@ fn dedupe(rows: Vec<(Chunk, Vec<f32>)>) -> Vec<(Chunk, Vec<f32>)> {
     rows.into_iter().filter(|(c, _)| seen.insert(c.chunk_id.clone())).collect()
 }
 
-fn expected_dimensions(cfg: &EmbedConfig) -> i32 {
+/// `getExpectedDimensions`: the text profile prefers its own entry, then falls back to the code one.
+fn expected_dimensions(cfg: &EmbedConfig, text: bool) -> i32 {
     let meta: Option<Value> = std::fs::read_to_string(data_dir().join("embedding-meta.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
-    let from_meta = meta.and_then(|m| m["code"]["dimensions"].as_i64().or(m["dimensions"].as_i64()));
+    let from_meta = meta.and_then(|m| {
+        let own = if text { m["text"]["dimensions"].as_i64() } else { None };
+        own.or(m["code"]["dimensions"].as_i64()).or(m["dimensions"].as_i64())
+    });
     from_meta.map_or(cfg.dimensions, |d| d as i32)
 }
 
 /// The full-index health check. A corrupt table is dropped and rebuilt by the index that follows. Today's
 /// code also tries a version rollback, but it calls a method the LanceDB package doesn't have, so it never
 /// runs and that branch isn't ported. Returns the table's state and how it was repaired.
-async fn repair_if_corrupt(store: &Store, table: &str, project: &str, source: &str, cfg: &EmbedConfig) -> (&'static str, &'static str) {
-    match store.table_health(table, Some(expected_dimensions(cfg))).await {
+pub(crate) async fn repair_if_corrupt(store: &Store, table: &str, project: &str, source: &str, cfg: &EmbedConfig, text: bool) -> (&'static str, &'static str) {
+    match store.table_health(table, Some(expected_dimensions(cfg, text))).await {
         Health::Corrupt(reason) => {
             eprintln!("[scrybe] table {table} is corrupt ({reason}): rebuilding");
             let mut repaired = "none";
@@ -238,8 +242,11 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     let started = std::time::Instant::now();
     let project = registry::get_project(project_id).with_context(|| format!("Project '{project_id}' not found"))?;
     let source: &Source = project.sources.iter().find(|s| s.source_id == source_id).with_context(|| format!("Source '{source_id}' not found in project '{project_id}'"))?;
+    if source.kind() == "ticket" {
+        return crate::index_ticket::index_ticket_source(store, project_id, source, mode, options).await;
+    }
     if source.kind() != "code" {
-        bail!("this build only indexes code sources, not ticket sources yet");
+        bail!("No plugin registered for source type \"{}\"", source.kind());
     }
     let embedding = registry::resolve_embedding(source)?;
     let table = match &source.table_name {
@@ -277,7 +284,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     if mode == Mode::Full {
         let mut phase = Phase::begin(&ctx, "preflight_health");
         phase.set_work(json!({ "table_state": "unknown", "repaired": "none" }));
-        let (table_state, repaired) = repair_if_corrupt(store, &table, project_id, source_id, &embedding).await;
+        let (table_state, repaired) = repair_if_corrupt(store, &table, project_id, source_id, &embedding, false).await;
         phase.set_work(json!({ "table_state": table_state, "repaired": repaired }));
         phase.end(Outcome::Ok);
     }
