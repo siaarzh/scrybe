@@ -1,5 +1,5 @@
 //! Indexes one code source. Mirrors the code path of `indexSource` in `src/indexer.ts`, from the working
-//! tree or from a git ref. Not yet: ticket sources, phase telemetry, the rebuild-cadence bookkeeping.
+//! tree or from a git ref. Not yet: ticket sources, phase telemetry.
 use crate::branches::{self, Writer};
 use crate::chunk::{self, Chunk, Sizes};
 use crate::config::{data_dir, Settings};
@@ -10,6 +10,7 @@ use crate::jsstr::normalize_content;
 use crate::registry::{self, EmbedConfig, Source};
 use crate::scan;
 use crate::store::{Health, Store};
+use crate::vecindex;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -173,7 +174,9 @@ impl Run<'_> {
             let before = self.store.count_rows(&self.table).await.unwrap_or(0);
             self.store.upsert_code(&self.table, &rows).await?;
             let after = self.store.count_rows(&self.table).await.unwrap_or(0);
-            self.persisted += after.saturating_sub(before);
+            let added = after.saturating_sub(before);
+            self.persisted += added;
+            vecindex::record_upsert(&self.table, added, after);
         }
         for (key, chunks) in batches.iter() {
             self.writer.add_tags(key, chunks)?;
@@ -360,6 +363,9 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         // Housekeeping: a failure here must not fail an index that has already been written.
         let _ = store.compact_with_grace(&table).await;
         store.prune_index_orphans(&table);
+        if mode == Mode::Full {
+            vecindex::mark_full_reindex(&table);
+        }
     }
     if let Some(sha) = sha {
         if let Err(e) = run.writer.set_last_indexed_sha(&sha) {

@@ -3,6 +3,7 @@
 //! A small HTTP reader on purpose: one request per connection, no new compile cost.
 //! Not yet: ticket polling, the vector index backfill, pinned-branch routes, the RSS guard, install.
 use crate::autogc::{self, AutoGc};
+use crate::vecindex;
 use crate::config::{data_dir, VERSION};
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
@@ -611,6 +612,7 @@ pub async fn serve(store: Store) -> Result<()> {
     let d = Arc::new(Daemon { store, queue: queue.clone(), autogc: AutoGc::new(queue.clone()), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
     let _owner = owner;
     d.autogc.start();
+    vecindex::Backfill::new(queue.clone()).start();
     watch::start(queue.clone(), idle, health, &registry::list_projects());
     autogc::sweep_ephemeral(&queue);
 

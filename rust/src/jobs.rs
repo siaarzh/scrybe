@@ -310,7 +310,7 @@ pub struct Queue {
     max_concurrent: usize,
     max_depth: usize,
     pub events: broadcast::Sender<String>,
-    hook: std::sync::OnceLock<Hook>,
+    hooks: Mutex<Vec<Hook>>,
     // Watcher threads submit jobs from outside the runtime, so spawn through a stored handle.
     rt: tokio::runtime::Handle,
 }
@@ -339,7 +339,7 @@ impl Queue {
             max_concurrent: env_num("SCRYBE_DAEMON_MAX_CONCURRENT").unwrap_or((cpus / 2).max(1)),
             max_depth: env_num("SCRYBE_DAEMON_MAX_QUEUE_DEPTH").unwrap_or(1000),
             events,
-            hook: std::sync::OnceLock::new(),
+            hooks: Mutex::new(Vec::new()),
             rt: tokio::runtime::Handle::current(),
         }))
     }
@@ -367,13 +367,14 @@ impl Queue {
         let _ = self.events.send(line);
     }
 
-    /// `onQueueJobEvent`: one listener is all the server needs.
-    pub fn set_hook(&self, hook: Hook) {
-        let _ = self.hook.set(hook);
+    /// `onQueueJobEvent`: every listener sees every event, in the order they were added.
+    pub fn add_hook(&self, hook: Hook) {
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner()).push(hook);
     }
 
     fn fire(&self, event: JobEvent, item: &Item) {
-        if let Some(hook) = self.hook.get() {
+        let hooks = self.hooks.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for hook in hooks {
             hook(event, item);
         }
     }

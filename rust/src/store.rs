@@ -5,6 +5,7 @@ use crate::chunk::Chunk;
 use arrow_array::{Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeStringArray, RecordBatch, RecordBatchIterator, StringArray, StringViewArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
+use lancedb::index::vector::IvfHnswSqIndexBuilder;
 use lancedb::index::scalar::{FtsIndexBuilder, FtsQuery, FullTextSearchQuery, MatchQuery, PhraseQuery};
 use lancedb::index::Index;
 use lancedb::table::OptimizeAction;
@@ -421,6 +422,44 @@ impl Store {
         }
         let params = FtsIndexBuilder::default().stem(false).lower_case(true);
         table.create_index(&["content"], Index::FTS(params)).replace(true).execute().await?;
+        Ok(())
+    }
+
+    /// `createVectorIndex`: an hnswSq index on `vector`, cosine, one partition. Skipped below the row threshold,
+    /// and when one exists unless `force`, which rebuilds it in place.
+    pub async fn create_vector_index(&self, name: &str, force: bool) -> Result<()> {
+        let Some(table) = self.open(name).await? else { return Ok(()) };
+        if table.count_rows(None).await? < self.settings.vector_index_min_rows {
+            return Ok(());
+        }
+        if !force && self.vector_index_present(name, &table).await? {
+            return Ok(());
+        }
+        let build = |t: Table| async move {
+            let params = IvfHnswSqIndexBuilder::default().distance_type(DistanceType::Cosine).num_partitions(1);
+            t.create_index(&["vector"], Index::IvfHnswSq(params)).replace(true).execute().await?;
+            // `maybeCompact`: only once enough versions have piled up.
+            let threshold = std::env::var("SCRYBE_LANCE_COMPACT_THRESHOLD").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(10);
+            if t.list_versions().await?.len() >= threshold {
+                self.compact_with_grace(name).await?;
+            }
+            anyhow::Ok(())
+        };
+        let first = build(table).await;
+        let result = match first {
+            Err(e) if is_commit_conflict(&format!("{e:#}")) => {
+                self.tables.lock().unwrap().remove(name);
+                eprintln!("[scrybe] commit conflict on '{name}' — evicting cached table handle and retrying");
+                match self.open(name).await? {
+                    Some(t) => build(t).await,
+                    None => Ok(()),
+                }
+            }
+            other => other,
+        };
+        result?;
+        self.has_vector_index.lock().unwrap().remove(name);
+        self.tables.lock().unwrap().remove(name);
         Ok(())
     }
 

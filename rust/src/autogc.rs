@@ -43,7 +43,7 @@ impl AutoGc {
     /// Hooks into every queue event, arms a timer for each project and starts the timer thread.
     pub fn start(self: &Arc<Self>) {
         let me = self.clone();
-        self.queue.set_hook(Arc::new(move |event, item| {
+        self.queue.add_hook(Arc::new(move |event, item| {
             if enabled() {
                 me.reset(&item.project);
             }

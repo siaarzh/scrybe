@@ -1,7 +1,7 @@
 // Same call, same answer: every test here passes against today's TypeScript build, and is written so
 // the Rust build can be held to it. A tool a build doesn't have yet shows as skipped, not passed.
 import assert from "node:assert/strict";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -588,6 +588,49 @@ describe("automatic garbage collection switched off", () => {
     await until(symbolGone(c, "frobnicateWidget", w.main), 30_000, "the deletion to be noticed");
     await sleep(3000);
     assert.deepEqual(feed.events.filter((e) => e.event.startsWith("auto-gc.")), []);
+  });
+});
+
+describe("the vector index after quiet", () => {
+  let w, c, feed;
+  const ids = async () => (await c.call("search_code", { project_id: "demo", query: "widget", top_k: 5 })).value.map((h) => h.chunk_id).sort();
+  const completed = () => feed.events.filter((e) => e.event === "vector-index.completed");
+  const hasVectorIndex = () => {
+    const dir = join(w.data, "lancedb");
+    return readdirSync(dir).filter((t) => t.endsWith(".lance")).some((t) => {
+      const indices = join(dir, t, "_indices");
+      return existsSync(indices) && readdirSync(indices).some((u) => readdirSync(join(indices, u)).some((f) => f === "auxiliary.idx"));
+    });
+  };
+  before(async () => {
+    w = await makeWorld({ serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_VECTOR_INDEX_MIN_ROWS: "1", SCRYBE_VECTOR_INDEX_REBUILD_ROWS: "1", SCRYBE_VECTOR_INDEX_BACKFILL_IDLE_MS: "4000" } });
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    await until(() => w.pidfile(), 10_000, "the pidfile");
+    feed = await watchEvents(`http://127.0.0.1:${w.pidfile().port}`);
+  });
+  after(() => { feed?.stop(); return w.stop(); });
+
+  test("a quiet project gets its index built, then rebuilt after growth, and searches answer the same", async () => {
+    const before = await ids();
+    assert.ok(before.length > 0);
+    assert.equal(hasVectorIndex(), false);
+    const built = await until(() => completed()[0], 30_000, "vector-index.completed");
+    assert.equal(built.level, "info");
+    assert.equal(typeof built.detail.tableName, "string");
+    assert.equal(typeof built.detail.durationMs, "number");
+    assert.equal(built.detail.forced, false);
+    assert.ok(hasVectorIndex(), "the index files exist");
+    assert.deepEqual(await ids(), before);
+    const found = (await c.call("search_code", { project_id: "demo", query: "frobnicateWidget", top_k: 5 })).value;
+    assert.ok(found.some((h) => h.symbol_name === "frobnicateWidget"));
+    writeFileSync(join(w.repo, "src/saved_later.ts"), "export function savedWhileRunning() { return 7; }\n");
+    await until(async () => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: "savedWhileRunning" })).value?.length > 0, 30_000, "the saved file to be indexed");
+    const rebuilt = await until(() => completed().find((e) => e.detail.forced), 30_000, "the forced rebuild");
+    assert.equal(rebuilt.detail.tableName, built.detail.tableName);
+    assert.ok((await ids()).length > 0);
   });
 });
 
