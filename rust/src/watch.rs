@@ -71,7 +71,7 @@ fn retry_delay(retries: u32) -> Duration {
 }
 
 fn watcher_event(ctx: &Ctx, level: &str, project: &str, detail: serde_json::Value) {
-    ctx.queue.emit(json!({ "ts": now_iso(), "level": level, "event": "watcher.event", "projectId": project, "detail": detail }));
+    ctx.queue.push(json!({ "ts": now_iso(), "level": level, "event": "watcher.event", "projectId": project, "detail": detail }));
 }
 
 fn enqueue(ctx: &Ctx, project: &str) {
@@ -111,6 +111,15 @@ fn new_watcher(tx: Sender<notify::Result<Event>>) -> notify::Result<RecommendedW
 
 fn is_change(kind: &EventKind) -> bool {
     matches!(kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
+}
+
+/// The path relative to `root`. macOS reports real paths (`/private/var/...`), which may not start with `root` as given.
+fn relative_to<'a>(path: &'a Path, root: &Path, real_root: &Path) -> Option<&'a Path> {
+    path.strip_prefix(root).or_else(|_| path.strip_prefix(real_root)).ok()
+}
+
+fn real_path(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 fn add_file_watches(w: &mut RecommendedWatcher, root: &Path, rules: &IgnoreRules) -> notify::Result<()> {
@@ -158,6 +167,7 @@ fn watch_files(ctx: Arc<Ctx>, project: String, source: String, root: PathBuf) {
 fn pump_files(ctx: &Ctx, project: &str, root: &Path, rules: &IgnoreRules, w: &mut RecommendedWatcher, rx: &Receiver<notify::Result<Event>>, base: Duration) -> String {
     let mut pending: HashSet<String> = HashSet::new();
     let mut deadline: Option<Instant> = None;
+    let real_root = real_path(root);
     loop {
         let wait = deadline.map_or(Duration::from_secs(3600), |d| d.saturating_duration_since(Instant::now()));
         match rx.recv_timeout(wait) {
@@ -168,7 +178,7 @@ fn pump_files(ctx: &Ctx, project: &str, root: &Path, rules: &IgnoreRules, w: &mu
                 }
                 let mut relevant = false;
                 for path in &event.paths {
-                    let Ok(rel) = path.strip_prefix(root) else { continue };
+                    let Some(rel) = relative_to(path, root, &real_root) else { continue };
                     let rel = rel.to_string_lossy().replace('\\', "/");
                     if rel.is_empty() || rel.split('/').any(scan::skip_dir) || rules.should_ignore(&rel) {
                         continue;
@@ -237,6 +247,7 @@ fn add_git_watches(w: &mut RecommendedWatcher, git_dir: &Path) -> notify::Result
 fn watch_git(ctx: Arc<Ctx>, project: String, root: PathBuf) {
     let Some(git_dir) = resolve_git_dir(&root) else { return };
     let debounce = env_ms("SCRYBE_DAEMON_GIT_DEBOUNCE_MS", 300);
+    let real_git_dir = real_path(&git_dir);
     let mut last_branch = branches::resolve_branch_for_path(&root);
     ctx.health.branch.lock().unwrap().insert(project.clone(), last_branch.clone());
     let mut retries = 0;
@@ -261,7 +272,7 @@ fn watch_git(ctx: Arc<Ctx>, project: String, root: PathBuf) {
                                     let _ = add_git_watches(&mut w, &git_dir);
                                 }
                             }
-                            let relevant = event.paths.iter().any(|p| p.strip_prefix(&git_dir).is_ok_and(|r| is_watched_ref(&r.to_string_lossy().replace('\\', "/"))));
+                            let relevant = event.paths.iter().any(|p| relative_to(p, &git_dir, &real_git_dir).is_some_and(|r| is_watched_ref(&r.to_string_lossy().replace('\\', "/"))));
                             if relevant {
                                 deadline = Some(Instant::now() + debounce);
                             }
@@ -411,6 +422,14 @@ mod tests {
         for no in ["index", "objects/ab/cd", "logs/HEAD", "refs/tags/v1", "COMMIT_EDITMSG"] {
             assert!(!is_watched_ref(no), "{no}");
         }
+    }
+
+    #[test]
+    fn real_paths_still_count_as_inside_the_root() {
+        let (root, real) = (Path::new("/var/folders/x/repo"), Path::new("/private/var/folders/x/repo"));
+        assert_eq!(relative_to(Path::new("/private/var/folders/x/repo/src/a.ts"), root, real), Some(Path::new("src/a.ts")));
+        assert_eq!(relative_to(Path::new("/var/folders/x/repo/src/a.ts"), root, real), Some(Path::new("src/a.ts")));
+        assert_eq!(relative_to(Path::new("/elsewhere/a.ts"), root, real), None);
     }
 
     #[test]
