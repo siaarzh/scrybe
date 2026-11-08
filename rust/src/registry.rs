@@ -16,6 +16,8 @@ pub struct Source {
     pub table_name: Option<String>,
     #[serde(default)]
     pub last_indexed: Option<String>,
+    #[serde(default)]
+    pub pinned_branches: Option<Vec<String>>,
 }
 
 impl Source {

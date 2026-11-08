@@ -38,6 +38,7 @@ ndarray = "0.17"
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 regex = "1"
+notify = "8"
 sha2 = "0.11"
 base64 = "0.22"
 # Already in the tree through lancedb, with these features.

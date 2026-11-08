@@ -17,6 +17,7 @@ mod search;
 mod serve;
 mod store;
 mod tools;
+mod watch;
 
 use clap::{Parser, Subcommand};
 use store::Store;

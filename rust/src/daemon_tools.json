@@ -189,5 +189,27 @@
    "readOnlyHint": true,
    "openWorldHint": false
   }
+ },
+ {
+  "name": "gc",
+  "description": "Run garbage collection: remove orphan chunks and compact LanceDB tables. Routes through the daemon queue when available (prevents write races with active reindex jobs). Cancels any pending auto-gc jobs in the same scope. Pass project_id to limit scope; omit for all projects.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string",
+     "description": "Limit gc to a specific project (omit for all projects)"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Limit gc to a specific source within the project"
+    }
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
  }
 ]

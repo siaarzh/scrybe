@@ -137,6 +137,15 @@ fn classify_probe_error(msg: &str) -> Health {
     Health::Corrupt(if missing_data { "manifest_missing_data" } else { "schema_unreadable" }.into())
 }
 
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries.flatten().map(|e| match e.metadata() {
+        Ok(m) if m.is_dir() => dir_bytes(&e.path()),
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    }).sum()
+}
+
 fn newest_manifest_is_empty(versions: &std::path::Path) -> bool {
     let Ok(dir) = std::fs::read_dir(versions) else { return false };
     let newest = dir.flatten().filter_map(|e| {
@@ -421,6 +430,48 @@ impl Store {
         table.optimize(OptimizeAction::Compact { options: Default::default(), remap_options: None }).await?;
         table.optimize(OptimizeAction::Prune { older_than: Some(chrono::TimeDelta::seconds(60)), delete_unverified: None, error_if_tagged_old_versions: None }).await?;
         table.optimize(OptimizeAction::Index(Default::default())).await?;
+        Ok(())
+    }
+
+    /// `compactTable` or `compactTableWithGrace`. Returns the bytes the folder shrank by, because Lance's
+    /// own count includes bytes it never deleted.
+    pub async fn compact_measured(&self, name: &str, purge: bool) -> Result<u64> {
+        let Some(table) = self.open(name).await? else { return Ok(0) };
+        let dir = db_path().join(format!("{name}.lance"));
+        let before = dir_bytes(&dir);
+        let older_than = chrono::TimeDelta::seconds(if purge { 0 } else { 60 });
+        table.optimize(OptimizeAction::Compact { options: Default::default(), remap_options: None }).await?;
+        table.optimize(OptimizeAction::Prune { older_than: Some(older_than), delete_unverified: None, error_if_tagged_old_versions: None }).await?;
+        table.optimize(OptimizeAction::Index(Default::default())).await?;
+        Ok(before.saturating_sub(dir_bytes(&dir)))
+    }
+
+    /// `listChunkIds`.
+    pub async fn list_chunk_ids(&self, name: &str, project: &str) -> Result<Vec<String>> {
+        let Some(table) = self.open(name).await? else { return Ok(vec![]) };
+        let batches: Vec<RecordBatch> = table.query().select(lancedb::query::Select::columns(&["chunk_id"])).only_if(format!("project_id = '{}'", escape_sql(project))).execute().await?.try_collect().await?;
+        let mut out = vec![];
+        for b in &batches {
+            let col = b.column(0);
+            if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+                out.extend(a.iter().flatten().map(String::from));
+            } else if let Some(a) = col.as_any().downcast_ref::<LargeStringArray>() {
+                out.extend(a.iter().flatten().map(String::from));
+            } else if let Some(a) = col.as_any().downcast_ref::<StringViewArray>() {
+                out.extend(a.iter().flatten().map(String::from));
+            }
+        }
+        Ok(out)
+    }
+
+    /// `deleteChunks`.
+    pub async fn delete_chunks(&self, name: &str, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let Some(table) = self.open(name).await? else { return Ok(()) };
+        let list: Vec<String> = ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
+        table.delete(&format!("chunk_id IN ({})", list.join(", "))).await?;
         Ok(())
     }
 

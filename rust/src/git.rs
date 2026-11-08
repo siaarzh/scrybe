@@ -23,6 +23,23 @@ pub fn output(cwd: &Path, args: &[&str], max_bytes: Option<usize>) -> Option<Str
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Runs to the end, or is killed at the timeout. True only for a clean exit.
+pub fn run_with_timeout(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> bool {
+    let Ok(mut child) = command(cwd).args(args).stdout(Stdio::null()).spawn() else { return false };
+    let end = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < end => std::thread::sleep(std::time::Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 pub fn trimmed(cwd: &Path, args: &[&str]) -> Option<String> {
     output(cwd, args, None).map(|s| s.trim().to_string())
 }

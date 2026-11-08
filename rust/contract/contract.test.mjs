@@ -421,6 +421,94 @@ describe("the tiny client and the server's lifetime", () => {
   });
 });
 
+describe("indexing by itself", () => {
+  const quick = { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_GIT_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_DAEMON_NO_FETCH: "", SCRYBE_DAEMON_FETCH_ACTIVE_MS: "1000", SCRYBE_DAEMON_FETCH_IDLE_MS: "1000" };
+  let w, c;
+  before(async () => {
+    w = await makeWorld({ serverEnv: quick, pinned: ["side"], withOrigin: true });
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    // Watchers start with the server; give them a moment to subscribe.
+    await sleep(1500);
+  });
+  after(() => w.stop());
+  const found = (name, extra = {}) => async () => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: name, ...extra })).value?.length > 0;
+
+  test("saving a file indexes it", async (t) => {
+    const names = await c.toolNames();
+    if (!names.includes("gc")) return t.skip("not ported");
+    writeFileSync(join(w.repo, "src/saved_later.ts"), "export function savedWhileRunning() { return 7; }\n");
+    await until(found("savedWhileRunning"), 30_000, "the saved file to be indexed");
+  });
+
+  test("switching branches indexes the new one", async (t) => {
+    const names = await c.toolNames();
+    if (!names.includes("gc")) return t.skip("not ported");
+    rmSync(join(w.repo, "src/saved_later.ts"));
+    w.git("checkout", "-q", "side");
+    await until(found("onlyOnTheSideBranch", { branch: "side" }), 30_000, "the branch to be indexed");
+    w.git("checkout", "-q", w.main);
+  });
+
+  test("a pinned branch follows its remote", async (t) => {
+    const names = await c.toolNames();
+    if (!names.includes("gc")) return t.skip("not ported");
+    writeFileSync(join(w.origin, "src/from_upstream.py"), "def arrived_from_upstream():\n    return 1\n");
+    w.originGit("add", "src/from_upstream.py");
+    w.originGit("commit", "-q", "-m", "upstream");
+    await until(found("arrived_from_upstream", { branch: "side" }), 30_000, "the upstream commit to be indexed");
+  });
+
+  test("garbage collection removes rows no branch refers to", async (t) => {
+    const names = await c.toolNames();
+    if (!names.includes("gc")) return t.skip("not ported");
+    await until(async () => (await c.call("queue_status")).value.running.length === 0, 30_000, "the queue to settle");
+    rmSync(join(w.repo, "src/widget.ts"));
+    await until(async () => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: "frobnicateWidget", branch: w.main })).value.length === 0, 30_000, "the deletion to be noticed");
+    await until(async () => (await c.call("queue_status")).value.running.length === 0, 30_000, "the queue to settle");
+    // The side branch still has this file, so only removing that branch's tags could orphan it.
+    const started = await c.call("gc", { project_id: "demo" });
+    assert.match(started.value.message, /1 gc job\(s\) queued/);
+    const id = started.value.jobs[0].job_id;
+    const done = await until(async () => {
+      const s = (await c.call("reindex_status", { job_id: id })).value;
+      return ["done", "failed"].includes(s?.status) && s;
+    }, 30_000, "the gc job");
+    assert.equal(done.status, "done", JSON.stringify(done));
+    assert.equal(done.type, "gc");
+    const result = JSON.parse(done.result);
+    for (const f of ["orphans_deleted", "bytes_freed", "duration_ms"]) assert.equal(typeof result[f], "number");
+  });
+});
+
+// Its own world with the fetch poller off: every fetch rewrites FETCH_HEAD, and both builds start a job for that.
+describe("ignored files", () => {
+  let w, c;
+  before(async () => {
+    w = await makeWorld({ serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1" } });
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    await sleep(1500);
+  });
+  after(() => w.stop());
+
+  test("an ignored file doesn't start a job, and a real one does", async (t) => {
+    const names = await c.toolNames();
+    if (!names.includes("gc")) return t.skip("not ported");
+    // list_jobs only shows jobs started by hand, so count the server's own job events instead.
+    const started = () => { try { return readFileSync(join(w.data, "daemon-log.jsonl"), "utf8").split("\n").filter((l) => l.includes('"job.started"')).length; } catch { return 0; } };
+    const before = started();
+    writeFileSync(join(w.repo, "notes/ignored_too.ts"), "export function neverIndexed() { return 7; }\n");
+    await sleep(2500);
+    assert.equal(started(), before);
+    writeFileSync(join(w.repo, "src/not_ignored.ts"), "export function indexedAfterAll() { return 7; }\n");
+    await until(async () => started() > before, 15_000, "a job for the real file");
+  });
+});
+
 describe("the server's own lifetime", () => {
   let w;
   before(async () => { w = await makeWorld(); await w.index("--full"); });

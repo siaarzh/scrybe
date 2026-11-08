@@ -9,7 +9,7 @@ use crate::store::Store;
 use anyhow::Result;
 use rusqlite::{params, types::Value as SqlValue, Connection};
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,6 +100,44 @@ impl Rows {
 
     fn finish(&self, id: &str, status: &str, at: i64, error: Option<&str>) {
         let _ = self.lock().execute("UPDATE jobs SET status=?, finished_at=?, error_message=? WHERE job_id=?", params![status, at, error, id]);
+    }
+
+    pub fn list_branches(&self, project: &str, source: &str) -> Vec<String> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT DISTINCT branch FROM branch_tags WHERE project_id=? AND source_id=?") else { return vec![] };
+        stmt.query_map([project, source], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    pub fn last_indexed_sha(&self, project: &str, source: &str, branch: &str) -> Option<String> {
+        self.lock().query_row("SELECT last_indexed_sha FROM branch_state WHERE project_id=? AND source_id=? AND branch=?", [project, source, branch], |r| r.get(0)).ok()
+    }
+
+    pub fn set_last_indexed_sha(&self, project: &str, source: &str, branch: &str, sha: &str) {
+        let _ = self.lock().execute(
+            "INSERT INTO branch_state (project_id, source_id, branch, last_indexed_sha, last_indexed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id, source_id, branch) DO UPDATE SET last_indexed_sha=excluded.last_indexed_sha, last_indexed_at=excluded.last_indexed_at",
+            params![project, source, branch, sha, now_ms()],
+        );
+    }
+
+    fn tagged_chunk_ids(&self, project: &str, source: &str) -> HashSet<String> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT DISTINCT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?") else { return HashSet::new() };
+        stmt.query_map([project, source], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    fn cancel_queued_gc(&self, project: &str) {
+        let _ = self.lock().execute("UPDATE jobs SET status='cancelled', finished_at=? WHERE type='gc' AND status='queued' AND project_id=?", params![now_ms(), project]);
+    }
+
+    fn insert_queued_gc(&self, item: &Item) {
+        let _ = self.lock().execute(
+            "INSERT INTO jobs (job_id, project_id, source_id, branch, mode, status, phase, queued_at, started_at, finished_at, error_message, origin, type, result) VALUES (?,?,?,NULL,'incremental','queued',NULL,?,NULL,NULL,NULL,'daemon','gc',NULL)",
+            params![item.job_id, item.project, item.source, now_ms()],
+        );
+    }
+
+    fn finish_with_result(&self, id: &str, status: &str, at: i64, error: Option<&str>, result: Option<&str>) {
+        let _ = self.lock().execute("UPDATE jobs SET status=?, finished_at=?, error_message=?, result=? WHERE job_id=?", params![status, at, error, result, id]);
     }
 
     fn select(&self, sql: &str, values: &[&dyn rusqlite::ToSql]) -> Result<Vec<Value>> {
@@ -193,6 +231,8 @@ pub struct Item {
     pub branch: Option<String>,
     pub content_ref: Option<String>,
     pub mode: Mode,
+    /// A garbage collection job: `Some(true)` removes old versions at once, `Some(false)` keeps a grace.
+    pub gc_purge: Option<bool>,
 }
 
 impl Item {
@@ -208,6 +248,7 @@ pub struct Request {
     pub branch: Option<String>,
     pub content_ref: Option<String>,
     pub full: bool,
+    pub gc_purge: Option<bool>,
 }
 
 pub struct Submitted {
@@ -233,6 +274,8 @@ pub struct Queue {
     max_concurrent: usize,
     max_depth: usize,
     pub events: broadcast::Sender<String>,
+    // Watcher threads submit jobs from outside the runtime, so spawn through a stored handle.
+    rt: tokio::runtime::Handle,
 }
 
 fn pending_task(source: &str, mode: &str) -> Value {
@@ -259,6 +302,7 @@ impl Queue {
             max_concurrent: env_num("SCRYBE_DAEMON_MAX_CONCURRENT").unwrap_or((cpus / 2).max(1)),
             max_depth: env_num("SCRYBE_DAEMON_MAX_QUEUE_DEPTH").unwrap_or(1000),
             events,
+            rt: tokio::runtime::Handle::current(),
         }))
     }
 
@@ -311,9 +355,13 @@ impl Queue {
                 return Submitted { job_id, status: "rejected", queue_position: None, duplicate_of_pending: false };
             }
         }
-        let item = Item { job_id: job_id.clone(), project: req.project, source: req.source, branch: req.branch, content_ref: req.content_ref, mode };
+        let item = Item { job_id: job_id.clone(), project: req.project, source: req.source, branch: req.branch, content_ref: req.content_ref, mode, gc_purge: req.gc_purge };
         let duplicate = self.lock().pending.iter().any(|p| p.project == item.project && p.source == item.source && p.mode == item.mode && p.branch == item.branch);
-        self.rows.insert_queued(&item);
+        if item.gc_purge.is_some() {
+            self.rows.insert_queued_gc(&item);
+        } else {
+            self.rows.insert_queued(&item);
+        }
         self.lock().pending.push_back(item);
         self.drain();
         let st = self.lock();
@@ -342,8 +390,86 @@ impl Queue {
                 self.emit(json!({ "ts": ts, "level": "warn", "event": "job.failed", "projectId": item.project, "detail": { "jobId": item.job_id, "type": "reindex", "skippedOrphan": true, "reason": "project no longer exists" } }));
                 continue;
             }
-            self.start(item, ts);
+            if item.gc_purge.is_some() {
+                self.start_gc(item, ts);
+            } else {
+                self.start(item, ts);
+            }
         }
+    }
+
+    /// A manual gc replaces any gc still waiting in its scope. Returns how many it replaced.
+    pub fn cancel_pending_gc(&self, scope: &[String]) -> usize {
+        let mut st = self.lock();
+        let before = st.pending.len();
+        st.pending.retain(|p| !(p.gc_purge.is_some() && scope.contains(&p.project)));
+        let removed = before - st.pending.len();
+        drop(st);
+        if removed > 0 {
+            for project in scope {
+                self.rows.cancel_queued_gc(project);
+            }
+        }
+        removed
+    }
+
+    fn start_gc(self: &Arc<Self>, item: Item, ts: String) {
+        self.lock().active.insert(item.job_id.clone(), item.project.clone());
+        self.rows.set_started(&item.job_id, now_ms());
+        let purge = item.gc_purge == Some(true);
+        let mut event = json!({ "ts": ts, "level": "info", "event": "job.started", "projectId": item.project });
+        if let Some(s) = &item.source {
+            event["sourceId"] = json!(s);
+        }
+        event["detail"] = json!({ "jobId": item.job_id, "type": "gc", "gcMode": if purge { "purge" } else { "grace" } });
+        self.emit(event);
+        let me = self.clone();
+        self.rt.spawn(async move {
+            let started = std::time::Instant::now();
+            let outcome = me.collect_garbage(&item, purge).await;
+            let at = now_ms();
+            let mut event = json!({ "ts": now_iso(), "projectId": item.project });
+            if let Some(s) = &item.source {
+                event["sourceId"] = json!(s);
+            }
+            match outcome {
+                Ok((orphans, freed)) => {
+                    let ms = started.elapsed().as_millis() as u64;
+                    let result = json!({ "orphans_deleted": orphans, "bytes_freed": freed, "duration_ms": ms });
+                    me.rows.finish_with_result(&item.job_id, "done", at, None, Some(&result.to_string()));
+                    event["level"] = json!("info");
+                    event["event"] = json!("job.completed");
+                    event["durationMs"] = json!(ms);
+                    event["detail"] = json!({ "jobId": item.job_id, "type": "gc", "orphans_deleted": orphans, "bytes_freed": freed });
+                }
+                Err(e) => {
+                    let message = format!("{e:#}");
+                    me.rows.finish_with_result(&item.job_id, "failed", at, Some(&message), None);
+                    event["level"] = json!("error");
+                    event["event"] = json!("job.failed");
+                    event["error"] = json!({ "message": message });
+                    event["detail"] = json!({ "jobId": item.job_id, "type": "gc" });
+                }
+            }
+            me.emit(event);
+            me.lock().active.remove(&item.job_id);
+            me.drain();
+        });
+    }
+
+    /// `runGcJobHandler`: rows no branch refers to go, then the table is compacted.
+    async fn collect_garbage(&self, item: &Item, purge: bool) -> Result<(usize, u64)> {
+        let project = registry::get_project(&item.project).ok_or_else(|| anyhow::anyhow!("Project '{}' not found", item.project))?;
+        let (mut orphans, mut freed) = (0, 0);
+        for source in project.sources.iter().filter(|s| item.source.as_ref().is_none_or(|want| *want == s.source_id)) {
+            let Some(table) = source.table_name.as_ref().filter(|_| source.kind() == "code") else { continue };
+            let tagged = self.rows.tagged_chunk_ids(&item.project, &source.source_id);
+            let stale: Vec<String> = self.store.list_chunk_ids(table, &item.project).await?.into_iter().filter(|id| !tagged.contains(id)).collect();
+            self.store.delete_chunks(table, &stale).await?;
+            orphans += stale.len();
+            freed += self.store.compact_measured(table, purge).await?;
+        }
+        Ok((orphans, freed))
     }
 
     fn start(self: &Arc<Self>, item: Item, ts: String) {
@@ -388,7 +514,7 @@ impl Queue {
         event["detail"] = json!({ "jobId": item.job_id, "mode": item.mode_str() });
         self.emit(event);
         let me = self.clone();
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             me.run(item, sources, cancel).await;
         });
     }
@@ -497,7 +623,7 @@ impl Queue {
         }
         self.rows.insert_running_all(&id, started);
         let (me, job) = (self.clone(), id.clone());
-        tokio::spawn(async move {
+        self.rt.spawn(async move {
             let options = Options { cancel: Some(cancel), ..Default::default() };
             let mut failed = vec![];
             'projects: for p in registry::list_projects() {

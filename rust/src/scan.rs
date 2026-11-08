@@ -8,7 +8,7 @@ const SKIP_DIRS: &[&str] = &[".git", ".svn", "node_modules", "__pycache__", ".ve
 const SKIP_EXTENSIONS: &[&str] = &[".lock", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip", ".tar", ".gz", ".map"];
 const SKIP_FILENAMES: &[&str] = &["pnpm-lock.yaml", "yarn.lock", "package-lock.json", "Gemfile.lock", "Pipfile.lock", "composer.lock", "poetry.lock", "go.sum"];
 
-fn skip_dir(name: &str) -> bool {
+pub fn skip_dir(name: &str) -> bool {
     name.starts_with('.') || SKIP_DIRS.contains(&name) || name.starts_with("Intra.Old.")
 }
 

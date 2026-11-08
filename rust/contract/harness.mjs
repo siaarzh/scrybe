@@ -94,16 +94,25 @@ export function makeRepo(root) {
 }
 
 /** Everything one test group needs. `stop()` leaves nothing running. */
-export async function makeWorld({ embedder } = {}) {
+export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "scrybe-contract-"));
   const fake = embedder ?? (await fakeEmbedder());
   const repo = join(dir, "repo");
   const data = join(dir, "data");
   mkdirSync(data);
   const repoInfo = makeRepo(repo);
+  // A second clone stands in for the remote, so a fetch has something real to find.
+  const origin = join(dir, "origin");
+  if (withOrigin) {
+    execFileSync("git", ["clone", "-q", "--no-hardlinks", repo, origin], { stdio: "ignore" });
+    repoInfo.git("remote", "add", "origin", origin);
+    git(origin, "checkout", "-q", "side");
+    repoInfo.git("fetch", "-q", "origin");
+  }
   const presets = { fake: { provider: "custom", model: "fake-model", dim: DIM, base_url: fake.url, credentials: "${CONTRACT_EMBED_KEY}" } };
   writeFileSync(join(data, "config.json"), JSON.stringify({ schema_version: 1, embedding_presets: presets, assignments: { code_preset: "fake", text_preset: "fake" } }, null, 2));
-  writeFileSync(join(data, "projects.json"), JSON.stringify([{ id: "demo", description: "A demo", sources: [{ source_id: "primary", source_config: { type: "code", root_path: repo, languages: [] } }] }], null, 2));
+  const source = { source_id: "primary", source_config: { type: "code", root_path: repo, languages: [] }, ...(pinned ? { pinned_branches: pinned } : {}) };
+  writeFileSync(join(data, "projects.json"), JSON.stringify([{ id: "demo", description: "A demo", sources: [source] }], null, 2));
   const env = {
     ...process.env,
     SCRYBE_DATA_DIR: data,
@@ -113,6 +122,7 @@ export async function makeWorld({ embedder } = {}) {
     SCRYBE_DAEMON_NO_TICKET_FETCH: "1",
     SCRYBE_AUTO_GC: "false",
     SCRYBE_DAEMON_KEEP_ALIVE: "1",
+    ...serverEnv,
   };
   for (const k of ["SCRYBE_DAEMON_MCP_HTTP", "SCRYBE_DAEMON_PORT", "SCRYBE_NO_AUTO_DAEMON"]) delete env[k];
 
@@ -128,7 +138,7 @@ export async function makeWorld({ embedder } = {}) {
   });
   const clients = [];
   const world = {
-    dir, data, repo, env, fake, cli, main: repoInfo.main, git: repoInfo.git,
+    dir, data, repo, origin, env, fake, cli, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
     pidfile() {
       try { return JSON.parse(readFileSync(join(data, "daemon.pid"), "utf8")); } catch { return null; }
     },

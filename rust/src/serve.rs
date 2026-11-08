@@ -1,7 +1,7 @@
 //! The one shared server. Mirrors `src/daemon/main.ts` and `http-server.ts`: data-dir ownership, a sticky
 //! port, the Host and Origin gate on every route, jobs, heartbeats, and a shutdown that drains.
 //! A small HTTP reader on purpose: one request per connection, no new compile cost.
-//! Not yet: watchers, pollers, auto-gc, gc and pinned-branch routes, the RSS guard, install.
+//! Not yet: ticket polling, auto-gc, the vector index backfill, pinned-branch routes, the RSS guard, install.
 use crate::config::{data_dir, VERSION};
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
@@ -9,6 +9,7 @@ use crate::lifecycle::Lifecycle;
 use crate::mcp;
 use crate::registry;
 use crate::store::Store;
+use crate::watch::{self, Idle, WatchHealth};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -26,7 +27,9 @@ struct Daemon {
     store: Arc<Store>,
     queue: Arc<Queue>,
     lifecycle: Mutex<Lifecycle>,
-    state: Mutex<&'static str>,
+    idle: Arc<Idle>,
+    health: Arc<WatchHealth>,
+    paused: AtomicBool,
     started_at: Instant,
     started_iso: String,
     port: u16,
@@ -131,19 +134,64 @@ impl Daemon {
         self.started_at.elapsed().as_millis() as u64
     }
 
+    fn state_word(&self) -> &'static str {
+        if self.paused.load(Ordering::SeqCst) {
+            "paused"
+        } else if self.idle.is_hot() {
+            "hot"
+        } else {
+            "cold"
+        }
+    }
+
+    /// The `/gc` route: replace any waiting gc in scope, then queue one for each project.
+    fn gc(&self, scope: Vec<String>, source: Option<String>, purge: bool) -> Value {
+        let cancelled = self.queue.cancel_pending_gc(&scope);
+        let jobs: Vec<Value> = scope
+            .into_iter()
+            .map(|project| {
+                let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), gc_purge: Some(purge), ..Default::default() });
+                json!({ "jobId": r.job_id, "projectId": project, "status": r.status })
+            })
+            .collect();
+        json!({ "cancelledPending": cancelled, "jobs": jobs })
+    }
+
+    fn gc_tool(&self, a: &Value) -> Result<Value> {
+        let scope: Vec<String> = match a["project_id"].as_str() {
+            Some(p) => {
+                if registry::get_project(p).is_none() {
+                    anyhow::bail!("Project '{p}' not found");
+                }
+                vec![p.to_string()]
+            }
+            None => registry::list_projects().into_iter().map(|p| p.id).collect(),
+        };
+        if scope.is_empty() {
+            return Ok(json!({ "message": "No projects registered." }));
+        }
+        let result = self.gc(scope, a["source_id"].as_str().map(String::from), true);
+        let cancelled = result["cancelledPending"].as_u64().unwrap_or(0);
+        let hint = if cancelled > 0 { format!(" ({cancelled} pending auto-gc job(s) preempted)") } else { String::new() };
+        let jobs: Vec<Value> = result["jobs"].as_array().into_iter().flatten().map(|j| json!({ "job_id": j["jobId"], "project_id": j["projectId"], "status": j["status"] })).collect();
+        let message = format!("{} gc job(s) queued{hint}. Poll with reindex_status or run 'scrybe job list'.", jobs.len());
+        Ok(json!({ "jobs": jobs, "message": message }))
+    }
+
     fn status(&self) -> Value {
         let projects: Vec<Value> = registry::list_projects()
             .iter()
             .map(|p| {
                 let code = p.sources.iter().find(|s| s.kind() == "code");
+                let branch = self.health.branch.lock().unwrap().get(&p.id).cloned();
                 json!({
                     "projectId": p.id,
                     "rootPath": code.and_then(|s| s.root_path()).unwrap_or(""),
-                    "currentBranch": null,
-                    "watcherHealthy": false,
-                    "gitWatcherHealthy": false,
+                    "currentBranch": branch,
+                    "watcherHealthy": self.health.files.lock().unwrap().get(&p.id).copied().unwrap_or(false),
+                    "gitWatcherHealthy": self.health.git.lock().unwrap().get(&p.id).copied().unwrap_or(false),
                     "lastIndexedAt": code.and_then(|s| s.last_indexed.clone()),
-                    "lastBranch": null,
+                    "lastBranch": branch,
                     "queueDepth": 0,
                 })
             })
@@ -155,7 +203,7 @@ impl Daemon {
             "pid": std::process::id(),
             "port": self.port,
             "uptimeMs": self.uptime_ms(),
-            "state": *self.state.lock().unwrap(),
+            "state": self.state_word(),
             "startedAt": self.started_iso,
             "dataDir": data_dir().to_string_lossy(),
             "projects": projects,
@@ -179,7 +227,7 @@ impl Daemon {
         let jobs: Vec<Value> = ids
             .into_iter()
             .map(|project| {
-                let r = self.queue.submit(Request { project: project.clone(), source: text("sourceId"), branch: text("branch"), content_ref: text("contentRef"), full: body["mode"] == "full" });
+                let r = self.queue.submit(Request { project: project.clone(), source: text("sourceId"), branch: text("branch"), content_ref: text("contentRef"), full: body["mode"] == "full", gc_purge: None });
                 let mut job = json!({ "jobId": r.job_id, "projectId": project, "sourceId": text("sourceId").unwrap_or_else(|| "all".into()), "branch": text("branch").unwrap_or_else(|| "HEAD".into()), "status": r.status });
                 if let Some(q) = r.queue_position {
                     job["queuePosition"] = json!(q);
@@ -197,7 +245,7 @@ impl Daemon {
         if registry::get_project(&project).is_none() {
             anyhow::bail!("Project '{project}' not found");
         }
-        let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: a["branch"].as_str().map(String::from), content_ref: a["content_ref"].as_str().map(String::from), full });
+        let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: a["branch"].as_str().map(String::from), content_ref: a["content_ref"].as_str().map(String::from), full, gc_purge: None });
         let mut out = json!({ "job_id": r.job_id, "status": r.status, "project_id": project });
         if let Some(s) = source {
             out["source_id"] = json!(s);
@@ -244,6 +292,7 @@ impl Daemon {
             "list_jobs" => self.queue.list_jobs(a["status"].as_str()).map(|jobs| json!({ "count": jobs.len(), "jobs": jobs })),
             "queue_status" => self.queue.rows.queue_status(a["project_id"].as_str()).map(|(running, queued)| json!({ "running": running, "queued": queued, "awaiting_migration": [] })),
             "status" => Ok(self.status_tool()),
+            "gc" => self.gc_tool(a),
             _ => return None,
         })
     }
@@ -373,12 +422,20 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
                 .iter()
                 .map(|p| {
                     let code = p.sources.iter().find(|x| x.kind() == "code");
-                    json!({ "id": p.id, "rootPath": code.and_then(|x| x.root_path()).unwrap_or(""), "branches": [], "lastIndexed": code.and_then(|x| x.last_indexed.clone()), "watcherHealthy": false })
+                    json!({ "id": p.id, "rootPath": code.and_then(|x| x.root_path()).unwrap_or(""), "branches": code.and_then(|x| x.pinned_branches.clone()).unwrap_or_default(), "lastIndexed": code.and_then(|x| x.last_indexed.clone()), "watcherHealthy": false })
                 })
                 .collect();
             json_res(&mut s, "200 OK", &json!({ "projects": projects })).await
         }
         ("POST", "/kick") => json_res(&mut s, "200 OK", &d.kick(&parsed)).await,
+        ("POST", "/gc") => {
+            let purge = parsed["mode"].as_str() != Some("grace");
+            let scope: Vec<String> = match parsed["scope"].as_array().filter(|a| !a.is_empty()) {
+                Some(list) => list.iter().filter_map(Value::as_str).map(String::from).collect(),
+                None => registry::list_projects().into_iter().filter(|p| p.sources.iter().any(|x| x.kind() == "code")).map(|p| p.id).collect(),
+            };
+            json_res(&mut s, "200 OK", &d.gc(scope, parsed["sourceId"].as_str().map(String::from), purge)).await
+        }
         ("GET", "/jobs") => {
             let (status, project) = (query_param(query, "status"), query_param(query, "project_id"));
             let rows = d.queue.rows.list(status.as_deref(), project.as_deref()).unwrap_or_default();
@@ -402,11 +459,13 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
             json_res(&mut s, "200 OK", &json!({ "running": running, "queued": queued, "awaiting_migration": [] })).await
         }
         ("POST", "/pause") => {
-            *d.state.lock().unwrap() = "paused";
+            // A status word only, as today: jobs and watchers carry on.
+            d.paused.store(true, Ordering::SeqCst);
             json_res(&mut s, "200 OK", &json!({ "state": "paused" })).await
         }
         ("POST", "/resume") => {
-            *d.state.lock().unwrap() = "hot";
+            d.paused.store(false, Ordering::SeqCst);
+            d.idle.touch();
             json_res(&mut s, "200 OK", &json!({ "state": "hot" })).await
         }
         ("POST", "/shutdown") => {
@@ -543,8 +602,10 @@ pub async fn serve(store: Store) -> Result<()> {
     eprintln!("[scrybe daemon] started pid={} port={port} dataDir={}", std::process::id(), data_dir().display());
 
     let now = Instant::now();
-    let d = Arc::new(Daemon { store, queue, lifecycle: Mutex::new(Lifecycle::from_env(now)), state: Mutex::new("cold"), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
+    let (idle, health) = (Arc::new(Idle::from_env()), Arc::new(WatchHealth::default()));
+    let d = Arc::new(Daemon { store, queue: queue.clone(), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
     let _owner = owner;
+    watch::start(queue, idle, health, &registry::list_projects());
 
     let ticking = d.clone();
     tokio::spawn(async move {
