@@ -7,6 +7,14 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.54.0] — 2026-11-09
+
+### Added
+
+- The local provider now offers `jinaai/jina-embeddings-v2-base-code` (768 dimensions), a code-trained model that runs on your machine. Add it as a local preset and reindex to use it. It understands English and code only, so searches written in other languages do worse than with the default model. See `docs/configuration.md` for the trade-offs.
+
 ### Security
 
 - The image library pulled in by the local embedding stack (`sharp`) is now forced to 0.35.5, which bundles a patched librsvg (CVE-2026-96889). scrybe never decodes images, so the vulnerable code wasn't reachable, but installs no longer ship it. The older copy also downloaded native binaries during `npm install`; the new one doesn't, so about 45 helper packages drop out of the install.
@@ -70,31 +78,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.51.0] — 2026-08-13
-
-### Added
-
-- Two settings tune the background watch that upgrades a cold session's tool list: `SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS` (default 2000) and `SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS` (default 300000).
-
-### Fixed
-
-- **A session no longer loses the scrybe tools when the daemon is cold.** The MCP server used to wait for the daemon before answering the connection handshake. On a cold start that wait could exceed the client's connect timeout, and the session ended up with no scrybe tools and no error saying why. The handshake is now answered immediately, and the daemon is resolved when the tool list is first requested.
-- **The tool surface upgrades itself once the daemon is ready.** If the daemon is still starting when a session connects, scrybe serves its offline tools (`status`, `doctor`, `init`) and swaps in the full list as soon as the daemon answers. No reconnect needed. The background watch runs for up to five minutes; a session left idle past that stops being watched, but its next tool call still picks up the change.
-- A session talking to a daemon too old for it now notices when that daemon is restarted on a compatible version, instead of staying stuck for the rest of the session.
-- Closed a local symlink-based file-write hazard in the Claude Code plugin's search-guard hook: it wrote a marker file to a predictable path in the shared OS temp directory, which could be made to follow a pre-planted symlink onto an arbitrary file.
-
----
-
 ## Older releases
 
-For releases v0.50.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.51.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.53.2...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.54.0...HEAD
+[0.54.0]: https://github.com/siaarzh/scrybe/compare/v0.53.2...v0.54.0
 [0.53.2]: https://github.com/siaarzh/scrybe/compare/v0.53.1...v0.53.2
 [0.53.1]: https://github.com/siaarzh/scrybe/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/siaarzh/scrybe/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/siaarzh/scrybe/compare/v0.51.1...v0.52.0
 [0.51.1]: https://github.com/siaarzh/scrybe/compare/v0.51.0...v0.51.1
-[0.51.0]: https://github.com/siaarzh/scrybe/compare/v0.50.0...v0.51.0

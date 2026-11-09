@@ -73,6 +73,23 @@ When no `EMBEDDING_*` or `OPENAI_API_KEY` env vars are set, Scrybe uses an in-pr
 
 The model is downloaded on first use (~120 MB) and cached under `${DATA_DIR}/models/` (overridable via `SCRYBE_MODEL_CACHE_DIR`). Weights survive reinstalls and npx cache wipes; subsequent runs load from cache.
 
+### Choosing a local model
+
+The catalog also offers `jinaai/jina-embeddings-v2-base-code` (768d, ~155 MB), a model trained on code. To use it, add a local preset with `max_input_tokens: 512`, assign it to the code slot (and the text slot if you want one model for everything), then reindex every source: vectors from different models can't be mixed.
+
+| | `multilingual-e5-small` (default) | `jina-embeddings-v2-base-code` |
+|---|---|---|
+| Languages | ~100 natural languages | English and code only |
+| Indexing speed | baseline | about 2.4× slower |
+| Memory while searching | about the same | about the same |
+| Index size on disk | baseline | about 1.6× larger |
+
+Things to know before switching:
+
+- **Search in English.** In a small test on issue tickets, jina found Russian tickets better than the default when the search was written in English, but much worse when the search itself was written in Russian. If you or your agents search in another language, keep the default.
+- **Reindexing takes time.** Every source is rebuilt from scratch, and each source returns no results until its rebuild finishes.
+- **Small evidence.** The comparisons behind this section are a few dozen searches on one set of codebases, scored by one reviewer. Treat them as a reason to try jina on your own code, not as a guarantee it will do better there.
+
 ---
 
 ## Code embedding (API provider)

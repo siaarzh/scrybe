@@ -315,6 +315,7 @@ OpenAI              text-embedding-3-small          1536  text    configurable d
                     text-embedding-3-large          3072  text    configurable dim
 Local (in-process)  Xenova/multilingual-e5-small    384   text
                     Xenova/all-MiniLM-L6-v2         384   text
+                    jinaai/jina-embeddings-v2-base-code  768  code
 Custom (OpenAI-...) (user-defined)                  -     -       base_url + dim required
 ```
 
