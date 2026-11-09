@@ -121,6 +121,7 @@ export const PROVIDERS: Record<string, ProviderSpec> = {
     embedding_models: {
       "Xenova/multilingual-e5-small": { dim: 384, profile: "text" },
       "Xenova/all-MiniLM-L6-v2":      { dim: 384, profile: "text" },
+      "jinaai/jina-embeddings-v2-base-code": { dim: 768, profile: "code" },
     },
     rerank_models: null,
   },

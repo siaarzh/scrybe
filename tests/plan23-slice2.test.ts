@@ -75,6 +75,21 @@ describe("resolvePreset — catalog preset", () => {
     }
   });
 
+  it("local jina code model resolves to dim=768 in both slots", async () => {
+    const { resolvePreset } = await import("../src/preset-resolver.js");
+    const cfg = makeConfig({
+      embedding_presets: {
+        "local-jina": { provider: "local", model: "jinaai/jina-embeddings-v2-base-code", max_input_tokens: 512 },
+      },
+    } as any);
+    for (const slot of ["code_preset", "text_preset"] as const) {
+      const result = resolvePreset("local-jina", slot, cfg);
+      expect(result.provider).toBe("local");
+      expect(result.dim).toBe(768);
+      expect(result.profile).toBe(slot === "code_preset" ? "code" : "text");
+    }
+  });
+
   it("voyage-3 text preset resolves correctly", async () => {
     process.env["SCRYBE_VOYAGE_API_KEY"] = "test-voyage-key-2";
     try {
