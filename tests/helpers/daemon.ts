@@ -238,7 +238,7 @@ export async function startTempDaemon(opts: {
   const port = pidfileData.port;
   const client = new DaemonClient({ port });
 
-  // Wait until /health is responding
+  // Wait until /health is responding (15s: loaded macOS CI runners have overrun 5s)
   await waitUntil(async () => {
     try {
       const h = await client.health();
@@ -246,7 +246,7 @@ export async function startTempDaemon(opts: {
     } catch {
       return false;
     }
-  }, 5000);
+  }, 15000);
 
   async function stop(): Promise<void> {
     try {
