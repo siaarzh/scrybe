@@ -7,7 +7,7 @@ import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config, warnOldEnvVars } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
-import { acquireDataDirOwnership, releaseDataDirOwnership, acquireSpawnLock, releaseSpawnLock } from "./data-dir-lock.js";
+import { acquireDataDirOwnership, releaseDataDirOwnership, acquireSpawnLock, releaseSpawnLock, type LockOutcome } from "./data-dir-lock.js";
 import type { AcquireResult } from "./data-dir-lock.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState, setDraining, setClosing } from "./http-server.js";
 import { initQueue, submitToQueue, stopQueue, onQueueJobEvent, getActiveReindexCount } from "./queue.js";
@@ -23,12 +23,13 @@ import { startBuildIntegrityCheck, getOwnModulePath } from "./build-integrity.js
 import { spawnDaemonDetached, describeDaemonMemoryCap } from "./spawn-detached.js";
 import { readCgroupMemoryStats } from "./cgroup-stats.js";
 import { listProjects, onProjectRemoved } from "../registry.js";
+import { reconcileOrphanedJobs, type ReconcileResult } from "../jobs-store.js";
 import { LifecycleManager } from "./lifecycle.js";
 import { rotateIfNeeded } from "./log-rotate.js";
 import { initAutoGc, evaluateRatioTrigger } from "./auto-gc.js";
 import { initVectorIndexBackfill } from "./vector-index-backfill.js";
 import { migrateModelsCache } from "./migrate-models-cache.js";
-import type { KickRequest, KickResponse } from "./http-server.js";
+import type { KickRequest, KickResponse, DaemonEvent } from "./http-server.js";
 
 let shutdownCalled = false;
 /** Set by shutdown() when this exit owes the world a replacement daemon (review G9). */
@@ -41,6 +42,28 @@ function daemonLog(msg: string): void {
   const line = `${new Date().toISOString()} ${msg}\n`;
   process.stderr.write(line);
   _logWrite?.(line);
+}
+
+/** Only the data-dir lock holder may treat jobs queued before its start as orphans. */
+export function reconcileJobsAtStartup(
+  ownershipOutcome: LockOutcome,
+  startedAtMs: number,
+  emit: (ev: DaemonEvent) => void,
+  reconcile: (beforeEpochMs: number) => ReconcileResult = reconcileOrphanedJobs,
+): void {
+  if (ownershipOutcome !== "acquired") return;
+  try {
+    const rec = reconcile(startedAtMs);
+    if (rec.interrupted + rec.cancelled === 0) return;
+    emit({
+      ts: new Date().toISOString(),
+      level: "info",
+      event: "jobs.reconciled",
+      detail: { interrupted: rec.interrupted, cancelled: rec.cancelled, sampleJobIds: rec.sampleJobIds },
+    });
+  } catch (e) {
+    daemonLog(`[scrybe daemon] job reconciliation failed: ${e}`);
+  }
 }
 
 /**
@@ -414,6 +437,13 @@ export async function runDaemon(): Promise<void> {
     shutdown(reason).catch(() => {});
   });
   lifecycle.start();
+
+  reconcileJobsAtStartup(ownership.outcome, startedAt.getTime(), (ev) => {
+    pushEvent(ev);
+    try {
+      appendFileSync(process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl"), JSON.stringify(ev) + "\n", "utf8");
+    } catch { /* ignore */ }
+  });
 
   // Wire queue → SSE ring buffer (must happen after startHttpServer exports pushEvent)
   initQueue({ pushEvent });

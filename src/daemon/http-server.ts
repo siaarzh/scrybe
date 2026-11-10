@@ -33,7 +33,7 @@ export interface DaemonEvent {
     | "pinned.changed"
     | "auto-gc.scheduled" | "auto-gc.completed" | "auto-gc.failed" | "auto-gc.skipped"
     | "vector-index.completed" | "vector-index.failed"
-    | "project.removed"
+    | "project.removed" | "jobs.reconciled"
     | "health.corrupt" | "health.post-gc-corruption-detected"
     | "ephemeral.swept";
   projectId?: string;

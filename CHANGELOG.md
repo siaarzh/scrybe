@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- Jobs left `running` or `queued` by a daemon that died are now closed on every daemon start (`interrupted`, or `cancelled` for removed projects). Before, this cleanup ran only once, on upgrade, so stale jobs piled up in `list_jobs` and `queue_status`.
+
 ---
 
 ## [0.54.0] — 2026-11-09
