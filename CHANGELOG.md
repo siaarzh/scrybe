@@ -9,7 +9,7 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ### Fixed
 
-- Jobs left `running` or `queued` by a daemon that died are now closed on every daemon start (`interrupted`, or `cancelled` for removed projects). Before, this cleanup ran only once, on upgrade, so stale jobs piled up in `list_jobs` and `queue_status`.
+- Jobs left `running` or `queued` by a daemon that died are now closed whenever a daemon starts (`interrupted`, or `cancelled` for removed projects), except on a data dir that can't be locked, where another daemon might still own them. A job running at that moment in a separate CLI or MCP process that works without the daemon shows as `interrupted` until it finishes. Before, this cleanup ran only once, on upgrade, so stale jobs piled up in `list_jobs` and `queue_status`.
 
 ---
 

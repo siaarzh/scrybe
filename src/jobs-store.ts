@@ -5,7 +5,7 @@
  * In-memory AbortControllers and per-source task detail stay in jobs.ts.
  */
 import { getDB } from "./branch-state.js";
-import { listProjects } from "./registry.js";
+import { listProjectsIfReadable } from "./registry.js";
 import type { IndexMode, JobState } from "./types.js";
 
 export type JobOrigin = "daemon" | "mcp" | "cli";
@@ -157,28 +157,39 @@ export interface ReconcileResult {
 /** Close jobs queued before `beforeEpochMs`: `interrupted`, or `cancelled` if the project is gone. */
 export function reconcileOrphanedJobs(beforeEpochMs: number): ReconcileResult {
   const db = getDB();
-  const projectIds = listProjects().map((p) => p.id);
+  // An unreadable registry lists nothing; never call every project removed on that basis.
+  const projects = listProjectsIfReadable();
+  const readable = projects !== null;
+  const projectIds = (projects ?? []).map((p) => p.id);
   // "*" is the reindex_all job's project id.
   const ids = [...projectIds, "*"];
   const marks = ids.map(() => "?").join(",");
-  // An unreadable registry lists nothing; never call every project removed on that basis.
-  const registered = projectIds.length ? `project_id IN (${marks})` : "1";
-  const removed = projectIds.length ? `project_id NOT IN (${marks})` : "0";
-  const idParams = projectIds.length ? ids : [];
+  const registered = readable ? `project_id IN (${marks})` : "1";
+  const removed = readable ? `project_id NOT IN (${marks})` : "0";
+  const idParams = readable ? ids : [];
   const pending = "status IN ('queued','running') AND queued_at < ?";
 
-  const sample = db.prepare(`SELECT job_id FROM jobs WHERE ${pending} ORDER BY queued_at LIMIT 5`)
-    .all(beforeEpochMs) as Array<{ job_id: string }>;
-
   const now = Date.now();
-  const interrupted = db.prepare(`
-    UPDATE jobs SET status='interrupted', error_message='interrupted by daemon restart', finished_at=?
-    WHERE ${pending} AND ${registered}
-  `).run(now, beforeEpochMs, ...idParams) as unknown as { changes: number };
-  const cancelled = db.prepare(`
-    UPDATE jobs SET status='cancelled', error_message='project no longer exists (zombie cleanup)', finished_at=?
-    WHERE ${pending} AND ${removed}
-  `).run(now, beforeEpochMs, ...idParams) as unknown as { changes: number };
+  let sample: Array<{ job_id: string }>;
+  let interrupted: { changes: number };
+  let cancelled: { changes: number };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    sample = db.prepare(`SELECT job_id FROM jobs WHERE ${pending} ORDER BY queued_at LIMIT 5`)
+      .all(beforeEpochMs) as Array<{ job_id: string }>;
+    interrupted = db.prepare(`
+      UPDATE jobs SET status='interrupted', error_message='interrupted by daemon restart', finished_at=?
+      WHERE ${pending} AND ${registered}
+    `).run(now, beforeEpochMs, ...idParams) as unknown as { changes: number };
+    cancelled = db.prepare(`
+      UPDATE jobs SET status='cancelled', error_message='project no longer exists (zombie cleanup)', finished_at=?
+      WHERE ${pending} AND ${removed}
+    `).run(now, beforeEpochMs, ...idParams) as unknown as { changes: number };
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 
   return {
     interrupted: Number(interrupted.changes),

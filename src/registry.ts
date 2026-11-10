@@ -20,12 +20,17 @@ type RawProject = Project & {
 };
 
 function load(): Project[] {
+  return loadOrNull() ?? [];
+}
+
+/** The registry from one read of projects.json; null when the file exists but does not parse. */
+function loadOrNull(): Project[] | null {
   if (!existsSync(REGISTRY_PATH)) return [];
   let projects: RawProject[];
   try {
     projects = JSON.parse(readFileSync(REGISTRY_PATH, "utf8")) as RawProject[];
   } catch {
-    return [];
+    return null;
   }
 
   let anyMigrated = false;
@@ -86,6 +91,11 @@ function save(projects: Project[]): void {
 
 export function listProjects(): Project[] {
   return load();
+}
+
+/** Like `listProjects()`, but null when projects.json exists and cannot be parsed. */
+export function listProjectsIfReadable(): Project[] | null {
+  return loadOrNull();
 }
 
 export function getProject(id: string): Project | undefined {

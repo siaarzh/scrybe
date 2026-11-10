@@ -70,8 +70,50 @@ describe("reconcileOrphanedJobs with an unreadable registry", () => {
   });
 });
 
+describe("reconcileOrphanedJobs while another process holds the write lock", () => {
+  it("waits for it instead of failing at once", async () => {
+    const dir = process.env["SCRYBE_DATA_DIR"]!;
+    writeFileSync(join(dir, "projects.json"), JSON.stringify([{ id: "live", description: "", sources: [] }]), "utf8");
+    const { insertJob, reconcileOrphanedJobs, getJobRow } = await import("../src/jobs-store.js");
+    insertJob({
+      job_id: "busy-old", project_id: "live", source_id: null, branch: null, mode: "incremental", status: "running",
+      phase: null, queued_at: CUTOFF - 5, started_at: null, finished_at: null, error_message: null,
+      origin: "daemon", type: "reindex", result: null,
+    });
+    const { spawn } = await import("child_process");
+    const holderSrc = `const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]);` +
+      ` db.exec("BEGIN IMMEDIATE"); process.stdout.write("HELD"); setTimeout(() => { db.exec("COMMIT"); process.exit(0); }, 1200);`;
+    const holder = spawn(process.execPath, ["-e", holderSrc, join(dir, "branch-tags.db")], { stdio: ["ignore", "pipe", "ignore"] });
+    await new Promise<void>((resolve) => holder.stdout!.on("data", (b) => { if (String(b).includes("HELD")) resolve(); }));
+
+    const t0 = Date.now();
+    const res = reconcileOrphanedJobs(CUTOFF);
+    const waited = Date.now() - t0;
+
+    expect(res.interrupted).toBe(1);
+    expect(getJobRow("busy-old")!.status).toBe("interrupted");
+    expect(waited).toBeGreaterThan(500);
+  }, 20_000);
+});
+
+describe("reconcileOrphanedJobs with a valid but empty registry", () => {
+  it("cancels rows for projects that are no longer registered", async () => {
+    const dir = process.env["SCRYBE_DATA_DIR"]!;
+    writeFileSync(join(dir, "projects.json"), "[]", "utf8");
+    const { insertJob, reconcileOrphanedJobs, getJobRow } = await import("../src/jobs-store.js");
+    insertJob({
+      job_id: "empty-reg-old", project_id: "gone", source_id: null, branch: null, mode: "incremental", status: "queued",
+      phase: null, queued_at: CUTOFF - 5, started_at: null, finished_at: null, error_message: null,
+      origin: "daemon", type: "reindex", result: null,
+    });
+    const res = reconcileOrphanedJobs(CUTOFF);
+    expect(res).toMatchObject({ interrupted: 0, cancelled: 1 });
+    expect(getJobRow("empty-reg-old")!.status).toBe("cancelled");
+  });
+});
+
 describe("reconcileJobsAtStartup", () => {
-  it("runs only for the data-dir lock holder, with the daemon's start time as the cutoff", async () => {
+  it("runs only for the data-dir lock holder, with the time it took the lock as the cutoff", async () => {
     const { reconcileJobsAtStartup } = await import("../src/daemon/main.js");
     const calls: number[] = [];
     const emitted: unknown[] = [];

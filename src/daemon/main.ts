@@ -7,8 +7,8 @@ import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config, warnOldEnvVars } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
-import { acquireDataDirOwnership, releaseDataDirOwnership, acquireSpawnLock, releaseSpawnLock, type LockOutcome } from "./data-dir-lock.js";
-import type { AcquireResult } from "./data-dir-lock.js";
+import { acquireDataDirOwnership, releaseDataDirOwnership, acquireSpawnLock, releaseSpawnLock } from "./data-dir-lock.js";
+import type { AcquireResult, LockOutcome } from "./data-dir-lock.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState, setDraining, setClosing } from "./http-server.js";
 import { initQueue, submitToQueue, stopQueue, onQueueJobEvent, getActiveReindexCount } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
@@ -44,17 +44,24 @@ function daemonLog(msg: string): void {
   _logWrite?.(line);
 }
 
-/** Only the data-dir lock holder may treat jobs queued before its start as orphans. */
+/** Only the data-dir lock holder may treat jobs queued before it took the lock as orphans. */
 export function reconcileJobsAtStartup(
   ownershipOutcome: LockOutcome,
-  startedAtMs: number,
+  ownedAtMs: number,
   emit: (ev: DaemonEvent) => void,
   reconcile: (beforeEpochMs: number) => ReconcileResult = reconcileOrphanedJobs,
 ): void {
   if (ownershipOutcome !== "acquired") return;
+  let rec: ReconcileResult;
   try {
-    const rec = reconcile(startedAtMs);
-    if (rec.interrupted + rec.cancelled === 0) return;
+    // Rows a clock jump stamped after this start wait for a later start; nothing is lost.
+    rec = reconcile(ownedAtMs);
+  } catch (e) {
+    daemonLog(`[scrybe daemon] job reconciliation failed: ${e}`);
+    return;
+  }
+  if (rec.interrupted + rec.cancelled === 0) return;
+  try {
     emit({
       ts: new Date().toISOString(),
       level: "info",
@@ -62,7 +69,7 @@ export function reconcileJobsAtStartup(
       detail: { interrupted: rec.interrupted, cancelled: rec.cancelled, sampleJobIds: rec.sampleJobIds },
     });
   } catch (e) {
-    daemonLog(`[scrybe daemon] job reconciliation failed: ${e}`);
+    daemonLog(`[scrybe daemon] jobs were reconciled but the event could not be emitted: ${e}`);
   }
 }
 
@@ -290,6 +297,7 @@ export async function runDaemon(): Promise<void> {
   // (review F9), which is what covers the CLI and MCP entry points too.
   mkdirSync(config.dataDir, { recursive: true });
   const ownership = acquireDataDirOwnership();
+  const ownedAtMs = Date.now();
   if (ownership.outcome === "contended") {
     diagEmit({
       level: "warn",
@@ -438,11 +446,9 @@ export async function runDaemon(): Promise<void> {
   });
   lifecycle.start();
 
-  reconcileJobsAtStartup(ownership.outcome, startedAt.getTime(), (ev) => {
+  reconcileJobsAtStartup(ownership.outcome, ownedAtMs, (ev) => {
     pushEvent(ev);
-    try {
-      appendFileSync(process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(config.dataDir, "daemon-log.jsonl"), JSON.stringify(ev) + "\n", "utf8");
-    } catch { /* ignore */ }
+    diagEmit({ level: ev.level, event: ev.event, detail: ev.detail });
   });
 
   // Wire queue → SSE ring buffer (must happen after startHttpServer exports pushEvent)
