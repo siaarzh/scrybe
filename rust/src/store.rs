@@ -382,6 +382,16 @@ impl Store {
         Ok(())
     }
 
+    /// `dropTable`: the table, its directory and its sidecar.
+    pub async fn drop_table(&self, name: &str) -> Result<()> {
+        self.drop_table_and_files(name).await?;
+        let sidecar = db_path().join(format!("{name}-meta.json"));
+        if sidecar.exists() {
+            let _ = std::fs::remove_file(sidecar);
+        }
+        Ok(())
+    }
+
     /// `probeTableHealth`: one retry after 100 ms, because a compaction can hide a file briefly.
     pub async fn table_health(&self, name: &str, expected_dim: Option<i32>) -> Health {
         let first = self.probe_once(name, expected_dim).await;

@@ -297,8 +297,35 @@ pub fn table_name_for(project: &str, source: &Source, emb: &EmbedConfig) -> Stri
     format!("{prefix}_{}", &hash[..12])
 }
 
+// One writer at a time, so two calls can't each read the old list and drop the other's change.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    WRITE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `load`: a missing or unparseable file is an empty list. Entries stay JSON so unknown fields survive.
+fn load_list() -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(data_dir().join("projects.json")) else { return vec![] };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Array(list)) => list,
+        _ => vec![],
+    }
+}
+
+/// `save`: writes beside the file, then renames over it.
+fn save_list(list: Vec<Value>) -> Result<()> {
+    let path = data_dir().join("projects.json");
+    std::fs::create_dir_all(data_dir())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&Value::Array(list))?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 /// `addSource`: appends to the registry as JSON so fields this code doesn't know survive.
 pub fn add_source(project: &str, source: Value) -> Result<()> {
+    let _guard = write_lock();
     let path = data_dir().join("projects.json");
     let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
     let Some(p) = doc.as_array_mut().context("projects.json is not a list")?.iter_mut().find(|p| p["id"] == project) else {
@@ -320,6 +347,7 @@ pub fn add_source(project: &str, source: Value) -> Result<()> {
 
 /// `updateSource`: patches the registry as JSON so fields this code doesn't know survive.
 pub fn update_source(project: &str, source: &str, patch: &[(&str, Value)]) -> Result<()> {
+    let _guard = write_lock();
     let path = data_dir().join("projects.json");
     let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
     for p in doc.as_array_mut().context("projects.json is not a list")? {
@@ -338,6 +366,52 @@ pub fn update_source(project: &str, source: &str, patch: &[(&str, Value)]) -> Re
     std::fs::write(&tmp, serde_json::to_string_pretty(&doc)?)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// `addProject`.
+pub fn add_project(id: &str, description: &str) -> Result<()> {
+    let _guard = write_lock();
+    let mut list = load_list();
+    if list.iter().any(|p| p["id"] == id) {
+        anyhow::bail!("Project '{id}' already exists");
+    }
+    list.push(serde_json::json!({ "id": id, "description": description, "sources": [] }));
+    save_list(list)
+}
+
+/// `updateProject`: sets the description when one is given and returns the whole project.
+pub fn update_project(id: &str, description: Option<Value>) -> Result<Value> {
+    let _guard = write_lock();
+    let mut list = load_list();
+    let Some(p) = list.iter_mut().find(|p| p["id"] == id) else {
+        anyhow::bail!("Project '{id}' not found");
+    };
+    if let Some(d) = description {
+        p["description"] = d;
+    }
+    let out = p.clone();
+    save_list(list)?;
+    Ok(out)
+}
+
+/// The last step of `removeProject`: the entry leaves the file.
+pub fn remove_project_entry(id: &str) -> Result<()> {
+    let _guard = write_lock();
+    let mut list = load_list();
+    list.retain(|p| p["id"] != id);
+    save_list(list)
+}
+
+/// The last step of `removeSource`: the source leaves its project's list.
+pub fn remove_source_entry(project: &str, source: &str) -> Result<()> {
+    let _guard = write_lock();
+    let mut list = load_list();
+    for p in list.iter_mut().filter(|p| p["id"] == project) {
+        if let Some(sources) = p["sources"].as_array_mut() {
+            sources.retain(|s| s["source_id"] != source);
+        }
+    }
+    save_list(list)
 }
 
 /// Mirrors `isSearchable`.

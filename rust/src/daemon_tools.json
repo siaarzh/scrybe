@@ -379,5 +379,246 @@
   "annotations": {
    "openWorldHint": true
   }
+ },
+ {
+  "name": "add_project",
+  "description": "Register a new project container. Add sources to it with source add.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string",
+     "description": "Unique project identifier"
+    },
+    "description": {
+     "type": "string",
+     "description": "Human-readable description"
+    }
+   },
+   "required": [
+    "project_id"
+   ]
+  },
+  "annotations": {
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "update_project",
+  "description": "Update a project's description.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "description": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "project_id"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "remove_project",
+  "description": "Unregister a project and drop all its source tables (vector data deleted).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "project_id"
+   ]
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "update_source",
+  "description": "Update an existing source's config — e.g. refresh a token, change root path, or update language hints. Only the fields you provide are changed.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string"
+    },
+    "url": {
+     "type": "string",
+     "description": "Provider base URL"
+    },
+    "project": {
+     "type": "string",
+     "description": "Provider-scoped project identifier"
+    },
+    "token": {
+     "type": "string",
+     "description": "New personal access token (literal or ${VAR} form)"
+    },
+    "gitlab_token": {
+     "type": "string",
+     "description": "[deprecated: use token] New GitLab personal access token"
+    },
+    "gitlab_url": {
+     "type": "string",
+     "description": "[deprecated: use url] GitLab instance base URL"
+    },
+    "gitlab_project_id": {
+     "type": "string",
+     "description": "[deprecated: use project] GitLab project ID or path"
+    },
+    "root_path": {
+     "type": "string",
+     "description": "Absolute path to repo root"
+    },
+    "languages": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "description": "Language hints"
+    }
+   },
+   "required": [
+    "project_id",
+    "source_id"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "remove_source",
+  "description": "Remove a source from a project and drop its vector table.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "project_id",
+    "source_id"
+   ]
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "list_branches",
+  "description": "List branches that have been indexed for a project's sources. Each code source maintains separate indexed chunks per branch. Non-code sources (tickets) always use the branch sentinel '*'.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Limit to a specific source (omit for all sources)"
+    }
+   },
+   "required": [
+    "project_id"
+   ]
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "set_private_ignore",
+  "description": "Set or clear private ignore rules for a code source. **Replaces the entire file content** — to add a single pattern to existing rules, call `get_private_ignore` first, append your pattern, then call `set_private_ignore` with the concatenated content. Pass empty string to delete the file. Only code sources are supported (knowledge sources have a different ignore model). Returns `{ ok, path, action, hint }`. `hint` includes the exact reindex command to apply changes.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string",
+     "description": "Project identifier"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Source identifier (must be a code source)"
+    },
+    "content": {
+     "type": "string",
+     "description": "Full new content of the private ignore file (gitignore syntax). Empty string = delete the file (no private ignore rules)."
+    }
+   },
+   "required": [
+    "project_id",
+    "source_id",
+    "content"
+   ]
+  },
+  "annotations": {
+   "idempotentHint": false,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "get_private_ignore",
+  "description": "Read the current private ignore content for a code source. Returns `null` if no file exists. Use before `set_private_ignore` when adding patterns to existing rules.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string",
+     "description": "Project identifier"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "Source identifier"
+    }
+   },
+   "required": [
+    "project_id",
+    "source_id"
+   ]
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
+ },
+ {
+  "name": "list_private_ignores",
+  "description": "Enumerate all private ignore files across all registered projects. Returns metadata only (project_id, source_id, mtime, rule_count). For full content, use `get_private_ignore`.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string",
+     "description": "Limit to a specific project (omit for all projects)"
+    }
+   },
+   "required": []
+  },
+  "annotations": {
+   "readOnlyHint": true,
+   "openWorldHint": false
+  }
  }
 ]

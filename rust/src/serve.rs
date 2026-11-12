@@ -9,6 +9,7 @@ use crate::config::{data_dir, VERSION};
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
 use crate::lifecycle::Lifecycle;
+use crate::manage;
 use crate::mcp;
 use crate::registry;
 use crate::store::Store;
@@ -32,6 +33,7 @@ struct Daemon {
     store: Arc<Store>,
     queue: Arc<Queue>,
     autogc: Arc<AutoGc>,
+    backfill: Arc<vecindex::Backfill>,
     lifecycle: Mutex<Lifecycle>,
     idle: Arc<Idle>,
     health: Arc<WatchHealth>,
@@ -328,6 +330,13 @@ impl Daemon {
             "status" => Ok(self.status_tool()),
             "gc" => self.gc_tool(a),
             "list_pinned_branches" | "pin_branches" | "unpin_branches" => self.pin_tool(name, a),
+            "add_project" => manage::add_project(a),
+            "update_project" => manage::update_project(a),
+            "update_source" => manage::update_source(a),
+            "list_branches" => manage::list_branches(&self.queue, a),
+            "set_private_ignore" => manage::set_private_ignore(a),
+            "get_private_ignore" => manage::get_private_ignore(a),
+            "list_private_ignores" => manage::list_private_ignores(a),
             _ => return None,
         })
     }
@@ -405,6 +414,15 @@ impl Daemon {
         out.map_err(|m| anyhow::anyhow!(m))
     }
 
+    /// `remove_project`, then what the server does when a project goes: stop its timers and announce it.
+    async fn remove_project(&self, id: &str) -> Result<Value> {
+        let cancelled = manage::remove_project(&self.queue, id).await?;
+        self.autogc.cancel(id);
+        self.backfill.cancel(id);
+        self.queue.push(json!({ "ts": jobs::now_iso(), "level": "info", "event": "project.removed", "projectId": id, "detail": { "jobsCancelled": cancelled } }));
+        Ok(json!({ "ok": true, "project_id": id }))
+    }
+
     fn status_tool(&self) -> Value {
         let mut out = json!({ "version": VERSION, "daemon_running": true, "daemon_pid": std::process::id(), "daemon_port": self.port, "daemon_version": VERSION });
         for (k, v) in registry::embedding_status().as_object().into_iter().flatten() {
@@ -425,7 +443,12 @@ impl Daemon {
         if let Err(message) = mcp::validate_params(name, &spec["inputSchema"], &args) {
             return fail(-32602, &message);
         }
-        let outcome = if name == "add_source" { Some(source_add::add(&self.queue, &args).await) } else { self.run_tool(name, &args) };
+        let outcome = match name {
+            "add_source" => Some(source_add::add(&self.queue, &args).await),
+            "remove_source" => Some(manage::remove_source(&self.queue, &args).await),
+            "remove_project" => Some(self.remove_project(args["project_id"].as_str().unwrap_or("")).await),
+            _ => self.run_tool(name, &args),
+        };
         match outcome {
             Some(Ok(result)) => json!({ "id": id, "result": result }).to_string(),
             Some(Err(e)) => match e.downcast_ref::<registry::CallerFacing>() {
@@ -719,10 +742,10 @@ pub async fn serve(store: Store) -> Result<()> {
 
     let now = Instant::now();
     let (idle, health) = (Arc::new(Idle::from_env()), Arc::new(WatchHealth::default()));
-    let d = Arc::new(Daemon { store, queue: queue.clone(), autogc: AutoGc::new(queue.clone()), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
+    let d = Arc::new(Daemon { store, queue: queue.clone(), autogc: AutoGc::new(queue.clone()), backfill: vecindex::Backfill::new(queue.clone()), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
     let _owner = owner;
     d.autogc.start();
-    vecindex::Backfill::new(queue.clone()).start();
+    d.backfill.start();
     let projects = registry::list_projects();
     ticket_poll::start(queue.clone(), idle.clone(), &projects);
     watch::start(queue.clone(), idle, health, &projects);

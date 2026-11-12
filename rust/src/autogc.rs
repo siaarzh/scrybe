@@ -36,7 +36,7 @@ impl AutoGc {
         self.wake.notify_all();
     }
 
-    fn cancel(&self, project: &str) {
+    pub fn cancel(&self, project: &str) {
         self.deadlines.lock().unwrap().remove(project);
     }
 

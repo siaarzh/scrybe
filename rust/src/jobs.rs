@@ -108,6 +108,26 @@ impl Rows {
         stmt.query_map([project, source], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
 
+    /// Queued and running jobs of a project, as (job id, status).
+    pub fn open_jobs(&self, project: &str) -> Vec<(String, String)> {
+        let conn = self.lock();
+        let Ok(mut stmt) = conn.prepare("SELECT job_id, status FROM jobs WHERE project_id = ? AND status IN ('queued', 'running')") else { return vec![] };
+        stmt.query_map([project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Closes a job of a removed project. False when the row couldn't be updated.
+    pub fn cancel_removed(&self, job: &str) -> bool {
+        self.lock().execute("UPDATE jobs SET status='cancelled', error_message='project removed', finished_at=? WHERE job_id=?", params![now_ms(), job]).is_ok()
+    }
+
+    /// The SQLite half of `wipeSource`.
+    pub fn wipe_source(&self, project: &str, source: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM branch_tags WHERE project_id=? AND source_id=?", [project, source])?;
+        conn.execute("DELETE FROM branch_state WHERE project_id=? AND source_id=?", [project, source])?;
+        Ok(())
+    }
+
     pub fn last_indexed_sha(&self, project: &str, source: &str, branch: &str) -> Option<String> {
         self.lock().query_row("SELECT last_indexed_sha FROM branch_state WHERE project_id=? AND source_id=? AND branch=?", [project, source, branch], |r| r.get(0)).ok()
     }

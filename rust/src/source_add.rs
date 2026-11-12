@@ -13,7 +13,7 @@ fn text(a: &Value, key: &str) -> Option<String> {
 }
 
 /// `resolveTicketFields`: the generic fields win over the deprecated `gitlab_*` ones.
-fn ticket_fields(a: &Value) -> (String, String, String, String) {
+pub(crate) fn ticket_fields(a: &Value) -> (String, String, String, String) {
     let alias = |old: &str, new: &str, key: &str| {
         let v = text(a, key);
         if v.is_some() {

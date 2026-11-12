@@ -227,12 +227,45 @@ pub fn write_entry(key: &str, entry: Entry) -> Result<()> {
     Ok(())
 }
 
+/// Removes the entries whose key starts with `prefix`. True when any went.
+fn strip_entries(doc: &mut Value, prefix: &str) -> bool {
+    let Some(entries) = doc["entries"].as_object_mut() else { return false };
+    let before = entries.len();
+    entries.retain(|k, _| !k.starts_with(prefix));
+    entries.len() != before
+}
+
+/// `deleteEntriesForSource`: drops every entry under `project:source:`. Nothing is written when none match.
+pub fn delete_entries_for_source(project: &str, source: &str) -> Result<()> {
+    let path = state_path();
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(()) };
+    let Ok(mut doc) = serde_json::from_str::<Value>(&text) else { return Ok(()) };
+    if !strip_entries(&mut doc, &format!("{project}:{source}:")) {
+        return Ok(());
+    }
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(&doc)? + "\n").context("writing embed-batch-state")?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cfg() -> EmbedConfig {
         EmbedConfig { local: false, base_url: "http://x/v1".into(), model: "m".into(), dimensions: 2, credentials: "k".into(), encoding_float: false, max_input_tokens: None, query_prefix: String::new(), passage_prefix: String::new() }
+    }
+
+    #[test]
+    fn a_removed_source_takes_only_its_own_batch_size_entries() {
+        let mut doc = json!({ "entries": { "p:s:model:8": {}, "p:s:other:8": {}, "p:t:model:8": {}, "q:s:model:8": {} } });
+        assert!(strip_entries(&mut doc, "p:s:"));
+        let mut left: Vec<&String> = doc["entries"].as_object().unwrap().keys().collect();
+        left.sort();
+        assert_eq!(left, ["p:t:model:8", "q:s:model:8"]);
+        assert!(!strip_entries(&mut doc, "p:s:"));
+        assert!(!strip_entries(&mut json!({ "entries": 5 }), "p:s:"));
     }
 
     #[test]

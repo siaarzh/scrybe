@@ -15,6 +15,7 @@ mod index_ticket;
 mod jobs;
 mod jsstr;
 mod lifecycle;
+mod manage;
 mod mcp;
 mod phase;
 mod pinned;

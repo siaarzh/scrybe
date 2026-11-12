@@ -94,6 +94,11 @@ impl Backfill {
         self.wake.notify_all();
     }
 
+    /// Stops a removed project's timer.
+    pub fn cancel(&self, project: &str) {
+        self.deadlines.lock().unwrap().remove(project);
+    }
+
     /// Resets a project's timer on every queue event, arms one per project, and starts the timer thread.
     pub fn start(self: &Arc<Self>) {
         let me = self.clone();

@@ -1519,6 +1519,311 @@ describe("add_source with a token the tracker accepts", () => {
   });
 });
 
+// ─── Projects, sources, branches and private ignore rules ────────────────────
+
+const INTERNAL = "internal error";
+const jobDone = (c, id) => until(async () => {
+  const s = (await c.call("reindex_status", { job_id: id })).value;
+  return ["done", "completed", "failed", "cancelled"].includes(s?.status) && s;
+}, 90_000, "the job");
+const registryOf = (w) => JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"));
+const sourceOf = (w, project, source) => registryOf(w).find((p) => p.id === project)?.sources.find((s) => s.source_id === source);
+const tagCount = (w, project, source) => {
+  const db = new DatabaseSync(join(w.data, "branch-tags.db"), { readOnly: true });
+  try {
+    const sql = source === undefined ? "SELECT COUNT(*) AS n FROM branch_tags WHERE project_id=?" : "SELECT COUNT(*) AS n FROM branch_tags WHERE project_id=? AND source_id=?";
+    return db.prepare(sql).get(...(source === undefined ? [project] : [project, source])).n;
+  } finally {
+    db.close();
+  }
+};
+const filesStartingWith = (dir, prefix) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.startsWith(prefix)) : []);
+const refusedAs = (r, message) => {
+  assert.ok(wasRefused(r), JSON.stringify(r));
+  assert.equal(failureText(r), message);
+};
+const addCodeSource = async (c, w, project, source) => {
+  const r = await c.call("add_source", { project_id: project, source_id: source, source_type: "code", root_path: w.repo });
+  assert.equal(r.isError, false, JSON.stringify(r));
+  const job = await jobDone(c, r.value.job_id);
+  assert.equal(job.status, "done", JSON.stringify(job));
+  return r.value.job_id;
+};
+const ISO_TIME = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+
+describe("projects, sources, branches and private ignore rules", () => {
+  let w, c;
+  before(async () => {
+    w = await makeWorld();
+    await w.index("--full");
+    await w.index("--branch", "side");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+  });
+  after(() => w.stop());
+
+  test("a project is added with or without a description, and a repeat is refused", async () => {
+    const solo = await c.call("add_project", { project_id: "solo" });
+    assert.deepEqual(solo.value, { ok: true, project_id: "solo" });
+    assert.deepEqual(registryOf(w).find((p) => p.id === "solo"), { id: "solo", description: "", sources: [] });
+    assert.deepEqual((await c.call("add_project", { project_id: "second", description: "two" })).value, { ok: true, project_id: "second" });
+    refusedAs(await c.call("add_project", { project_id: "second", description: "other" }), INTERNAL);
+    const second = registryOf(w).filter((p) => p.id === "second");
+    assert.equal(second.length, 1);
+    assert.equal(second[0].description, "two");
+    const typo = await c.call("add_project", { project: "x" });
+    assert.ok(wasRefused(typo), JSON.stringify(typo));
+    assert.equal(failureText(typo), "invalid params for add_project: unknown key 'project' (did you mean 'project_id'?)");
+    assert.ok(!registryOf(w).some((p) => p.id === "x"));
+  });
+
+  test("update_project returns the whole project, and only a description changes it", async () => {
+    assert.deepEqual((await c.call("update_project", { project_id: "second", description: "changed" })).value, { id: "second", description: "changed", sources: [] });
+    assert.equal(registryOf(w).find((p) => p.id === "second").description, "changed");
+    assert.deepEqual((await c.call("update_project", { project_id: "second" })).value, { id: "second", description: "changed", sources: [] });
+    const demo = (await c.call("update_project", { project_id: "demo" })).value;
+    assert.equal(demo.id, "demo");
+    assert.equal(demo.description, "A demo");
+    assert.deepEqual(demo.sources.map((s) => s.source_id), ["primary"]);
+    refusedAs(await c.call("update_project", { project_id: "nope", description: "x" }), INTERNAL);
+    assert.ok(!registryOf(w).some((p) => p.id === "nope"));
+  });
+
+  test("an empty project is removed without touching the others", async () => {
+    assert.deepEqual((await c.call("remove_project", { project_id: "solo" })).value, { ok: true, project_id: "solo" });
+    const ids = registryOf(w).map((p) => p.id);
+    assert.ok(!ids.includes("solo"));
+    assert.ok(ids.includes("demo") && ids.includes("second"));
+    refusedAs(await c.call("remove_project", { project_id: "solo" }), INTERNAL);
+    assert.deepEqual((await c.call("remove_project", { project_id: "second" })).value, { ok: true, project_id: "second" });
+  });
+
+  test("list_branches names the indexed branches of each source, '*' for a tracker, nothing for an unknown source", async () => {
+    const primary = (await c.call("list_branches", { project_id: "demo" })).value;
+    assert.equal(primary.length, 1);
+    assert.equal(primary[0].source_id, "primary");
+    assert.deepEqual([...primary[0].branches].sort(), [w.main, "side"].sort());
+    await addCodeSource(c, w, "demo", "extra");
+    const both = (await c.call("list_branches", { project_id: "demo" })).value;
+    assert.deepEqual(both.map((e) => e.source_id), ["primary", "extra"]);
+    assert.deepEqual(both[1].branches, [w.main]);
+    assert.deepEqual((await c.call("list_branches", { project_id: "demo", source_id: "extra" })).value, [{ source_id: "extra", branches: [w.main] }]);
+    assert.deepEqual((await c.call("list_branches", { project_id: "demo", source_id: "nope" })).value, []);
+    refusedAs(await c.call("list_branches", { project_id: "nope" }), INTERNAL);
+    await c.call("remove_source", { project_id: "demo", source_id: "extra" });
+  });
+
+  test("private ignore rules are written, read, listed, left alone when unchanged, and cleared", async () => {
+    const path = join(w.data, "ignores", "demo", "primary.gitignore");
+    assert.deepEqual((await c.call("get_private_ignore", { project_id: "demo", source_id: "primary" })).value, { project_id: "demo", source_id: "primary", content: null, path, rule_count: 0 });
+    assert.deepEqual((await c.call("list_private_ignores")).value, []);
+    const rules = "# mine\nsecret/\n*.tmp\n";
+    const set = await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: rules });
+    assert.deepEqual(set.value, {
+      ok: true,
+      path,
+      action: "written",
+      hint: "To apply changes, run: scrybe index -P demo -S primary --incremental\n  (or via MCP: reindex_source with project_id=\"demo\", source_id=\"primary\", mode=\"incremental\")",
+    });
+    assert.equal(readFileSync(path, "utf8"), rules);
+    assert.deepEqual((await c.call("get_private_ignore", { project_id: "demo", source_id: "primary" })).value, { project_id: "demo", source_id: "primary", content: rules, path, rule_count: 2 });
+    for (const args of [{}, { project_id: "demo" }]) {
+      const listed = (await c.call("list_private_ignores", args)).value;
+      assert.equal(listed.length, 1, JSON.stringify(listed));
+      assert.deepEqual({ ...listed[0], mtime: undefined }, { project_id: "demo", source_id: "primary", path, rule_count: 2, mtime: undefined });
+      assert.match(listed[0].mtime, ISO_TIME);
+    }
+    assert.equal((await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: rules })).value.action, "unchanged");
+    assert.equal((await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "secret/\n" })).value.action, "written");
+    assert.equal(readFileSync(path, "utf8"), "secret/\n");
+    assert.equal((await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "# only a note\n" })).value.action, "deleted");
+    assert.ok(!existsSync(path));
+    assert.equal((await c.call("get_private_ignore", { project_id: "demo", source_id: "primary" })).value.content, null);
+    assert.deepEqual((await c.call("list_private_ignores")).value, []);
+    assert.equal((await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "" })).value.action, "unchanged");
+    assert.equal((await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "# only a note\n" })).value.action, "unchanged");
+    assert.ok(!existsSync(path), "a note alone is not written");
+    await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "x\n" });
+    assert.equal((await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "" })).value.action, "deleted");
+    assert.ok(!existsSync(path));
+  });
+
+  test("private ignore tools refuse an unknown project or source and write nothing", async () => {
+    for (const [tool, args] of [
+      ["set_private_ignore", { project_id: "nope", source_id: "primary", content: "x\n" }],
+      ["set_private_ignore", { project_id: "demo", source_id: "nope", content: "x\n" }],
+      ["get_private_ignore", { project_id: "nope", source_id: "primary" }],
+      ["get_private_ignore", { project_id: "demo", source_id: "nope" }],
+      ["list_private_ignores", { project_id: "nope" }],
+    ]) refusedAs(await c.call(tool, args), INTERNAL);
+    assert.ok(!existsSync(join(w.data, "ignores", "nope")));
+    assert.ok(!existsSync(join(w.data, "ignores", "demo", "nope.gitignore")));
+    assert.equal((await c.call("get_private_ignore", { project_id: "demo", source_id: "primary" })).isError, false);
+  });
+
+  test("a rule set through the tool keeps a file out of the next full index run, and clearing it brings the file back", async () => {
+    const found = async () => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: "calibrate_gadget" })).value.length;
+    // An incremental run leaves rows of an already indexed file in place, so the check uses a full one.
+    const reindex = async () => {
+      const r = await c.call("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" });
+      assert.equal((await jobDone(c, r.value.job_id)).status, "done");
+    };
+    assert.equal(await found(), 1);
+    await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "src/gadget.py\n" });
+    await reindex();
+    assert.equal(await found(), 0);
+    await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "" });
+    await reindex();
+    assert.equal(await found(), 1);
+  });
+
+  test("remove_source takes the source's rows, hash files, cursor and table, and nothing of its neighbour", async () => {
+    await addCodeSource(c, w, "demo", "extra");
+    const extra = sourceOf(w, "demo", "extra");
+    const primary = sourceOf(w, "demo", "primary");
+    const lance = (s) => join(w.data, "lancedb", `${s.table_name}.lance`);
+    const sidecar = (s) => join(w.data, "lancedb", `${s.table_name}-meta.json`);
+    const cursor = (id) => join(w.data, "cursors", `demo__${id}.json`);
+    assert.ok(extra.table_name && extra.table_name !== primary.table_name);
+    assert.ok(tagCount(w, "demo", "extra") > 0);
+    assert.ok(filesStartingWith(join(w.data, "hashes"), "demo__extra__").length > 0);
+    assert.ok(existsSync(lance(extra)) && existsSync(sidecar(extra)) && existsSync(cursor("extra")));
+
+    refusedAs(await c.call("remove_source", { project_id: "demo", source_id: "nope" }), INTERNAL);
+    refusedAs(await c.call("remove_source", { project_id: "nope", source_id: "extra" }), INTERNAL);
+    assert.deepEqual(registryOf(w)[0].sources.map((s) => s.source_id), ["primary", "extra"]);
+    assert.ok(tagCount(w, "demo", "extra") > 0);
+
+    assert.deepEqual((await c.call("remove_source", { project_id: "demo", source_id: "extra" })).value, { ok: true, project_id: "demo", source_id: "extra" });
+    assert.deepEqual(registryOf(w)[0].sources.map((s) => s.source_id), ["primary"]);
+    assert.equal(tagCount(w, "demo", "extra"), 0);
+    assert.deepEqual(filesStartingWith(join(w.data, "hashes"), "demo__extra__"), []);
+    assert.ok(!existsSync(lance(extra)) && !existsSync(sidecar(extra)) && !existsSync(cursor("extra")));
+    assert.ok(tagCount(w, "demo", "primary") > 0);
+    assert.ok(filesStartingWith(join(w.data, "hashes"), "demo__primary__").length > 0);
+    assert.ok(existsSync(lance(primary)) && existsSync(sidecar(primary)) && existsSync(cursor("primary")));
+    const search = await c.call("search_code", { project_id: "demo", query: "frobnicateWidget", top_k: 5 });
+    assert.ok(search.value.length > 0 && search.value.every((h) => h.source_id === "primary"), JSON.stringify(search.value));
+  });
+
+  test("remove_project takes every row of the project, announces it, and leaves its jobs and private rules", async () => {
+    assert.equal((await c.call("add_project", { project_id: "doomed", description: "to go" })).value.ok, true);
+    const jobId = await addCodeSource(c, w, "doomed", "code");
+    const table = sourceOf(w, "doomed", "code").table_name;
+    const lance = join(w.data, "lancedb", `${table}.lance`);
+    await c.call("set_private_ignore", { project_id: "doomed", source_id: "code", content: "vendor/\n" });
+    const before = await c.call("search_code", { project_id: "doomed", query: "frobnicateWidget", top_k: 5 });
+    assert.ok(before.value.length > 0, JSON.stringify(before));
+    assert.ok(tagCount(w, "doomed") > 0);
+    assert.ok(filesStartingWith(join(w.data, "hashes"), "doomed__code__").length > 0);
+    assert.ok(existsSync(lance) && existsSync(join(w.data, "cursors", "doomed__code.json")));
+    const feed = await watchEvents(`http://127.0.0.1:${w.pidfile().port}`);
+    try {
+      refusedAs(await c.call("remove_project", { project_id: "nope" }), INTERNAL);
+      assert.ok(registryOf(w).some((p) => p.id === "doomed"));
+      assert.ok(tagCount(w, "doomed") > 0);
+
+      assert.deepEqual((await c.call("remove_project", { project_id: "doomed" })).value, { ok: true, project_id: "doomed" });
+      assert.ok(!registryOf(w).some((p) => p.id === "doomed"));
+      assert.equal(tagCount(w, "doomed"), 0);
+      assert.deepEqual(filesStartingWith(join(w.data, "hashes"), "doomed__"), []);
+      assert.ok(!existsSync(lance) && !existsSync(join(w.data, "lancedb", `${table}-meta.json`)) && !existsSync(join(w.data, "cursors", "doomed__code.json")));
+      assert.match(failureText(await c.call("search_code", { project_id: "doomed", query: "frobnicateWidget" })), /Project 'doomed' not found/);
+      const event = await until(() => feed.events.find((e) => e.event === "project.removed" && e.projectId === "doomed"), 10_000, "the project.removed event");
+      assert.equal(event.projectId, "doomed");
+      assert.equal(event.level, "info");
+      assert.deepEqual(event.detail, { jobsCancelled: 0 });
+    } finally {
+      feed.stop();
+    }
+    const others = await c.call("search_code", { project_id: "demo", query: "frobnicateWidget", top_k: 5 });
+    assert.ok(others.value.length > 0, "another project is untouched");
+    assert.ok(tagCount(w, "demo", "primary") > 0);
+    // Today's build keeps the removed project's finished jobs and its private ignore file.
+    assert.ok((await c.call("list_jobs")).value.jobs.some((j) => j.job_id === jobId));
+    assert.equal(readFileSync(join(w.data, "ignores", "doomed", "code.gitignore"), "utf8"), "vendor/\n");
+  });
+});
+
+describe("updating and inspecting a tracker source", () => {
+  let gl, w, c;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN } });
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    const r = await c.call("add_source", addGitlab(gl, { source_id: "issues" }));
+    assert.equal(r.isError, false, JSON.stringify(r));
+    assert.equal((await jobDone(c, r.value.job_id)).status, "done");
+  });
+  after(async () => { await w.stop(); gl.close(); });
+
+  const config = () => sourceOf(w, "demo", "issues").source_config;
+  const update = (args) => c.call("update_source", { project_id: "demo", source_id: "issues", ...args });
+
+  test("update_source changes only the fields given, and says whether anything changed", async () => {
+    const original = { type: "ticket", provider: "gitlab", base_url: gl.url, project_id: GITLAB_PROJECT, token: "${CONTRACT_GITLAB_TOKEN}" };
+    assert.deepEqual(config(), original);
+    assert.deepEqual((await update({})).value, { ok: true, project_id: "demo", source_id: "issues", updated: false });
+    assert.deepEqual(config(), original);
+    assert.deepEqual((await update({ token: "" })).value.updated, false);
+    const r = await update({ project: "demo/renamed", token: "${CONTRACT_OTHER_TOKEN}" });
+    assert.deepEqual(r.value, { ok: true, project_id: "demo", source_id: "issues", updated: true });
+    assert.deepEqual(config(), { ...original, project_id: "demo/renamed", token: "${CONTRACT_OTHER_TOKEN}" });
+    assert.deepEqual((await update({ url: "http://tracker.example.invalid" })).value.updated, true);
+    assert.deepEqual(config(), { ...original, base_url: "http://tracker.example.invalid", project_id: "demo/renamed", token: "${CONTRACT_OTHER_TOKEN}" });
+  });
+
+  test("the old gitlab_ names still work, and the new name wins when both are given", async () => {
+    assert.equal((await update({ gitlab_token: "${CONTRACT_OLD_NAME}" })).value.updated, true);
+    assert.equal(config().token, "${CONTRACT_OLD_NAME}");
+    assert.equal((await update({ token: "${CONTRACT_NEW_NAME}", gitlab_token: "${CONTRACT_OLD_NAME}" })).value.updated, true);
+    assert.equal(config().token, "${CONTRACT_NEW_NAME}");
+    assert.equal((await update({ gitlab_project_id: "demo/legacy", gitlab_url: gl.url })).value.updated, true);
+    assert.deepEqual([config().project_id, config().base_url], ["demo/legacy", gl.url]);
+  });
+
+  test("update_source ignores fields that belong to the other kind of source, and refuses unknown names", async () => {
+    const before = JSON.stringify(registryOf(w));
+    assert.equal((await update({ root_path: "/somewhere" })).value.updated, false);
+    assert.equal(JSON.stringify(registryOf(w)), before);
+    refusedAs(await c.call("update_source", { project_id: "demo", source_id: "nope", token: "x" }), INTERNAL);
+    refusedAs(await c.call("update_source", { project_id: "nope", source_id: "issues", token: "x" }), INTERNAL);
+    const typo = await update({ rootpath: "/x" });
+    assert.ok(wasRefused(typo), JSON.stringify(typo));
+    assert.equal(failureText(typo), "invalid params for update_source: unknown key 'rootpath' (did you mean 'root_path'?)");
+    assert.equal(JSON.stringify(registryOf(w)), before);
+  });
+
+  test("update_source changes a code source's root, and refuses a language list as today's build does", async () => {
+    const original = sourceOf(w, "demo", "primary").source_config;
+    const code = (args) => c.call("update_source", { project_id: "demo", source_id: "primary", ...args });
+    assert.equal((await code({ root_path: "" })).value.updated, false);
+    assert.equal((await code({ url: "http://x.invalid", token: "t" })).value.updated, false);
+    assert.deepEqual(sourceOf(w, "demo", "primary").source_config, original);
+    // The tool's schema asks for a list and its code splits a string, so a language hint can't be given.
+    refusedAs(await code({ languages: ["ts"] }), INTERNAL);
+    refusedAs(await code({ languages: [] }), INTERNAL);
+    assert.deepEqual(sourceOf(w, "demo", "primary").source_config, original);
+    assert.deepEqual((await code({ root_path: "/elsewhere" })).value, { ok: true, project_id: "demo", source_id: "primary", updated: true });
+    assert.deepEqual(sourceOf(w, "demo", "primary").source_config, { ...original, root_path: "/elsewhere" });
+  });
+
+  test("a tracker source lists '*' as its branch and has no private ignore rules to set", async () => {
+    const listed = (await c.call("list_branches", { project_id: "demo" })).value;
+    assert.deepEqual(listed, [{ source_id: "primary", branches: [] }, { source_id: "issues", branches: ["*"] }]);
+    const path = join(w.data, "ignores", "demo", "issues.gitignore");
+    refusedAs(await c.call("set_private_ignore", { project_id: "demo", source_id: "issues", content: "x\n" }), INTERNAL);
+    assert.ok(!existsSync(path));
+    assert.deepEqual((await c.call("get_private_ignore", { project_id: "demo", source_id: "issues" })).value, { project_id: "demo", source_id: "issues", content: null, path, rule_count: 0 });
+    assert.equal((await c.call("set_private_ignore", { project_id: "demo", source_id: "primary", content: "x\n" })).value.action, "written");
+    assert.deepEqual((await c.call("list_private_ignores")).value.map((e) => e.source_id), ["primary"]);
+  });
+});
+
 test("the run's commands", () => {
   assert.ok(SERVER.length && CLI.length && RELAY.length);
 });
