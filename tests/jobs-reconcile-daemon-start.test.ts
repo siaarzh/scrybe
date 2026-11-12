@@ -28,18 +28,33 @@ describe("daemon start reconciles orphaned jobs", () => {
     insertJob(row("future-queued", "queued", Date.now() + 3_600_000));
     closeDB();
 
-    daemon = await startTempDaemon({ dataDir, projects: [] }); // the daemon reads projects.json, written above
+    // An inherited SCRYBE_DAEMON_LOG_PATH would mix other runs' records and the plain-text log into the file read below.
+    const inheritedLogPath = process.env["SCRYBE_DAEMON_LOG_PATH"];
+    delete process.env["SCRYBE_DAEMON_LOG_PATH"];
+    const beforeStart = Date.now();
+    try {
+      daemon = await startTempDaemon({ dataDir, projects: [] }); // the daemon reads projects.json, written above
+    } finally {
+      if (inheritedLogPath !== undefined) process.env["SCRYBE_DAEMON_LOG_PATH"] = inheritedLogPath;
+    }
 
     expect(getJobRow("orphan-running")!.status).toBe("interrupted");
     expect(getJobRow("orphan-queued")!.status).toBe("interrupted");
     expect(getJobRow("orphan-running")!.error_message).toBe("interrupted by daemon restart");
     expect(getJobRow("future-queued")!.status).toBe("queued");
 
-    const logPath = process.env["SCRYBE_DAEMON_LOG_PATH"] ?? join(dataDir, "daemon-log.jsonl");
-    const events = readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
-      .filter((e) => e.event === "jobs.reconciled");
+    const records = readFileSync(join(dataDir, "daemon-log.jsonl"), "utf8").split("\n").filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const events = records.filter((e) => e.event === "jobs.reconciled");
     expect(events).toHaveLength(1);
     expect(events[0].detail).toMatchObject({ interrupted: 2, cancelled: 0 });
     expect([...events[0].detail.sampleJobIds].sort()).toEqual(["orphan-queued", "orphan-running"]);
+
+    // The cutoff is the lock time, taken before daemon.start is logged, not the later startedAt.
+    const starts = records.filter((e) => e.event === "daemon.start");
+    expect(starts).toHaveLength(1);
+    const start = starts[0];
+    expect(events[0].detail.cutoffMs).toBeGreaterThanOrEqual(beforeStart);
+    expect(events[0].detail.cutoffMs).toBeLessThanOrEqual(Date.parse(start.ts));
   }, 60_000);
 });

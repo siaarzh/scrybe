@@ -77,7 +77,11 @@ async function waitForDeath(pid: number, timeoutMs = 5_000): Promise<void> {
 describe("data-dir-lock — contention", () => {
   it("acquireDataDirOwnership succeeds on a fresh data dir", async () => {
     const { acquireDataDirOwnership } = await freshLockModule();
-    expect(acquireDataDirOwnership().outcome).toBe("acquired");
+    const before = Date.now();
+    const result = acquireDataDirOwnership();
+    expect(result.outcome).toBe("acquired");
+    expect(result.acquiredAtMs).toBeGreaterThanOrEqual(before);
+    expect(result.acquiredAtMs).toBeLessThanOrEqual(Date.now());
   });
 
   it("reports contended when a foreign process holds the owner lock", async () => {
@@ -88,6 +92,7 @@ describe("data-dir-lock — contention", () => {
     const result = acquireDataDirOwnership();
 
     expect(result.outcome).toBe("contended");
+    expect(result.acquiredAtMs).toBeUndefined();
     // Diagnostics-only, but it should work in the ordinary case.
     expect(result.heldByPid).toBe(pid);
   });

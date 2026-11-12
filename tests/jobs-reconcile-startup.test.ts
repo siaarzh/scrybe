@@ -119,22 +119,22 @@ describe("reconcileJobsAtStartup", () => {
     const emitted: unknown[] = [];
     const reconcile = (t: number) => { calls.push(t); return { interrupted: 1, cancelled: 0, sampleJobIds: ["x"] }; };
 
-    reconcileJobsAtStartup("contended", 42, (e) => emitted.push(e), reconcile);
-    reconcileJobsAtStartup("unavailable", 42, (e) => emitted.push(e), reconcile);
+    reconcileJobsAtStartup({ outcome: "contended" }, (e) => emitted.push(e), reconcile);
+    reconcileJobsAtStartup({ outcome: "unavailable" }, (e) => emitted.push(e), reconcile);
     expect(calls).toEqual([]);
     expect(emitted).toEqual([]);
 
-    reconcileJobsAtStartup("acquired", 42, (e) => emitted.push(e), reconcile);
+    reconcileJobsAtStartup({ outcome: "acquired", acquiredAtMs: 42 }, (e) => emitted.push(e), reconcile);
     expect(calls).toEqual([42]);
     expect(emitted).toHaveLength(1);
-    expect(emitted[0]).toMatchObject({ event: "jobs.reconciled", detail: { interrupted: 1, cancelled: 0, sampleJobIds: ["x"] } });
+    expect(emitted[0]).toMatchObject({ event: "jobs.reconciled", detail: { interrupted: 1, cancelled: 0, sampleJobIds: ["x"], cutoffMs: 42 } });
   });
 
   it("emits nothing when there was nothing to close, and survives a failing reconcile", async () => {
     const { reconcileJobsAtStartup } = await import("../src/daemon/main.js");
     const emitted: unknown[] = [];
-    reconcileJobsAtStartup("acquired", 1, (e) => emitted.push(e), () => ({ interrupted: 0, cancelled: 0, sampleJobIds: [] }));
-    expect(() => reconcileJobsAtStartup("acquired", 1, (e) => emitted.push(e), () => { throw new Error("db locked"); })).not.toThrow();
+    reconcileJobsAtStartup({ outcome: "acquired", acquiredAtMs: 1 }, (e) => emitted.push(e), () => ({ interrupted: 0, cancelled: 0, sampleJobIds: [] }));
+    expect(() => reconcileJobsAtStartup({ outcome: "acquired", acquiredAtMs: 1 }, (e) => emitted.push(e), () => { throw new Error("db locked"); })).not.toThrow();
     expect(emitted).toEqual([]);
   });
 });

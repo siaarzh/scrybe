@@ -8,7 +8,7 @@ import { checkAndMigrate } from "../schema-version.js";
 import { VERSION, config, warnOldEnvVars } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
 import { acquireDataDirOwnership, releaseDataDirOwnership, acquireSpawnLock, releaseSpawnLock } from "./data-dir-lock.js";
-import type { AcquireResult, LockOutcome } from "./data-dir-lock.js";
+import type { AcquireResult } from "./data-dir-lock.js";
 import { startHttpServer, stopHttpServer, pushEvent, setDaemonState, setDraining, setClosing } from "./http-server.js";
 import { initQueue, submitToQueue, stopQueue, onQueueJobEvent, getActiveReindexCount } from "./queue.js";
 import { initWatcher, watchProject, stopWatcher } from "./watcher.js";
@@ -46,16 +46,16 @@ function daemonLog(msg: string): void {
 
 /** Only the data-dir lock holder may treat jobs queued before it took the lock as orphans. */
 export function reconcileJobsAtStartup(
-  ownershipOutcome: LockOutcome,
-  ownedAtMs: number,
+  ownership: Pick<AcquireResult, "outcome" | "acquiredAtMs">,
   emit: (ev: DaemonEvent) => void,
   reconcile: (beforeEpochMs: number) => ReconcileResult = reconcileOrphanedJobs,
 ): void {
-  if (ownershipOutcome !== "acquired") return;
+  if (ownership.outcome !== "acquired" || ownership.acquiredAtMs === undefined) return;
+  const cutoffMs = ownership.acquiredAtMs;
   let rec: ReconcileResult;
   try {
     // Rows a clock jump stamped after this start wait for a later start; nothing is lost.
-    rec = reconcile(ownedAtMs);
+    rec = reconcile(cutoffMs);
   } catch (e) {
     daemonLog(`[scrybe daemon] job reconciliation failed: ${e}`);
     return;
@@ -66,7 +66,7 @@ export function reconcileJobsAtStartup(
       ts: new Date().toISOString(),
       level: "info",
       event: "jobs.reconciled",
-      detail: { interrupted: rec.interrupted, cancelled: rec.cancelled, sampleJobIds: rec.sampleJobIds },
+      detail: { interrupted: rec.interrupted, cancelled: rec.cancelled, sampleJobIds: rec.sampleJobIds, cutoffMs },
     });
   } catch (e) {
     daemonLog(`[scrybe daemon] jobs were reconciled but the event could not be emitted: ${e}`);
@@ -297,7 +297,6 @@ export async function runDaemon(): Promise<void> {
   // (review F9), which is what covers the CLI and MCP entry points too.
   mkdirSync(config.dataDir, { recursive: true });
   const ownership = acquireDataDirOwnership();
-  const ownedAtMs = Date.now();
   if (ownership.outcome === "contended") {
     diagEmit({
       level: "warn",
@@ -446,7 +445,7 @@ export async function runDaemon(): Promise<void> {
   });
   lifecycle.start();
 
-  reconcileJobsAtStartup(ownership.outcome, ownedAtMs, (ev) => {
+  reconcileJobsAtStartup(ownership, (ev) => {
     pushEvent(ev);
     diagEmit({ level: ev.level, event: ev.event, detail: ev.detail });
   });

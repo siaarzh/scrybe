@@ -380,3 +380,28 @@ describe("getBranchesForChunks", () => {
     expect(map.has(cid)).toBe(false);
   });
 });
+
+describe("getDB on an existing database", () => {
+  it("opens without waiting for another process's write lock", async () => {
+    const { getDB, closeDB } = await import("../src/branch-state.js");
+    const { join } = await import("path");
+    const { spawn } = await import("child_process");
+    getDB();
+    closeDB();
+
+    const dbPath = join(process.env["SCRYBE_DATA_DIR"]!, "branch-tags.db");
+    const holderSrc = `const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]);` +
+      ` db.exec("BEGIN IMMEDIATE"); process.stdout.write("HELD"); setTimeout(() => { db.exec("COMMIT"); process.exit(0); }, 3000);`;
+    const holder = spawn(process.execPath, ["-e", holderSrc, dbPath], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    try {
+      await new Promise<void>((resolve) => holder.stdout!.on("data", (b) => { if (String(b).includes("HELD")) resolve(); }));
+      const t0 = Date.now();
+      const db = getDB();
+      db.prepare("SELECT count(*) FROM jobs").get();
+      expect(Date.now() - t0).toBeLessThan(1000);
+    } finally {
+      holder.kill();
+      closeDB();
+    }
+  }, 20_000);
+});

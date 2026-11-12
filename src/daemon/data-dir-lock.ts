@@ -190,6 +190,8 @@ export interface AcquireResult {
   heldByPid?: number;
   /** The error that made the lock unavailable, when `outcome === "unavailable"`. */
   error?: NodeJS.ErrnoException;
+  /** `Date.now()` right after the lock was taken; set only when `outcome === "acquired"`. */
+  acquiredAtMs?: number;
 }
 
 /**
@@ -322,8 +324,9 @@ function acquire(name: LockName, waitMs = 0): AcquireResult {
 
   if (attempt.ok) {
     _held.set(name, { db: attempt.db, lockPath });
+    const acquiredAtMs = Date.now();
     writeOwnerSidecar(lockPath);
-    return { outcome: "acquired" };
+    return { outcome: "acquired", acquiredAtMs };
   }
 
   if (sqliteCode(attempt.error) === SQLITE_BUSY) {

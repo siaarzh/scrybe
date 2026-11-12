@@ -96,15 +96,7 @@ function deleteBranchHashesFile(projectId: string, sourceId: string, branch: str
 
 let _db: DatabaseSync | null = null;
 
-export function getDB(): DatabaseSync {
-  if (_db) return _db;
-
-  const dbPath = join(config.dataDir, "branch-tags.db");
-  const db = new DatabaseSync(dbPath);
-
-  db.exec("PRAGMA journal_mode=WAL");
-  db.exec("PRAGMA busy_timeout=5000");
-  db.exec(`
+const SCHEMA_SQL = `
     CREATE TABLE IF NOT EXISTS branch_tags (
       project_id  TEXT NOT NULL,
       source_id   TEXT NOT NULL,
@@ -157,8 +149,30 @@ export function getDB(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS idx_branch_state_lookup
       ON branch_state(project_id, source_id);
-  `);
-  db.prepare("INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1')").run();
+  `;
+const SCHEMA_OBJECTS = [...SCHEMA_SQL.matchAll(/CREATE (?:TABLE|INDEX) IF NOT EXISTS (\w+)/g)].map((m) => m[1]!);
+
+/** Read-only check, so opening an existing DB never waits on another process's write lock. */
+function schemaIsComplete(db: DatabaseSync): boolean {
+  const marks = SCHEMA_OBJECTS.map(() => "?").join(",");
+  const row = db.prepare(`SELECT count(*) AS n FROM sqlite_master WHERE name IN (${marks})`)
+    .get(...SCHEMA_OBJECTS) as { n: number };
+  if (Number(row.n) !== SCHEMA_OBJECTS.length) return false;
+  return db.prepare("SELECT 1 FROM schema_meta WHERE key='version'").get() !== undefined;
+}
+
+export function getDB(): DatabaseSync {
+  if (_db) return _db;
+
+  const dbPath = join(config.dataDir, "branch-tags.db");
+  const db = new DatabaseSync(dbPath);
+
+  db.exec("PRAGMA journal_mode=WAL");
+  db.exec("PRAGMA busy_timeout=5000");
+  if (!schemaIsComplete(db)) {
+    db.exec(SCHEMA_SQL);
+    db.prepare("INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1')").run();
+  }
 
   _db = db;
   return db;
