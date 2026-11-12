@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 import { closeDB } from "../branch-state.js";
 import { cancelAllJobs } from "../jobs.js";
 import { checkAndMigrate } from "../schema-version.js";
-import { VERSION, config, warnOldEnvVars } from "../config.js";
+import { VERSION, config, warnOldEnvVars, markDaemonProcess } from "../config.js";
 import { writePidfile, removePidfile } from "./pidfile.js";
 import { acquireDataDirOwnership, releaseDataDirOwnership, acquireSpawnLock, releaseSpawnLock } from "./data-dir-lock.js";
 import type { AcquireResult } from "./data-dir-lock.js";
@@ -281,6 +281,7 @@ async function kickHandler(req: KickRequest): Promise<KickResponse> {
  * Phase 5+: Git ref watcher, fetch poller.
  */
 export async function runDaemon(): Promise<void> {
+  markDaemonProcess();
   // Claim data-dir ownership before the HTTP server binds or the pidfile is
   // written, so a second daemon exits(0) within milliseconds of starting
   // rather than serving from a second port.

@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from "fs";
 import { join, dirname } from "path";
 import { createHash } from "crypto";
-import { config, readScrybeConfig } from "./config.js";
+import { config, readScrybeConfig, daemonEnvRefRemedy } from "./config.js";
 import { dropTable } from "./vector-store.js";
 import { wipeSource, getDB } from "./branch-state.js";
 import { getPlugin } from "./plugins/index.js";
@@ -421,7 +421,7 @@ export function isSearchable(source: Source): { ok: boolean; reason?: string } {
         ok: false,
         reason:
           `Requires env var ${envVarName} (model: ${preset.model}) — ` +
-          `not set in current environment`,
+          `not set in current environment${daemonEnvRefRemedy(envVarName)}`,
       };
     }
     return { ok: true };

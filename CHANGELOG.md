@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+### Security
+
+- On Linux, the daemon no longer inherits every environment variable of the process that started it, only what scrybe and its runtime need plus the variables your config references as `${VAR}`; add others with the new `SCRYBE_DAEMON_ENV_PASSTHROUGH`. A running daemon doesn't pick up a variable you reference for the first time unless its name starts with `SCRYBE_`: list it in `SCRYBE_DAEMON_ENV_PASSTHROUGH` or `<DATA_DIR>/.env`, or rename it, then run `scrybe daemon stop`; `scrybe source add` and `scrybe source update` warn when this applies. Its environment values also no longer appear in `systemctl --user show` or `cat`, except in one fallback `docs/daemon.md` describes.
+
 ### Fixed
 
 - Jobs left `running` or `queued` by a daemon that died are now closed whenever a daemon starts (`interrupted`, or `cancelled` for removed projects), except on a data dir that can't be locked, where another daemon might still own them. A job running at that moment in a separate CLI or MCP process that works without the daemon shows as `interrupted` until it finishes. Before, this cleanup ran only once, on upgrade, so stale jobs piled up in `list_jobs` and `queue_status`.

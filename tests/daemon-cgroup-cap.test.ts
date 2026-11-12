@@ -33,17 +33,21 @@ vi.mock("child_process", async (importOriginal) => {
 // anything, and every unavailable path must degrade to today's plain spawn.
 
 let binDir: string;
+/** Stand-in for XDG_RUNTIME_DIR, so spawn tests never write env files into the real one. */
+let runtimeDir: string;
 /** An env in which the probe should succeed. */
 let goodEnv: NodeJS.ProcessEnv;
 
 beforeAll(() => {
   binDir = mkdtempSync(join(tmpdir(), "scrybe-cgroup-cap-"));
+  runtimeDir = mkdtempSync(join(tmpdir(), "scrybe-cgroup-cap-run-"));
   writeFileSync(join(binDir, "systemd-run"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  goodEnv = { PATH: binDir, XDG_RUNTIME_DIR: "/run/user/1000" };
+  goodEnv = { PATH: binDir, XDG_RUNTIME_DIR: runtimeDir };
 });
 
 afterAll(() => {
   rmSync(binDir, { recursive: true, force: true });
+  rmSync(runtimeDir, { recursive: true, force: true });
 });
 
 describe("describeDaemonMemoryCap", () => {
@@ -257,7 +261,7 @@ describe.skipIf(process.platform !== "linux")("wrapper-failure fallback (synchro
     spawnDaemonDetached({
       execPath: "/usr/bin/node",
       entryScript: "/tmp/entry.js",
-      env: { PATH: binDir, XDG_RUNTIME_DIR: "/run/user/1000" },
+      env: { PATH: binDir, XDG_RUNTIME_DIR: runtimeDir },
       cgroupMaxMb: 512,
     });
   }
@@ -348,7 +352,7 @@ describe.skipIf(process.platform !== "linux")("wrapper-failure fallback (synchro
     spawnDaemonDetached({
       execPath: "/usr/bin/node",
       entryScript: "/tmp/entry.js",
-      env: { PATH: binDir, XDG_RUNTIME_DIR: "/run/user/1000" },
+      env: { PATH: binDir, XDG_RUNTIME_DIR: runtimeDir },
       cgroupMaxMb: 512,
       budgetMs: 5000,
     });
@@ -443,7 +447,7 @@ describe.skipIf(process.platform !== "linux")("spawnDaemonDetachedAsync", () => 
     await spawnDaemonDetachedAsync({
       execPath: "/usr/bin/node",
       entryScript: "/tmp/entry.js",
-      env: { PATH: binDir, XDG_RUNTIME_DIR: "/run/user/1000" },
+      env: { PATH: binDir, XDG_RUNTIME_DIR: runtimeDir },
       cgroupMaxMb: 512,
       ...(budgetMs === undefined ? {} : { budgetMs }),
     });

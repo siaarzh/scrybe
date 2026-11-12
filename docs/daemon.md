@@ -360,6 +360,37 @@ client.close(); // abort any open SSE stream
 | `SCRYBE_DAEMON_LOG_LEVEL` | `info` | `debug | info | warn | error` |
 | `SCRYBE_DAEMON_FS_DEBOUNCE_MS` | `1500` | FS event debounce (HOT state) |
 | `SCRYBE_DAEMON_GIT_DEBOUNCE_MS` | `300` | Git ref debounce |
+| `SCRYBE_DAEMON_ENV_PASSTHROUGH` | — | Linux only. Extra variable names, comma or space separated, the daemon receives from the process that starts it. See below |
+
+### What the daemon inherits (Linux)
+
+On Linux the daemon no longer inherits the whole environment of the process that starts it in the background (your MCP client, a scrybe command such as `scrybe daemon up` or `scrybe source add`, or the daemon itself when it restarts). A daemon you run in the foreground with `scrybe daemon start` is your own shell process and keeps your whole environment. A background daemon keeps the names below, the variables your scrybe config references, and any names listed in `SCRYBE_DAEMON_ENV_PASSTHROUGH` (both described after the list), and drops every other one:
+
+- scrybe's own `SCRYBE_*` settings, except the internal `SCRYBE_PRESET_*` values, which the daemon rebuilds from your config;
+- process and git basics: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TMPDIR`, `TEMP`, `TMP`, `XDG_*`, `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK`, `SSH_ASKPASS`, `KRB5CCNAME`, `GCM_*`, and `GIT_*` except `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE`;
+- Node, TLS and proxy settings: `NODE_*` except `NODE_AUTH_TOKEN`, `OPENSSL_*`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `UV_THREADPOOL_SIZE`, and `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` in either case;
+- loader settings read at start: `LD_LIBRARY_PATH`, `LD_PRELOAD`, `GLIBC_TUNABLES`, `NIX_LD`, `NIX_LD_LIBRARY_PATH`;
+- library tuning: `MALLOC_*`, `LANCE_*`, `LANCEDB_*`, `HF_*`, `ORT_*`, `ONNXRUNTIME_*`, `NAPI_RS_*`, `TOKIO_*`, `RAYON_*`, `OMP_NUM_THREADS`, `RUST_LOG`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`, `RUST_MIN_STACK`, `UV_USE_IO_URING`, `DEBUG`;
+- npm settings for the daemon's own install repair: `npm_config_*`, except names containing `auth`, `token`, `pass`, `cert` or `key`;
+- `OPENAI_BASE_URL`, `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_LOG`, `ELECTRON_RUN_AS_NODE`, `CI`, `WSL_DISTRO_NAME`, `NO_UPDATE_NOTIFIER`.
+
+Within those families, a name that looks like a credential (containing `TOKEN`, `PASSWORD`, `PASSWD`, `SECRET`, `API_KEY`, `ACCESS_KEY` or `PRIVATE_KEY`, such as `HF_TOKEN` or `GIT_TOKEN`) is dropped unless your config references it or it is listed in `SCRYBE_DAEMON_ENV_PASSTHROUGH`. `SCRYBE_*` names are always kept, so `SCRYBE_GITLAB_TOKEN` reaches the daemon. If you download a private or gated embedding model, add `HF_TOKEN` to `SCRYBE_DAEMON_ENV_PASSTHROUGH`.
+
+`OPENAI_API_KEY` is dropped because scrybe does not read it; reference it as `${OPENAI_API_KEY}` in a preset if you use it. macOS and Windows are unchanged.
+
+Variables your scrybe config references as `${VAR}` (embedding preset credentials in `config.json`, ticket source tokens) are kept automatically. For anything else, list the names in `SCRYBE_DAEMON_ENV_PASSTHROUGH`. For example, a gh git credential helper that reads `GH_TOKEN` needs `SCRYBE_DAEMON_ENV_PASSTHROUGH=GH_TOKEN`.
+
+Keys in `<DATA_DIR>/.env` reach the daemon too: the ones in the families above (such as `MALLOC_ARENA_MAX` or `NODE_EXTRA_CA_CERTS`, which only work if present at start) are handed over by the process that starts it, and the daemon reads the file itself for the rest. A variable that only works when present at start and is not in those groups needs `SCRYBE_DAEMON_ENV_PASSTHROUGH`, wherever it is set.
+
+The daemon only has the variables that existed when it started. Names starting with `SCRYBE_` (such as the suggested `SCRYBE_GITLAB_TOKEN`) are always handed over, so they never hit this. For any other name:
+
+- **Embedding preset added through an MCP client**, referencing a variable the config did not reference before: run `scrybe daemon stop`; the next scrybe call starts a daemon that has it, as long as that call's environment (or `<DATA_DIR>/.env`) does.
+- **Ticket source added through an MCP client**: its token is checked inside the daemon before the source is saved, so a daemon that lacks the variable refuses to add it, and stopping the daemon alone won't help. Rename the variable to `SCRYBE_…`, or list it in `SCRYBE_DAEMON_ENV_PASSTHROUGH`, or put the value in `<DATA_DIR>/.env`; then run `scrybe daemon stop`.
+- **Ticket source added from a terminal with `scrybe source add`**: the source is saved before scrybe starts a daemon, so if none is running, the daemon it starts has the variable. If one is already running, it doesn't, and `scrybe source add` prints a warning; use one of the fixes above, then `scrybe daemon stop`.
+
+Names already listed in `SCRYBE_DAEMON_ENV_PASSTHROUGH` when the daemon started need no restart.
+
+When the daemon runs in a systemd user session (the memory-capped mode), its environment is handed to systemd through a private file that is deleted as soon as systemd has read it, so `systemctl --user show` and `systemctl --user cat` on its unit no longer print the values. If `$XDG_RUNTIME_DIR` is missing, relative or not writable, or its `scrybe` folder is not private to you, scrybe falls back to passing the variable names to `systemd-run`, which stores the values on the unit where those commands do print them, and logs a `daemon.spawn.env-file-fallback` warning. systemd also gives the daemon the user manager's own environment; if your login runs `dbus-update-activation-environment --systemd --all`, that is your whole session environment, and the filtering above cannot remove it.
 
 ---
 

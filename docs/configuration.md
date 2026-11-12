@@ -216,6 +216,8 @@ Tokens for ticket sources (GitLab, GitHub, etc.) can be stored as environment va
 
 Any environment variable name works (`GITLAB_PAT`, `GH_TOKEN`, etc.); these are just conventions. The variable is resolved at index/validate time, not at configuration time. Unset variables fail fast with an actionable error message naming the variable.
 
+On Linux, the daemon receives a variable referenced this way only if its name starts with `SCRYBE_`, it is listed in `SCRYBE_DAEMON_ENV_PASSTHROUGH`, it is in `<DATA_DIR>/.env`, or your saved config already referenced it when the daemon started. So with no daemon running, `scrybe source add --token '${GITLAB_PAT}'` from a terminal that has `GITLAB_PAT` set just works. If a daemon is already running, a custom name such as `GITLAB_PAT` referenced for the first time doesn't reach it (`scrybe source add` warns about this): name the variable `SCRYBE_…`, or list it in `SCRYBE_DAEMON_ENV_PASSTHROUGH` or put it in `<DATA_DIR>/.env`, then run `scrybe daemon stop`; the next scrybe call starts a daemon that has it. See [daemon.md](daemon.md#what-the-daemon-inherits-linux).
+
 Literal tokens also work but trigger a one-time daemon-start warning — using env vars is recommended.
 
 ---
@@ -225,6 +227,7 @@ Literal tokens also work but trigger a one-time daemon-start warning — using e
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SCRYBE_NO_AUTO_DAEMON` | unset | Set to `1` to disable the MCP server's automatic daemon spawn. Useful if you manage the daemon manually or via a process supervisor. When set, run `scrybe daemon start` yourself. |
+| `SCRYBE_DAEMON_ENV_PASSTHROUGH` | unset | Linux only. Extra environment variable names, comma or space separated, that the daemon receives from the process that starts it. Otherwise the daemon gets only scrybe's own settings, system and library basics, and the variables your scrybe config references as `${VAR}`; see [daemon.md](daemon.md#what-the-daemon-inherits-linux). Example: `GH_TOKEN` for a gh git credential helper. Takes effect the next time a daemon starts. |
 | `SCRYBE_DAEMON_KEEP_ALIVE` | unset | Set to `1` to disable the grace and no-client-ever shutdown timers. The daemon stays running until manually stopped or the system shuts down. This is set automatically by OS-level autostart entries (always-on mode). |
 | `SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS` | `1800000` | Maximum time (ms, default 30min) a graceful shutdown waits for an in-flight reindex to finish before force-exiting. The idle shutdown timers also defer while a reindex is active, so a long index started from the CLI is no longer killed mid-job. Applies only to a user-requested `daemon stop` / signal — not to the daemon's own memory-ceiling restart (see `SCRYBE_DAEMON_RESTART_DRAIN_MS`). |
 | `SCRYBE_DAEMON_RESTART_DRAIN_MS` | `2000` | Maximum time (ms) the daemon waits for in-flight work to finish when it restarts itself after crossing its memory ceiling. Deliberately short so an auto-restart frees memory and becomes reachable again within seconds instead of blocking on the 30-minute graceful-shutdown drain. |

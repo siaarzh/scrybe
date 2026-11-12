@@ -1,6 +1,7 @@
 import { chunkLines, stampChunkId } from "../chunker.js";
 import { normalizeContent } from "../normalize.js";
-import { resolveEnvRef } from "../config.js";
+import { resolveEnvRef, daemonEnvRefRemedy } from "../config.js";
+import { markCallerFacing } from "../daemon/caller-error.js";
 import type { KnowledgeChunk, RawKnowledgeChunk, Project, Source, SourceConfig } from "../types.js";
 import type { AnyChunk, SourcePlugin } from "./base.js";
 
@@ -104,10 +105,11 @@ export async function validateGitlabToken(cfg: SourceConfig): Promise<void> {
     // Extract variable name from the ${VAR} pattern for a more actionable error.
     const varMatch = c.token.match(/\$\{([A-Z_][A-Z0-9_]*)\}/);
     const varName = varMatch ? varMatch[1] : c.token;
-    throw new Error(
+    throw markCallerFacing(new Error(
       `Token for GitLab source "${c.project_id}" references env var ${varName} which is not set. ` +
-      `Set it in your environment or in <DATA_DIR>/.env: ${varName}=<your-token>`
-    );
+      `Set it in your environment or in <DATA_DIR>/.env: ${varName}=<your-token>` +
+      (varMatch ? daemonEnvRefRemedy(varName!, true) : "")
+    ));
   }
   const encodedId = encodeURIComponent(c.project_id);
   await gitlabFetch(`${c.base_url}/api/v4/projects/${encodedId}`, token, c.project_id);

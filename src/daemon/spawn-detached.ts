@@ -1,8 +1,8 @@
 import { spawn, spawnSync } from "child_process";
 import { randomBytes } from "crypto";
-import { writeFileSync, mkdirSync, existsSync } from "fs";
-import { join, delimiter } from "path";
-import { config } from "../config.js";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, readdirSync, lstatSync } from "fs";
+import { join, delimiter, isAbsolute } from "path";
+import { config, ENV_REF_RE } from "../config.js";
 import { diagEmit } from "./events.js";
 
 /**
@@ -52,12 +52,30 @@ export interface SpawnDaemonOptions {
    * See `resolveWrapperTimeoutMs`.
    */
   budgetMs?: number;
+  /** Where the private env file for `systemd-run` goes; defaults to the spawn env's XDG_RUNTIME_DIR. */
+  runtimeDir?: string;
+}
+
+/** The daemon's spawn env: arena caps merged in, then (Linux) cut down to what the daemon needs. */
+function resolveSpawnEnv(opts: SpawnDaemonOptions): NodeJS.ProcessEnv {
+  const env = daemonSpawnEnv(opts.env ?? process.env);
+  if (process.platform !== "linux") return env;
+
+  const filtered = filterDaemonEnv(env, env["SCRYBE_DATA_DIR"] || config.dataDir);
+  diagEmit({
+    event: "daemon.spawn.env-filtered",
+    level: "info",
+    kept: filtered.kept,
+    dropped: filtered.dropped,
+    missingRefs: filtered.missingRefs,
+  });
+  return filtered.env;
 }
 
 export function spawnDaemonDetached(opts: SpawnDaemonOptions): void {
   const node   = opts.execPath   ?? process.execPath;
   const script = opts.entryScript ?? process.argv[1]!;
-  const env    = daemonSpawnEnv(opts.env ?? process.env);
+  const env    = resolveSpawnEnv(opts);
 
   if (process.platform === "win32") {
     const vbs = ensureWindowsLauncherVbs();
@@ -117,16 +135,16 @@ export function spawnDaemonDetached(opts: SpawnDaemonOptions): void {
  * sites there is no event loop left to yield to.
  */
 export async function spawnDaemonDetachedAsync(opts: SpawnDaemonOptions): Promise<void> {
-  const node   = opts.execPath   ?? process.execPath;
-  const script = opts.entryScript ?? process.argv[1]!;
-  const env    = daemonSpawnEnv(opts.env ?? process.env);
-
   if (process.platform === "win32") {
     // The Windows launcher never blocks (wscript.exe returns immediately), so
     // there is nothing to await — reuse the one implementation.
     spawnDaemonDetached(opts);
     return;
   }
+
+  const node   = opts.execPath   ?? process.execPath;
+  const script = opts.entryScript ?? process.argv[1]!;
+  const env    = resolveSpawnEnv(opts);
 
   const attempt = planWrapperAttempt(opts, node, script, env);
   if (attempt && await spawnViaSystemdRunAsync(attempt, env)) return;
@@ -164,12 +182,124 @@ function spawnPlainDetached(node: string, script: string, env: NodeJS.ProcessEnv
   child.unref();
 }
 
+// ─── Linux: what the daemon inherits from whoever spawned it ─────────────────
+
+const FORWARD_PREFIXES = [
+  "SCRYBE_", "MALLOC_", "LC_", "XDG_", "GIT_", "NODE_", "OPENSSL_", "LANCE_", "LANCEDB_", "HF_",
+  "NAPI_RS_", "TOKIO_", "ORT_", "ONNXRUNTIME_", "GCM_", "RAYON_", "npm_config_",
+];
+
+/** Prefixed names that redirect the daemon's own git calls, or are an npm publish credential. */
+const PREFIX_EXCEPTIONS = new Set(["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "NODE_AUTH_TOKEN"]);
+
+const FORWARD_EXACT = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TZ", "TMPDIR", "TEMP", "TMP",
+  "SSH_AUTH_SOCK", "SSH_ASKPASS", "KRB5CCNAME", "DBUS_SESSION_BUS_ADDRESS", "DEBUG",
+  "UV_THREADPOOL_SIZE", "SSL_CERT_FILE", "SSL_CERT_DIR",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+  "OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "OPENAI_LOG",
+  "CI", "WSL_DISTRO_NAME", "NO_UPDATE_NOTIFIER", "RUST_LOG", "RUST_BACKTRACE", "RUST_LIB_BACKTRACE",
+  "RUST_MIN_STACK", "OMP_NUM_THREADS", "UV_USE_IO_URING", "ELECTRON_RUN_AS_NODE",
+  "LD_LIBRARY_PATH", "LD_PRELOAD", "GLIBC_TUNABLES", "NIX_LD", "NIX_LD_LIBRARY_PATH",
+]);
+
+/** Resolved preset credentials a process injects into its own env; the child re-derives them. */
+const NEVER_FORWARD_PREFIX = "SCRYBE_PRESET_";
+
+export interface DaemonEnvFilterResult {
+  env: NodeJS.ProcessEnv;
+  kept: number;
+  dropped: number;
+  /** `${VAR}` names scrybe config references that the spawner's env lacks. */
+  missingRefs: string[];
+}
+
+/** Every `${VAR}` name in the raw text of the data dir's config.json and projects.json. */
+export function configEnvRefs(dataDir: string): Set<string> {
+  const refs = new Set<string>();
+  for (const file of ["config.json", "projects.json"]) {
+    let text: string;
+    try {
+      text = readFileSync(join(dataDir, file), "utf8");
+      JSON.parse(text);
+    } catch {
+      continue;
+    }
+    for (const m of text.matchAll(ENV_REF_RE)) refs.add(m[1]!);
+  }
+  return refs;
+}
+
+/** Names listed in `SCRYBE_DAEMON_ENV_PASSTHROUGH` (comma or space separated). */
+export function daemonEnvPassthrough(env: NodeJS.ProcessEnv): Set<string> {
+  return new Set((env["SCRYBE_DAEMON_ENV_PASSTHROUGH"] ?? "").split(/[\s,]+/).filter(Boolean));
+}
+
+/** Secret-looking names such as HF_TOKEN or GIT_PASSWORD, which a family prefix alone must not forward. */
+const PREFIXED_CREDENTIAL_RE = /(TOKEN|PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)/i;
+
+/** npm credential settings, e.g. `npm_config__authToken` or `npm_config_//registry/:_password`. */
+const NPM_CREDENTIAL_RE = /^npm_config_.*(auth|token|pass|cert|key)/i;
+
+function forwardsEnvName(key: string, refs: Set<string>, passthrough: Set<string>): boolean {
+  if (key.startsWith(NEVER_FORWARD_PREFIX)) return false;
+  if (FORWARD_EXACT.has(key) || refs.has(key) || passthrough.has(key)) return true;
+  if (PREFIX_EXCEPTIONS.has(key) || NPM_CREDENTIAL_RE.test(key)) return false;
+  if (!key.startsWith("SCRYBE_") && PREFIXED_CREDENTIAL_RE.test(key)) return false;
+  return FORWARD_PREFIXES.some((p) => key.startsWith(p));
+}
+
+/** Whether a spawned daemon gets `key` regardless of what config references (allowlist or passthrough). */
+export function daemonKeepsEnvName(key: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return forwardsEnvName(key, new Set(), daemonEnvPassthrough(env));
+}
+
+/**
+ * Variable names (never values) in a live process's start-up environment: `"gone"` when no such
+ * process exists, `null` when it exists but can't be read.
+ */
+export function processEnvNames(pid: number): Set<string> | "gone" | null {
+  let raw: string;
+  try {
+    raw = readFileSync(`/proc/${pid}/environ`, "latin1");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? "gone" : null;
+  }
+  return new Set(raw.split("\0").filter(Boolean).map((e) => {
+    const eq = e.indexOf("=");
+    return eq === -1 ? e : e.slice(0, eq);
+  }));
+}
+
+/** Cuts a spawn env down to the allowlist, config `${VAR}` refs and `SCRYBE_DAEMON_ENV_PASSTHROUGH` names. */
+export function filterDaemonEnv(env: NodeJS.ProcessEnv, dataDir: string): DaemonEnvFilterResult {
+  const refs = configEnvRefs(dataDir);
+  const passthrough = daemonEnvPassthrough(env);
+  const forward = (key: string): boolean => forwardsEnvName(key, refs, passthrough);
+
+  const out: NodeJS.ProcessEnv = {};
+  let kept = 0;
+  let dropped = 0;
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (forward(key)) {
+      out[key] = value;
+      kept++;
+    } else {
+      dropped++;
+    }
+  }
+
+  const missingRefs = [...refs].filter((name) => env[name] === undefined).sort();
+  return { env: out, kept, dropped, missingRefs };
+}
+
 // ─── Linux: kernel-enforced memory cap via a transient systemd user service ───
 
 /**
  * Environment variables the systemd user manager sets for a unit itself.
  * Forwarding the spawner's copies would lie to the child about its own
- * activation, so they are dropped from the `--setenv` list.
+ * activation, so they are never handed to the unit.
  */
 const SYSTEMD_OWNED_ENV_KEYS = new Set([
   "INVOCATION_ID",
@@ -186,6 +316,89 @@ const SYSTEMD_OWNED_ENV_KEYS = new Set([
 ]);
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** The env entries a unit can be given: systemd-owned keys, invalid names and NUL/CR/LF values skipped. */
+function unitEnvEntries(env: NodeJS.ProcessEnv): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (SYSTEMD_OWNED_ENV_KEYS.has(key)) continue;
+    if (!ENV_NAME_RE.test(key)) continue;
+    // Skipping one variable systemd cannot carry beats failing the whole spawn.
+    if (/[\0\n\r]/.test(value)) continue;
+    entries.push([key, value]);
+  }
+  return entries;
+}
+
+/** Double-quotes a value for a systemd EnvironmentFile, which does no `$` expansion. */
+export function escapeEnvFileValue(v: string): string {
+  return '"' + v.replace(/[\\"`$]/g, (c) => "\\" + c) + '"';
+}
+
+/** A live env file exists only while `systemd-run` runs (at most `SYSTEMD_RUN_TIMEOUT_MS`). */
+const STALE_ENV_FILE_MS = 60_000;
+
+/** Removes env files a spawner killed mid-launch left behind. */
+export function sweepStaleEnvFiles(dir: string, now = Date.now()): void {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return; }
+  for (const name of names) {
+    if (!/^scrybe-daemon-[\w.-]+\.env$/.test(name)) continue;
+    const path = join(dir, name);
+    try {
+      const st = lstatSync(path);
+      if (st.isFile() && now - st.mtimeMs > STALE_ENV_FILE_MS) rmSync(path, { force: true });
+    } catch { /* best effort */ }
+  }
+}
+
+/** Writes `<runtimeDir>/scrybe/<unitName>.env` (dir 700, file 600, exclusive create); null means use `--setenv`. */
+function writeDaemonEnvFile(
+  runtimeDir: string | undefined,
+  unitName: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  if (!runtimeDir || !isAbsolute(runtimeDir)) {
+    diagEmit({
+      event: "daemon.spawn.env-file-fallback",
+      level: "warn",
+      unit: unitName,
+      reason: runtimeDir ? "runtime-dir-not-absolute" : "no-runtime-dir",
+    });
+    return null;
+  }
+  const dir = join(runtimeDir, "scrybe");
+  const path = join(dir, `${unitName}.env`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const st = lstatSync(dir);
+    if (!st.isDirectory() || st.uid !== process.getuid?.() || (st.mode & 0o077) !== 0) {
+      diagEmit({ event: "daemon.spawn.env-file-fallback", level: "warn", unit: unitName, reason: "runtime-dir-unsafe" });
+      return null;
+    }
+    sweepStaleEnvFiles(dir);
+    const body = unitEnvEntries(env).map(([k, v]) => `${k}=${escapeEnvFileValue(v)}\n`).join("");
+    writeFileSync(path, body, { mode: 0o600, flag: "wx" });
+    return path;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // A write that failed after creating the file must not leave values behind; EEXIST means it is not ours.
+    if (code !== "EEXIST") removeEnvFile(path);
+    diagEmit({
+      event: "daemon.spawn.env-file-fallback",
+      level: "warn",
+      unit: unitName,
+      reason: code ?? String(err),
+    });
+    return null;
+  }
+}
+
+function removeEnvFile(path: string | null): void {
+  if (!path) return;
+  try { rmSync(path, { force: true }); } catch { /* best effort */ }
+}
 
 /** Whether the resulting daemon will be memory-capped, and if not, why not. */
 export type DaemonMemoryCapStatus =
@@ -294,36 +507,8 @@ export function makeDaemonUnitName(): string {
  *   logout still tears the whole `user.slice` down regardless of `KillMode`.
  * - `--collect`: a transient unit that failed or was OOM-killed otherwise
  *   lingers in `failed` state and blocks reuse of its name.
- * - `--setenv=NAME` (NAME-ONLY, never `NAME=VALUE`): a transient unit inherits
- *   the *user manager's* environment, not the caller's, so every variable the
- *   daemon needs (SCRYBE_*, MALLOC_*, PATH) must be forwarded explicitly — but
- *   the `NAME=VALUE` form puts every value in `systemd-run`'s argv, i.e. in
- *   world-readable `/proc/<pid>/cmdline` (default `hidepid=0`) and in
- *   `systemctl --user show <unit>`. That leaks SCRYBE_EMBEDDING_API_KEY /
- *   OPENAI_API_KEY to any local user. The name-only form makes systemd-run
- *   read the value from its OWN environment (which we hand it via `spawn`'s
- *   `env`) and pass it over the private D-Bus connection, so argv carries only
- *   the variable NAME. Verified on systemd 255.
- *
- *   HONEST LIMIT of the name-only form: it closes the CROSS-USER leak only.
- *   systemd still resolves each value and stores it as the unit's
- *   `Environment=` property, so `systemctl --user show <unit>` prints the
- *   full `NAME=VALUE` — to the SAME uid (verified on systemd 255: a probe
- *   secret came back verbatim). That is equivalent exposure to the daemon's
- *   own `/proc/<pid>/environ` (mode 400, same-uid readable), so it grants an
- *   attacker nothing they don't already have — unlike `/proc/<pid>/cmdline`,
- *   which is mode 444 and readable by EVERY local user at default hidepid=0.
- *
- *   Name-only `--setenv` needs a reasonably recent systemd; older releases
- *   reject an assignment without `=` and exit non-zero WITHOUT starting a unit.
- *   That is caught by the synchronous launch check in `spawnViaSystemdRun`,
- *   which then falls back to the plain (uncapped) spawn. Degrading to
- *   "uncapped but correct and leak-free" beats "capped but leaking secrets".
- *
- *   Specifier expansion (`%h`, `%%`, …) applied to forwarded VALUES under the
- *   `NAME=VALUE` form is moot here for two reasons: values no longer traverse
- *   argv at all, and a NAME is constrained by `ENV_NAME_RE` to
- *   `[A-Za-z_][A-Za-z0-9_]*`, which cannot contain `%`.
+ * - Environment: `envFile` → `EnvironmentFile=` (values never in argv or `systemctl show`);
+ *   otherwise name-only `--setenv=NAME`, whose values `systemctl show` does print.
  * - `WorkingDirectory=-<cwd>`: preserves the spawner's cwd, which a relative
  *   `SCRYBE_DATA_DIR` resolves against. The leading `-` makes a missing
  *   directory non-fatal (a spawner running from a deleted worktree must still
@@ -336,6 +521,7 @@ export function buildSystemdRunArgs(opts: {
   limitMb: number;
   env: NodeJS.ProcessEnv;
   workingDir?: string | null;
+  envFile?: string | null;
 }): string[] {
   const args = [
     "--user",
@@ -351,16 +537,10 @@ export function buildSystemdRunArgs(opts: {
 
   if (opts.workingDir) args.push("-p", `WorkingDirectory=-${opts.workingDir}`);
 
-  for (const [key, value] of Object.entries(opts.env)) {
-    if (value === undefined) continue;
-    if (SYSTEMD_OWNED_ENV_KEYS.has(key)) continue;
-    if (!ENV_NAME_RE.test(key)) continue;
-    // systemd cannot carry NUL or newlines in a unit property value; skipping
-    // the variable is strictly better than failing the whole spawn. The value
-    // is still inspected (not forwarded) — it reaches the unit out-of-band,
-    // via systemd-run's own environment, so only the NAME goes in argv.
-    if (/[\0\n\r]/.test(value)) continue;
-    args.push(`--setenv=${key}`);
+  if (opts.envFile) {
+    args.push("-p", `EnvironmentFile=${opts.envFile}`);
+  } else {
+    for (const [key] of unitEnvEntries(opts.env)) args.push(`--setenv=${key}`);
   }
 
   args.push("--", opts.node, opts.script, "daemon", "start");
@@ -412,12 +592,13 @@ export function resolveWrapperTimeoutMs(budgetMs?: number): number {
 /** Everything needed to launch (and log) one `systemd-run` attempt. */
 interface WrapperAttempt {
   unitName: string;
-  args: string[];
   systemdRunPath: string;
   limitMb: number;
   timeoutMs: number;
   node: string;
   script: string;
+  workingDir: string | null;
+  runtimeDir: string | undefined;
 }
 
 /**
@@ -462,18 +643,30 @@ function planWrapperAttempt(
     timeoutMs: resolveWrapperTimeoutMs(opts.budgetMs),
     node,
     script,
-    args: buildSystemdRunArgs({
-      node,
-      script,
-      unitName,
-      limitMb: status.limitMb,
-      env,
-      workingDir,
-    }),
+    workingDir,
+    runtimeDir: opts.runtimeDir ?? env["XDG_RUNTIME_DIR"],
   };
 }
 
-function emitWrapperSpawn(a: WrapperAttempt): void {
+/** Writes the env file when possible and builds the matching argv; the caller removes the file. */
+function prepareWrapperLaunch(
+  a: WrapperAttempt,
+  env: NodeJS.ProcessEnv,
+): { args: string[]; envFile: string | null } {
+  const envFile = writeDaemonEnvFile(a.runtimeDir, a.unitName, env);
+  const args = buildSystemdRunArgs({
+    node: a.node,
+    script: a.script,
+    unitName: a.unitName,
+    limitMb: a.limitMb,
+    env,
+    workingDir: a.workingDir,
+    envFile,
+  });
+  return { args, envFile };
+}
+
+function emitWrapperSpawn(a: WrapperAttempt, envFile: string | null): void {
   diagEmit({
     event: "child-process.spawn",
     level: "info",
@@ -486,6 +679,7 @@ function emitWrapperSpawn(a: WrapperAttempt): void {
     unit: a.unitName,
     memoryMaxMb: a.limitMb,
     timeoutMs: a.timeoutMs,
+    envVia: envFile ? "environment-file" : "setenv",
   });
 }
 
@@ -535,41 +729,47 @@ function declineWrapper(a: WrapperAttempt, why: string): false {
  * path in `ensureRunning`.
  */
 function spawnViaSystemdRunSync(a: WrapperAttempt, env: NodeJS.ProcessEnv): boolean {
-  emitWrapperSpawn(a);
+  const { args, envFile } = prepareWrapperLaunch(a, env);
+  emitWrapperSpawn(a, envFile);
 
-  let result: ReturnType<typeof spawnSync>;
   try {
-    result = spawnSync(a.systemdRunPath, a.args, {
-      stdio: "ignore",
-      windowsHide: true,
-      env,
-      timeout: a.timeoutMs,
-      // Node's default is SIGTERM, which a wedged D-Bus client blocked in an
-      // uninterruptible connect can ignore — turning the "bound" above into a
-      // suggestion. SIGKILL makes `timeout` mean what the comment says.
-      killSignal: "SIGKILL",
-    });
-  } catch (err) {
-    // spawnSync only throws on a caller error (bad options), but a wrapper
-    // that cannot even be attempted must never take the daemon down with it.
-    return declineWrapper(a, `spawn-threw: ${err instanceof Error ? err.message : String(err)}`);
-  }
+    let result: ReturnType<typeof spawnSync>;
+    try {
+      result = spawnSync(a.systemdRunPath, args, {
+        stdio: "ignore",
+        windowsHide: true,
+        env,
+        timeout: a.timeoutMs,
+        // Node's default is SIGTERM, which a wedged D-Bus client blocked in an
+        // uninterruptible connect can ignore — turning the "bound" above into a
+        // suggestion. SIGKILL makes `timeout` mean what the comment says.
+        killSignal: "SIGKILL",
+      });
+    } catch (err) {
+      // spawnSync only throws on a caller error (bad options), but a wrapper
+      // that cannot even be attempted must never take the daemon down with it.
+      return declineWrapper(a, `spawn-threw: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
-  if (result.error) {
-    // Includes ETIMEDOUT (bus wedged — spawnSync has already SIGKILLed
-    // systemd-run) and ENOENT (the PATH entry vanished between the probe and
-    // now). If a unit did squeak through before the kill, the loser of the
-    // data-dir ownership lock exits(0) on its own — a duplicate is
-    // self-healing, zero daemons is not.
-    return declineWrapper(a, `spawn-error: ${result.error.message}`);
-  }
+    if (result.error) {
+      // Includes ETIMEDOUT (bus wedged — spawnSync has already SIGKILLed
+      // systemd-run) and ENOENT (the PATH entry vanished between the probe and
+      // now). If a unit did squeak through before the kill, the loser of the
+      // data-dir ownership lock exits(0) on its own — a duplicate is
+      // self-healing, zero daemons is not.
+      return declineWrapper(a, `spawn-error: ${result.error.message}`);
+    }
 
-  emitWrapperExit(a, result.status, result.signal ?? null);
+    emitWrapperExit(a, result.status, result.signal ?? null);
 
-  if (result.status !== 0) {
-    return declineWrapper(a, `systemd-run exited ${result.status ?? result.signal}`);
+    if (result.status !== 0) {
+      return declineWrapper(a, `systemd-run exited ${result.status ?? result.signal}`);
+    }
+    return true;
+  } finally {
+    // systemd has read the file by the time systemd-run returns; a late one finds it gone and starts nothing.
+    removeEnvFile(envFile);
   }
-  return true;
 }
 
 /**
@@ -577,13 +777,21 @@ function spawnViaSystemdRunSync(a: WrapperAttempt, env: NodeJS.ProcessEnv): bool
  * timeout and fallback semantics — it only differs in yielding the event loop
  * while the D-Bus round-trip is in flight.
  */
-function spawnViaSystemdRunAsync(a: WrapperAttempt, env: NodeJS.ProcessEnv): Promise<boolean> {
-  emitWrapperSpawn(a);
+async function spawnViaSystemdRunAsync(a: WrapperAttempt, env: NodeJS.ProcessEnv): Promise<boolean> {
+  const { args, envFile } = prepareWrapperLaunch(a, env);
+  emitWrapperSpawn(a, envFile);
+  try {
+    return await launchSystemdRunAsync(a, args, env);
+  } finally {
+    removeEnvFile(envFile);
+  }
+}
 
+function launchSystemdRunAsync(a: WrapperAttempt, args: string[], env: NodeJS.ProcessEnv): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(a.systemdRunPath, a.args, {
+      child = spawn(a.systemdRunPath, args, {
         stdio: "ignore",
         windowsHide: true,
         env,

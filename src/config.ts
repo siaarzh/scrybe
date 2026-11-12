@@ -3,6 +3,7 @@ import { join } from "path";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { createRequire } from "module";
 import { resolveProvider, LOCAL_PROVIDER_DEFAULTS } from "./providers.js";
+import { markCallerFacing } from "./daemon/caller-error.js";
 
 /** Map of old env var name → new env var name (for .env file rewriting at load time). */
 const ENV_RENAME_MAP_INTERNAL: Record<string, string> = {
@@ -17,6 +18,9 @@ const ENV_RENAME_MAP_INTERNAL: Record<string, string> = {
   "SCRYBE_TEXT_EMBEDDING_MODEL":      "SCRYBE_KNOWLEDGE_EMBEDDING_MODEL",
   "SCRYBE_TEXT_EMBEDDING_DIMENSIONS": "SCRYBE_KNOWLEDGE_EMBEDDING_DIMENSIONS",
 };
+
+/** Keys DATA_DIR/.env defines; every daemon loads that file itself at start. */
+export const dotEnvKeys = new Set<string>();
 
 /**
  * Load DATA_DIR/.env into process.env. OS env always takes precedence.
@@ -109,6 +113,7 @@ const ENV_RENAME_MAP_INTERNAL: Record<string, string> = {
     if (eq === -1) continue;
     const key = trimmed.slice(0, eq).trim();
     const val = trimmed.slice(eq + 1).trim();
+    if (key) dotEnvKeys.add(key);
     if (key && !(key in process.env)) process.env[key] = val;
   }
 })();
@@ -560,16 +565,47 @@ if (config.chunkOverlap >= config.chunkSize) {
 
 // ─── config.json (Plan 23) ────────────────────────────────────────────────────
 
+/** `${VAR}` reference syntax; the daemon spawn filter scans config files with the same pattern. */
+export const ENV_REF_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
+
+let _inDaemonProcess = false;
+
+/** Called by runDaemon, so an unresolvable `${VAR}` can name the daemon-specific remedy. */
+export function markDaemonProcess(): void {
+  _inDaemonProcess = true;
+}
+
+export function isDaemonProcess(): boolean {
+  return _inDaemonProcess;
+}
+
+/** Remedy for an unset-`${VAR}` error raised inside the daemon ("" elsewhere); `unsaved` = token checked before saving. */
+export function daemonEnvRefRemedy(name: string, unsaved = false): string {
+  if (!_inDaemonProcess) return "";
+  if (unsaved && process.platform === "linux") {
+    return `. The daemon only receives variables your saved config already references, so restarting it alone won't help here: ` +
+      `name the variable SCRYBE_<something>, list ${name} in SCRYBE_DAEMON_ENV_PASSTHROUGH, or put it in <DATA_DIR>/.env, ` +
+      `then run \`scrybe daemon stop\`; or run \`scrybe daemon stop\`, then add the source with \`scrybe source add\` ` +
+      `from a terminal that has ${name} set`;
+  }
+  const passthrough = process.platform === "linux"
+    ? `. Names starting with SCRYBE_, and names listed in SCRYBE_DAEMON_ENV_PASSTHROUGH, reach the daemon even before config references them`
+    : "";
+  return `. The daemon only has the environment it was started with: run \`scrybe daemon stop\` and the next ` +
+    `scrybe call starts one that has ${name}, as long as that call's environment ` +
+    `(or <DATA_DIR>/.env) has it${passthrough}`;
+}
+
 /**
  * Resolves `${VAR}` references in a string against process.env.
  * - Strings with no `${...}` tokens are returned verbatim.
  * - A missing env var throws with a message that names the variable.
  */
 export function resolveEnvRef(value: string): string {
-  return value.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_, name: string) => {
+  return value.replace(ENV_REF_RE, (_, name: string) => {
     const v = process.env[name];
     if (v === undefined) {
-      throw new Error(`env var ${name} not set (referenced in scrybe config)`);
+      throw markCallerFacing(new Error(`env var ${name} not set (referenced in scrybe config)${daemonEnvRefRemedy(name)}`));
     }
     return v;
   });

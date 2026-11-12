@@ -22,9 +22,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mutable embedding error — null means "healthy"
 let _embeddingConfigError: string | null = null;
 
-vi.mock("../src/config.js", () => ({
+vi.mock("../src/config.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/config.js")>()),
   config: {
     get embeddingConfigError() { return _embeddingConfigError; },
+    get dataDir() { return process.env["SCRYBE_DATA_DIR"]!; },
     embeddingApiKey: "test",
     embeddingBaseUrl: "http://localhost:11111/v1",
     embeddingModel: "test-model",
@@ -77,6 +79,16 @@ vi.mock("../src/registry.js", () => ({
 
 vi.mock("../src/plugins/gitlab-issues.js", () => ({
   validateGitlabToken: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../src/daemon/pidfile.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/daemon/pidfile.js")>()),
+  readPidfile: vi.fn().mockReturnValue(null),
+}));
+
+vi.mock("../src/daemon/spawn-detached.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/daemon/spawn-detached.js")>()),
+  processEnvNames: vi.fn().mockReturnValue("gone"),
 }));
 
 vi.mock("../src/jobs-store.js", () => ({
@@ -240,7 +252,7 @@ describe("T3 — embedding-broken: throws before registry write", () => {
 
 // ─── T4 — daemon spawn-failed / health-timeout ───────────────────────────────
 
-describe("T4 — daemon spawn-failed: throws daemon_unavailable; source NOT registered", () => {
+describe("T4 — daemon spawn-failed: throws daemon_unavailable; source rolled back", () => {
   it("throws with error_type=daemon_unavailable on spawn-failed", async () => {
     const { ensureRunning, DaemonClient } = await import("../src/daemon/client.js");
     vi.mocked(ensureRunning).mockResolvedValue({ ok: false, reason: "spawn-failed" });
@@ -259,8 +271,11 @@ describe("T4 — daemon spawn-failed: throws daemon_unavailable; source NOT regi
     expect(caught).not.toBeNull();
     expect(caught!.message).toContain("daemon failed to start");
     expect(caught!.error_type).toBe("daemon_unavailable");
-    // Source MUST NOT be registered
-    expect(addSource).not.toHaveBeenCalled();
+    // Saved first so a spawned daemon sees it, then removed again because it was never indexed
+    const { removeSource } = await import("../src/registry.js");
+    expect(addSource).toHaveBeenCalledOnce();
+    expect(removeSource).toHaveBeenCalledWith("proj1", "code");
+    expect(vi.mocked(removeSource).mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(addSource).mock.invocationCallOrder[0]!);
   });
 
   it("throws daemon_unavailable on health-timeout", async () => {
@@ -279,7 +294,9 @@ describe("T4 — daemon spawn-failed: throws daemon_unavailable; source NOT regi
 
     expect(caught).not.toBeNull();
     expect(caught!.error_type).toBe("daemon_unavailable");
-    expect(addSource).not.toHaveBeenCalled();
+    const { removeSource } = await import("../src/registry.js");
+    expect(addSource).toHaveBeenCalledOnce();
+    expect(removeSource).toHaveBeenCalledWith("proj1", "code");
   });
 });
 
@@ -324,5 +341,115 @@ describe("T5 — opt-out: registers + returns in-process job_id", () => {
 
     const { addSource } = await import("../src/registry.js");
     expect(addSource).toHaveBeenCalledOnce();
+  });
+});
+
+// ─── T6 — the source is saved before the daemon is started ───────────────────
+
+describe("T6 — order: registry write before ensureRunning", () => {
+  it("saves the source before it can spawn a daemon, so the daemon sees the source's ${VAR} reference", async () => {
+    const { ensureRunning, DaemonClient } = await import("../src/daemon/client.js");
+    vi.mocked(ensureRunning).mockResolvedValue({ ok: true });
+    vi.mocked(DaemonClient.fromPidfile).mockReturnValue({
+      submitReindex: vi.fn().mockResolvedValue({ jobs: [{ jobId: "j", status: "queued" }] }),
+    } as any);
+    const { addSourceTool } = await import("../src/tools/source.js");
+    const { addSource } = await import("../src/registry.js");
+    await addSourceTool.handler(baseInput);
+    expect(vi.mocked(addSource).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(ensureRunning).mock.invocationCallOrder[0]!);
+  });
+});
+
+// ─── T7 — warning when the running daemon lacks the token variable ──────────
+
+type EnvNames = Set<string> | "gone" | null;
+
+async function captureStderr(fn: () => Promise<unknown>): Promise<string> {
+  const writes: string[] = [];
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((c: any) => { writes.push(String(c)); return true; });
+  try { await fn(); } finally { spy.mockRestore(); }
+  return writes.join("");
+}
+
+async function stubDaemon(names: EnvNames, pid: number | null = 100) {
+  const { readPidfile } = await import("../src/daemon/pidfile.js");
+  const { processEnvNames } = await import("../src/daemon/spawn-detached.js");
+  vi.mocked(readPidfile).mockReset().mockReturnValue(pid === null ? null : { pid, port: 1 } as any);
+  vi.mocked(processEnvNames).mockReset().mockReturnValue(names);
+}
+
+describe.skipIf(process.platform !== "linux")("T7 — source add warns when the running daemon can't see its ${VAR}", () => {
+  const ticketInput = (token: string) => ({
+    project_id: "proj1", source_id: "issues", source_type: "ticket",
+    provider: "gitlab", url: "https://gitlab.example", project: "1", token,
+  });
+
+  async function run(token: string, names: EnvNames, opts: { pid?: number | null; env?: Record<string, string>; refBefore?: boolean } = {}) {
+    const { ensureRunning, DaemonClient } = await import("../src/daemon/client.js");
+    vi.mocked(ensureRunning).mockResolvedValue({ ok: true });
+    vi.mocked(DaemonClient.fromPidfile).mockReturnValue({
+      submitReindex: vi.fn().mockResolvedValue({ jobs: [{ jobId: "j", status: "queued" }] }),
+    } as any);
+    await stubDaemon(names, opts.pid === undefined ? 100 : opts.pid);
+    const { writeFileSync } = await import("fs");
+    const { join } = await import("path");
+    writeFileSync(join(process.env["SCRYBE_DATA_DIR"]!, "projects.json"), opts.refBefore ? '[{"t":"${GITLAB_PAT}"}]' : "[]");
+    const saved = { ...process.env };
+    Object.assign(process.env, opts.env ?? {});
+    try {
+      const { addSourceTool } = await import("../src/tools/source.js");
+      return await captureStderr(() => addSourceTool.handler(ticketInput(token) as any));
+    } finally {
+      for (const k of Object.keys(opts.env ?? {})) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    }
+  }
+
+  it("warns with the remedy when the running daemon's environment lacks the variable", async () => {
+    const out = await run("${GITLAB_PAT}", new Set(["PATH", "HOME"]));
+    expect(out).toContain("GITLAB_PAT");
+    expect(out).toContain("scrybe daemon stop");
+    expect(out).toContain("SCRYBE_DAEMON_ENV_PASSTHROUGH");
+    expect(out).toContain("SCRYBE_<something>");
+  });
+
+  it("stays quiet when the daemon has it, e.g. one this call spawned after saving the source", async () => {
+    expect(await run("${GITLAB_PAT}", new Set(["PATH", "GITLAB_PAT"]))).toBe("");
+  });
+
+  it("warns for a second source reusing a variable the running daemon still lacks", async () => {
+    expect(await run("${GITLAB_PAT}", new Set(["PATH"]), { refBefore: true })).toContain("GITLAB_PAT");
+  });
+
+  it("stays quiet with a stale pidfile or no pidfile", async () => {
+    expect(await run("${GITLAB_PAT}", "gone")).toBe("");
+    expect(await run("${GITLAB_PAT}", "gone", { pid: null })).toBe("");
+  });
+
+  it("falls back to whether config referenced it before when the daemon's env can't be read", async () => {
+    expect(await run("${GITLAB_PAT}", null)).toContain("GITLAB_PAT");
+    expect(await run("${GITLAB_PAT}", null, { refBefore: true })).toBe("");
+  });
+
+  it("stays quiet for a SCRYBE_ name, a passthrough name, or a literal token", async () => {
+    expect(await run("${SCRYBE_GITLAB_TOKEN}", new Set(["PATH"]))).toBe("");
+    expect(await run("${GITLAB_PAT}", new Set(["PATH"]), { env: { SCRYBE_DAEMON_ENV_PASSTHROUGH: "GITLAB_PAT" } })).toBe("");
+    expect(await run("glpat-literal", new Set(["PATH"]))).toBe("");
+  });
+});
+
+describe.skipIf(process.platform !== "linux")("T8 — source update warns the same way", () => {
+  it("warns when the running daemon lacks the new token's variable, quiet when no daemon is running", async () => {
+    const { getSource } = await import("../src/registry.js");
+    const { updateSourceTool } = await import("../src/tools/source.js");
+    const ticket = { source_id: "issues", source_config: { type: "ticket", provider: "gitlab", base_url: "https://g", project_id: "1", token: "x" } };
+    const runUpdate = async (names: EnvNames, token: string) => {
+      vi.mocked(getSource).mockReturnValueOnce(ticket as any);
+      await stubDaemon(names);
+      return captureStderr(() => updateSourceTool.handler({ project_id: "proj1", source_id: "issues", token }));
+    };
+    expect(await runUpdate(new Set(["PATH"]), "${GITLAB_PAT}")).toContain("scrybe daemon stop");
+    expect(await runUpdate("gone", "${GITLAB_PAT}")).toBe("");
+    expect(await runUpdate(new Set(["PATH"]), "${SCRYBE_GITLAB_TOKEN}")).toBe("");
   });
 });

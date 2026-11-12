@@ -12,7 +12,9 @@ import { validateGitlabToken } from "../plugins/gitlab-issues.js";
 import { validateGithubToken } from "../plugins/github-issues.js";
 import { submitSourceJob } from "../jobs.js";
 import { ensureRunning, DaemonClient, daemonWriteUnavailableError } from "../daemon/client.js";
-import { config } from "../config.js";
+import { config, dotEnvKeys, ENV_REF_RE, isDaemonProcess } from "../config.js";
+import { readPidfile } from "../daemon/pidfile.js";
+import { configEnvRefs, daemonKeepsEnvName, processEnvNames } from "../daemon/spawn-detached.js";
 import type { Source, SourceConfig } from "../types.js";
 import type { Tool } from "./types.js";
 
@@ -96,6 +98,33 @@ function buildSourceConfig(
     };
   }
   return { type: sourceType };
+}
+
+/** The ticket token's `${VAR}` name if a running daemon might lack it (Linux CLI only; not forwarded by name or `.env`). */
+function envRefToCheck(sc: SourceConfig): string | null {
+  if (process.platform !== "linux" || isDaemonProcess() || sc.type !== "ticket") return null;
+  const token = (sc as Extract<SourceConfig, { type: "ticket" }>).token ?? "";
+  const name = token.match(new RegExp(ENV_REF_RE.source))?.[1];
+  if (!name || daemonKeepsEnvName(name) || dotEnvKeys.has(name)) return null;
+  return name;
+}
+
+/** Whether the daemon in the pidfile lacks `name`; falls back to "config didn't reference it before" when its env is unreadable. */
+function runningDaemonLacks(name: string, referencedBefore: boolean): boolean {
+  const pid = readPidfile()?.pid;
+  if (!pid) return false;
+  const names = processEnvNames(pid);
+  if (names === "gone") return false;
+  return names === null ? !referencedBefore : !names.has(name);
+}
+
+function warnDaemonLacksEnvRef(name: string): void {
+  process.stderr.write(
+    `[scrybe] warning: the running daemon doesn't have ${name}, so it can't read this source's token. ` +
+    `Run \`scrybe daemon stop\`; the next scrybe call starts a daemon that has ${name} if that call's ` +
+    `environment does. To avoid this, name the variable SCRYBE_<something>, list it in ` +
+    `SCRYBE_DAEMON_ENV_PASSTHROUGH, or put it in ${config.dataDir}/.env.\n`,
+  );
 }
 
 /** Route to the appropriate token validator based on provider. */
@@ -260,19 +289,26 @@ export const addSourceTool: Tool<
       gitlab_token: input.gitlab_token,
     });
     await validateToken(sc);
+    const refToCheck = envRefToCheck(sc);
+    const referencedBefore = refToCheck ? configEnvRefs(config.dataDir).has(refToCheck) : false;
 
-    // D6 — decide daemon path BEFORE registry write so spawn-failed doesn't
-    // leave a registered-but-never-indexed source behind
-    const daemon = await ensureRunning();
-    const unavailable = daemonWriteUnavailableError(daemon);
-    if (unavailable) throw unavailable;
-
-    // Register the source
+    // Saved before the daemon is started, so a daemon spawned here sees the source's ${VAR} reference.
     const src: Omit<Source, "table_name" | "last_indexed"> = {
       source_id,
       source_config: sc,
     };
     addSource(project_id, src);
+
+    const daemon = await ensureRunning();
+    const unavailable = daemonWriteUnavailableError(daemon);
+    if (unavailable) {
+      // A source that was never indexed must not stay registered.
+      await removeSource(project_id, source_id).catch(() => {});
+      throw unavailable;
+    }
+    if (refToCheck && daemon.ok && runningDaemonLacks(refToCheck, referencedBefore)) {
+      warnDaemonLacksEnvRef(refToCheck);
+    }
 
     // D3 — auto-enqueue via daemon when available
     if (daemon.ok && !daemon.draining) {
@@ -390,7 +426,10 @@ export const updateSourceTool: Tool<
     if (Object.keys(fields).length === 0) {
       return { ok: true, project_id, source_id, updated: false };
     }
+    const refToCheck = fields.source_config ? envRefToCheck(fields.source_config) : null;
+    const referencedBefore = refToCheck ? configEnvRefs(config.dataDir).has(refToCheck) : false;
     updateSource(project_id, source_id, fields);
+    if (refToCheck && runningDaemonLacks(refToCheck, referencedBefore)) warnDaemonLacksEnvRef(refToCheck);
     return { ok: true, project_id, source_id, updated: true };
   },
   cliOpts: ([opts]) => ({

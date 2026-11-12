@@ -350,8 +350,8 @@ async function runPoller(ps: TicketPollerState): Promise<void> {
             phase: "ticket-poller",
             sourceId: ps.sourceId,
             error: msg,
-            hint: `Set the missing env var in your environment or in <DATA_DIR>/.env, ` +
-              `then update the source token with: scrybe update-source --project-id ${ps.projectId} --source-id ${ps.sourceId} --token '\${VAR_NAME}'`,
+            hint: `Set the missing env var where your scrybe calls run or in <DATA_DIR>/.env, ` +
+              `then run \`scrybe daemon stop\` so the next scrybe call starts a daemon that has it`,
           },
         });
         ps.warnedUnsetVar = true;
