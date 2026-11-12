@@ -51,6 +51,15 @@ pub fn list_projects() -> Vec<Project> {
     serde_json::from_str(&text).unwrap_or_default()
 }
 
+/// The registry as read now: `None` when there is no file, an error when it can't be read or parsed.
+pub fn read_projects() -> Result<Option<Vec<Project>>> {
+    let path = data_dir().join("projects.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&std::fs::read_to_string(&path)?)?))
+}
+
 pub fn get_project(id: &str) -> Option<Project> {
     list_projects().into_iter().find(|p| p.id == id)
 }
@@ -159,6 +168,37 @@ pub fn resolve_env_ref(value: &str) -> Result<String> {
     Ok(out)
 }
 
+/// `daemonEnvRefRemedy` for a token checked before it is saved; empty outside the daemon.
+pub fn env_ref_remedy(name: &str, in_daemon: bool) -> String {
+    if !in_daemon {
+        return String::new();
+    }
+    if cfg!(target_os = "linux") {
+        return format!(". The daemon only receives variables your saved config already references, so restarting it alone won't help here: name the variable SCRYBE_<something>, list {name} in SCRYBE_DAEMON_ENV_PASSTHROUGH, or put it in <DATA_DIR>/.env, then run `scrybe daemon stop`; or run `scrybe daemon stop`, then add the source with `scrybe source add` from a terminal that has {name} set");
+    }
+    format!(". The daemon only has the environment it was started with: run `scrybe daemon stop` and the next scrybe call starts one that has {name}, as long as that call's environment (or <DATA_DIR>/.env) has it")
+}
+
+/// An error whose text is meant for the caller, like `markCallerFacing`.
+#[derive(Debug)]
+pub struct CallerFacing(pub String);
+
+impl std::fmt::Display for CallerFacing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CallerFacing {}
+
+/// What the token check says when the token is a `${VAR}` that isn't set.
+pub fn unset_token_error(label: &str, project_id: &str, token: &str, in_daemon: bool) -> anyhow::Error {
+    let found = regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").ok().and_then(|re| re.captures(token).map(|c| c[1].to_string()));
+    let name = found.clone().unwrap_or_else(|| token.to_string());
+    let remedy = if found.is_some() { env_ref_remedy(&name, in_daemon) } else { String::new() };
+    anyhow::Error::new(CallerFacing(format!("Token for {label} source \"{project_id}\" references env var {name} which is not set. Set it in your environment or in <DATA_DIR>/.env: {name}=<your-token>{remedy}")))
+}
+
 /// `resolveEmbeddingConfig` plus `resolvePreset`.
 pub fn resolve_embedding(source: &Source) -> Result<EmbedConfig> {
     let Some(cfg) = read_config()? else {
@@ -255,6 +295,27 @@ pub fn table_name_for(project: &str, source: &Source, emb: &EmbedConfig) -> Stri
     let prefix = if source.profile() == Some("text") { "knowledge" } else { "code" };
     let hash = sha256_hex(&format!("{project}:{}:{}:{}", source.source_id, emb.model, emb.dimensions));
     format!("{prefix}_{}", &hash[..12])
+}
+
+/// `addSource`: appends to the registry as JSON so fields this code doesn't know survive.
+pub fn add_source(project: &str, source: Value) -> Result<()> {
+    let path = data_dir().join("projects.json");
+    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+    let Some(p) = doc.as_array_mut().context("projects.json is not a list")?.iter_mut().find(|p| p["id"] == project) else {
+        anyhow::bail!("Project '{project}' not found");
+    };
+    let source_id = source["source_id"].as_str().unwrap_or("").to_string();
+    if p["sources"].as_array().is_some_and(|s| s.iter().any(|s| s["source_id"] == source_id)) {
+        anyhow::bail!("Source '{source_id}' already exists in project '{project}'");
+    }
+    match p["sources"].as_array_mut() {
+        Some(list) => list.push(source),
+        None => p["sources"] = Value::Array(vec![source]),
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&doc)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 /// `updateSource`: patches the registry as JSON so fields this code doesn't know survive.

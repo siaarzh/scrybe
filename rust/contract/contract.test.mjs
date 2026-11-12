@@ -1293,6 +1293,232 @@ describe("GitHub issues, when the token fails", () => {
   });
 });
 
+// ─── Ticket sources: the server's own polling, and add_source ────────────────
+
+const tickerEvents = (feed, pick = () => true) => feed.events.filter((e) => e.event === "watcher.event" && e.detail?.phase === "ticket-poller" && e.detail.enqueued === true && pick(e));
+const hasIssue = (c, path) => async () => (await c.call("search_knowledge", { project_id: "demo", query: "Pagination check", top_k: 20, source_id: "issues" })).value?.some?.((h) => h.item_path === path);
+const POLL_ENV = { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN, SCRYBE_DAEMON_NO_TICKET_FETCH: "0" };
+
+/** Starts the server through a client and follows its events from the beginning. */
+async function serverWithFeed(w) {
+  const c = w.client();
+  await c.hello();
+  await c.rpc("tools/list");
+  await until(() => w.pidfile(), 10_000, "the pidfile");
+  return { c, feed: await watchEvents(`http://127.0.0.1:${w.pidfile().port}`) };
+}
+
+describe("ticket sources are polled by the server", () => {
+  let gl, w, c, feed;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { ...POLL_ENV, SCRYBE_DAEMON_TICKET_ACTIVE_MS: "1500", SCRYBE_DAEMON_TICKET_IDLE_MS: "1500" } });
+    ({ c, feed } = await serverWithFeed(w));
+  });
+  after(async () => { feed?.stop(); await w.stop(); gl.close(); });
+
+  test("a source never indexed is polled at once and its issues become searchable", async () => {
+    const first = await until(() => tickerEvents(feed)[0], 30_000, "the first ticket poll");
+    assert.equal(first.level, "info");
+    assert.equal(first.projectId, "demo");
+    assert.deepEqual(first.detail, { phase: "ticket-poller", sourceId: "issues", enqueued: true });
+    await until(hasIssue(c, "issues/4"), 60_000, "the issues to be indexed");
+    assert.ok(gl.state.log.length > 0 && gl.state.log.every((l) => l.auth === `Bearer ${GITLAB_TOKEN}`));
+  });
+
+  test("it polls again on the interval and then asks only for what changed", async () => {
+    await until(() => tickerEvents(feed).length >= 2, 30_000, "a second ticket poll");
+    await until(() => gl.state.log.some((l) => l.url.includes("updated_after=")), 30_000, "a request with a cursor");
+  });
+});
+
+describe("ticket polling switched off", () => {
+  let gl, w, c, feed;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { ...POLL_ENV, SCRYBE_DAEMON_NO_TICKET_FETCH: "1", SCRYBE_DAEMON_TICKET_ACTIVE_MS: "300", SCRYBE_DAEMON_TICKET_IDLE_MS: "300" } });
+    ({ c, feed } = await serverWithFeed(w));
+  });
+  after(async () => { feed?.stop(); await w.stop(); gl.close(); });
+
+  test("nothing polls the tracker, though a run asked for by hand still reads it", async () => {
+    await sleep(3000);
+    assert.equal(tickerEvents(feed).length, 0);
+    assert.equal(gl.state.log.length, 0);
+    const started = await c.call("reindex_source", { project_id: "demo", source_id: "issues" });
+    assert.ok(started.value?.job_id, JSON.stringify(started));
+    await until(hasIssue(c, "issues/4"), 60_000, "the hand-started run to index the issues");
+    assert.ok(gl.state.log.length > 0);
+    assert.equal(tickerEvents(feed).length, 0);
+  });
+});
+
+describe("a ticket source added while the server runs", () => {
+  let gl, w, c, feed;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ serverEnv: { ...POLL_ENV, SCRYBE_DAEMON_TICKET_ACTIVE_MS: "600000", SCRYBE_DAEMON_TICKET_IDLE_MS: "600000" } });
+    ({ c, feed } = await serverWithFeed(w));
+  });
+  after(async () => { feed?.stop(); await w.stop(); gl.close(); });
+
+  test("is polled once its first run is queued, and not before", async () => {
+    await sleep(2000);
+    assert.equal(feed.events.filter((e) => e.detail?.phase?.startsWith("ticket-poller")).length, 0);
+    const file = join(w.data, "projects.json");
+    const projects = JSON.parse(readFileSync(file, "utf8"));
+    projects[0].sources.push(ticketSource(gl));
+    writeFileSync(file, JSON.stringify(projects, null, 2));
+    const started = await c.call("reindex_source", { project_id: "demo", source_id: "issues" });
+    assert.ok(started.value?.job_id, JSON.stringify(started));
+    const polled = await until(() => tickerEvents(feed)[0], 30_000, "the new source to be polled");
+    assert.equal(polled.detail.sourceId, "issues");
+    await until(hasIssue(c, "issues/4"), 60_000, "the issues to be indexed");
+  });
+});
+
+describe("a literal token", () => {
+  let gl, w, feed;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    const literal = { ...ticketSource(gl), source_id: "literal" };
+    literal.source_config.token = GITLAB_TOKEN;
+    w = await makeWorld({ extraSources: [ticketSource(gl), literal], serverEnv: { ...POLL_ENV, SCRYBE_DAEMON_TICKET_ACTIVE_MS: "600000", SCRYBE_DAEMON_TICKET_IDLE_MS: "600000" } });
+    ({ feed } = await serverWithFeed(w));
+  });
+  after(async () => { feed?.stop(); await w.stop(); gl.close(); });
+
+  test("is warned about once, and a ${VAR} token is not", async () => {
+    await until(() => tickerEvents(feed, (e) => e.detail.sourceId === "issues")[0] && tickerEvents(feed, (e) => e.detail.sourceId === "literal")[0], 30_000, "both sources to be polled");
+    const warned = feed.events.filter((e) => e.detail?.phase === "ticket-poller.literal-token");
+    assert.equal(warned.length, 1, JSON.stringify(warned));
+    assert.equal(warned[0].level, "warn");
+    assert.equal(warned[0].event, "watcher.event");
+    assert.equal(warned[0].projectId, "demo");
+    assert.deepEqual(warned[0].detail, {
+      phase: "ticket-poller.literal-token",
+      sourceId: "literal",
+      literalTokenWarn: true,
+      message: 'Source "literal" uses a literal token. Store the token in an env var (e.g. SCRYBE_GITLAB_TOKEN) and reference it as ${SCRYBE_GITLAB_TOKEN} to avoid exposing credentials in projects.json.',
+    });
+  });
+});
+
+/** What a failed tool call says, whether it came back as an error result or an error reply. */
+const failureText = (r) => (r.rpcError ? r.rpcError.message : typeof r.value?.error === "string" ? r.value.error : r.text);
+const wasRefused = (r) => r.isError === true || r.rpcError !== undefined;
+const savedSources = (w) => JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources.map((s) => s.source_id);
+
+// What the server adds to an unset-variable message depends on the platform it runs on.
+const daemonRemedy = (name) => (process.platform === "linux"
+  ? `. The daemon only receives variables your saved config already references, so restarting it alone won't help here: name the variable SCRYBE_<something>, list ${name} in SCRYBE_DAEMON_ENV_PASSTHROUGH, or put it in <DATA_DIR>/.env, then run \`scrybe daemon stop\`; or run \`scrybe daemon stop\`, then add the source with \`scrybe source add\` from a terminal that has ${name} set`
+  : `. The daemon only has the environment it was started with: run \`scrybe daemon stop\` and the next scrybe call starts one that has ${name}, as long as that call's environment (or <DATA_DIR>/.env) has it`);
+
+// The published TypeScript build masks this message as an internal error; its source now sends it to the caller. The Rust build must send it.
+const unsetMessage = (actual, expected) => {
+  assert.ok((BUILD !== "rust" && actual === "internal error") || actual === expected, actual);
+};
+
+const addGitlab = (gl, extra = {}) => ({ project_id: "demo", source_id: "tracker", source_type: "ticket", provider: "gitlab", url: gl.url, project: GITLAB_PROJECT, token: "${CONTRACT_GITLAB_TOKEN}", ...extra });
+const addGithub = (gh, extra = {}) => ({ project_id: "demo", source_id: "tracker", source_type: "ticket", provider: "github", url: gh.url, project: GITHUB_PROJECT, token: "${CONTRACT_GITHUB_TOKEN}", ...extra });
+
+describe("add_source checks a ticket token first", () => {
+  let gl, gh, w, c, names;
+  before(async () => {
+    gl = await fakeGitlab();
+    gh = await fakeGithub();
+    w = await makeWorld({ serverEnv: { CONTRACT_GITLAB_TOKEN: "not-the-token", CONTRACT_GITHUB_TOKEN: "not-the-token" } });
+    c = w.client();
+    await c.hello();
+    names = await c.toolNames();
+  });
+  after(async () => { await w.stop(); gl.close(); gh.close(); });
+
+  test("a GitLab token the tracker rejects saves nothing", async (t) => {
+    if (!names.includes("add_source")) return t.skip(`${BUILD} has no add_source yet`);
+    const r = await c.call("add_source", addGitlab(gl));
+    assert.ok(wasRefused(r), JSON.stringify(r));
+    assert.equal(failureText(r), "internal error");
+    assert.deepEqual(gl.state.log.map((l) => [l.url, l.auth]), [["/api/v4/projects/demo%2Ftracker", "Bearer not-the-token"]]);
+    assert.deepEqual(savedSources(w), ["primary"]);
+  });
+
+  test("a GitHub token the tracker rejects saves nothing", async (t) => {
+    if (!names.includes("add_source")) return t.skip(`${BUILD} has no add_source yet`);
+    const r = await c.call("add_source", addGithub(gh));
+    assert.ok(wasRefused(r), JSON.stringify(r));
+    assert.equal(failureText(r), "internal error");
+    assert.deepEqual(gh.state.log.map((l) => [l.url, l.auth, l.accept, l.version]), [["/user", "Bearer not-the-token", "application/vnd.github+json", "2022-11-28"]]);
+    assert.deepEqual(savedSources(w), ["primary"]);
+  });
+
+  test("the tracker is not asked when the token variable is unset, and the caller is told which one", async (t) => {
+    if (!names.includes("add_source")) return t.skip(`${BUILD} has no add_source yet`);
+    gl.state.log.length = 0;
+    gh.state.log.length = 0;
+    const lab = await c.call("add_source", addGitlab(gl, { token: "${CONTRACT_UNSET_VAR}" }));
+    assert.ok(wasRefused(lab), JSON.stringify(lab));
+    unsetMessage(failureText(lab), `Token for GitLab source "${GITLAB_PROJECT}" references env var CONTRACT_UNSET_VAR which is not set. Set it in your environment or in <DATA_DIR>/.env: CONTRACT_UNSET_VAR=<your-token>${daemonRemedy("CONTRACT_UNSET_VAR")}`);
+    const hub = await c.call("add_source", addGithub(gh, { token: "${CONTRACT_UNSET_VAR}" }));
+    assert.ok(wasRefused(hub), JSON.stringify(hub));
+    unsetMessage(failureText(hub), `Token for GitHub source "${GITHUB_PROJECT}" references env var CONTRACT_UNSET_VAR which is not set. Set it in your environment or in <DATA_DIR>/.env: CONTRACT_UNSET_VAR=<your-token>${daemonRemedy("CONTRACT_UNSET_VAR")}`);
+    assert.equal(gl.state.log.length + gh.state.log.length, 0);
+    assert.deepEqual(savedSources(w), ["primary"]);
+  });
+});
+
+describe("add_source with a token the tracker accepts", () => {
+  let gl, gh, w, c, names;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    gh = await fakeGithub();
+    seedGithub(gh);
+    w = await makeWorld({ serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN, CONTRACT_GITHUB_TOKEN: GITHUB_TOKEN } });
+    c = w.client();
+    await c.hello();
+    names = await c.toolNames();
+  });
+  after(async () => { await w.stop(); gl.close(); gh.close(); });
+
+  test("a GitLab source is saved and its first run queued", async (t) => {
+    if (!names.includes("add_source")) return t.skip(`${BUILD} has no add_source yet`);
+    const r = await c.call("add_source", addGitlab(gl, { source_id: "issues" }));
+    assert.equal(r.isError, false, JSON.stringify(r));
+    assert.equal(r.value.ok, true);
+    assert.deepEqual([r.value.project_id, r.value.source_id], ["demo", "issues"]);
+    assert.match(r.value.job_id, /^[0-9a-f]{8}$/);
+    assert.equal(gl.state.log[0].url, "/api/v4/projects/demo%2Ftracker");
+    assert.equal(gl.state.log[0].auth, `Bearer ${GITLAB_TOKEN}`);
+    const saved = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources.find((s) => s.source_id === "issues");
+    assert.deepEqual(saved.source_config, { type: "ticket", provider: "gitlab", base_url: gl.url, project_id: GITLAB_PROJECT, token: "${CONTRACT_GITLAB_TOKEN}" });
+    await until(hasIssue(c, "issues/4"), 60_000, "the first run to index the issues");
+  });
+
+  test("a GitHub source is saved and its first run queued", async (t) => {
+    if (!names.includes("add_source")) return t.skip(`${BUILD} has no add_source yet`);
+    const r = await c.call("add_source", addGithub(gh, { source_id: "hub-issues" }));
+    assert.equal(r.isError, false, JSON.stringify(r));
+    assert.equal(r.value.ok, true);
+    assert.match(r.value.job_id, /^[0-9a-f]{8}$/);
+    assert.equal(gh.state.log[0].url, "/user");
+    assert.equal(gh.state.log[0].auth, `Bearer ${GITHUB_TOKEN}`);
+    const saved = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources.find((s) => s.source_id === "hub-issues");
+    assert.deepEqual(saved.source_config, { type: "ticket", provider: "github", base_url: gh.url, project_id: GITHUB_PROJECT, token: "${CONTRACT_GITHUB_TOKEN}" });
+  });
+
+  test("a source id already in use is refused", async (t) => {
+    if (!names.includes("add_source")) return t.skip(`${BUILD} has no add_source yet`);
+    const r = await c.call("add_source", addGitlab(gl, { source_id: "issues" }));
+    assert.ok(wasRefused(r), JSON.stringify(r));
+    assert.deepEqual(savedSources(w).filter((s) => s === "issues"), ["issues"]);
+  });
+});
+
 test("the run's commands", () => {
   assert.ok(SERVER.length && CLI.length && RELAY.length);
 });

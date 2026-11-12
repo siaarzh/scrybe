@@ -1,9 +1,9 @@
 //! The GitHub issues ticket source. Mirrors `src/plugins/github-issues.ts`, including its known defects.
 use crate::chunk::Sizes;
 use crate::embed_api::client;
-use crate::gitlab_issues::{encode_uri_component, field_str, js_str, ticket_config, truthy, Emit, KnowledgeChunk, Meta};
+use crate::gitlab_issues::{encode_uri_component, field_str, js_str, ticket_config, truthy, Emit, KnowledgeChunk, Meta, TicketConfig};
 use crate::jsstr::{js_trim, normalize_content};
-use crate::registry::{resolve_env_ref, Source};
+use crate::registry::{resolve_env_ref, unset_token_error, Source};
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -88,6 +88,28 @@ async fn github_fetch(url: &str, token: &str, project_id: &str) -> Result<Value>
 
         return res.json::<Value>().await.map_err(|e| anyhow::Error::new(e).context("Unexpected end of JSON input"));
     }
+}
+
+/// `validateGithubToken`: a cheap authenticated read of `/user`, as `scrybe source add` does before saving.
+pub async fn validate_token(cfg: &TicketConfig, in_daemon: bool) -> Result<()> {
+    let token = resolve_env_ref(&cfg.token).map_err(|_| unset_token_error("GitHub", &cfg.project_id, &cfg.token, in_daemon))?;
+    let base_url = if cfg.base_url.is_empty() { DEFAULT_BASE_URL } else { cfg.base_url.as_str() };
+    let res = client()
+        .get(format!("{base_url}/user"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("fetch failed"))?;
+    let status = res.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        bail!("GitHub token for project \"{}\" is invalid or lacks required permissions (HTTP {}). {SCOPES}", cfg.project_id, status.as_u16());
+    }
+    if !status.is_success() {
+        bail!("GitHub API error {} {} during token validation", status.as_u16(), status.canonical_reason().unwrap_or(""));
+    }
+    Ok(())
 }
 
 async fn fetch_all_pages(base_url: &str, token: &str, project_id: &str) -> Result<Vec<Value>> {

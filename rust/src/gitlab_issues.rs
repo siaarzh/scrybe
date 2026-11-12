@@ -2,7 +2,7 @@
 use crate::chunk::{chunk_id, chunk_lines, Sizes};
 use crate::embed_api::client;
 use crate::jsstr::{js_trim, normalize_content};
-use crate::registry::{resolve_env_ref, Source};
+use crate::registry::{resolve_env_ref, unset_token_error, Source};
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
 
@@ -71,6 +71,13 @@ async fn gitlab_fetch(url: &str, token: &str, project_id: &str) -> Result<Value>
         bail!("GitLab API error {} {} for {url}", status.as_u16(), status.canonical_reason().unwrap_or(""));
     }
     res.json::<Value>().await.map_err(|e| anyhow::Error::new(e).context("Unexpected end of JSON input"))
+}
+
+/// `validateGitlabToken`: one authenticated read of the project, as `scrybe source add` does before saving.
+pub async fn validate_token(cfg: &TicketConfig, in_daemon: bool) -> Result<()> {
+    let token = resolve_env_ref(&cfg.token).map_err(|_| unset_token_error("GitLab", &cfg.project_id, &cfg.token, in_daemon))?;
+    gitlab_fetch(&format!("{}/api/v4/projects/{}", cfg.base_url, encode_uri_component(&cfg.project_id)), &token, &cfg.project_id).await?;
+    Ok(())
 }
 
 async fn fetch_all_pages(base_url: &str, token: &str, project_id: &str) -> Result<Vec<Value>> {

@@ -23,7 +23,7 @@ const FETCH_RETRY_BASE: Duration = Duration::from_secs(30);
 const FETCH_RETRY_MAX: Duration = Duration::from_secs(600);
 const MAX_CONCURRENT_FETCHES: usize = 2;
 
-fn env_ms(name: &str, default: u64) -> Duration {
+pub(crate) fn env_ms(name: &str, default: u64) -> Duration {
     Duration::from_millis(std::env::var(name).ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(default))
 }
 
@@ -32,16 +32,33 @@ pub struct Idle {
     last_active: Mutex<Option<Instant>>,
     hot_for: Duration,
     cold_multiplier: u32,
+    on_hot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Idle {
     pub fn from_env() -> Self {
         let multiplier = std::env::var("SCRYBE_DAEMON_COLD_MULTIPLIER").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(5);
-        Idle { last_active: Mutex::new(None), hot_for: env_ms("SCRYBE_DAEMON_HOT_MS", 60_000), cold_multiplier: multiplier }
+        Idle { last_active: Mutex::new(None), hot_for: env_ms("SCRYBE_DAEMON_HOT_MS", 60_000), cold_multiplier: multiplier, on_hot: Mutex::new(None) }
+    }
+
+    /// Runs `f` on every cold to hot change, like `onStateChange`.
+    pub fn set_on_hot(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_hot.lock().unwrap() = Some(f);
     }
 
     pub fn touch(&self) {
-        *self.last_active.lock().unwrap() = Some(Instant::now());
+        let was_hot = {
+            let mut last = self.last_active.lock().unwrap();
+            let was_hot = last.is_some_and(|t| t.elapsed() < self.hot_for);
+            *last = Some(Instant::now());
+            was_hot
+        };
+        if !was_hot {
+            let hook = self.on_hot.lock().unwrap().clone();
+            if let Some(f) = hook {
+                f();
+            }
+        }
     }
 
     pub fn is_hot(&self) -> bool {
@@ -442,11 +459,25 @@ mod tests {
 
     #[test]
     fn a_cold_server_waits_longer() {
-        let idle = Idle { last_active: Mutex::new(None), hot_for: Duration::from_secs(60), cold_multiplier: 5 };
+        let idle = Idle { last_active: Mutex::new(None), hot_for: Duration::from_secs(60), cold_multiplier: 5, on_hot: Mutex::new(None) };
         assert!(!idle.is_hot());
         assert_eq!(idle.debounce(Duration::from_secs(1)), Duration::from_secs(5));
         idle.touch();
         assert!(idle.is_hot());
         assert_eq!(idle.debounce(Duration::from_secs(1)), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn only_a_cold_to_hot_change_runs_the_hook() {
+        let idle = Idle { last_active: Mutex::new(None), hot_for: Duration::from_millis(80), cold_multiplier: 5, on_hot: Mutex::new(None) };
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        idle.set_on_hot(Arc::new(move || { c.fetch_add(1, Ordering::SeqCst); }));
+        idle.touch();
+        idle.touch();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        std::thread::sleep(Duration::from_millis(120));
+        idle.touch();
+        assert_eq!(count.load(Ordering::SeqCst), 2);
     }
 }

@@ -76,6 +76,8 @@ export async function fakeGitlab({ token = GITLAB_TOKEN } = {}) {
     };
     if (req.headers.authorization !== `Bearer ${token}`) return send(401, { message: "401 Unauthorized" });
     const url = new URL(req.url, "http://localhost");
+    const project = url.pathname.match(/^\/api\/v4\/projects\/([^/]+)$/);
+    if (project) return decodeURIComponent(project[1]) === GITLAB_PROJECT ? send(200, { id: 1, path_with_namespace: GITLAB_PROJECT }) : send(404, { message: "404 Project Not Found" });
     const m = url.pathname.match(/^\/api\/v4\/projects\/([^/]+)\/issues(?:\/(\d+)(\/notes)?)?$/);
     if (!m || decodeURIComponent(m[1]) !== GITLAB_PROJECT) return send(404, { message: "404 Not Found" });
     const page = (all) => {
@@ -111,6 +113,7 @@ export async function fakeGithub({ token = GITHUB_TOKEN } = {}) {
     if (forced) return send(forced.code, forced.body ?? { message: "pushed back" }, forced.headers);
     if (req.headers.authorization !== `Bearer ${token}`) return send(401, { message: "Bad credentials" });
     const url = new URL(req.url, "http://localhost");
+    if (url.pathname === "/user") return send(200, { login: "alice" });
     const m = url.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/issues(?:\/(\d+)(\/comments)?)?$/);
     if (!m || m[1] !== GITHUB_PROJECT) return send(404, { message: "Not Found" });
     const page = (all) => {

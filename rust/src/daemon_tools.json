@@ -304,5 +304,80 @@
    "idempotentHint": true,
    "openWorldHint": false
   }
+ },
+ {
+  "name": "add_source",
+  "description": "Add an indexable source to a project (code repo, GitLab/GitHub issues, etc.) and auto-enqueue a reindex. Returns a job_id to poll with reindex_status.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "project_id": {
+     "type": "string"
+    },
+    "source_id": {
+     "type": "string",
+     "description": "User-defined label, e.g. \"code\", \"gitlab-issues\""
+    },
+    "source_type": {
+     "type": "string",
+     "enum": [
+      "code",
+      "ticket"
+     ],
+     "description": "Source type: code | ticket"
+    },
+    "root_path": {
+     "type": "string",
+     "description": "Absolute path to repo root (required for type=code)"
+    },
+    "languages": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     },
+     "description": "Language hints for code source"
+    },
+    "provider": {
+     "type": "string",
+     "enum": [
+      "gitlab",
+      "github"
+     ],
+     "description": "Ticket provider (default: gitlab)"
+    },
+    "url": {
+     "type": "string",
+     "description": "Provider base URL. Required for GitLab; optional for GitHub (defaults to https://api.github.com)"
+    },
+    "project": {
+     "type": "string",
+     "description": "Provider-scoped project identifier: GitLab numeric id or path; GitHub owner/repo"
+    },
+    "token": {
+     "type": "string",
+     "description": "Personal access token (literal or ${VAR} form)"
+    },
+    "gitlab_url": {
+     "type": "string",
+     "description": "[deprecated: use url] GitLab instance base URL"
+    },
+    "gitlab_project_id": {
+     "type": "string",
+     "description": "[deprecated: use project] GitLab project ID or path"
+    },
+    "gitlab_token": {
+     "type": "string",
+     "description": "[deprecated: use token] GitLab personal access token"
+    }
+   },
+   "required": [
+    "project_id",
+    "source_id",
+    "source_type"
+   ]
+  },
+  "annotations": {
+   "openWorldHint": true
+  }
  }
 ]

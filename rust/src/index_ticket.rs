@@ -81,7 +81,7 @@ fn save_hashes(path: &Path, hashes: &Ordered) -> Result<()> {
     Ok(())
 }
 
-fn load_cursor(project: &str, source: &str) -> Option<String> {
+pub(crate) fn load_cursor(project: &str, source: &str) -> Option<String> {
     let text = std::fs::read_to_string(cursor_path(project, source)).ok()?;
     serde_json::from_str::<Value>(&text).ok()?["updated_after"].as_str().map(String::from)
 }

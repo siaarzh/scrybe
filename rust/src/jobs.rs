@@ -406,6 +406,11 @@ impl Queue {
         json!({ "active": st.active.len(), "pending": st.pending.len(), "maxConcurrent": self.max_concurrent })
     }
 
+    /// Jobs waiting, and the most that may wait.
+    pub fn depth(&self) -> (usize, usize) {
+        (self.lock().pending.len(), self.max_depth)
+    }
+
     pub fn active_count(&self) -> usize {
         self.lock().active.len()
     }

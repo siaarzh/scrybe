@@ -22,7 +22,9 @@ mod registry;
 mod scan;
 mod search;
 mod serve;
+mod source_add;
 mod store;
+mod ticket_poll;
 mod tools;
 mod watch;
 

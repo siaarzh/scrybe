@@ -12,6 +12,8 @@ use crate::lifecycle::Lifecycle;
 use crate::mcp;
 use crate::registry;
 use crate::store::Store;
+use crate::source_add;
+use crate::ticket_poll;
 use crate::watch::{self, Idle, WatchHealth};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -423,12 +425,16 @@ impl Daemon {
         if let Err(message) = mcp::validate_params(name, &spec["inputSchema"], &args) {
             return fail(-32602, &message);
         }
-        match self.run_tool(name, &args) {
+        let outcome = if name == "add_source" { Some(source_add::add(&self.queue, &args).await) } else { self.run_tool(name, &args) };
+        match outcome {
             Some(Ok(result)) => json!({ "id": id, "result": result }).to_string(),
-            Some(Err(e)) => {
-                eprintln!("tool {name} failed: {e:#}");
-                fail(-32603, "internal error")
-            }
+            Some(Err(e)) => match e.downcast_ref::<registry::CallerFacing>() {
+                Some(c) => fail(-32602, &c.0),
+                None => {
+                    eprintln!("tool {name} failed: {e:#}");
+                    fail(-32603, "internal error")
+                }
+            },
             None => fail(-32601, &format!("method not found: {name}")),
         }
     }
@@ -717,7 +723,9 @@ pub async fn serve(store: Store) -> Result<()> {
     let _owner = owner;
     d.autogc.start();
     vecindex::Backfill::new(queue.clone()).start();
-    watch::start(queue.clone(), idle, health, &registry::list_projects());
+    let projects = registry::list_projects();
+    ticket_poll::start(queue.clone(), idle.clone(), &projects);
+    watch::start(queue.clone(), idle, health, &projects);
     autogc::sweep_ephemeral(&queue);
 
     let ticking = d.clone();
