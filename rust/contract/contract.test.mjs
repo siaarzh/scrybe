@@ -1824,6 +1824,223 @@ describe("updating and inspecting a tracker source", () => {
   });
 });
 
+const hashFileOf = (w, label) => join(w.data, "hashes", `demo__primary__${label.replace(/\//g, "__")}.json`);
+const labelRows = (w, label) => {
+  const db = new DatabaseSync(join(w.data, "branch-tags.db"), { readOnly: true });
+  try {
+    return db.prepare("SELECT COUNT(*) AS n FROM branch_tags WHERE project_id='demo' AND source_id='primary' AND branch=?").get(label).n;
+  } finally {
+    db.close();
+  }
+};
+
+describe("ephemeral labels", () => {
+  let w, c, names;
+  const label = "_ephemeral/mr-side";
+  const find = async (symbol, branch) => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: symbol, branch })).value;
+  before(async () => {
+    w = await makeWorld({ withOrigin: true });
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    names = await c.toolNames();
+  });
+  after(() => w.stop());
+  const ported = (t) => {
+    if (names.includes("index_ephemeral") && names.includes("drop_ephemeral")) return true;
+    t.skip(`${BUILD} has no index_ephemeral yet`);
+    return false;
+  };
+
+  test("a fetched branch becomes searchable under its own label and nowhere else", async (t) => {
+    if (!ported(t)) return;
+    assert.equal((await find("onlyOnTheSideBranch", label)).length, 0, "nothing before it is indexed");
+    const r = await c.call("index_ephemeral", { project_id: "demo", branch: "side" });
+    assert.ok(!r.isError && !r.rpcError, JSON.stringify(r));
+    assert.equal(r.value.label, label);
+    assert.equal(typeof r.value.chunks_new, "number");
+    assert.equal(typeof r.value.chunks_reused, "number");
+    assert.ok(r.value.duration_ms >= 0);
+    assert.equal((await find("onlyOnTheSideBranch", label)).length, 1);
+    assert.equal((await find("onlyOnTheSideBranch", w.main)).length, 0, "the checked-out branch does not see it");
+    assert.equal((await find("frobnicateWidget", label)).length, 1, "the label holds the whole branch");
+    const search = await c.call("search_code", { project_id: "demo", query: "onlyOnTheSideBranch", branch: label, top_k: 3 });
+    assert.equal(search.value[0].item_path, "src/side_only.ts");
+    assert.ok(labelRows(w, label) > 0);
+    assert.ok(existsSync(hashFileOf(w, label)));
+    const listed = (await c.call("list_branches", { project_id: "demo", source_id: "primary" })).value;
+    assert.ok(listed[0].branches.includes(label), JSON.stringify(listed));
+    assert.ok(!(await c.call("list_pinned_branches", { project_id: "demo" })).text.includes("_ephemeral"), "it is never pinned");
+  });
+
+  test("the label can be chosen, and a full ref is read as given", async (t) => {
+    if (!ported(t)) return;
+    const r = await c.call("index_ephemeral", { project_id: "demo", branch: "refs/heads/side", label: "review-1" });
+    assert.equal(r.value?.label, "_ephemeral/review-1", JSON.stringify(r));
+    assert.equal((await find("onlyOnTheSideBranch", "_ephemeral/review-1")).length, 1);
+    const again = await c.call("index_ephemeral", { project_id: "demo", branch: "origin/side" });
+    assert.equal(again.value?.label, label, "the label comes from the last segment of a full ref");
+    assert.equal((await c.call("drop_ephemeral", { project_id: "demo", label: "_ephemeral/review-1" })).value.dropped, true);
+  });
+
+  test("an unknown project, source or ref is refused and leaves no label", async (t) => {
+    if (!ported(t)) return;
+    refusedAs(await c.call("index_ephemeral", { project_id: "nope", branch: "side" }), INTERNAL);
+    refusedAs(await c.call("index_ephemeral", { project_id: "demo", branch: "side", source_id: "nope" }), INTERNAL);
+    refusedAs(await c.call("index_ephemeral", { project_id: "demo", branch: "no-such-branch" }), INTERNAL);
+    assert.equal(labelRows(w, "_ephemeral/mr-no-such-branch"), 0);
+    assert.ok(wasRefused(await c.call("index_ephemeral", { project_id: "demo" })), "branch is required");
+    assert.ok(!(await c.call("index_ephemeral", { project_id: "demo", branch: "side" })).isError, "the same call with a real branch works");
+  });
+
+  test("a label outside the prefix is never dropped", async (t) => {
+    if (!ported(t)) return;
+    const before = tagCount(w, "demo", "primary");
+    refusedAs(await c.call("drop_ephemeral", { project_id: "demo", label: w.main }), INTERNAL);
+    refusedAs(await c.call("drop_ephemeral", { project_id: "demo", label: "ephemeral/mr-side" }), INTERNAL);
+    refusedAs(await c.call("drop_ephemeral", { project_id: "nope", label }), INTERNAL);
+    assert.equal(tagCount(w, "demo", "primary"), before);
+    assert.equal((await find("frobnicateWidget", w.main)).length, 1);
+  });
+
+  test("dropping a label removes its rows and state, and keeps what the branch checked out still uses", async (t) => {
+    if (!ported(t)) return;
+    assert.ok(labelRows(w, label) > 0);
+    const r = await c.call("drop_ephemeral", { project_id: "demo", label });
+    assert.ok(!r.isError && !r.rpcError, JSON.stringify(r));
+    assert.equal(r.value.label, label);
+    assert.equal(r.value.dropped, true);
+    assert.ok(r.value.orphans_deleted > 0, "rows only this label used are reclaimed");
+    assert.equal(typeof r.value.bytes_freed, "number");
+    assert.equal(labelRows(w, label), 0);
+    assert.ok(!existsSync(hashFileOf(w, label)));
+    assert.equal((await find("onlyOnTheSideBranch", label)).length, 0);
+    assert.equal((await find("frobnicateWidget", w.main)).length, 1, "committed rows stay");
+    assert.equal((await find("calibrate_gadget", w.main)).length, 1);
+    const again = await c.call("drop_ephemeral", { project_id: "demo", label });
+    assert.equal(again.value?.dropped, false, JSON.stringify(again));
+    assert.equal(again.value.orphans_deleted, 0);
+  });
+});
+
+const cfgOf = (w) => JSON.parse(readFileSync(join(w.data, "config.json"), "utf8"));
+const cfgText = (w) => readFileSync(join(w.data, "config.json"), "utf8");
+
+describe("embedding presets", () => {
+  let w, c, names, extra;
+  before(async () => {
+    w = await makeWorld();
+    extra = { ...cfgOf(w), zeta: { kept: true }, reranker_presets: { r1: { model: "rerank-2" } } };
+    writeFileSync(join(w.data, "config.json"), JSON.stringify(extra, null, 2));
+    c = w.client();
+    await c.hello();
+    names = await c.toolNames();
+  });
+  after(() => w.stop());
+  const ported = (t) => {
+    if (names.includes("add_embedding_preset") && names.includes("assign_preset")) return true;
+    t.skip(`${BUILD} has no preset tools yet`);
+    return false;
+  };
+  const add = async (args) => (await c.call("add_embedding_preset", args)).value;
+  const assign = async (slot, preset_name) => (await c.call("assign_preset", { slot, preset_name })).value;
+  const other = () => ({ name: "other", provider: "custom", model: "other-model", dim: 8, base_url: w.fake.url, credentials: "${CONTRACT_EMBED_KEY}" });
+
+  test("a preset is stored beside what was already there, and a duplicate is refused", async (t) => {
+    if (!ported(t)) return;
+    assert.deepEqual(await add(other()), { ok: true, preset_name: "other" });
+    const cfg = cfgOf(w);
+    assert.deepEqual(cfg.embedding_presets.other, { provider: "custom", model: "other-model", credentials: "${CONTRACT_EMBED_KEY}", base_url: w.fake.url, dim: 8 });
+    assert.deepEqual(cfg.embedding_presets.fake, extra.embedding_presets.fake);
+    assert.deepEqual(cfg.zeta, { kept: true });
+    assert.deepEqual(cfg.assignments, extra.assignments);
+    const saved = cfgText(w);
+    assert.ok(saved.endsWith("}\n"));
+    const dup = await add({ ...other(), model: "changed" });
+    assert.equal(dup.ok, false);
+    assert.equal(dup.preset_name, "other");
+    assert.match(dup.error, /Preset 'other' already exists/);
+    assert.equal(cfgText(w), saved);
+  });
+
+  test("a preset with a missing or misplaced field is refused and nothing is saved", async (t) => {
+    if (!ported(t)) return;
+    const saved = cfgText(w);
+    const refused = async (args, pattern) => {
+      const r = await add(args);
+      assert.equal(r.ok, false, JSON.stringify(r));
+      assert.match(r.error, pattern);
+      assert.equal(cfgText(w), saved);
+    };
+    await refused({ name: "a", provider: "custom", model: "m", dim: 8 }, /base-url is required/);
+    await refused({ name: "a", provider: "custom", model: "m", base_url: "http://x/v1" }, /dim is required/);
+    await refused({ name: "a", provider: "nope", model: "m" }, /Unknown provider: "nope"/);
+    await refused({ name: "a", provider: "local", model: "no-such-model" }, /Model "no-such-model" not found in provider "local"/);
+    await refused({ name: "a", provider: "local", model: "Xenova/all-MiniLM-L6-v2", base_url: "http://x/v1" }, /base-url is only valid for custom/);
+    await refused({ name: "a", provider: "local", model: "Xenova/all-MiniLM-L6-v2", dim: 8 }, /dim is only valid for custom/);
+    await refused({ name: "a", provider: "local", model: "Xenova/all-MiniLM-L6-v2", encoding_format: "float" }, /encoding-format is only valid for custom/);
+    assert.deepEqual(await add({ name: "a", provider: "local", model: "Xenova/all-MiniLM-L6-v2" }), { ok: true, preset_name: "a" });
+    assert.deepEqual(cfgOf(w).embedding_presets.a, { provider: "local", model: "Xenova/all-MiniLM-L6-v2" });
+    assert.deepEqual(await add({ name: "f", provider: "custom", model: "m", dim: 8, base_url: "http://x/v1", encoding_format: "float", credentials_from: "other" }), { ok: true, preset_name: "f" });
+    assert.deepEqual(cfgOf(w).embedding_presets.f, { provider: "custom", model: "m", credentials_from: "other", base_url: "http://x/v1", dim: 8, encoding_format: "float" });
+  });
+
+  test("an assignment says whether the vectors on disk must be rebuilt, and changes what status reports", async (t) => {
+    if (!ported(t)) return;
+    assert.equal((await c.call("status")).value.code_model, "fake-model");
+    assert.deepEqual(await assign("code", "fake"), { ok: true, requires_reindex: false });
+    assert.deepEqual(await assign("code", "other"), { ok: true, requires_reindex: true });
+    assert.equal(cfgOf(w).assignments.code_preset, "other");
+    assert.equal(cfgOf(w).assignments.text_preset, "fake");
+    assert.equal((await c.call("status")).value.code_model, "other-model");
+    assert.deepEqual(await assign("code", "other"), { ok: true, requires_reindex: false });
+    assert.deepEqual(await assign("code", "fake"), { ok: true, requires_reindex: true });
+    assert.equal((await c.call("status")).value.code_model, "fake-model");
+    assert.deepEqual(cfgOf(w).zeta, { kept: true });
+  });
+
+  test("an assignment to a missing preset, the wrong profile or an unset credential changes nothing", async (t) => {
+    if (!ported(t)) return;
+    await add({ name: "wants-key", provider: "custom", model: "m", dim: 8, base_url: "http://x/v1", credentials: "${CONTRACT_NOT_SET_ANYWHERE}" });
+    await add({ name: "v4", provider: "voyage", model: "voyage-4", credentials: "literal" });
+    const saved = cfgText(w);
+    const refused = async (slot, name, pattern) => {
+      const r = await assign(slot, name);
+      assert.equal(r.ok, false, JSON.stringify(r));
+      assert.equal(r.requires_reindex, false);
+      assert.match(r.error, pattern);
+      assert.equal(cfgText(w), saved);
+    };
+    await refused("code", "nope", /Preset 'nope' not found in embedding_presets\./);
+    await refused("text", "nope", /Preset 'nope' not found in embedding_presets\./);
+    await refused("rerank", "nope", /Reranker preset 'nope' not found in reranker_presets\./);
+    await refused("code", "v4", /preset "v4" uses model "voyage-4" with profile "text", but it is assigned to slot "code_preset" which requires profile "code"/);
+    await refused("code", "wants-key", /env var CONTRACT_NOT_SET_ANYWHERE not set \(referenced in scrybe config\)/);
+    assert.deepEqual(await assign("text", "v4"), { ok: true, requires_reindex: true });
+    assert.equal((await c.call("status")).value.text_model, "voyage-4");
+    assert.deepEqual(await assign("text", "fake"), { ok: true, requires_reindex: true });
+  });
+
+  test("the rerank slot takes a reranker preset or 'none'", async (t) => {
+    if (!ported(t)) return;
+    assert.deepEqual(await assign("rerank", "r1"), { ok: true, requires_reindex: false });
+    assert.equal(cfgOf(w).assignments.rerank_preset, "r1");
+    assert.deepEqual(await assign("rerank", "none"), { ok: true, requires_reindex: false });
+    assert.ok(!("rerank_preset" in cfgOf(w).assignments));
+    assert.deepEqual(cfgOf(w).reranker_presets, { r1: { model: "rerank-2" } });
+  });
+
+  test("a slot or argument the schema doesn't know is a clean error", async (t) => {
+    if (!ported(t)) return;
+    const saved = cfgText(w);
+    for (const args of [{ slot: "both", preset_name: "fake" }, { slot: "code" }, { slot: "code", preset_name: "fake", extra: 1 }]) {
+      assert.ok(wasRefused(await c.call("assign_preset", args)), JSON.stringify(args));
+    }
+    assert.ok(wasRefused(await c.call("add_embedding_preset", { name: "x", provider: "custom" })));
+    assert.equal(cfgText(w), saved);
+  });
+});
+
 test("the run's commands", () => {
   assert.ok(SERVER.length && CLI.length && RELAY.length);
 });

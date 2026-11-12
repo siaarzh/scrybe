@@ -6,6 +6,8 @@ use crate::autogc::{self, AutoGc};
 use crate::pinned;
 use crate::vecindex;
 use crate::config::{data_dir, VERSION};
+use crate::ephemeral;
+use crate::presets;
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
 use crate::lifecycle::Lifecycle;
@@ -337,6 +339,8 @@ impl Daemon {
             "set_private_ignore" => manage::set_private_ignore(a),
             "get_private_ignore" => manage::get_private_ignore(a),
             "list_private_ignores" => manage::list_private_ignores(a),
+            "add_embedding_preset" => Ok(presets::add_embedding_preset(a)),
+            "assign_preset" => Ok(presets::assign_preset(a)),
             _ => return None,
         })
     }
@@ -423,6 +427,17 @@ impl Daemon {
         Ok(json!({ "ok": true, "project_id": id }))
     }
 
+    /// `drop_ephemeral`: forget the label, then a gc scoped to its source reclaims the rows only it used.
+    async fn drop_ephemeral(&self, a: &Value) -> Result<Value> {
+        let dropped = ephemeral::drop_label(&self.queue, a)?;
+        if self.draining.load(Ordering::SeqCst) {
+            anyhow::bail!("The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call.");
+        }
+        let queued = self.gc(vec![dropped.project.clone()], Some(dropped.source.clone()), true);
+        let job = queued["jobs"][0]["jobId"].as_str().unwrap_or("");
+        Ok(ephemeral::drop_result(&self.queue, job, &dropped).await)
+    }
+
     fn status_tool(&self) -> Value {
         let mut out = json!({ "version": VERSION, "daemon_running": true, "daemon_pid": std::process::id(), "daemon_port": self.port, "daemon_version": VERSION });
         for (k, v) in registry::embedding_status().as_object().into_iter().flatten() {
@@ -446,6 +461,8 @@ impl Daemon {
         let outcome = match name {
             "add_source" => Some(source_add::add(&self.queue, &args).await),
             "remove_source" => Some(manage::remove_source(&self.queue, &args).await),
+            "index_ephemeral" => Some(ephemeral::index_branch(&self.queue, &args).await),
+            "drop_ephemeral" => Some(self.drop_ephemeral(&args).await),
             "remove_project" => Some(self.remove_project(args["project_id"].as_str().unwrap_or("")).await),
             _ => self.run_tool(name, &args),
         };

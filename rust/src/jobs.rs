@@ -170,6 +170,11 @@ impl Rows {
         Ok(())
     }
 
+    /// `getChunkIdsForBranch(...).size > 0`.
+    pub fn branch_has_chunks(&self, project: &str, source: &str, branch: &str) -> bool {
+        self.lock().query_row("SELECT 1 FROM branch_tags WHERE project_id=? AND source_id=? AND branch=? LIMIT 1", [project, source, branch], |_| Ok(())).is_ok()
+    }
+
     fn cancel_queued_gc(&self, project: &str) {
         let _ = self.lock().execute("UPDATE jobs SET status='cancelled', finished_at=? WHERE type='gc' AND status='queued' AND project_id=?", params![now_ms(), project]);
     }

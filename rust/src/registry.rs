@@ -138,16 +138,13 @@ impl EmbedConfig {
 
 /// The catalog in `src/providers.ts`: base URL and dimensions.
 fn catalog(provider: &str, model: &str) -> Result<(String, i32)> {
-    let (base, models): (&str, &[(&str, i32)]) = match provider {
-        "voyage" => ("https://api.voyageai.com/v1", &[("voyage-code-3", 1024), ("voyage-3", 1024), ("voyage-3-large", 1024), ("voyage-3.5", 1024), ("voyage-3.5-lite", 1024), ("voyage-4", 1024), ("voyage-4-lite", 1024), ("voyage-4-large", 1024)]),
-        "openai" => ("https://api.openai.com/v1", &[("text-embedding-3-small", 1536), ("text-embedding-3-large", 3072)]),
-        "local" => ("", &[("Xenova/multilingual-e5-small", 384), ("Xenova/all-MiniLM-L6-v2", 384)]),
-        other => anyhow::bail!("unknown provider \"{other}\""),
+    let Some(base) = crate::presets::provider_base_url(provider) else {
+        anyhow::bail!("unknown provider \"{provider}\"");
     };
-    let Some((_, dim)) = models.iter().find(|(m, _)| *m == model) else {
+    let Some(spec) = crate::presets::model_spec(provider, model) else {
         anyhow::bail!("model \"{model}\" not found in provider \"{provider}\"");
     };
-    Ok((base.to_string(), *dim))
+    Ok((base.to_string(), spec.dim))
 }
 
 /// `resolveEnvRef`: every `${VAR}` must be set.
@@ -300,7 +297,7 @@ pub fn table_name_for(project: &str, source: &Source, emb: &EmbedConfig) -> Stri
 // One writer at a time, so two calls can't each read the old list and drop the other's change.
 static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+pub fn write_lock() -> std::sync::MutexGuard<'static, ()> {
     WRITE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
