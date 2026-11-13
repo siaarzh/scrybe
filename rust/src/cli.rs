@@ -247,28 +247,44 @@ async fn settle(queue: &Arc<Queue>) {
     }
 }
 
-/// The port of a live server on this data dir. TS starts one when auto-start is allowed; this never does.
-async fn live_server() -> Result<Option<u16>> {
-    if std::env::var("SCRYBE_NO_AUTO_DAEMON").as_deref() == Ok("1") {
-        return Ok(None);
-    }
-    let Some(port) = std::fs::read_to_string(crate::config::data_dir().join("daemon.pid")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()) else { return Ok(None) };
-    let Ok(client) = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build() else { return Ok(None) };
-    let Ok(res) = client.get(format!("http://127.0.0.1:{port}/health")).send().await else { return Ok(None) };
-    if !res.status().is_success() {
-        return Ok(None);
-    }
-    if res.json::<Value>().await.is_ok_and(|h| h["draining"] == true) {
-        bail!("The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call.");
-    }
-    Ok(Some(port as u16))
+pub(crate) enum Server {
+    /// No server to use: none running, starting is switched off, or this is a container.
+    Down,
+    Up(u16),
+    Draining,
 }
 
-async fn post(port: u16, path: &str, body: &Value) -> Result<Value> {
+/// `ensureRunning` without the starting: TS would spawn a server here when auto-start is allowed; this never does.
+pub(crate) async fn server_state() -> Server {
+    if std::env::var("SCRYBE_NO_AUTO_DAEMON").as_deref() == Ok("1") || crate::ops::in_container() {
+        return Server::Down;
+    }
+    let Some(port) = std::fs::read_to_string(crate::config::data_dir().join("daemon.pid")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()) else { return Server::Down };
+    let Ok(client) = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build() else { return Server::Down };
+    let Ok(res) = client.get(format!("http://127.0.0.1:{port}/health")).send().await else { return Server::Down };
+    if !res.status().is_success() {
+        return Server::Down;
+    }
+    if res.json::<Value>().await.is_ok_and(|h| h["draining"] == true) {
+        return Server::Draining;
+    }
+    Server::Up(port as u16)
+}
+
+/// The port of a live server on this data dir; a draining one is an error, as it refuses new work.
+async fn live_server() -> Result<Option<u16>> {
+    match server_state().await {
+        Server::Down => Ok(None),
+        Server::Up(port) => Ok(Some(port)),
+        Server::Draining => bail!("The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call."),
+    }
+}
+
+pub(crate) async fn post(port: u16, path: &str, body: &Value) -> Result<Value> {
     let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build()?;
     let res = client.post(format!("http://127.0.0.1:{port}{path}")).json(body).send().await?;
     if !res.status().is_success() {
-        bail!("Daemon request failed: HTTP {}", res.status().as_u16());
+        bail!("POST {path} returned {}", res.status().as_u16());
     }
     Ok(res.json().await?)
 }

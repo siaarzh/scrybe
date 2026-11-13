@@ -535,7 +535,7 @@ async fn refresh(project_id: Option<String>, source_id: Option<String>, branch: 
     show(&res.json::<Value>().await.map_err(|e| anyhow!("Failed to reach daemon: {e}"))?)
 }
 
-fn in_container() -> bool {
+pub(crate) fn in_container() -> bool {
     std::path::Path::new("/.dockerenv").exists()
         || std::fs::read_to_string("/proc/1/cgroup").is_ok_and(|c| c.contains("docker") || c.contains("kubepods") || c.contains("lxc"))
         || std::env::var_os("WSL_DISTRO_NAME").is_some()

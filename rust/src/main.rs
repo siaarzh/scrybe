@@ -24,6 +24,7 @@ mod phase;
 mod pinned;
 mod presets;
 mod registry;
+mod reindex;
 mod scan;
 mod search;
 mod serve;
@@ -118,21 +119,8 @@ enum Command {
     },
     /// Print token ids for a JSON list of texts in a file (parity checks)
     DebugTokens { file: String, #[arg(long, default_value = "Xenova/multilingual-e5-small")] model: String },
-    /// Index one code, GitLab issues or GitHub issues source into a scratch data dir (refuses the live one)
-    Index {
-        #[arg(short = 'P', long = "project-id")]
-        project_id: String,
-        #[arg(short = 'S', long = "source-id")]
-        source_id: String,
-        #[arg(long)]
-        full: bool,
-        /// Branch label to store (default: the checked-out branch)
-        #[arg(long)]
-        branch: Option<String>,
-        /// Git ref to read content from, such as origin/dev (default: the branch)
-        #[arg(long = "content-ref")]
-        content_ref: Option<String>,
-    },
+    /// Index or reindex a project (all sources) or specific sources
+    Index(reindex::IndexArgs),
     /// Chunk every file of a code source and print one line per chunk (parity checks)
     DebugChunks { #[arg(short = 'P', long = "project-id")] project_id: String, #[arg(short = 'S', long = "source-id")] source_id: String },
     /// Try a keyword search on every registered table and report which fail (read-only)
@@ -225,11 +213,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let ids: Vec<Vec<u32>> = texts.iter().map(|t| embed::tokens(&model, t)).collect::<anyhow::Result<_>>()?;
             println!("{}", serde_json::to_string(&ids)?);
         }
-        Command::Index { project_id, source_id, full, branch, content_ref } => {
-            let mode = if full { index::Mode::Full } else { index::Mode::Incremental };
-            let summary = index::index_source(&store, &project_id, &source_id, mode, &index::Options { branch, content_ref, cancel: None, job_id: None }).await?;
-            println!("{}", serde_json::to_string_pretty(&summary)?);
-        }
+        Command::Index(args) => reindex::index(store, args).await,
         Command::DebugChunks { project_id, source_id } => {
             let handle = std::thread::Builder::new().stack_size(256 << 20).spawn(move || debug_chunks(&project_id, &source_id))?;
             handle.join().map_err(|_| anyhow::anyhow!("chunker thread panicked"))??;

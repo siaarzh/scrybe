@@ -1440,6 +1440,96 @@ describe("the daemon start, restart and status commands", () => {
   });
 });
 
+describe("the index command", () => {
+  let w;
+  // The first command on a fresh data dir may print a one-time notice, so it runs before anything is compared.
+  before(async () => {
+    w = await makeWorld();
+    const file = join(w.data, "projects.json");
+    const projects = JSON.parse(readFileSync(file, "utf8"));
+    projects[0].sources.push({ source_id: "second", source_config: { type: "code", root_path: w.repo, languages: [] } });
+    writeFileSync(file, JSON.stringify(projects, null, 2));
+    await w.cli("projects");
+  });
+  after(() => w.stop());
+
+  // Progress is rewritten in place with carriage returns; only the lines that stay are compared.
+  const text = (r) => r.stdout.replace(/\r[^\r\n]*/g, "");
+  const COUNTS = "\\d+ chunks indexed, \\d+ files reindexed, \\d+ files removed";
+
+  test("one source prints its own result line", async () => {
+    let r = await w.cli("index", "-P", "demo", "-S", "primary");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(text(r), new RegExp(`^Indexing demo/primary \\(incremental\\)\\.\\.\\.\\n\\n {2}\\[primary\\] Done: [1-9]\\d* chunks indexed, 2 files reindexed, 0 files removed\\n$`));
+    r = await w.cli("index", "-P", "demo", "--source-ids", "primary");
+    assert.equal(text(r), "Indexing demo/primary (incremental)...\n\n  [primary] Done: 0 chunks indexed, 0 files reindexed, 0 files removed\n");
+    r = await w.cli("index", "-P", "demo", "-S", "primary", "--full");
+    assert.match(text(r), /^Indexing demo\/primary \(full\)\.\.\.\n\n {2}\[primary\] Done: [1-9]\d* chunks indexed, 2 files reindexed, 0 files removed\n$/);
+  });
+
+  test("several sources add a total", async () => {
+    const r = await w.cli("index", "-P", "demo", "-S", "primary, second", "-I");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(text(r), new RegExp(`^Indexing demo/primary, demo/second \\(incremental\\)\\.\\.\\.\\n\\n {2}\\[primary\\] Done: ${COUNTS}\\n\\n {2}\\[second\\] Done: [1-9]\\d* chunks indexed, 2 files reindexed, 0 files removed\\n\\nTotal: [1-9]\\d* chunks indexed, 2 files reindexed, 0 files removed\\n$`));
+  });
+
+  test("a whole project is indexed source by source", async () => {
+    const r = await w.cli("index", "-P", "demo");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(text(r), "Indexing 'demo' (all sources) (incremental)...\n\nDone (2 source(s)): 0 chunks indexed, 0 files reindexed, 0 files removed\n");
+  });
+
+  test("--all goes through every project", async () => {
+    const r = await w.cli("index", "--all", "-P", "ignored");
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stderr.includes("Warning: --project-id is ignored when --all is specified\n"), r.stderr);
+    assert.equal(text(r), "Incrementally reindexing all 1 project(s)...\n\n── demo (2 source(s))\n\n  Done (2 source(s)): 0 chunks indexed, 0 files reindexed, 0 files removed\n\nAll projects processed. All succeeded.\n");
+  });
+
+  test("bad arguments are named", async () => {
+    let r = await w.cli("index");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "--project-id is required (or use --all to reindex everything)\n"]);
+    r = await w.cli("index", "-P", "demo", "--full");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Error: --full requires --source-ids (e.g. --source-ids primary,gitlab-issues)\n"]);
+    r = await w.cli("index", "-P", "nope", "-S", "primary");
+    assert.equal(r.status, 1);
+    assert.equal(text(r), "Indexing nope/primary (incremental)...\n");
+    assert.match(r.stderr, /^scrybe error: Error: .*nope/);
+    r = await w.cli("index", "-P", "demo", "-S", "nope");
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^scrybe error: Error: .*nope/);
+  });
+});
+
+describe("the index command with a server running", () => {
+  let w, c;
+  before(async () => {
+    w = await makeWorld();
+    await w.cli("projects");
+    c = w.client();
+    await c.hello();
+    await c.toolNames();
+  });
+  after(() => w.stop());
+
+  test("--detach prints the job id, and the server lists that job", async () => {
+    const r = await w.cliLive("index", "-P", "demo", "-S", "primary", "--detach");
+    assert.equal(r.status, 0, r.stderr);
+    const id = r.stdout.match(/^Job \w+: ([0-9a-f]{8})( \(queue position: \d+\))?\n$/)?.[1];
+    assert.ok(id, r.stdout);
+    const seen = await until(async () => (await c.call("list_jobs", {})).value?.jobs.find((j) => j.job_id === id), 30_000, "the job in the server's list");
+    assert.equal(seen.project_id, "demo");
+    await until(async () => (await c.call("reindex_status", { job_id: id })).value?.status === "done", 60_000, "the job to finish");
+  });
+
+  test("a followed job ends with Done.", async () => {
+    const r = await w.cliLive("index", "-P", "demo", "-S", "primary", "--full");
+    assert.equal(r.status, 0, r.stderr);
+    const shown = r.stdout.replace(/\r[^\r\n]*/g, "");
+    assert.match(shown, /^Indexing demo\/primary \(full\)\.\.\. \(job_id: [0-9a-f]{8}\)\n\nDone\.\n$/);
+  });
+});
+
 describe("per-phase memory records", () => {
   const PHASE_KEYS = ["branch", "durationMs", "endRssBytes", "event", "final", "jobId", "level", "mode", "outcome", "peakRssBytes", "phase", "pid", "projectId", "seq", "sourceId", "startRssBytes", "ts", "work"];
   const INTENT_KEYS = ["branch", "event", "jobId", "level", "mode", "pid", "projectId", "rssBytes", "sourceId", "stage", "ts"];
