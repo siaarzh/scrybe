@@ -145,6 +145,11 @@ impl Rows {
         stmt.query_map([project, source], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
 
+    /// `getLastGcTime` as `status` calls it: when the last good gc finished, whatever came after.
+    pub fn last_good_gc(&self, project: &str) -> Option<i64> {
+        self.lock().query_row("SELECT MAX(finished_at) FROM jobs WHERE project_id = ? AND type = 'gc' AND status = 'done'", [project], |r| r.get::<_, Option<i64>>(0)).ok().flatten()
+    }
+
     /// `getLastGcTime` with `ignoreDebounceForFailed`: a failed last gc counts as none.
     pub fn last_gc_time(&self, project: &str) -> Option<i64> {
         let conn = self.lock();

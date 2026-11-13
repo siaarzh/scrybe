@@ -69,6 +69,20 @@ pub enum DaemonAction {
         #[arg(long, value_name = "mode", default_value = "incremental")]
         mode: String,
     },
+    /// Run the daemon attached to this terminal
+    Start,
+    /// Stop and restart the daemon (attached, like start)
+    Restart {
+        /// Abandon the drain: send a second SIGTERM so the old daemon exits immediately
+        #[arg(long)]
+        force: bool,
+    },
+    /// [deprecated] Use `scrybe status` instead
+    Status {
+        /// Live dashboard (not available in this build)
+        #[arg(long)]
+        watch: bool,
+    },
     /// Start the daemon if not running (idempotent, quiet by default)
     #[command(alias = "ensure-running")]
     Up {
@@ -80,7 +94,7 @@ pub enum DaemonAction {
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
-fn pidfile() -> Option<(i64, i64)> {
+pub(crate) fn pidfile() -> Option<(i64, i64)> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(config::data_dir().join("daemon.pid")).ok()?).ok()?;
     Some((v["pid"].as_i64()?, v["port"].as_i64()?))
 }
@@ -89,7 +103,7 @@ fn remove_pidfile() {
     let _ = std::fs::remove_file(config::data_dir().join("daemon.pid"));
 }
 
-fn client(timeout: Duration) -> Result<reqwest::Client> {
+pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder().no_proxy().timeout(timeout).build()?)
 }
 
@@ -188,7 +202,7 @@ const TERM: i32 = 15;
 const KILL: i32 = 9;
 
 /// `isDaemonRunning`: a live pid with a healthy or busy port. A live pid with no listener is killed and its pidfile cleared.
-async fn running() -> Option<(i64, i64)> {
+pub(crate) async fn running() -> Option<(i64, i64)> {
     let (pid, port) = pidfile()?;
     if !pid_alive(pid) {
         remove_pidfile();
@@ -217,7 +231,7 @@ fn confirm(prompt: &str) -> Result<bool> {
 
 // ─── gc ──────────────────────────────────────────────────────────────────────
 
-fn fmt_size(bytes: u64) -> String {
+pub(crate) fn fmt_size(bytes: u64) -> String {
     let b = bytes as f64;
     if bytes < 1024 {
         format!("{bytes} B")
@@ -438,7 +452,7 @@ pub fn ignore(action: Option<IgnoreAction>) {
 // ─── daemon ──────────────────────────────────────────────────────────────────
 
 /// `stopDaemonGracefully`: SIGTERM, wait; with `force` a second SIGTERM and a longer wait. Err is (reason, detail).
-async fn stop_gracefully(pid: i64, force: bool) -> Result<(), (&'static str, String)> {
+pub(crate) async fn stop_gracefully(pid: i64, force: bool) -> Result<(), (&'static str, String)> {
     let wait_for_death = |ms: u64| async move {
         let deadline = Instant::now() + Duration::from_millis(ms);
         while Instant::now() < deadline {
@@ -606,8 +620,53 @@ async fn up(verbose: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn daemon(action: DaemonAction) {
+/// `daemon start`: refuse if one runs, else serve in this terminal.
+async fn start(store: Store) -> Result<()> {
+    if running().await.is_some() {
+        eprintln!("[scrybe] Daemon is already running. Use 'scrybe status' to check.");
+        std::process::exit(1);
+    }
+    crate::serve::serve(store).await
+}
+
+/// `daemon restart`: stop the running one, then serve in this terminal like `start`.
+async fn restart(store: Store, force: bool) -> Result<()> {
+    if let Some((pid, _)) = running().await {
+        if let Err((reason, detail)) = stop_gracefully(pid, force).await {
+            let drain = if reason == "still-draining" { "[scrybe] It is finishing an in-flight reindex. Check: scrybe status  ·  Don't wait: scrybe daemon restart --force\n" } else { "" };
+            eprintln!("[scrybe] Cannot restart: the running daemon (PID {pid}) did not stop.\n[scrybe] {detail}\n{drain}");
+            std::process::exit(1);
+        }
+    }
+    crate::serve::serve(store).await
+}
+
+/// The deprecated `daemon status`: the server's own status as one line of JSON.
+async fn old_status(watch: bool) -> Result<()> {
+    eprintln!("[scrybe] 'daemon status' is deprecated — use 'scrybe status' instead (will be removed in v2.0)");
+    if watch {
+        crate::status::no_dashboard();
+    }
+    let Some((_, port)) = pidfile().filter(|(_, port)| *port > 0) else {
+        say("Daemon is not running.");
+        return Ok(());
+    };
+    let got = match client(Duration::from_secs(5))?.get(format!("http://127.0.0.1:{port}/status")).send().await {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+        _ => None,
+    };
+    match got {
+        Some(s) => say(&serde_json::to_string(&s)?),
+        None => say("Daemon is not running."),
+    }
+    Ok(())
+}
+
+pub async fn daemon(store: Store, action: DaemonAction) {
     finish(match action {
+        DaemonAction::Start => start(store).await,
+        DaemonAction::Restart { force } => restart(store, force).await,
+        DaemonAction::Status { watch } => old_status(watch).await,
         DaemonAction::Stop { force } => stop(force).await,
         DaemonAction::Refresh { project_id, source_id, branch, mode } => refresh(project_id, source_id, branch, mode).await,
         DaemonAction::Up { verbose } => up(verbose).await,

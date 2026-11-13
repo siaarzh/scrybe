@@ -28,6 +28,7 @@ mod scan;
 mod search;
 mod serve;
 mod source_add;
+mod status;
 mod store;
 mod ticket_poll;
 mod tools;
@@ -97,6 +98,9 @@ enum Command {
         #[command(subcommand)]
         action: Option<ops::IgnoreAction>,
     },
+    /// Show scrybe health (daemon + all projects)
+    #[command(alias = "ps")]
+    Status(status::StatusArgs),
     /// Manage the background scrybe daemon
     Daemon {
         #[command(subcommand)]
@@ -199,8 +203,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::IndexEphemeral(args) => cli::index_ephemeral(args).await,
         Command::DropEphemeral(args) => cli::drop_ephemeral(store, args).await,
         Command::Gc(args) => ops::gc(store, args).await,
+        Command::Status(args) => status::status(store, args).await,
         Command::Ignore { action } => ops::ignore(action),
-        Command::Daemon { action } => ops::daemon(action).await,
+        Command::Daemon { action } => ops::daemon(store, action).await,
         Command::Search { kind: SearchKind::Code { query, project_id, top_k, branch } } => {
             let hits = tools::search_code(&store, &project_id, &query, top_k, branch.as_deref()).await.unwrap_or_else(|e| fail(e));
             println!("{}", tools::format_code(&hits));

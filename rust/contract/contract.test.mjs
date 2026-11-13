@@ -1286,6 +1286,160 @@ describe("the daemon commands", () => {
   });
 });
 
+describe("the status command", () => {
+  let w;
+  // The first command after an index may print a one-time notice, so it runs before anything is compared.
+  before(async () => { w = await makeWorld(); await w.index("--full"); await w.cli("projects"); });
+  after(() => w.stop());
+
+  const lines = (r) => r.stdout.split("\n").slice(0, -1).filter((l) => !l.startsWith("Mode "));
+  const SOURCE_KEYS = ["sourceId", "chunks", "lastIndexed", "sizeBytes", "versionCount", "flags", "healthFlag"];
+
+  test("--json without a server has the versioned shape", async () => {
+    const r = await w.cli("status", "--json");
+    assert.equal(r.status, 0, r.stderr);
+    const s = JSON.parse(r.stdout);
+    assert.deepEqual(Object.keys(s), ["schemaVersion", "scrybeVersion", "dataDir", "daemon", "projects"]);
+    assert.equal(s.schemaVersion, 1);
+    assert.equal(typeof s.scrybeVersion, "string");
+    assert.deepEqual(Object.keys(s.dataDir), ["path", "sizeBytes"]);
+    assert.equal(s.dataDir.path, w.data);
+    assert.ok(Number.isInteger(s.dataDir.sizeBytes) && s.dataDir.sizeBytes > 0);
+    assert.deepEqual(s.daemon, { running: false });
+    assert.equal(s.projects.length, 1);
+    assert.deepEqual(Object.keys(s.projects[0]), ["id", "sources"]);
+    assert.equal(s.projects[0].id, "demo");
+    const [src] = s.projects[0].sources;
+    assert.deepEqual(Object.keys(src), SOURCE_KEYS);
+    assert.equal(src.sourceId, "primary");
+    assert.ok(Number.isInteger(src.chunks) && src.chunks > 0);
+    assert.match(src.lastIndexed, /^\d{4}-\d\d-\d\dT/);
+    assert.ok(src.sizeBytes > 0 && src.versionCount >= 1);
+    assert.deepEqual([src.flags, src.healthFlag], [[], null]);
+  });
+
+  test("-P prints the project with its branches, then the data dir", async () => {
+    for (const verb of ["status", "ps"]) {
+      const r = await w.cli(verb, "-P", "demo");
+      assert.equal(r.status, 0, r.stderr);
+      const tail = `\nData dir: ${w.data}\n`;
+      assert.ok(r.stdout.endsWith(tail), r.stdout.slice(-200));
+      const project = JSON.parse(r.stdout.slice(0, -tail.length + 1));
+      assert.deepEqual(Object.keys(project), ["id", "description", "sources"]);
+      assert.equal(project.description, "A demo");
+      const [src] = project.sources;
+      const keys = Object.keys(src);
+      assert.deepEqual(keys.slice(0, 4), ["source_id", "source_config", "table_name", "last_indexed"]);
+      assert.equal(keys.at(-1), "branches_indexed");
+      assert.deepEqual(src.branches_indexed, [w.main]);
+    }
+    const r = await w.cli("status", "-P", "nope");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Project 'nope' not found\n"]);
+  });
+
+  test("the plain text has the same lines in the same places", async () => {
+    const r = await w.cli("status");
+    assert.deepEqual([r.status, r.stderr], [0, ""]);
+    const l = lines(r);
+    assert.equal(l[0].indexOf("DATA_DIR:"), 40);
+    assert.match(l[0], /^Scrybe v\S+ +DATA_DIR: /);
+    assert.ok(l[0].endsWith(`DATA_DIR: ${w.data}`));
+    assert.equal(l[1], "");
+    assert.ok(l[2].startsWith("Daemon         ○ not running"), l[2]);
+    assert.equal(l[3], "Auto-GC        ● enabled · 5m idle / 15% ratio");
+    assert.equal(l[4], "Projects       1 registered");
+    assert.equal(l[5], `  ${"PROJECT".padEnd(20)}${"SOURCE".padEnd(18)}${"CHUNKS".padStart(8)}  ${"SIZE".padEnd(10)}${"HEALTH".padEnd(12)}${"LAST INDEXED".padEnd(14)}LAST GC`);
+    assert.match(l[6], /^ {2}demo {16}primary {11} *[\d,]+ {2}.{10}Healthy {5}just now {6}—$/);
+    assert.equal(l.length, 7);
+  });
+
+  test("--projects leaves out the daemon and auto-gc lines", async () => {
+    const l = lines(await w.cli("status", "--projects"));
+    assert.equal(l[2], "Projects       1 registered");
+    assert.equal(l.length, 5);
+  });
+
+  test("only five projects show without --all", async () => {
+    for (let i = 1; i <= 6; i++) await w.cli("project", "add", "--id", `empty${i}`);
+    let l = lines(await w.cli("status", "--projects"));
+    assert.equal(l[2], "Projects       7 registered");
+    assert.equal(l.at(-1), "  (2 more — use --all)");
+    l = lines(await w.cli("status", "--projects", "-a"));
+    assert.ok(!l.some((x) => x.includes("more — use --all")));
+    for (let i = 1; i <= 6; i++) await w.cli("project", "remove", `empty${i}`);
+  });
+
+  test("with a server running it reports the server", async () => {
+    const c = w.client();
+    await c.hello();
+    await c.toolNames();
+    const pid = w.pidfile().pid;
+    const s = JSON.parse((await w.cli("status", "--json")).stdout);
+    assert.deepEqual(Object.keys(s.daemon), ["running", "pid", "uptimeMs", "activeJobs", "clientCount", "mode", "gracePeriodRemainingMs", "draining"]);
+    assert.equal(s.daemon.running, true);
+    assert.equal(s.daemon.pid, pid);
+    assert.ok(Number.isInteger(s.daemon.uptimeMs) && s.daemon.uptimeMs >= 0);
+    assert.ok(Number.isInteger(s.daemon.activeJobs) && Number.isInteger(s.daemon.clientCount));
+    assert.match(s.daemon.mode, /^(on-demand|always-on)$/);
+    assert.ok(s.daemon.gracePeriodRemainingMs === null || typeof s.daemon.gracePeriodRemainingMs === "number");
+    assert.equal(s.daemon.draining, false);
+
+    const text = await w.cli("status");
+    const l = text.stdout.split("\n");
+    assert.match(l[2], new RegExp(`^Daemon {9}● running · PID ${pid} · uptime \\d+m · \\d+ clients?( · grace in ~\\d+m)? · \\d+ jobs active$`));
+    assert.match(l[3], /^Mode {11}(on-demand|always-on)/);
+  });
+
+  test("the live dashboard is not in this build", { skip: BUILD === "rust" ? false : "today's build draws one" }, async () => {
+    const r = await w.cli("status", "--watch");
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, "");
+    assert.match(r.stderr, /^\[scrybe\] .*not available in this build yet/);
+  });
+});
+
+describe("the daemon start, restart and status commands", () => {
+  let w;
+  const running = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  test("the old status says it is deprecated, then what it knows", async () => {
+    const note = "[scrybe] 'daemon status' is deprecated — use 'scrybe status' instead (will be removed in v2.0)\n";
+    let r = await w.cli("daemon", "status");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Daemon is not running.\n", note]);
+
+    const c = w.client();
+    await c.hello();
+    await c.toolNames();
+    r = await w.cli("daemon", "status");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, note);
+    assert.equal(r.stdout.trimEnd().split("\n").length, 1);
+    assert.equal(JSON.parse(r.stdout).pid, w.pidfile().pid);
+  });
+
+  test("start refuses while a server runs", async () => {
+    const r = await w.cli("daemon", "start");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "[scrybe] Daemon is already running. Use 'scrybe status' to check.\n"]);
+  });
+
+  test("restart stops the running server and serves from the same terminal", async () => {
+    const old = w.pidfile().pid;
+    const restart = spawn(CLI[0], [...CLI.slice(1), "daemon", "restart"], { env: w.env, stdio: "ignore", windowsHide: true });
+    const exited = new Promise((resolve) => restart.on("exit", resolve));
+    try {
+      await until(async () => w.pidfile()?.pid === restart.pid && (await w.health()), 40_000, "the restarted server");
+      assert.notEqual(w.pidfile().pid, old);
+      assert.ok(!running(old), "the old server is gone");
+    } finally {
+      restart.kill("SIGTERM");
+      await exited;
+    }
+    await until(() => w.pidfile() === null, 20_000, "the pidfile to go");
+  });
+});
+
 describe("per-phase memory records", () => {
   const PHASE_KEYS = ["branch", "durationMs", "endRssBytes", "event", "final", "jobId", "level", "mode", "outcome", "peakRssBytes", "phase", "pid", "projectId", "seq", "sourceId", "startRssBytes", "ts", "work"];
   const INTENT_KEYS = ["branch", "event", "jobId", "level", "mode", "pid", "projectId", "rssBytes", "sourceId", "stage", "ts"];

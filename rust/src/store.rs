@@ -590,6 +590,16 @@ impl Store {
         Ok(CompactReport { bytes_freed: before.saturating_sub(dir_bytes(&dir)), had_real_work, fragments_merged: merged.map_or(0, |c| c.fragments_removed as u64), versions_pruned })
     }
 
+    /// `getTableStats`: the table folder's bytes and how many versions it keeps.
+    pub async fn table_stats(&self, name: &str) -> (u64, usize) {
+        let size = dir_bytes(&db_path().join(format!("{name}.lance")));
+        let versions = match self.open(name).await {
+            Ok(Some(t)) => t.list_versions().await.map_or(0, |v| v.len()),
+            _ => 0,
+        };
+        (size, versions)
+    }
+
     /// `listChunkIds`.
     pub async fn list_chunk_ids(&self, name: &str, project: &str) -> Result<Vec<String>> {
         let Some(table) = self.open(name).await? else { return Ok(vec![]) };

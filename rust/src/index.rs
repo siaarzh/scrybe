@@ -104,7 +104,7 @@ fn dedupe(rows: Vec<(Chunk, Vec<f32>)>) -> Vec<(Chunk, Vec<f32>)> {
 }
 
 /// `getExpectedDimensions`: the text profile prefers its own entry, then falls back to the code one.
-fn expected_dimensions(cfg: &EmbedConfig, text: bool) -> i32 {
+pub(crate) fn expected_dimensions(cfg: &EmbedConfig, text: bool) -> i32 {
     let meta: Option<Value> = std::fs::read_to_string(data_dir().join("embedding-meta.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
     let from_meta = meta.and_then(|m| {
         let own = if text { m["text"]["dimensions"].as_i64() } else { None };
