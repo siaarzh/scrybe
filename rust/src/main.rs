@@ -19,6 +19,7 @@ mod jsstr;
 mod lifecycle;
 mod manage;
 mod mcp;
+mod ops;
 mod phase;
 mod pinned;
 mod presets;
@@ -89,6 +90,18 @@ enum Command {
     IndexEphemeral(cli::IndexEphemeralArgs),
     /// Remove an '_ephemeral/' label created by index-ephemeral
     DropEphemeral(cli::DropEphemeralArgs),
+    /// Remove orphan chunks not referenced by any indexed branch
+    Gc(ops::GcArgs),
+    /// Edit per-source private ignore rules
+    Ignore {
+        #[command(subcommand)]
+        action: Option<ops::IgnoreAction>,
+    },
+    /// Manage the background scrybe daemon
+    Daemon {
+        #[command(subcommand)]
+        action: ops::DaemonAction,
+    },
     /// Exact-symbol lookup
     Lookup {
         symbol: String,
@@ -165,7 +178,9 @@ fn main() -> anyhow::Result<()> {
     });
     // Deep ASTs recurse: chunking runs on blocking threads with room for them.
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(64 << 20).enable_all().build()?;
-    rt.block_on(run(cli))
+    // The command future is big and Windows gives the main thread 1 MB, so it runs boxed on a thread with room.
+    let main_task = std::thread::Builder::new().stack_size(64 << 20).spawn(move || rt.block_on(Box::pin(run(cli))))?;
+    main_task.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -183,6 +198,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Branches(args) => cli::branches(store, args),
         Command::IndexEphemeral(args) => cli::index_ephemeral(args).await,
         Command::DropEphemeral(args) => cli::drop_ephemeral(store, args).await,
+        Command::Gc(args) => ops::gc(store, args).await,
+        Command::Ignore { action } => ops::ignore(action),
+        Command::Daemon { action } => ops::daemon(action).await,
         Command::Search { kind: SearchKind::Code { query, project_id, top_k, branch } } => {
             let hits = tools::search_code(&store, &project_id, &query, top_k, branch.as_deref()).await.unwrap_or_else(|e| fail(e));
             println!("{}", tools::format_code(&hits));

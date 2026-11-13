@@ -1,7 +1,7 @@
 // Same call, same answer: every test here passes against today's TypeScript build, and is written so
 // the Rust build can be held to it. A tool a build doesn't have yet shows as skipped, not passed.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -1107,6 +1107,182 @@ describe("the ephemeral branch commands", () => {
     failure(await w.cli("drop-ephemeral", "-P", "demo", "--label", "dev"), "drop_ephemeral refuses to drop 'dev' — only labels under '_ephemeral/' can be dropped (safety: this verb must never remove a real branch like 'dev' or 'master').");
     const d = await w.cli("drop-ephemeral", "-P", "demo");
     assert.deepEqual([d.status, d.stdout, d.stderr], [1, "", "error: required option '--label <label>' not specified\n"]);
+  });
+});
+
+describe("the gc command", () => {
+  let w;
+  // The first command after an index may print a one-time notice, so it runs before anything is compared.
+  before(async () => { w = await makeWorld(); await w.index("--full"); await w.cli("projects"); });
+  after(() => w.stop());
+
+  const COMPACTING = /\n\nCompacting Lance tables\.\.\.\n(?:.*\n)*Done\. .*\.\n$/;
+
+  test("a project that does not exist is named, without the usual prefix", async () => {
+    const r = await w.cli("gc", "-P", "nope");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Project 'nope' not found\n"]);
+  });
+
+  test("with no server it finds nothing, then counts orphans, then deletes them", async () => {
+    let r = await w.cli("gc", "--dry-run");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "No orphan chunks found.\n", ""]);
+
+    await w.index("--branch", "side");
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"));
+    db.prepare("DELETE FROM branch_tags WHERE branch = ?").run("side");
+    db.close();
+
+    r = await w.cli("gc", "--dry-run");
+    assert.equal(r.status, 0, r.stderr);
+    const counted = r.stdout.match(/^ {2}demo\/primary: (\d+) orphan chunk\(s\)\n\nDry run: (\d+) orphan chunk\(s\) found \(not deleted\)\.\n$/);
+    assert.ok(counted && Number(counted[1]) > 0 && counted[1] === counted[2], r.stdout);
+
+    r = await w.cli("gc");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`^ {2}demo/primary: ${counted[1]} orphan chunk\\(s\\)\\n\\nGC complete: ${counted[1]} orphan chunk\\(s\\) deleted\\.${COMPACTING.source}`));
+
+    r = await w.cli("gc");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`^No orphan chunks found\\.${COMPACTING.source}`));
+  });
+
+  test("a project with no sources is reported on a dry run, and only without -P", async () => {
+    await w.cli("project", "add", "--id", "hollow");
+    let r = await w.cli("gc", "--dry-run");
+    assert.deepEqual([r.status, r.stdout], [0, "No orphan chunks found.\n\nDry run: 1 empty project(s) would be pruned: hollow\n"]);
+    r = await w.cli("gc", "-P", "demo", "--dry-run");
+    assert.deepEqual([r.status, r.stdout], [0, "No orphan chunks found.\n"]);
+    r = await w.cli("gc");
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!r.stdout.includes("Pruned"), "nothing is pruned without a person at the terminal");
+    assert.ok(readFileSync(join(w.data, "projects.json"), "utf8").includes('"hollow"'));
+  });
+
+  test("with a server running it queues a job there and returns", async () => {
+    const live = await makeWorld();
+    try {
+      await live.index("--full");
+      const c = live.client();
+      await c.hello();
+      await c.toolNames();
+      const r = await live.cliLive("gc");
+      assert.equal(r.status, 0, r.stderr);
+      const m = r.stdout.match(/^Submitted gc job\(s\) for 1 project\(s\) via daemon queue:\n {2}demo: job ([0-9a-f]{8}) \((queued|running)\)\nRun 'scrybe job list' to monitor progress\.\n$/);
+      assert.ok(m, r.stdout);
+      const done = await until(async () => {
+        const s = (await c.call("reindex_status", { job_id: m[1] })).value;
+        return ["done", "failed"].includes(s?.status) && s;
+      }, 30_000, "the gc job");
+      assert.equal(done.status, "done");
+      assert.equal(done.type, "gc");
+    } finally {
+      await live.stop();
+    }
+  });
+});
+
+describe("the ignore commands", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  const file = () => join(w.data, "ignores", "demo", "primary.gitignore");
+  const failure = (r, message) => {
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, `[scrybe] ${message}\n`);
+  };
+
+  test("nothing is listed until rules exist", async () => {
+    let r = await w.cli("ignore", "list");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "No private ignore files.\n", ""]);
+    r = await w.cli("ignore", "list", "--json");
+    assert.deepEqual([r.status, r.stdout], [0, "[]\n"]);
+    r = await w.cli("ignore", "get", "-P", "demo", "-S", "primary");
+    assert.deepEqual([r.status, r.stdout], [0, `# No private ignore file for demo/primary\n# Expected at: ${file()}\n`]);
+    r = await w.cli("ignore", "get", "-P", "demo", "-S", "primary", "--json");
+    assert.deepEqual(JSON.parse(r.stdout), { project_id: "demo", source_id: "primary", content: null, path: file(), rule_count: 0 });
+  });
+
+  test("rules are listed and printed", async () => {
+    mkdirSync(join(w.data, "ignores", "demo"), { recursive: true });
+    writeFileSync(file(), "# mine\nvendor/\n*.log\n");
+    let r = await w.cli("ignore", "list");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, new RegExp(`^demo/primary — 2 rule\\(s\\) \\(modified \\d{4}-\\d\\d-\\d\\dT[\\d:.]+Z\\)\\n  ${file().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n$`));
+    r = await w.cli("ignore", "list", "-P", "demo", "--json");
+    const [entry] = JSON.parse(r.stdout);
+    assert.deepEqual(Object.keys(entry), ["project_id", "source_id", "path", "rule_count", "mtime"]);
+    assert.deepEqual([entry.project_id, entry.source_id, entry.path, entry.rule_count], ["demo", "primary", file(), 2]);
+    r = await w.cli("ignore", "get", "-P", "demo", "-S", "primary");
+    assert.deepEqual([r.status, r.stdout], [0, "# mine\nvendor/\n*.log\n"]);
+    writeFileSync(file(), "vendor/");
+    assert.equal((await w.cli("ignore", "get", "-P", "demo", "-S", "primary")).stdout, "vendor/\n");
+    r = await w.cli("ignore", "get", "-P", "demo", "-S", "primary", "--json");
+    assert.deepEqual(JSON.parse(r.stdout), { project_id: "demo", source_id: "primary", content: "vendor/", path: file(), rule_count: 1 });
+  });
+
+  test("errors name the problem", async () => {
+    failure(await w.cli("ignore", "list", "-P", "nope"), "Project 'nope' not found");
+    failure(await w.cli("ignore", "get", "-P", "nope", "-S", "primary"), "Project 'nope' not found");
+    failure(await w.cli("ignore", "get", "-P", "demo", "-S", "nope"), "Source 'nope' not found in project 'demo'");
+    const r = await w.cli("ignore", "get", "-P", "demo");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "error: required option '-S, --source-id <id>' not specified\n"]);
+  });
+
+  test("the interactive editor is not in this build", { skip: BUILD === "rust" ? false : "today's build opens a wizard" }, async () => {
+    for (const args of [["ignore"], ["ignore", "edit"]]) {
+      const r = await w.cli(...args);
+      assert.equal(r.status, 1);
+      assert.equal(r.stdout, "");
+      assert.match(r.stderr, /^\[scrybe\] .*not available in this build yet/);
+    }
+  });
+});
+
+describe("the daemon commands", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  test("with no server, stop says so and refresh fails", async () => {
+    let r = await w.cli("daemon", "stop");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Daemon is not running.\n", ""]);
+    r = await w.cli("daemon", "refresh");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Daemon is not running (no pidfile or port not yet bound).\n"]);
+  });
+
+  test("up starts nothing when starting is switched off, and says so only when asked", async () => {
+    let r = await w.cli("daemon", "up");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "", ""]);
+    r = await w.cli("daemon", "ensure-running", "--verbose");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Skipping daemon start (opted-out).\n", ""]);
+    assert.equal(w.pidfile(), null);
+  });
+
+  test("up starts a server, refresh gives it a job, and stop ends it", async (t) => {
+    let r = await w.cliLive("daemon", "up", "--verbose");
+    if (r.stdout.startsWith("Skipping daemon start (container)")) return t.skip("this host counts as a container");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Daemon is running.\n", ""]);
+    const first = w.pidfile();
+    assert.ok(await w.health());
+
+    r = await w.cliLive("daemon", "up");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "", ""]);
+    assert.equal(w.pidfile().pid, first.pid);
+
+    r = await w.cliLive("daemon", "refresh", "-P", "demo");
+    assert.equal(r.status, 0, r.stderr);
+    const queued = JSON.parse(r.stdout);
+    assert.equal(queued.jobs[0].projectId, "demo");
+    assert.match(queued.jobs[0].jobId, /^[0-9a-f]{8}$/);
+    await until(async () => (await w.cli("jobs", "--running")).stdout === "No jobs found.\n", 60_000, "the refresh job");
+
+    r = await w.cliLive("daemon", "stop");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Daemon stopped.\n", ""]);
+    assert.equal(w.pidfile(), null);
+    r = await w.cliLive("daemon", "stop");
+    assert.deepEqual([r.status, r.stdout], [0, "Daemon is not running.\n"]);
   });
 });
 

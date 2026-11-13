@@ -139,6 +139,14 @@ fn classify_probe_error(msg: &str) -> Health {
     Health::Corrupt(if missing_data { "manifest_missing_data" } else { "schema_unreadable" }.into())
 }
 
+#[derive(Default)]
+pub struct CompactReport {
+    pub bytes_freed: u64,
+    pub had_real_work: bool,
+    pub fragments_merged: u64,
+    pub versions_pruned: u64,
+}
+
 fn dir_bytes(dir: &std::path::Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     entries.flatten().map(|e| match e.metadata() {
@@ -436,23 +444,32 @@ impl Store {
 
     /// `pruneIndexOrphans`: removes index folders no retained manifest mentions.
     pub fn prune_index_orphans(&self, name: &str) -> usize {
+        self.prune_index_orphans_measured(name).0
+    }
+
+    /// `pruneIndexOrphans` with the bytes the removed folders held.
+    pub fn prune_index_orphans_measured(&self, name: &str) -> (usize, u64) {
         let table_dir = db_path().join(format!("{name}.lance"));
         let (indices, versions) = (table_dir.join("_indices"), table_dir.join("_versions"));
-        let (Ok(entries), Ok(manifests)) = (std::fs::read_dir(&indices), std::fs::read_dir(&versions)) else { return 0 };
+        let (Ok(entries), Ok(manifests)) = (std::fs::read_dir(&indices), std::fs::read_dir(&versions)) else { return (0, 0) };
         let mut referenced = std::collections::HashSet::new();
         for m in manifests.flatten() {
             if let Ok(buf) = std::fs::read(m.path()) {
                 referenced.extend(uuids_in_manifest(&buf));
             }
         }
-        let mut removed = 0;
+        let (mut removed, mut freed) = (0, 0);
         for e in entries.flatten() {
             let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-            if is_dir && !referenced.contains(&*e.file_name().to_string_lossy()) && std::fs::remove_dir_all(e.path()).is_ok() {
-                removed += 1;
+            if is_dir && !referenced.contains(&*e.file_name().to_string_lossy()) {
+                let size = dir_bytes(&e.path());
+                if std::fs::remove_dir_all(e.path()).is_ok() {
+                    removed += 1;
+                    freed += size;
+                }
             }
         }
-        removed
+        (removed, freed)
     }
 
     async fn upsert_once(&self, name: &str, rows: &[(Chunk, Vec<f32>)]) -> Result<()> {
@@ -556,14 +573,21 @@ impl Store {
     /// `compactTable` or `compactTableWithGrace`. Returns the bytes the folder shrank by, because Lance's
     /// own count includes bytes it never deleted.
     pub async fn compact_measured(&self, name: &str, purge: bool) -> Result<u64> {
-        let Some(table) = self.open(name).await? else { return Ok(0) };
+        Ok(self.compact_report(name, purge).await?.bytes_freed)
+    }
+
+    /// `compactTable` with what it did: the folder's shrinkage, whether anything real happened, fragments merged, versions pruned.
+    pub async fn compact_report(&self, name: &str, purge: bool) -> Result<CompactReport> {
+        let Some(table) = self.open(name).await? else { return Ok(CompactReport::default()) };
         let dir = db_path().join(format!("{name}.lance"));
         let before = dir_bytes(&dir);
         let older_than = chrono::TimeDelta::seconds(if purge { 0 } else { 60 });
-        table.optimize(OptimizeAction::Compact { options: Default::default(), remap_options: None }).await?;
-        table.optimize(OptimizeAction::Prune { older_than: Some(older_than), delete_unverified: None, error_if_tagged_old_versions: None }).await?;
+        let merged = table.optimize(OptimizeAction::Compact { options: Default::default(), remap_options: None }).await?.compaction;
+        let pruned = table.optimize(OptimizeAction::Prune { older_than: Some(older_than), delete_unverified: None, error_if_tagged_old_versions: None }).await?.prune;
         table.optimize(OptimizeAction::Index(Default::default())).await?;
-        Ok(before.saturating_sub(dir_bytes(&dir)))
+        let versions_pruned = pruned.map_or(0, |p| p.old_versions);
+        let had_real_work = merged.as_ref().is_some_and(|c| c.files_removed > 0 || c.files_added > 0) || versions_pruned > 1;
+        Ok(CompactReport { bytes_freed: before.saturating_sub(dir_bytes(&dir)), had_real_work, fragments_merged: merged.map_or(0, |c| c.fragments_removed as u64), versions_pruned })
     }
 
     /// `listChunkIds`.

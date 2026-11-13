@@ -209,7 +209,7 @@ pub struct DropEphemeralArgs {
 // ─── Plumbing ────────────────────────────────────────────────────────────────
 
 /// A required option that wasn't given, worded and exited like commander does.
-fn need(value: Option<String>, flag: &str) -> String {
+pub(crate) fn need(value: Option<String>, flag: &str) -> String {
     value.unwrap_or_else(|| {
         eprintln!("error: required option '{flag}' not specified");
         std::process::exit(1)
@@ -217,7 +217,7 @@ fn need(value: Option<String>, flag: &str) -> String {
 }
 
 /// Errors print as `[scrybe] <message>` and exit 1.
-fn finish(result: Result<()>) {
+pub(crate) fn finish(result: Result<()>) {
     if let Err(e) = result {
         eprintln!("[scrybe] {e:#}");
         std::process::exit(1);
@@ -225,13 +225,13 @@ fn finish(result: Result<()>) {
 }
 
 /// `printResult`: nothing is printed for an empty text.
-fn say(text: &str) {
+pub(crate) fn say(text: &str) {
     if !text.is_empty() {
         println!("{text}");
     }
 }
 
-fn show(value: &Value) -> Result<()> {
+pub(crate) fn show(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }

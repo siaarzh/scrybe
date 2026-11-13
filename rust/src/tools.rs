@@ -407,7 +407,7 @@ pub fn format_sources(projects: &[registry::Project]) -> String {
 }
 
 /// `x.toFixed(1)`: JavaScript rounds an exact tie up where Rust rounds it to even.
-fn fixed1(x: f64) -> String {
+pub fn fixed1(x: f64) -> String {
     let tie = (x * 4.0).fract() == 0.0 && (x * 2.0).fract() != 0.0;
     format!("{:.1}", if tie { ((x * 10.0).floor() + 1.0) / 10.0 } else { x })
 }
