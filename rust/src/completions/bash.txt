@@ -1,0 +1,33 @@
+# scrybe bash completion
+_scrybe_completions() {
+  local cur prev words cword
+  _init_completion || return
+
+  local top_cmds="project source search job branch index gc daemon hook init doctor status ps uninstall projects sources jobs branches"
+  local project_cmds="add update remove list ls"
+  local source_cmds="add update remove list ls"
+  local search_cmds="code knowledge"
+  local job_cmds="list ls"
+  local branch_cmds="list ls pin unpin p u"
+  local daemon_cmds="start stop status restart refresh install uninstall ensure-running"
+  local hook_cmds="install uninstall"
+  local completion_cmds="bash zsh powershell"
+
+  if [[ "${cword}" -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "${top_cmds} completion" -- "${cur}") )
+    return
+  fi
+
+  case "${words[1]}" in
+    project)   COMPREPLY=( $(compgen -W "${project_cmds}" -- "${cur}") ) ;;
+    source)    COMPREPLY=( $(compgen -W "${source_cmds}" -- "${cur}") ) ;;
+    search)    COMPREPLY=( $(compgen -W "${search_cmds}" -- "${cur}") ) ;;
+    job)       COMPREPLY=( $(compgen -W "${job_cmds}" -- "${cur}") ) ;;
+    branch)    COMPREPLY=( $(compgen -W "${branch_cmds}" -- "${cur}") ) ;;
+    daemon)    COMPREPLY=( $(compgen -W "${daemon_cmds}" -- "${cur}") ) ;;
+    hook)      COMPREPLY=( $(compgen -W "${hook_cmds}" -- "${cur}") ) ;;
+    completion) COMPREPLY=( $(compgen -W "${completion_cmds}" -- "${cur}") ) ;;
+  esac
+}
+
+complete -F _scrybe_completions scrybe

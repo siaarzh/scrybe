@@ -1,0 +1,31 @@
+Register-ArgumentCompleter -Native -CommandName scrybe -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+
+  $tokens = $commandAst.ToString().Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+
+  $topLevelCmds = @('project','source','search','job','branch','index','gc','daemon','hook','init','doctor','status','ps','uninstall','completion','projects','sources','jobs','branches')
+  $subCmds = @{
+    'project'    = @('add','update','remove','list','ls')
+    'source'     = @('add','update','remove','list','ls')
+    'search'     = @('code','knowledge')
+    'job'        = @('list','ls')
+    'branch'     = @('list','ls','pin','p','unpin','u')
+    'daemon'     = @('start','stop','restart','refresh','install','uninstall','status','ensure-running')
+    'hook'       = @('install','uninstall')
+    'completion' = @('bash','zsh','powershell')
+  }
+
+  if ($tokens.Length -le 2) {
+    $topLevelCmds | Where-Object { $_ -like "${wordToComplete}*" } | ForEach-Object {
+      [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+    return
+  }
+
+  $noun = $tokens[1]
+  if ($subCmds.ContainsKey($noun)) {
+    $subCmds[$noun] | Where-Object { $_ -like "${wordToComplete}*" } | ForEach-Object {
+      [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+  }
+}

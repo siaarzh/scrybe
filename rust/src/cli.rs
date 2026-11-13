@@ -459,7 +459,7 @@ fn branch_list(store: Store, args: BranchListArgs, shorthand: bool) -> Result<()
             (None, false) => Some("primary".to_string()),
             (None, true) => None,
         };
-        return show(&pinned::list_tool(&project_id, source.as_deref()).map_err(|m| anyhow!(m))?);
+        return list_pinned(&project_id, source.as_deref());
     }
     let mut a = Map::new();
     a.insert("project_id".into(), json!(project_id));
@@ -477,6 +477,44 @@ pub fn branch(store: Store, action: BranchAction) {
     finish(branch_inner(store, action));
 }
 
+/// `branch pin`: the result as JSON, then the long-list warnings; ignore-rule warnings go to stderr in yellow.
+pub(crate) fn pin_branches(project_id: &str, source_id: &str, branches: &[String]) -> Result<()> {
+    let result = pinned::pin_tool(project_id, source_id, branches, false).map_err(|m| anyhow!(m))?;
+    for w in result["ignore_warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        eprintln!("\x1b[33m{w}\x1b[0m");
+    }
+    let mut out = serde_json::to_string_pretty(&result)?;
+    for w in result["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        out += &format!("\nwarning: {w}");
+    }
+    say(&out);
+    Ok(())
+}
+
+pub(crate) fn unpin_branches(project_id: &str, source_id: &str, branches: &[String]) -> Result<()> {
+    show(&pinned::remove(project_id, source_id, branches).map_err(|e| anyhow!(e.message()))?.to_json())
+}
+
+/// `branch unpin --all`: asks first unless `yes`.
+pub(crate) fn clear_pinned(project_id: &str, source_id: &str, yes: bool) -> Result<()> {
+    if !yes {
+        print!("Clear all pinned branches for {project_id}/{source_id}? [y/N] ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        if js_trim(&line).to_lowercase() != "y" {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+    show(&pinned::clear(project_id, source_id).map_err(|e| anyhow!(e.message()))?.to_json())
+}
+
+/// `list_pinned_branches` as JSON.
+pub(crate) fn list_pinned(project_id: &str, source_id: Option<&str>) -> Result<()> {
+    show(&pinned::list_tool(project_id, source_id).map_err(|m| anyhow!(m))?)
+}
+
 fn branch_inner(store: Store, action: BranchAction) -> Result<()> {
     match action {
         BranchAction::List(args) => branch_list(store, args, false),
@@ -486,37 +524,18 @@ fn branch_inner(store: Store, action: BranchAction) -> Result<()> {
                 eprintln!("error: missing required argument 'branches'");
                 std::process::exit(1);
             }
-            let result = pinned::pin_tool(&project_id, &source_id, &branches, false).map_err(|m| anyhow!(m))?;
-            for w in result["ignore_warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                eprintln!("\x1b[33m{w}\x1b[0m");
-            }
-            let mut out = serde_json::to_string_pretty(&result)?;
-            for w in result["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                out += &format!("\nwarning: {w}");
-            }
-            say(&out);
-            Ok(())
+            pin_branches(&project_id, &source_id, &branches)
         }
         BranchAction::Unpin { project_id, source_id, all, yes, branches } => {
             let project_id = need(project_id, PROJECT_FLAG);
             if all {
-                if !yes {
-                    print!("Clear all pinned branches for {project_id}/{source_id}? [y/N] ");
-                    std::io::stdout().flush()?;
-                    let mut line = String::new();
-                    std::io::stdin().lock().read_line(&mut line)?;
-                    if js_trim(&line).to_lowercase() != "y" {
-                        println!("Aborted.");
-                        return Ok(());
-                    }
-                }
-                return show(&pinned::clear(&project_id, &source_id).map_err(|e| anyhow!(e.message()))?.to_json());
+                return clear_pinned(&project_id, &source_id, yes);
             }
             if branches.is_empty() {
                 eprintln!("Specify branch names to unpin, or use --all to clear all.");
                 std::process::exit(1);
             }
-            show(&pinned::remove(&project_id, &source_id, &branches).map_err(|e| anyhow!(e.message()))?.to_json())
+            unpin_branches(&project_id, &source_id, &branches)
         }
     }
 }

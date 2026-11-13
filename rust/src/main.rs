@@ -16,6 +16,7 @@ mod index;
 mod index_ticket;
 mod jobs;
 mod jsstr;
+mod legacy;
 mod lifecycle;
 mod manage;
 mod mcp;
@@ -56,9 +57,17 @@ enum Command {
     /// Serve the read tools to many clients over HTTP on loopback (scratch data dirs only)
     Serve,
     /// Search code or knowledge
-    Search {
+    Search(SearchArgs),
+    /// [deprecated] Use: scrybe branch pin/unpin/list
+    #[command(hide = true)]
+    Pin {
         #[command(subcommand)]
-        kind: SearchKind,
+        action: legacy::PinAction,
+    },
+    /// Print shell completion script
+    Completion {
+        /// Shell type: bash | zsh | powershell
+        shell: String,
     },
     /// Manage registered projects
     Project {
@@ -131,6 +140,25 @@ enum Command {
     Embed { text: String, #[arg(long, default_value = "Xenova/multilingual-e5-small")] model: String, #[arg(long, default_value = "query: ")] prefix: String },
 }
 
+/// `search code`, `search knowledge`, or the deprecated bare `search <query...>`.
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct SearchArgs {
+    #[command(subcommand)]
+    kind: Option<SearchKind>,
+    /// Deprecated: use `search code <query>`
+    query: Vec<String>,
+    /// Project ID (deprecated bare form)
+    #[arg(long = "project-id", value_name = "id")]
+    project_id: Option<String>,
+    /// Number of results (deprecated bare form)
+    #[arg(long = "top-k", value_name = "n", default_value = "10")]
+    top_k: String,
+    /// Branch to search (deprecated bare form)
+    #[arg(long, value_name = "name")]
+    branch: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum SearchKind {
     Code {
@@ -194,15 +222,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Status(args) => status::status(store, args).await,
         Command::Ignore { action } => ops::ignore(action),
         Command::Daemon { action } => ops::daemon(store, action).await,
-        Command::Search { kind: SearchKind::Code { query, project_id, top_k, branch } } => {
+        Command::Search(SearchArgs { kind: Some(SearchKind::Code { query, project_id, top_k, branch }), .. }) => {
             let hits = tools::search_code(&store, &project_id, &query, top_k, branch.as_deref()).await.unwrap_or_else(|e| fail(e));
             println!("{}", tools::format_code(&hits));
         }
-        Command::Search { kind: SearchKind::Knowledge { query, project_id, source_id, item_types, top_k } } => {
+        Command::Search(SearchArgs { kind: Some(SearchKind::Knowledge { query, project_id, source_id, item_types, top_k }), .. }) => {
             let types: Option<Vec<String>> = item_types.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
             let hits = tools::search_knowledge(&store, &project_id, &query, top_k, source_id.as_deref(), types.as_deref()).await.unwrap_or_else(|e| fail(e));
             println!("{}", tools::format_knowledge(&hits));
         }
+        Command::Search(SearchArgs { kind: None, query, project_id, top_k, branch }) => legacy::bare_search(&store, query, project_id, &top_k, branch).await,
+        Command::Pin { action } => legacy::pin(action),
+        Command::Completion { shell } => legacy::completion(&shell),
         Command::Lookup { symbol, project_id, exact, limit } => {
             let input = tools::LookupInput { project_id: &project_id, symbol_name: &symbol, exact, branch: None, source_id: None, case_sensitive: true, limit };
             let hits = tools::lookup_symbol(&store, input).await.unwrap_or_else(|e| fail(e));

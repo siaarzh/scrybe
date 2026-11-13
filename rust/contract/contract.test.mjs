@@ -1436,7 +1436,8 @@ describe("the daemon start, restart and status commands", () => {
       restart.kill("SIGTERM");
       await exited;
     }
-    await until(() => w.pidfile() === null, 20_000, "the pidfile to go");
+    // Windows has no SIGTERM: kill() ends the process outright, so it can't remove its pidfile.
+    if (process.platform !== "win32") await until(() => w.pidfile() === null, 20_000, "the pidfile to go");
   });
 });
 
@@ -1527,6 +1528,85 @@ describe("the index command with a server running", () => {
     assert.equal(r.status, 0, r.stderr);
     const shown = r.stdout.replace(/\r[^\r\n]*/g, "");
     assert.match(shown, /^Indexing demo\/primary \(full\)\.\.\. \(job_id: [0-9a-f]{8}\)\n\nDone\.\n$/);
+  });
+});
+
+describe("the deprecated forms", () => {
+  let w;
+  // The first command after an index may print a one-time notice, so it runs before anything is compared.
+  before(async () => { w = await makeWorld(); await w.index("--full"); await w.cli("projects"); });
+  after(() => w.stop());
+
+  const note = (old, now) => `[deprecated] '${old}' renamed to '${now}'; will be removed in v1.0\n`;
+  const json = (r) => JSON.parse(r.stdout);
+
+  test("a bare search works and says it was renamed", async () => {
+    const r = await w.cli("search", "frobnicateWidget", "--project-id", "demo", "--top-k", "3");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /src\/widget\.ts/);
+    assert.equal(r.stderr, note("search <query>", "search code <query>"));
+    const several = await w.cli("search", "widen", "the", "widget", "--project-id", "demo");
+    assert.equal(several.status, 0, several.stderr);
+    assert.equal(several.stderr, note("search <query>", "search code <query>"));
+  });
+
+  test("the warning can be switched off", async () => {
+    const r = await w.cliWith({ SCRYBE_NO_DEPRECATION_WARNING: "1" }, "search", "frobnicateWidget", "--project-id", "demo");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    assert.match(r.stdout, /src\/widget\.ts/);
+  });
+
+  test("a bare search without a project says what to type", async () => {
+    const r = await w.cli("search", "foo", "bar");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "[scrybe] Missing project ID. Try: scrybe search code -P <id> \"foo bar\"  (run 'scrybe project list' to see ids)\n"]);
+    const bad = await w.cli("search", "x", "--project-id", "nope");
+    assert.equal(bad.status, 1);
+    assert.equal(bad.stdout, "");
+    assert.ok(bad.stderr.startsWith(note("search <query>", "search code <query>")), bad.stderr);
+    assert.match(bad.stderr, /\n\[scrybe\] .*nope/);
+  });
+
+  test("pin list, add, remove and clear map onto the branch commands", async () => {
+    let r = await w.cli("pin", "add", "--project-id", "demo", "side", "other");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual({ ...json(r), ignore_warnings: undefined }, { branches: ["side", "other"], added: ["side", "other"], warnings: [], ignore_warnings: undefined });
+    assert.ok(r.stderr.startsWith(note("pin add", "branch pin")), r.stderr);
+    assert.match(r.stderr, /has no \.scrybeignore/);
+
+    r = await w.cli("pin", "list", "--project-id", "demo");
+    assert.deepEqual([r.status, r.stderr], [0, note("pin list", "branch list --pinned")]);
+    assert.deepEqual(json(r), [{ source_id: "primary", branches: ["side", "other"] }]);
+
+    r = await w.cli("pin", "remove", "--project-id", "demo", "other");
+    assert.deepEqual([r.status, r.stderr], [0, note("pin remove", "branch unpin")]);
+    assert.deepEqual(json(r), { branches: ["side"], removed: ["other"] });
+
+    r = await w.cliInput("n\n", "pin", "clear", "--project-id", "demo");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Clear all pinned branches for demo/primary? [y/N] Aborted.\n", note("pin clear", "branch unpin --all")]);
+    r = await w.cli("pin", "clear", "--project-id", "demo", "--yes");
+    assert.deepEqual([r.status, r.stderr], [0, note("pin clear", "branch unpin --all")]);
+    assert.deepEqual(json(r), { branches: [], removed: ["side"] });
+  });
+
+  test("pin commands need their options", async () => {
+    let r = await w.cli("pin", "list");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "error: required option '--project-id <id>' not specified\n"]);
+    r = await w.cli("pin", "add", "--project-id", "demo");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "error: missing required argument 'branches'\n"]);
+    r = await w.cli("pin", "list", "--project-id", "nope");
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr, `${note("pin list", "branch list --pinned")}scrybe error: Error: Project 'nope' not found\n`);
+  });
+
+  test("completion prints each shell's script unchanged", async () => {
+    for (const shell of ["bash", "zsh", "powershell"]) {
+      const r = await w.cli("completion", shell);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, readFileSync(new URL(`./completions/${shell}.txt`, import.meta.url), "utf8"), shell);
+    }
+    const r = await w.cli("completion", "fish");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Unknown shell: fish. Supported: bash, zsh, powershell\n"]);
   });
 });
 

@@ -229,13 +229,15 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
     }, 5000));
   });
   const cli = (...args) => run(undefined, args);
+  /** Like `cli`, with extra environment variables. */
+  const cliWith = (extra, ...args) => run(undefined, args, { ...cliEnv, ...extra });
   /** Like `cli`, with `input` on standard input. */
   const cliInput = (input, ...args) => run(input, args);
   /** Like `cli`, but free to use a running server, as the command line is outside the harness. */
   const cliLive = (...args) => run(undefined, args, env);
   const clients = [];
   const world = {
-    dir, data, repo, origin, env, fake, cli, cliInput, cliLive, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
+    dir, data, repo, origin, env, fake, cli, cliWith, cliInput, cliLive, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
     pidfile() {
       try { return JSON.parse(readFileSync(join(data, "daemon.pid"), "utf8")); } catch { return null; }
     },
