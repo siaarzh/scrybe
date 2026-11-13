@@ -64,15 +64,32 @@ async fn validate_token(config: &Value) -> Result<()> {
     }
 }
 
-pub async fn add(queue: &Arc<Queue>, a: &Value) -> Result<Value> {
+/// What `add` settles before it writes anything: the embedding setup and the token are fine.
+pub async fn prepare(a: &Value) -> Result<Value> {
     let status = registry::embedding_status();
     if status["config_error"] == true {
         bail!("{}", status["config_error_message"].as_str().unwrap_or("embedding config error"));
     }
-    let (project, source_id) = (text(a, "project_id").unwrap_or_default(), text(a, "source_id").unwrap_or_default());
     let config = build_config(a);
     validate_token(&config).await?;
-    registry::add_source(&project, json!({ "source_id": source_id, "source_config": config }))?;
+    Ok(config)
+}
+
+/// Saves the source `prepare` approved.
+pub fn save(a: &Value, config: Value) -> Result<()> {
+    let (project, source_id) = (text(a, "project_id").unwrap_or_default(), text(a, "source_id").unwrap_or_default());
+    registry::add_source(&project, json!({ "source_id": source_id, "source_config": config }))
+}
+
+pub async fn add(queue: &Arc<Queue>, a: &Value) -> Result<Value> {
+    let config = prepare(a).await?;
+    save(a, config)?;
+    submit(queue, &text(a, "project_id").unwrap_or_default(), &text(a, "source_id").unwrap_or_default())
+}
+
+/// Queues the first run of a saved source.
+pub fn submit(queue: &Arc<Queue>, project: &str, source_id: &str) -> Result<Value> {
+    let (project, source_id) = (project.to_string(), source_id.to_string());
     let r = queue.submit(Request { project: project.clone(), source: Some(source_id.clone()), ..Default::default() });
     if r.status == "rejected" {
         let (pending, max) = queue.depth();

@@ -387,3 +387,85 @@ pub fn format_projects(rows: &[ProjectRow]) -> String {
     }
     out
 }
+
+/// `list_sources`' `formatCli`.
+pub fn format_sources(projects: &[registry::Project]) -> String {
+    if projects.iter().all(|p| p.sources.is_empty()) {
+        return "No sources found.".into();
+    }
+    projects
+        .iter()
+        .flat_map(|p| {
+            p.sources.iter().map(move |s| {
+                let indexed = s.last_indexed.as_ref().map_or_else(|| "never indexed".to_string(), |t| format!("indexed: {t}"));
+                let searchable = if registry::is_searchable(s).0 { "searchable" } else { "not searchable" };
+                format!("{}  [{}] type={}  {indexed}  {searchable}", p.id, s.source_id, s.kind())
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `x.toFixed(1)`: JavaScript rounds an exact tie up where Rust rounds it to even.
+fn fixed1(x: f64) -> String {
+    let tie = (x * 4.0).fract() == 0.0 && (x * 2.0).fract() != 0.0;
+    format!("{:.1}", if tie { ((x * 10.0).floor() + 1.0) / 10.0 } else { x })
+}
+
+/// `list_jobs`' `formatCli`, with `now` in milliseconds for a job still running.
+pub fn format_jobs(jobs: &[Value], now: i64) -> String {
+    if jobs.is_empty() {
+        return "No jobs found.".into();
+    }
+    jobs.iter()
+        .map(|job| {
+            let started = job["started_at"].as_i64().unwrap_or(0);
+            let elapsed = match job["finished_at"].as_i64().filter(|f| *f != 0) {
+                Some(f) => format!("{}s", fixed1((f - started) as f64 / 1000.0)),
+                None => format!("{}s (running)", fixed1((now - started) as f64 / 1000.0)),
+            };
+            let kind = job["type"].as_str().unwrap_or("reindex");
+            let summary = job["tasks"].as_array().into_iter().flatten().map(|t| format!("{}:{}", t["source_id"].as_str().unwrap_or(""), t["status"].as_str().unwrap_or(""))).collect::<Vec<_>>().join(", ");
+            let mut detail = if summary.is_empty() { job["current_project"].as_str().unwrap_or("").to_string() } else { summary };
+            if kind == "gc" {
+                if let Some(r) = job["result"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()).filter(|r| !r.is_null()) {
+                    let orphans = r["orphans_deleted"].as_f64().unwrap_or(0.0);
+                    detail = if orphans > 0.0 {
+                        let mb = fixed1(r["bytes_freed"].as_f64().unwrap_or(0.0) / 1024.0 / 1024.0);
+                        format!("{orphans} orphan{}, {mb} MB", if orphans == 1.0 { "" } else { "s" })
+                    } else {
+                        "0 orphans".into()
+                    };
+                }
+            }
+            let tail = if detail.is_empty() { String::new() } else { format!(" | {detail}") };
+            format!("[{}] {} | {kind} | {} | {elapsed}{tail}", job["job_id"].as_str().unwrap_or(""), job["project_id"].as_str().unwrap_or(""), job["status"].as_str().unwrap_or(""))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_decimal_rounds_an_exact_tie_up_like_javascript() {
+        assert_eq!(fixed1(1.25), "1.3");
+        assert_eq!(fixed1(0.75), "0.8");
+        assert_eq!(fixed1(1.24), "1.2");
+        assert_eq!(fixed1(2.0), "2.0");
+    }
+
+    #[test]
+    fn jobs_read_like_the_listing_of_today() {
+        assert_eq!(format_jobs(&[], 0), "No jobs found.");
+        let done = json!({ "job_id": "ab12", "project_id": "p", "status": "done", "started_at": 1000, "finished_at": 3250, "type": "reindex", "tasks": [{ "source_id": "primary", "status": "done" }] });
+        let gc = json!({ "job_id": "cd34", "project_id": "p", "status": "done", "started_at": 0, "finished_at": 500, "type": "gc", "tasks": [], "result": "{\"orphans_deleted\":2,\"bytes_freed\":2097152}" });
+        let running = json!({ "job_id": "ef56", "project_id": "p", "status": "running", "started_at": 1000, "finished_at": null, "tasks": [] });
+        assert_eq!(
+            format_jobs(&[done, gc, running], 4000),
+            "[ab12] p | reindex | done | 2.3s | primary:done\n[cd34] p | gc | done | 0.5s | 2 orphans, 2.0 MB\n[ef56] p | reindex | running | 3.0s (running)"
+        );
+    }
+}

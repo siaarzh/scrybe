@@ -3,6 +3,7 @@ mod autogc;
 mod vecindex;
 mod branches;
 mod chunk;
+mod cli;
 mod collate;
 mod config;
 mod embed;
@@ -56,11 +57,38 @@ enum Command {
         #[command(subcommand)]
         kind: SearchKind,
     },
-    /// List projects
+    /// Manage registered projects
     Project {
         #[command(subcommand)]
-        action: ProjectAction,
+        action: cli::ProjectAction,
     },
+    /// Manage indexable sources within a project
+    Source {
+        #[command(subcommand)]
+        action: cli::SourceAction,
+    },
+    /// Manage background reindex jobs
+    Job {
+        #[command(subcommand)]
+        action: cli::JobAction,
+    },
+    /// Manage indexed branches and pinned branches
+    Branch {
+        #[command(subcommand)]
+        action: cli::BranchAction,
+    },
+    /// List all registered projects (shorthand for project list)
+    Projects,
+    /// List all sources (shorthand for source list)
+    Sources(cli::SourcesArgs),
+    /// List background reindex jobs (shorthand for job list)
+    Jobs(cli::JobsArgs),
+    /// List indexed branches (shorthand for branch list)
+    Branches(cli::BranchListArgs),
+    /// Index an open MR's remote branch under a throwaway '_ephemeral/' label
+    IndexEphemeral(cli::IndexEphemeralArgs),
+    /// Remove an '_ephemeral/' label created by index-ephemeral
+    DropEphemeral(cli::DropEphemeralArgs),
     /// Exact-symbol lookup
     Lookup {
         symbol: String,
@@ -122,11 +150,6 @@ enum SearchKind {
     },
 }
 
-#[derive(Subcommand)]
-enum ProjectAction {
-    List,
-}
-
 fn fail(e: tools::ToolError) -> ! {
     eprintln!("{}", serde_json::to_string_pretty(&e.to_json()).unwrap_or(e.message));
     std::process::exit(1)
@@ -134,7 +157,12 @@ fn fail(e: tools::ToolError) -> ! {
 
 fn main() -> anyhow::Result<()> {
     config::load_env_file();
-    let cli = Cli::parse();
+    // A usage error exits 1, like the TypeScript command line; help and version still exit 0.
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        let code = i32::from(e.use_stderr());
+        let _ = e.print();
+        std::process::exit(code)
+    });
     // Deep ASTs recurse: chunking runs on blocking threads with room for them.
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(64 << 20).enable_all().build()?;
     rt.block_on(run(cli))
@@ -145,7 +173,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Mcp => mcp::serve(&store).await?,
         Command::Serve => serve::serve(store).await?,
-        Command::Project { action: ProjectAction::List } => println!("{}", tools::format_projects(&tools::list_projects())),
+        Command::Project { action } => cli::project(store, action).await,
+        Command::Source { action } => cli::source(store, action).await,
+        Command::Job { action } => cli::job(store, action),
+        Command::Branch { action } => cli::branch(store, action),
+        Command::Projects => cli::projects(),
+        Command::Sources(args) => cli::sources(args),
+        Command::Jobs(args) => cli::jobs(store, args),
+        Command::Branches(args) => cli::branches(store, args),
+        Command::IndexEphemeral(args) => cli::index_ephemeral(args).await,
+        Command::DropEphemeral(args) => cli::drop_ephemeral(store, args).await,
         Command::Search { kind: SearchKind::Code { query, project_id, top_k, branch } } => {
             let hits = tools::search_code(&store, &project_id, &query, top_k, branch.as_deref()).await.unwrap_or_else(|e| fail(e));
             println!("{}", tools::format_code(&hits));

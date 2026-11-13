@@ -199,17 +199,23 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
 
   const cliEnv = { ...env, SCRYBE_NO_AUTO_DAEMON: "1" };
   // Asynchronous, because the fake embedder lives in this process and has to keep answering.
-  const cli = (...args) => new Promise((resolve) => {
-    const p = spawn(CLI[0], [...CLI.slice(1), ...args], { env: cliEnv, cwd: dir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const run = (input, args, runEnv = cliEnv) => new Promise((resolve) => {
+    const p = spawn(CLI[0], [...CLI.slice(1), ...args], { env: runEnv, cwd: dir, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     p.stdout.on("data", (d) => { stdout += d; });
     p.stderr.on("data", (d) => { stderr += d; });
+    if (input !== undefined) p.stdin.end(input);
     const timer = setTimeout(() => p.kill(), 180_000);
     p.on("close", (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
   });
+  const cli = (...args) => run(undefined, args);
+  /** Like `cli`, with `input` on standard input. */
+  const cliInput = (input, ...args) => run(input, args);
+  /** Like `cli`, but free to use a running server, as the command line is outside the harness. */
+  const cliLive = (...args) => run(undefined, args, env);
   const clients = [];
   const world = {
-    dir, data, repo, origin, env, fake, cli, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
+    dir, data, repo, origin, env, fake, cli, cliInput, cliLive, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
     pidfile() {
       try { return JSON.parse(readFileSync(join(data, "daemon.pid"), "utf8")); } catch { return null; }
     },

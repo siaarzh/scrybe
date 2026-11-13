@@ -3,6 +3,7 @@
 //! Every error here is plain, so the server masks it like today's does.
 use crate::config::data_dir;
 use crate::jobs::Queue;
+use crate::jsstr::js_trim;
 use crate::registry::{self, Source};
 use crate::source_add;
 use anyhow::{anyhow, bail, Result};
@@ -83,9 +84,14 @@ pub fn update_source(a: &Value) -> Result<Value> {
             if truthy(a, "root_path") {
                 patch.insert("root_path".into(), a["root_path"].clone());
             }
-            // The tool's schema says a list and its code splits a string, so any value given here fails.
-            if !a["languages"].is_null() {
-                bail!("input.languages.split is not a function");
+            // The tool's schema says a list and its code splits a string: the command line sends a string, the server a list that fails.
+            match &a["languages"] {
+                Value::Null => {}
+                Value::String(s) if s.is_empty() => {}
+                Value::String(s) => {
+                    patch.insert("languages".into(), json!(s.split(',').map(js_trim).collect::<Vec<_>>()));
+                }
+                _ => bail!("input.languages.split is not a function"),
             }
         }
         _ => {}

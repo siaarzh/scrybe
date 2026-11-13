@@ -844,6 +844,272 @@ describe("the command line", () => {
   });
 });
 
+describe("the project, source and job commands", () => {
+  let w;
+  // The first command on a fresh data dir may print a one-time notice, so it runs before anything is compared.
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  const readProjects = () => JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"));
+  const failure = (r, message) => {
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, `[scrybe] ${message}\n`);
+  };
+
+  test("projects are listed as text by project list, its alias and the shorthand", async () => {
+    const expected = `\ndemo — A demo\n  ○ ${"primary".padEnd(20)} ${"code".padEnd(10)} never\n`;
+    for (const args of [["project", "list"], ["project", "ls"], ["projects"]]) {
+      const r = await w.cli(...args);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stdout, expected, args.join(" "));
+      assert.equal(r.stderr, "");
+    }
+  });
+
+  test("a project is added, described, updated and removed", async () => {
+    let r = await w.cli("project", "add", "--id", "extra", "--desc", "Second");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Added project 'extra'\n", ""]);
+    assert.match((await w.cli("projects")).stdout, /\nextra — Second\n {2}\(no sources\)/);
+    failure(await w.cli("project", "add", "--id", "extra"), "Project 'extra' already exists");
+
+    r = await w.cli("project", "update", "extra", "--desc", "Changed");
+    assert.deepEqual([r.status, r.stdout], [0, "Updated project 'extra'\n"]);
+    r = await w.cli("project", "update", "--id", "extra", "--desc", "Changed again");
+    assert.deepEqual([r.status, r.stdout], [0, "Updated project 'extra'\n"]);
+    assert.equal(readProjects().find((p) => p.id === "extra").description, "Changed again");
+    failure(await w.cli("project", "update", "--desc", "x"), "project id required (positional or --id)");
+    failure(await w.cli("project", "update", "nope", "--desc", "x"), "Project 'nope' not found");
+
+    r = await w.cli("project", "remove", "extra");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Removed project 'extra'\n", ""]);
+    assert.ok(!readProjects().some((p) => p.id === "extra"));
+    for (const verb of ["rm", "delete"]) {
+      await w.cli("project", "add", "--id", "tmp");
+      r = await w.cli("project", verb, "--id", "tmp");
+      assert.deepEqual([r.status, r.stdout], [0, "Removed project 'tmp'\n"], verb);
+    }
+    failure(await w.cli("project", "remove", "nope"), "Project 'nope' not found");
+    failure(await w.cli("project", "remove"), "project id required (positional or --id)");
+  });
+
+  test("a missing required option is named and exits 1", async () => {
+    const r = await w.cli("project", "add");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "error: required option '--id <id>' not specified\n"]);
+    const s = await w.cli("source", "add", "-P", "demo");
+    assert.equal(s.stderr, "error: required option '-S, --source-id <id>' not specified\n");
+    assert.equal(s.status, 1);
+  });
+
+  test("sources are listed by source list, its alias and the shorthand", async () => {
+    const line = "demo  [primary] type=code  never indexed  not searchable\n";
+    for (const args of [["source", "list"], ["source", "ls"], ["sources"], ["sources", "-P", "demo"], ["source", "list", "-P", "demo"]]) {
+      const r = await w.cli(...args);
+      assert.deepEqual([r.status, r.stdout, r.stderr], [0, line, ""], args.join(" "));
+    }
+    for (const args of [["source", "list", "-P", "nope"], ["sources", "-P", "nope"]]) {
+      const r = await w.cli(...args);
+      assert.deepEqual([r.status, r.stdout], [0, "No sources found.\n"], args.join(" "));
+    }
+  });
+
+  test("a code source is added, indexed, updated and removed", async () => {
+    let r = await w.cli("source", "add", "-P", "demo", "-S", "extra", "--type", "code", "--root", w.repo, "--languages", "ts,py");
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^Added source 'extra' to project 'demo' — reindex job: [0-9a-f]{8}\n$/);
+    assert.deepEqual(readProjects()[0].sources[1].source_config, { type: "code", root_path: w.repo, languages: ["ts", "py"] });
+    r = await w.cli("source", "list", "-P", "demo");
+    assert.match(r.stdout, /^demo {2}\[extra\] type=code {2}indexed: \d{4}-\d\d-\d\dT[\d:.]+Z {2}searchable$/m);
+
+    failure(await w.cli("source", "add", "-P", "demo", "-S", "extra", "--type", "code", "--root", w.repo), "Source 'extra' already exists in project 'demo'");
+    failure(await w.cli("source", "add", "-P", "nope", "-S", "x", "--type", "code", "--root", w.repo), "Project 'nope' not found");
+
+    r = await w.cli("source", "update", "-P", "demo", "-S", "extra", "--languages", "go, rs");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Updated source 'extra' in project 'demo'\n", ""]);
+    assert.deepEqual(readProjects()[0].sources[1].source_config.languages, ["go", "rs"]);
+    r = await w.cli("source", "update", "-P", "demo", "-S", "extra", "--root", w.repo);
+    assert.equal(r.stdout, "Updated source 'extra' in project 'demo'\n");
+    r = await w.cli("source", "update", "-P", "demo", "-S", "extra");
+    assert.deepEqual([r.status, r.stdout], [0, "Nothing to update — specify at least one option to change.\n"]);
+    failure(await w.cli("source", "update", "-P", "demo", "-S", "nope", "--root", "x"), "Source 'nope' not found in project 'demo'");
+
+    r = await w.cli("source", "remove", "-P", "demo", "-S", "extra");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Removed source 'extra' from project 'demo'\n", ""]);
+    assert.equal(readProjects()[0].sources.length, 1);
+    failure(await w.cli("source", "remove", "-P", "demo", "-S", "extra"), "Source 'extra' not found in project 'demo'");
+    failure(await w.cli("source", "remove", "-P", "nope", "-S", "extra"), "Project 'nope' not found");
+    for (const verb of ["rm", "delete"]) {
+      await w.cli("source", "add", "-P", "demo", "-S", "tmp", "--type", "code", "--root", w.repo);
+      r = await w.cli("source", verb, "-P", "demo", "-S", "tmp");
+      assert.deepEqual([r.status, r.stdout], [0, "Removed source 'tmp' from project 'demo'\n"], verb);
+    }
+  });
+
+  test("jobs are listed by job list and the shorthand", async () => {
+    const line = /^\[[0-9a-f]{8}\] demo \| reindex \| done \| \d+\.\ds$/;
+    const listed = await w.cli("job", "list");
+    assert.equal(listed.status, 0, listed.stderr);
+    const lines = listed.stdout.trimEnd().split("\n");
+    assert.ok(lines.length >= 3, listed.stdout);
+    for (const l of lines) assert.match(l, line);
+    const short = await w.cli("jobs");
+    assert.equal(short.stdout.trimEnd().split("\n").map((l) => l.slice(0, 11)).join(), lines.map((l) => l.slice(0, 11)).join());
+    for (const args of [["job", "list", "--running"], ["jobs", "--running"]]) {
+      const r = await w.cli(...args);
+      assert.deepEqual([r.status, r.stdout, r.stderr], [0, "No jobs found.\n", ""], args.join(" "));
+    }
+  });
+});
+
+describe("source add with a server running", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  test("the server takes the job, and its job list shows it", async () => {
+    const c = w.client();
+    await c.hello();
+    await c.toolNames();
+    assert.ok(await w.health());
+    const r = await w.cliLive("source", "add", "-P", "demo", "-S", "extra", "--type", "code", "--root", w.repo);
+    assert.equal(r.status, 0, r.stderr);
+    const id = r.stdout.match(/^Added source 'extra' to project 'demo' — reindex job: ([0-9a-f]{8})\n$/)?.[1];
+    assert.ok(id, r.stdout);
+    const seen = await until(async () => (await c.call("list_jobs", {})).value?.jobs.find((j) => j.job_id === id), 30_000, "the job in the server's list");
+    assert.equal(seen.project_id, "demo");
+    await until(async () => (await c.call("reindex_status", { job_id: id })).value?.status === "done", 60_000, "the job to finish");
+  });
+});
+
+describe("the branch commands", () => {
+  let w;
+  before(async () => { w = await makeWorld({ withOrigin: true }); await w.index("--full"); });
+  after(() => w.stop());
+
+  const json = (r) => {
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  const failure = (r, message) => {
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, `[scrybe] ${message}\n`);
+  };
+  const pinned = async () => json(await w.cli("branch", "list", "-P", "demo", "--pinned"))[0].branches;
+
+  test("indexed branches are listed as JSON by branch list, its alias and the shorthand", async () => {
+    const expected = [{ source_id: "primary", branches: [w.main] }];
+    for (const args of [["branch", "list", "-P", "demo"], ["branch", "ls", "-P", "demo"], ["branches", "-P", "demo"], ["branch", "list", "-P", "demo", "-S", "primary"], ["branches", "-P", "demo", "-S", "primary"]]) {
+      const r = await w.cli(...args);
+      assert.deepEqual(json(r), expected, args.join(" "));
+      assert.equal(r.stdout, JSON.stringify(expected, null, 2) + "\n");
+    }
+    assert.deepEqual(json(await w.cli("branch", "list", "-P", "demo", "-S", "nope")), []);
+    failure(await w.cli("branch", "list", "-P", "nope"), "Project 'nope' not found");
+    failure(await w.cli("branches", "-P", "nope"), "Project 'nope' not found");
+    const r = await w.cli("branch", "list");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "error: required option '-P, --project-id <id>' not specified\n"]);
+  });
+
+  test("branches are pinned and unpinned", async () => {
+    assert.deepEqual(await pinned(), []);
+    let r = await w.cli("branch", "pin", "-P", "demo", "side");
+    const pinnedSide = json(r);
+    assert.deepEqual({ ...pinnedSide, ignore_warnings: undefined }, { branches: ["side"], added: ["side"], warnings: [], ignore_warnings: undefined });
+    assert.equal(pinnedSide.ignore_warnings.length, 1);
+    assert.match(pinnedSide.ignore_warnings[0], /^warning: branch 'side' has no \.scrybeignore/);
+    assert.equal(r.stderr, `\x1b[33m${pinnedSide.ignore_warnings[0]}\x1b[0m\n`);
+
+    r = await w.cli("branch", "p", "-P", "demo", "-S", "primary", "side", "other");
+    assert.deepEqual({ ...json(r), ignore_warnings: undefined }, { branches: ["side", "other"], added: ["other"], warnings: [], ignore_warnings: undefined });
+    assert.deepEqual(await pinned(), ["side", "other"]);
+    assert.deepEqual(json(await w.cli("branches", "-P", "demo", "--pinned")), [{ source_id: "primary", branches: ["side", "other"] }]);
+    assert.deepEqual(json(await w.cli("branch", "ls", "-P", "demo", "-p", "-S", "primary")), [{ source_id: "primary", branches: ["side", "other"] }]);
+    assert.deepEqual(json(await w.cli("branch", "list", "-P", "demo", "-p", "-S", "nope")), []);
+
+    assert.deepEqual(json(await w.cli("branch", "unpin", "-P", "demo", "other", "never-pinned")), { branches: ["side"], removed: ["other"] });
+    assert.deepEqual(json(await w.cli("branch", "u", "-P", "demo", "-S", "primary", "side")), { branches: [], removed: ["side"] });
+    assert.deepEqual(await pinned(), []);
+  });
+
+  test("unpin --all asks first, and --yes skips the question", async () => {
+    assert.deepEqual(await pinned(), []);
+    await w.cli("branch", "pin", "-P", "demo", "a", "b");
+    let r = await w.cliInput("n\n", "branch", "unpin", "-P", "demo", "--all");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Clear all pinned branches for demo/primary? [y/N] Aborted.\n", ""]);
+    assert.deepEqual(await pinned(), ["a", "b"]);
+    r = await w.cliInput("y\n", "branch", "unpin", "-P", "demo", "--all");
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.startsWith("Clear all pinned branches for demo/primary? [y/N] "));
+    assert.deepEqual(JSON.parse(r.stdout.slice("Clear all pinned branches for demo/primary? [y/N] ".length)), { branches: [], removed: ["a", "b"] });
+    await w.cli("branch", "pin", "-P", "demo", "c");
+    r = await w.cli("branch", "unpin", "-P", "demo", "--all", "--yes");
+    assert.deepEqual(JSON.parse(r.stdout), { branches: [], removed: ["c"] });
+    assert.equal(r.stderr, "");
+  });
+
+  test("pin and unpin errors name the problem", async () => {
+    failure(await w.cli("branch", "pin", "-P", "nope", "x"), "Project 'nope' not found");
+    failure(await w.cli("branch", "pin", "-P", "demo", "-S", "nope", "x"), "Source 'nope' not found in project 'demo'");
+    failure(await w.cli("branch", "unpin", "-P", "nope", "x"), "Project 'nope' not found");
+    failure(await w.cli("branch", "unpin", "-P", "nope", "--all", "--yes"), "Project 'nope' not found");
+    const r = await w.cli("branch", "unpin", "-P", "demo");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Specify branch names to unpin, or use --all to clear all.\n"]);
+  });
+});
+
+describe("the ephemeral branch commands", () => {
+  let w;
+  before(async () => { w = await makeWorld({ withOrigin: true }); await w.index("--full"); });
+  after(() => w.stop());
+
+  const failure = (r, message) => {
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(r.stdout, "");
+    assert.equal(r.stderr, `[scrybe] ${message}\n`);
+  };
+  const branches = async () => JSON.parse((await w.cli("branch", "list", "-P", "demo")).stdout)[0].branches;
+
+  test("a label made through the server is dropped again", async () => {
+    const c = w.client();
+    await c.hello();
+    assert.equal((await c.call("index_ephemeral", { project_id: "demo", branch: "side" })).value.label, "_ephemeral/mr-side");
+    assert.equal((await c.call("index_ephemeral", { project_id: "demo", branch: "origin/side", label: "review-1" })).value.label, "_ephemeral/review-1");
+    await w.killServer();
+    assert.deepEqual((await branches()).sort(), [w.main, "_ephemeral/mr-side", "_ephemeral/review-1"].sort());
+
+    let r = await w.cli("drop-ephemeral", "-P", "demo", "--label", "_ephemeral/mr-side");
+    assert.equal(r.status, 0, r.stderr);
+    const dropped = JSON.parse(r.stdout);
+    assert.deepEqual(Object.keys(dropped), ["label", "dropped", "orphans_deleted", "bytes_freed"]);
+    assert.equal(dropped.label, "_ephemeral/mr-side");
+    assert.equal(dropped.dropped, true);
+    assert.ok(Number.isInteger(dropped.orphans_deleted) && Number.isInteger(dropped.bytes_freed));
+    assert.deepEqual((await branches()).sort(), [w.main, "_ephemeral/review-1"].sort());
+
+    r = await w.cli("drop-ephemeral", "-P", "demo", "--label", "_ephemeral/mr-side", "-S", "primary");
+    assert.equal(JSON.parse(r.stdout).dropped, false);
+    r = await w.cli("drop-ephemeral", "-P", "demo", "--label", "_ephemeral/review-1");
+    assert.equal(JSON.parse(r.stdout).dropped, true);
+    assert.deepEqual(await branches(), [w.main]);
+  });
+
+  // Today's command line never hands index-ephemeral its options, so the project it looks up is "undefined".
+  test("index-ephemeral names no project, as today's build does", async () => {
+    failure(await w.cli("index-ephemeral", "-P", "demo", "--branch", "side"), "Project 'undefined' not found");
+    failure(await w.cli("index-ephemeral", "-P", "nope", "--branch", "side", "--label", "x", "-S", "primary"), "Project 'undefined' not found");
+    const r = await w.cli("index-ephemeral", "-P", "demo");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "error: required option '--branch <name>' not specified\n"]);
+  });
+
+  test("drop-ephemeral errors name the problem", async () => {
+    failure(await w.cli("drop-ephemeral", "-P", "nope", "--label", "_ephemeral/x"), "Project 'nope' not found");
+    failure(await w.cli("drop-ephemeral", "-P", "demo", "--label", "dev"), "drop_ephemeral refuses to drop 'dev' — only labels under '_ephemeral/' can be dropped (safety: this verb must never remove a real branch like 'dev' or 'master').");
+    const d = await w.cli("drop-ephemeral", "-P", "demo");
+    assert.deepEqual([d.status, d.stdout, d.stderr], [1, "", "error: required option '--label <label>' not specified\n"]);
+  });
+});
+
 describe("per-phase memory records", () => {
   const PHASE_KEYS = ["branch", "durationMs", "endRssBytes", "event", "final", "jobId", "level", "mode", "outcome", "peakRssBytes", "phase", "pid", "projectId", "seq", "sourceId", "startRssBytes", "ts", "work"];
   const INTENT_KEYS = ["branch", "event", "jobId", "level", "mode", "pid", "projectId", "rssBytes", "sourceId", "stage", "ts"];
