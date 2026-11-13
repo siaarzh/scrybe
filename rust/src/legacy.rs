@@ -2,6 +2,9 @@
 //! Mirrors `src/cli.ts`, `src/cli-deprecation.ts` and `src/cli-completion.ts`.
 use crate::cli::{clear_pinned, list_pinned, need, pin_branches, say, unpin_branches};
 use crate::store::Store;
+use crate::{git, index, registry};
+use serde_json::json;
+use std::io::{BufRead, Write};
 use crate::tools;
 use clap::Subcommand;
 use std::io::IsTerminal;
@@ -133,6 +136,55 @@ pub async fn bare_search(store: &Store, query: Vec<String>, project_id: Option<S
     }
 }
 
+/// The project id `scrybe` suggests for a folder: lower case, every other character a dash.
+fn suggested_id(folder: &str) -> String {
+    folder.to_lowercase().chars().map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' { c.to_string() } else { "-".repeat(c.len_utf16()) }).collect()
+}
+
+/// Bare `scrybe`: say how the repository here stands, and offer to register and index it when a person is at the terminal.
+pub async fn default_action(store: Store) {
+    let Ok(cwd) = std::env::current_dir() else {
+        eprintln!("Not a git repository. Run `scrybe init` to set up scrybe.");
+        std::process::exit(1);
+    };
+    if git::output(&cwd, &["rev-parse", "--git-dir"], None).is_none() {
+        eprintln!("Not a git repository. Run `scrybe init` to set up scrybe.");
+        std::process::exit(1);
+    }
+    let here = cwd.to_string_lossy().into_owned();
+    if registry::list_projects().iter().any(|p| p.sources.iter().any(|s| s.kind() == "code" && s.root_path() == Some(here.as_str()))) {
+        println!("Repo already registered in scrybe. Try:\n  scrybe index -P <id>\n  scrybe search code -P <id> \"your query\"\n  scrybe status");
+        return;
+    }
+    if !std::io::stdin().is_terminal() {
+        println!("Repo not yet registered. Run:\n  scrybe init          # full wizard (recommended)");
+        return;
+    }
+    let id = suggested_id(&cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+    print!("Register '{id}' at {here} and run incremental index? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    if crate::jsstr::js_trim(&line).to_lowercase() != "y" {
+        println!("Aborted.");
+        return;
+    }
+    let outcome: anyhow::Result<()> = async {
+        registry::add_project(&id, "")?;
+        registry::add_source(&id, json!({ "source_id": "primary", "source_config": { "type": "code", "root_path": here, "languages": [] } }))?;
+        println!("Registered '{id}'. Indexing...");
+        let options = index::Options { branch: None, content_ref: None, cancel: None, job_id: None };
+        index::index_source(&store, &id, "primary", index::Mode::Incremental, &options).await?;
+        println!("Done. Try: scrybe search code -P {id} \"your query\"");
+        Ok(())
+    }
+    .await;
+    if let Err(e) = outcome {
+        eprintln!("scrybe error: Error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
 pub fn completion(shell: &str) {
     let script = match shell {
         "bash" => BASH,
@@ -149,6 +201,13 @@ pub fn completion(shell: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_name_becomes_an_id() {
+        assert_eq!(suggested_id("My Repo_2"), "my-repo-2");
+        assert_eq!(suggested_id("ok-name"), "ok-name");
+        assert_eq!(suggested_id("é😀"), "-" .to_string() + "--");
+    }
 
     #[test]
     fn the_numbers_people_type_read_like_parse_int() {

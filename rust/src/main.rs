@@ -46,8 +46,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[derive(Parser)]
 #[command(name = "scrybe-rs", version = config::VERSION, about = "Unfinished Rust port of scrybe")]
 struct Cli {
+    /// With none, scrybe offers to register the repository it is run in.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -183,6 +184,12 @@ enum SearchKind {
     },
 }
 
+/// What `search code` and `search knowledge` print on failure: `[scrybe] <message>`.
+fn search_fail(e: tools::ToolError) -> ! {
+    eprintln!("[scrybe] {}", e.message);
+    std::process::exit(1)
+}
+
 fn fail(e: tools::ToolError) -> ! {
     eprintln!("{}", serde_json::to_string_pretty(&e.to_json()).unwrap_or(e.message));
     std::process::exit(1)
@@ -205,7 +212,11 @@ fn main() -> anyhow::Result<()> {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let store = Store::new(config::Settings::from_env());
-    match cli.command {
+    let Some(command) = cli.command else {
+        legacy::default_action(store).await;
+        return Ok(());
+    };
+    match command {
         Command::Mcp => mcp::serve(&store).await?,
         Command::Serve => serve::serve(store).await?,
         Command::Project { action } => cli::project(store, action).await,
@@ -223,12 +234,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Ignore { action } => ops::ignore(action),
         Command::Daemon { action } => ops::daemon(store, action).await,
         Command::Search(SearchArgs { kind: Some(SearchKind::Code { query, project_id, top_k, branch }), .. }) => {
-            let hits = tools::search_code(&store, &project_id, &query, top_k, branch.as_deref()).await.unwrap_or_else(|e| fail(e));
+            let hits = tools::search_code(&store, &project_id, &query, top_k, branch.as_deref()).await.unwrap_or_else(|e| search_fail(e));
             println!("{}", tools::format_code(&hits));
         }
         Command::Search(SearchArgs { kind: Some(SearchKind::Knowledge { query, project_id, source_id, item_types, top_k }), .. }) => {
             let types: Option<Vec<String>> = item_types.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-            let hits = tools::search_knowledge(&store, &project_id, &query, top_k, source_id.as_deref(), types.as_deref()).await.unwrap_or_else(|e| fail(e));
+            let hits = tools::search_knowledge(&store, &project_id, &query, top_k, source_id.as_deref(), types.as_deref()).await.unwrap_or_else(|e| search_fail(e));
             println!("{}", tools::format_knowledge(&hits));
         }
         Command::Search(SearchArgs { kind: None, query, project_id, top_k, branch }) => legacy::bare_search(&store, query, project_id, &top_k, branch).await,

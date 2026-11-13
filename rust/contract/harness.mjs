@@ -200,8 +200,8 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
   const cliEnv = { ...env, SCRYBE_NO_AUTO_DAEMON: "1" };
   // Asynchronous, because the fake embedder lives in this process and has to keep answering.
   const CLI_TIMEOUT_MS = 90_000;
-  const run = (input, args, runEnv = cliEnv) => new Promise((resolve, reject) => {
-    const p = spawn(CLI[0], [...CLI.slice(1), ...args], { env: runEnv, cwd: dir, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+  const run = (input, args, runEnv = cliEnv, cwd = dir) => new Promise((resolve, reject) => {
+    const p = spawn(CLI[0], [...CLI.slice(1), ...args], { env: runEnv, cwd, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "", done = false;
     p.stdout.on("data", (d) => { stdout += d; });
     p.stderr.on("data", (d) => { stderr += d; });
@@ -229,6 +229,8 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
     }, 5000));
   });
   const cli = (...args) => run(undefined, args);
+  /** Like `cli`, run from `cwd`. */
+  const cliAt = (cwd, ...args) => run(undefined, args, cliEnv, cwd);
   /** Like `cli`, with extra environment variables. */
   const cliWith = (extra, ...args) => run(undefined, args, { ...cliEnv, ...extra });
   /** Like `cli`, with `input` on standard input. */
@@ -237,7 +239,7 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
   const cliLive = (...args) => run(undefined, args, env);
   const clients = [];
   const world = {
-    dir, data, repo, origin, env, fake, cli, cliWith, cliInput, cliLive, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
+    dir, data, repo, origin, env, fake, cli, cliAt, cliWith, cliInput, cliLive, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
     pidfile() {
       try { return JSON.parse(readFileSync(join(data, "daemon.pid"), "utf8")); } catch { return null; }
     },

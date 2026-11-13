@@ -1,7 +1,7 @@
 // Same call, same answer: every test here passes against today's TypeScript build, and is written so
 // the Rust build can be held to it. A tool a build doesn't have yet shows as skipped, not passed.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -830,10 +830,11 @@ describe("the command line", () => {
     assert.match(r.stdout, /src\/widget\.ts/);
   });
 
-  test("a search on an unknown project exits non-zero and names it", async () => {
-    const r = await w.cli("search", "code", "-P", "nope", "x");
-    assert.notEqual(r.status, 0);
-    assert.match(r.stderr + r.stdout, /nope/);
+  test("a search on an unknown project exits 1 with the message and nothing else", async () => {
+    for (const kind of ["code", "knowledge"]) {
+      const r = await w.cli("search", kind, "-P", "nope", "x");
+      assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "[scrybe] Project 'nope' not found\n"], kind);
+    }
   });
 
   test("the command line lists projects as text", gap("the command line lists projects as text"), async () => {
@@ -1607,6 +1608,36 @@ describe("the deprecated forms", () => {
     }
     const r = await w.cli("completion", "fish");
     assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Unknown shell: fish. Supported: bash, zsh, powershell\n"]);
+  });
+});
+
+describe("bare scrybe", () => {
+  let w, repo;
+  const setRoot = (root) => {
+    const file = join(w.data, "projects.json");
+    const projects = JSON.parse(readFileSync(file, "utf8"));
+    projects[0].sources[0].source_config.root_path = root;
+    writeFileSync(file, JSON.stringify(projects, null, 2));
+  };
+  // The first command on a fresh data dir may print a one-time notice, so it runs before anything is compared.
+  before(async () => { w = await makeWorld(); repo = realpathSync(w.repo); await w.cli("projects"); });
+  after(() => w.stop());
+
+  test("outside a git repository it says so and exits 1", async () => {
+    const r = await w.cliAt(w.dir);
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Not a git repository. Run `scrybe init` to set up scrybe.\n"]);
+  });
+
+  test("in a repository that isn't registered it points to init", async () => {
+    setRoot(join(w.dir, "somewhere-else"));
+    const r = await w.cliAt(repo);
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Repo not yet registered. Run:\n  scrybe init          # full wizard (recommended)\n", ""]);
+  });
+
+  test("in a registered repository it lists what to try next", async () => {
+    setRoot(repo);
+    const r = await w.cliAt(repo);
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Repo already registered in scrybe. Try:\n  scrybe index -P <id>\n  scrybe search code -P <id> \"your query\"\n  scrybe status\n", ""]);
   });
 });
 
