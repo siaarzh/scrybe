@@ -38,6 +38,29 @@ fn data_dir() -> PathBuf {
     }
 }
 
+/// A child inherits every inheritable handle on Windows, so the server would hold the client's pipes open after the relay exits.
+#[cfg(windows)]
+fn stop_inheriting_std_handles() {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(id: u32) -> *mut c_void;
+        fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    let invalid = usize::MAX as *mut c_void;
+    // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE are -10, -11 and -12.
+    for id in [-10i32, -11, -12] {
+        // SAFETY: the handles are this process's own standard ones.
+        unsafe {
+            let handle = GetStdHandle(id as u32);
+            if !handle.is_null() && handle != invalid {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 fn read_pidfile() -> Option<String> {
     std::fs::read_to_string(data_dir().join("daemon.pid")).ok()
 }
@@ -267,6 +290,7 @@ impl<W: Write + Send> Relay<W> {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+            stop_inheriting_std_handles();
         }
         if let Ok(mut child) = cmd.spawn() {
             let running = self.starter_running.clone();

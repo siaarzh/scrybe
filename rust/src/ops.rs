@@ -161,7 +161,30 @@ fn pid_alive(pid: i64) -> bool {
     true
 }
 
-#[cfg(not(unix))]
+/// `isPidAlive`: a process that is still running, not one that has exited and is waiting to be reaped.
+#[cfg(windows)]
+fn pid_alive(pid: i64) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    const STILL_ACTIVE: u32 = 259;
+    let Ok(raw) = u32::try_from(pid) else { return false };
+    if raw == 0 {
+        return false;
+    }
+    // SAFETY: plain Win32 calls on a handle opened here and closed here.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, raw);
+        if handle.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok == 0 || code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pid_alive(_pid: i64) -> bool {
     false
 }
@@ -187,7 +210,29 @@ fn signal(pid: i64, sig: i32) -> Sent {
     }
 }
 
-#[cfg(not(unix))]
+/// Windows has no SIGTERM: like Node's `process.kill`, both signals end the process outright.
+#[cfg(windows)]
+fn signal(pid: i64, _sig: i32) -> Sent {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER};
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    let Ok(raw) = u32::try_from(pid) else { return Sent::Failed("bad pid".into()) };
+    // SAFETY: plain Win32 calls on a handle opened here and closed here.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, raw);
+        if handle.is_null() {
+            return match GetLastError() {
+                ERROR_INVALID_PARAMETER => Sent::Gone,
+                code => Sent::Failed(format!("kill failed (error {code})")),
+            };
+        }
+        let ended = TerminateProcess(handle, 1) != 0;
+        let code = GetLastError();
+        CloseHandle(handle);
+        if ended { Sent::Ok } else { Sent::Failed(format!("kill failed (error {code})")) }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn signal(_pid: i64, _sig: i32) -> Sent {
     Sent::Failed("stopping a daemon is not available on this platform".into())
 }
@@ -541,6 +586,22 @@ pub(crate) fn in_container() -> bool {
         || std::env::var_os("WSL_DISTRO_NAME").is_some()
 }
 
+/// On Windows a child inherits every inheritable handle, so it would hold this process's own output pipes open after it exits.
+#[cfg(windows)]
+fn stop_inheriting_std_handles() {
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: the handles are this process's own standard ones.
+        unsafe {
+            let handle = GetStdHandle(id);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 /// The Rust server, detached from this terminal and with no output of its own.
 fn spawn_server() -> std::io::Result<()> {
     use std::process::{Command, Stdio};
@@ -555,6 +616,7 @@ fn spawn_server() -> std::io::Result<()> {
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000 | 0x0000_0200);
+        stop_inheriting_std_handles();
     }
     cmd.spawn().map(|_| ())
 }

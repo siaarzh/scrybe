@@ -199,14 +199,34 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
 
   const cliEnv = { ...env, SCRYBE_NO_AUTO_DAEMON: "1" };
   // Asynchronous, because the fake embedder lives in this process and has to keep answering.
-  const run = (input, args, runEnv = cliEnv) => new Promise((resolve) => {
+  const CLI_TIMEOUT_MS = 90_000;
+  const run = (input, args, runEnv = cliEnv) => new Promise((resolve, reject) => {
     const p = spawn(CLI[0], [...CLI.slice(1), ...args], { env: runEnv, cwd: dir, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
-    let stdout = "", stderr = "";
+    let stdout = "", stderr = "", done = false;
     p.stdout.on("data", (d) => { stdout += d; });
     p.stderr.on("data", (d) => { stderr += d; });
     if (input !== undefined) p.stdin.end(input);
-    const timer = setTimeout(() => p.kill(), 180_000);
-    p.on("close", (status) => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
+    const finish = (status) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr });
+    };
+    // A hung command fails its test with what it printed, instead of holding up the whole run.
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      p.kill();
+      reject(new Error(`scrybe ${args.join(" ")} did not finish in ${CLI_TIMEOUT_MS / 1000} s\nstdout: ${stdout}\nstderr: ${stderr}`));
+    }, CLI_TIMEOUT_MS);
+    p.on("close", finish);
+    // A server the command started must not keep its output pipes open: callers that read them would hang.
+    p.on("exit", () => setTimeout(() => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      reject(new Error(`scrybe ${args.join(" ")} exited but its output pipes stayed open (a child inherited them)\nstdout: ${stdout}\nstderr: ${stderr}`));
+    }, 5000));
   });
   const cli = (...args) => run(undefined, args);
   /** Like `cli`, with `input` on standard input. */

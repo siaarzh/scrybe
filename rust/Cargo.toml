@@ -75,3 +75,7 @@ opt-level = 1
 opt-level = 1
 [profile.release.package.tree-sitter-typescript]
 opt-level = 1
+
+[target.'cfg(windows)'.dependencies]
+# Only what `daemon up`, `stop` and `status` need to start a detached server and judge a pid.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
