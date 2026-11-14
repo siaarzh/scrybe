@@ -33,10 +33,10 @@ impl Embedder {
     }
 
     fn load(model: &str) -> Result<Self> {
-        let dir = data_dir().join("models").join(model);
+        let dir = models_dir().join(model);
         let onnx = dir.join("onnx").join("model_quantized.onnx");
         if !onnx.exists() {
-            anyhow::bail!("embedding model not found at {}: the read path does not download models", onnx.display());
+            anyhow::bail!("embedding model not found at {}", onnx.display());
         }
         let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow!("tokenizer: {e}"))?;
         let env = ort::init().build().map_err(|e| anyhow!("onnx: {e}"))?;
@@ -171,11 +171,90 @@ fn token_budget() -> usize {
     (raw.map(|n| n as usize).unwrap_or(4096)).max(MAX_SEQ_TOKENS)
 }
 
+/// `resolveModelCacheDir`.
+pub fn models_dir() -> std::path::PathBuf {
+    match std::env::var("SCRYBE_MODEL_CACHE_DIR") {
+        Ok(v) if !v.trim().is_empty() => std::path::PathBuf::from(v),
+        _ => data_dir().join("models"),
+    }
+}
+
+/// `isLocalModelCached`: loaded in this process, or its `config.json` is on disk.
+pub fn is_cached(model: &str) -> bool {
+    if MODELS.get().is_some_and(|m| m.lock().unwrap().contains_key(model)) {
+        return true;
+    }
+    models_dir().join(model).join("config.json").exists()
+}
+
+/// The files the feature-extraction pipeline fetches for a quantized model. `config.json` goes last, so
+/// its presence (the cache check above) means the rest arrived too.
+const MODEL_FILES: [&str; 4] = ["onnx/model_quantized.onnx", "tokenizer.json", "tokenizer_config.json", "config.json"];
+
+fn model_remote_host() -> String {
+    std::env::var("SCRYBE_MODEL_REMOTE_HOST").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "https://huggingface.co".into())
+}
+
+fn download_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
+}
+
+async fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut resp = download_client().get(url).send().await.map_err(|e| anyhow!("fetch failed: {e}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("fetch failed: {} returned {}", url, resp.status());
+    }
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let part = dest.with_extension(format!("{}.part", dest.extension().and_then(|e| e.to_str()).unwrap_or("")));
+    let mut file = tokio::fs::File::create(&part).await?;
+    while let Some(bytes) = resp.chunk().await.map_err(|e| anyhow!("fetch failed: {e}"))? {
+        file.write_all(&bytes).await?;
+    }
+    file.flush().await?;
+    drop(file);
+    tokio::fs::rename(&part, dest).await?;
+    Ok(())
+}
+
+/// First-use download into the model cache, as the pipeline does on its first load. Only the index path
+/// calls this; search fails fast instead.
+pub async fn ensure_model(model: &str) -> Result<()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _held = LOCK.lock().await;
+    let dir = models_dir().join(model);
+    let host = model_remote_host();
+    for file in MODEL_FILES {
+        let dest = dir.join(file);
+        if dest.exists() {
+            continue;
+        }
+        let url = format!("{}/{}/resolve/main/{}", host.trim_end_matches('/'), model, file);
+        download_file(&url, &dest).await.map_err(|e| anyhow!("{}", classify_load_error(&format!("{e:#}"))))?;
+    }
+    Ok(())
+}
+
+/// `classifyLocalLoadError`.
+fn classify_load_error(msg: &str) -> String {
+    let network = ["ENOTFOUND", "getaddrinfo", "fetch", "network"].iter().any(|k| msg.contains(k));
+    let cut = |n: usize| msg.char_indices().nth(n).map_or(msg, |(i, _)| &msg[..i]).to_string();
+    if network {
+        format!("Model not cached and no network available. Run once with internet access to download the model (~120 MB): {}", cut(120))
+    } else {
+        format!("Local embedder failed to load: {}", cut(200))
+    }
+}
+
 /// `embedLocalBatched`.
 pub async fn embed_passages(model: &str, prefix: &str, texts: Vec<String>, max_chars: usize, batch_size: usize) -> Result<Vec<Vec<f32>>> {
+    ensure_model(model).await?;
     let (model, prefix) = (model.to_string(), prefix.to_string());
     tokio::task::spawn_blocking(move || {
-        let e = embedder(&model)?;
+        let e = embedder(&model).map_err(|e| anyhow!("{}", classify_load_error(&format!("{e:#}"))))?;
         let budget = token_budget();
         let mut results: Vec<Vec<f32>> = vec![vec![]; texts.len()];
         for (b, window) in texts.chunks(batch_size.max(1)).enumerate() {
@@ -270,6 +349,11 @@ pub async fn embed_query_for(cfg: &crate::registry::EmbedConfig, query: &str) ->
 }
 
 pub async fn embed_query(model: &str, prefix: &str, query: &str) -> Result<Vec<f32>> {
+    if !is_cached(model) {
+        anyhow::bail!(
+            "LOCAL_MODEL_NOT_READY: Local embedding model \"{model}\" is not downloaded yet. Run an index first (scrybe index -P <project-id>) or use the MCP `init` tool to set up and download the model."
+        );
+    }
     let (model, text) = (model.to_string(), format!("{prefix}{}", cap_text(query)));
     tokio::task::spawn_blocking(move || embedder(&model)?.embed(&text)).await?
 }
@@ -277,6 +361,19 @@ pub async fn embed_query(model: &str, prefix: &str, query: &str) -> Result<Vec<f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_errors_read_as_todays() {
+        assert!(classify_load_error("fetch failed: dns error").starts_with("Model not cached and no network available. Run once with internet access to download the model (~120 MB): fetch failed"));
+        assert_eq!(classify_load_error("bad graph"), "Local embedder failed to load: bad graph");
+        let long = "é".repeat(300);
+        assert_eq!(classify_load_error(&long).chars().count(), "Local embedder failed to load: ".len() + 200);
+    }
+
+    #[test]
+    fn config_json_is_fetched_last() {
+        assert_eq!(MODEL_FILES.last(), Some(&"config.json"));
+    }
 
     #[test]
     fn planner_keeps_passes_inside_the_budget_and_visits_short_first() {
