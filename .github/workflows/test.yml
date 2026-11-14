@@ -4,7 +4,7 @@ on:
   push:
     branches: ["**"]
     # The Rust port has its own workflow.
-    paths-ignore: ["rust/**", ".cargo/**", ".github/workflows/rust.yml", ".github/workflows/test.yml"]
+    paths-ignore: ["rust/**", ".cargo/**", ".github/workflows/rust.yml", ".github/workflows/rust-package.yml", ".github/workflows/test.yml"]
   pull_request:
 
 concurrency:

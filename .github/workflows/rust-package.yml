@@ -1,0 +1,159 @@
+name: Rust package
+
+# Builds the release binaries for each system, packs them, and proves the packed copy runs on its own:
+# unpacked into an empty folder, it downloads the local model, indexes a small repo and answers a search,
+# then passes the contract suite. Uploads the archives to the run only. Nothing is released or published.
+
+on:
+  push:
+    branches: ["rust/rewrite"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-latest
+            name: macos-arm64
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc --no-progress -y
+
+      - name: Cache cargo downloads
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            rust-${{ runner.os }}-
+
+      - name: Build release binaries
+        run: cargo build --locked --release --workspace --bins
+
+      - name: Pack
+        run: |
+          EXT=""; [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
+          PKG="scrybe-rs-${{ matrix.name }}"
+          mkdir -p "dist/$PKG"
+          cp "target/release/scrybe-rs$EXT" "target/release/scrybe-relay$EXT" "dist/$PKG/"
+          # Any shared library the build placed next to the binary has to ship with it.
+          find target/release -maxdepth 1 \( -name '*onnxruntime*' -o -name '*.dll' -o -name '*.dylib' -o -name '*.so*' \) -type f -exec cp {} "dist/$PKG/" \;
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then 7z a -bd "$PKG.zip" "$PKG" > /dev/null; else tar -czf "$PKG.tar.gz" "$PKG"; fi
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          echo "EXT=$EXT" >> "$GITHUB_ENV"
+
+      - name: Report sizes and linked libraries
+        run: |
+          {
+            echo "### ${{ matrix.name }}"
+            echo '```'
+            ls -l "dist/$PKG"
+            ls -l dist/*.tar.gz dist/*.zip 2>/dev/null || true
+            case "$RUNNER_OS" in
+              Linux) ldd "dist/$PKG/scrybe-rs"; echo "newest glibc symbol: $(objdump -T "dist/$PKG/scrybe-rs" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)" ;;
+              macOS) otool -L "dist/$PKG/scrybe-rs"; echo "minimum macOS: $(otool -l "dist/$PKG/scrybe-rs" | grep -A3 LC_BUILD_VERSION | grep minos || true)" ;;
+              Windows) ldd "dist/$PKG/scrybe-rs.exe" || true ;;
+            esac
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Unpack into an empty folder
+        run: |
+          U="$RUNNER_TEMP/unpacked"
+          mkdir -p "$U"
+          if [ "$RUNNER_OS" = "Windows" ]; then 7z x -bd "dist/$PKG.zip" -o"$U" > /dev/null; else tar -xzf "dist/$PKG.tar.gz" -C "$U"; fi
+          B="$U/$PKG"
+          [ "$RUNNER_OS" = "Windows" ] && B="$(cygpath -m "$B")"
+          echo "B=$B" >> "$GITHUB_ENV"
+
+      - name: Smoke test the unpacked copy with the real local model
+        working-directory: ${{ runner.temp }}
+        env:
+          SCRYBE_NO_AUTO_DAEMON: "1"
+        run: |
+          T="$RUNNER_TEMP"; [ "$RUNNER_OS" = "Windows" ] && T="$(cygpath -m "$T")"
+          export SCRYBE_DATA_DIR="$T/smoke-data"
+          R="$T/smoke-repo"
+          mkdir -p "$R/src" "$SCRYBE_DATA_DIR"
+          printf 'export function parseArgs(argv: string[]): Record<string, string> {\n  const out: Record<string, string> = {};\n  for (const a of argv) { const [k, v] = a.split("="); out[k] = v; }\n  return out;\n}\n' > "$R/src/args.ts"
+          printf 'def read_config(path):\n    with open(path) as f:\n        return f.read()\n' > "$R/src/config.py"
+          git -C "$R" init -q
+          git -C "$R" -c user.name=ci -c user.email=ci@example.invalid add -A
+          git -C "$R" -c user.name=ci -c user.email=ci@example.invalid commit -qm init
+          ROOT="$R"
+          # The starter config today's build writes on first run; this build doesn't write it yet.
+          P='{"provider":"local","model":"Xenova/multilingual-e5-small","prompt_template":{"query":"query: ","passage":"passage: "},"max_input_tokens":512}'
+          echo "{\"schema_version\":1,\"embedding_presets\":{\"local-default-code\":$P,\"local-default-text\":$P},\"assignments\":{\"code_preset\":\"local-default-code\",\"text_preset\":\"local-default-text\"}}" > "$SCRYBE_DATA_DIR/config.json"
+          "$B/scrybe-rs$EXT" --version
+          "$B/scrybe-rs$EXT" project add --id smoke
+          "$B/scrybe-rs$EXT" source add -P smoke -S primary --type code --root "$ROOT"
+          OUT="$("$B/scrybe-rs$EXT" search code -P smoke --top-k 2 "parse command line arguments")"
+          echo "$OUT"
+          echo "$OUT" | grep -q "args.ts" || { echo "search did not find args.ts"; exit 1; }
+          find "$SCRYBE_DATA_DIR/models" -type f | sort
+
+      - name: Contract suite against the unpacked copy
+        run: |
+          export SCRYBE_CONTRACT_BUILD=rust
+          export SCRYBE_CONTRACT_SERVER="[\"$B/scrybe-rs$EXT\",\"serve\"]"
+          export SCRYBE_CONTRACT_CLI="[\"$B/scrybe-rs$EXT\"]"
+          export SCRYBE_CONTRACT_RELAY="[\"$B/scrybe-relay$EXT\"]"
+          node --test --test-reporter=spec contract/contract.test.mjs
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.PKG }}
+          path: |
+            rust/dist/*.tar.gz
+            rust/dist/*.zip
+          retention-days: 7
+          if-no-files-found: error
