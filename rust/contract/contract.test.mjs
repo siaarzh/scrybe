@@ -830,6 +830,16 @@ describe("the command line", () => {
     assert.match(r.stdout, /src\/widget\.ts/);
   });
 
+  test("search code and search knowledge ignore --top-k after the subcommand", async () => {
+    const plain = await w.cli("search", "code", "-P", "demo", "widget");
+    const one = await w.cli("search", "code", "-P", "demo", "--top-k", "1", "widget");
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.ok(plain.stdout.trim().split("\n").filter((l) => l.startsWith("[")).length > 1, plain.stdout);
+    assert.equal(one.stdout, plain.stdout);
+    const k = await w.cli("search", "knowledge", "-P", "demo", "--top-k", "1", "widget");
+    assert.equal(k.stderr, (await w.cli("search", "knowledge", "-P", "demo", "widget")).stderr);
+  });
+
   test("a search on an unknown project exits 1 with the message and nothing else", async () => {
     for (const kind of ["code", "knowledge"]) {
       const r = await w.cli("search", kind, "-P", "nope", "x");

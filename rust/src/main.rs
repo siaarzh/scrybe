@@ -166,8 +166,9 @@ enum SearchKind {
         query: String,
         #[arg(short = 'P', long = "project-id")]
         project_id: String,
-        #[arg(long = "top-k", default_value_t = 10)]
-        top_k: usize,
+        // Accepted and ignored, as today's build does: the parent `search --top-k` takes the value.
+        #[arg(long = "top-k", default_value = "10")]
+        _top_k: String,
         #[arg(long)]
         branch: Option<String>,
     },
@@ -179,10 +180,14 @@ enum SearchKind {
         source_id: Option<String>,
         #[arg(long = "item-types")]
         item_types: Option<String>,
-        #[arg(long = "top-k", default_value_t = 10)]
-        top_k: usize,
+        // Accepted and ignored, as `search code`'s is.
+        #[arg(long = "top-k", default_value = "10")]
+        _top_k: String,
     },
 }
+
+/// What `search code` and `search knowledge` return from the command line whatever `--top-k` says.
+const CLI_SEARCH_TOP_K: usize = 10;
 
 /// What `search code` and `search knowledge` print on failure: `[scrybe] <message>`.
 fn search_fail(e: tools::ToolError) -> ! {
@@ -233,13 +238,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Status(args) => status::status(store, args).await,
         Command::Ignore { action } => ops::ignore(action),
         Command::Daemon { action } => ops::daemon(store, action).await,
-        Command::Search(SearchArgs { kind: Some(SearchKind::Code { query, project_id, top_k, branch }), .. }) => {
-            let hits = tools::search_code(&store, &project_id, &query, top_k, branch.as_deref()).await.unwrap_or_else(|e| search_fail(e));
+        Command::Search(SearchArgs { kind: Some(SearchKind::Code { query, project_id, branch, .. }), .. }) => {
+            let hits = tools::search_code(&store, &project_id, &query, CLI_SEARCH_TOP_K, branch.as_deref()).await.unwrap_or_else(|e| search_fail(e));
             println!("{}", tools::format_code(&hits));
         }
-        Command::Search(SearchArgs { kind: Some(SearchKind::Knowledge { query, project_id, source_id, item_types, top_k }), .. }) => {
+        Command::Search(SearchArgs { kind: Some(SearchKind::Knowledge { query, project_id, source_id, item_types, .. }), .. }) => {
             let types: Option<Vec<String>> = item_types.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-            let hits = tools::search_knowledge(&store, &project_id, &query, top_k, source_id.as_deref(), types.as_deref()).await.unwrap_or_else(|e| search_fail(e));
+            let hits = tools::search_knowledge(&store, &project_id, &query, CLI_SEARCH_TOP_K, source_id.as_deref(), types.as_deref()).await.unwrap_or_else(|e| search_fail(e));
             println!("{}", tools::format_knowledge(&hits));
         }
         Command::Search(SearchArgs { kind: None, query, project_id, top_k, branch }) => legacy::bare_search(&store, query, project_id, &top_k, branch).await,
