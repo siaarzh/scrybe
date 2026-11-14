@@ -638,10 +638,13 @@ describe("automatic garbage collection by orphan share", () => {
     const first = await until(() => scheduled()[0], 30_000, "auto-gc.scheduled");
     assert.equal(first.detail.trigger, "ratio");
     await until(() => feed.events.find((e) => e.event === "auto-gc.completed"), 30_000, "auto-gc.completed");
+    // One deletion can start two index runs (Windows reports some deletes twice), and both may schedule
+    // before the first gc finishes, in either build. The debounce counts from a finished gc.
+    const before = scheduled().length;
     rmSync(join(w.repo, "src/gadget.py"));
     await until(symbolGone(c, "calibrate_gadget", w.main), 30_000, "the second deletion to be noticed");
     await sleep(2500);
-    assert.equal(scheduled().length, 1, JSON.stringify(scheduled()));
+    assert.equal(scheduled().length, before, JSON.stringify(scheduled()));
   });
 });
 
