@@ -197,7 +197,9 @@ fn model_remote_host() -> String {
 
 fn download_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
+    // HTTP/1.1, as today's build fetches: one HTTP/2 stream's flow-control window caps a long-distance
+    // download at about a third of the line speed.
+    CLIENT.get_or_init(|| reqwest::Client::builder().http1_only().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
 }
 
 /// Called with the download's whole percent (0 to 99) each time it changes.
@@ -263,6 +265,24 @@ async fn download_file(url: &str, dest: &std::path::Path, meter: &mut Meter, ind
     drop(file);
     tokio::fs::rename(&part, dest).await?;
     Ok(())
+}
+
+/// Times the download client: to `dest` through the model download path, or into memory.
+pub async fn debug_fetch(url: &str, dest: Option<&std::path::Path>) -> Result<u64> {
+    if let Some(dest) = dest {
+        let mut meter = Meter { files: vec![], last: None, report: None };
+        download_file(url, dest, &mut meter, 0).await?;
+        return Ok(std::fs::metadata(dest)?.len());
+    }
+    let mut resp = download_client().get(url).send().await?.error_for_status()?;
+    let host = resp.url().host_str().unwrap_or("").to_string();
+    let addr = resp.remote_addr().map_or(String::new(), |a| a.to_string());
+    eprintln!("fetching from {host} ({addr}), {:?}", resp.version());
+    let mut n = 0u64;
+    while let Some(bytes) = resp.chunk().await? {
+        n += bytes.len() as u64;
+    }
+    Ok(n)
 }
 
 /// First-use download into the model cache, as the pipeline does on its first load. Only the index path

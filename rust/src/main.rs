@@ -135,6 +135,8 @@ enum Command {
     DebugChunks { #[arg(short = 'P', long = "project-id")] project_id: String, #[arg(short = 'S', long = "source-id")] source_id: String },
     /// Try a keyword search on every registered table and report which fail (read-only)
     DebugFts,
+    /// Time a download with the model client: into memory, or to a file with --to
+    DebugFetch { url: String, #[arg(long)] to: Option<String> },
     /// Print a query's vector and keyword lists before fusion, as JSON (parity checks)
     DebugLists { query: String, #[arg(short = 'P', long = "project-id")] project_id: String, #[arg(long = "top-k", default_value_t = 10)] top_k: usize },
     /// Print a query's embedding as JSON (parity checks)
@@ -264,6 +266,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::DebugChunks { project_id, source_id } => {
             let handle = std::thread::Builder::new().stack_size(256 << 20).spawn(move || debug_chunks(&project_id, &source_id))?;
             handle.join().map_err(|_| anyhow::anyhow!("chunker thread panicked"))??;
+        }
+        Command::DebugFetch { url, to } => {
+            let started = std::time::Instant::now();
+            let bytes = embed::debug_fetch(&url, to.as_deref().map(std::path::Path::new)).await?;
+            let secs = started.elapsed().as_secs_f64();
+            println!("{bytes} bytes in {secs:.2} s, {:.1} MB/s", bytes as f64 / secs / 1e6);
         }
         Command::DebugFts => {
             for p in registry::list_projects() {
