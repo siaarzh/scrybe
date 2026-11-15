@@ -563,12 +563,16 @@ async fn drop_ephemeral_inner(store: Store, args: DropEphemeralArgs) -> Result<(
     let queue = queue_of(store)?;
     let a = json!({ "project_id": project_id, "label": label, "source_id": args.source_id });
     let dropped = ephemeral::drop_label(&queue, &a)?;
-    // With a server up the gc runs there; its job row lands in the same database this process reads.
+    // With a server up the gc runs there; its job row lands in the same database this process reads. A server
+    // that accepts no job gives zeros; one that can't be reached falls back to an in-process gc.
     let job = match live_server().await? {
-        Some(port) => {
-            let sent = post(port, "/gc", &json!({ "scope": [dropped.project], "sourceId": dropped.source, "mode": "purge" })).await?;
-            sent["jobs"][0]["jobId"].as_str().map(String::from)
-        }
+        Some(port) => match post(port, "/gc", &json!({ "scope": [dropped.project], "sourceId": dropped.source, "mode": "purge" })).await {
+            Ok(sent) => match sent["jobs"][0]["jobId"].as_str() {
+                Some(id) => Some(id.to_string()),
+                None => return show(&json!({ "label": dropped.label, "dropped": dropped.existed, "orphans_deleted": 0, "bytes_freed": 0 })),
+            },
+            Err(_) => None,
+        },
         None => None,
     };
     let job = job.unwrap_or_else(|| queue.submit(Request { project: dropped.project.clone(), source: Some(dropped.source.clone()), gc_purge: Some(true), ..Default::default() }).job_id);
