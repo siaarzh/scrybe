@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, RELAY, SERVER, fakeEmbedder, fakeGithub, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
+import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, LOCAL_MODEL, RELAY, SERVER, fakeEmbedder, fakeGithub, fakeModelHost, useLocalModel, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
 
 // Rows the TypeScript build wrote for the fixture trackers below, with the second one's addition after an edit.
 const GITLAB_ROWS = JSON.parse(readFileSync(new URL("./gitlab-rows.json", import.meta.url), "utf8"));
@@ -2908,6 +2908,55 @@ describe("progress on the command line", () => {
     assert.ok(embedded.length >= 1, r.stdout);
     assert.equal(embedded.at(-1), total);
     assert.ok(r.stdout.includes("\r  [primary] Scanning... 1 files"), JSON.stringify(r.stdout.slice(0, 200)));
+  });
+});
+
+describe("first-use model download from a stand-in host", () => {
+  // Today's build always fetches from the real host, so only a build that can be pointed elsewhere runs these.
+  const skip = BUILD === "ts" ? { skip: "today's build can't point the download elsewhere" } : {};
+  let w, host, c;
+  const modelDir = () => join(w.data, "models", LOCAL_MODEL);
+  const follow = async (id) => {
+    const seen = [];
+    const done = await until(async () => {
+      const s = (await c.call("reindex_status", { job_id: id })).value;
+      if (s?.status === "running" && s.tasks[0]) seen.push({ ...s.tasks[0] });
+      await sleep(30);
+      return ["done", "failed"].includes(s?.status) && s;
+    }, 60_000, "the job");
+    return { seen, done };
+  };
+  before(async () => {
+    if (BUILD === "ts") return;
+    host = await fakeModelHost({ dropFirst: true });
+    w = await makeWorld({ serverEnv: { SCRYBE_MODEL_REMOTE_HOST: host.url, SCRYBE_MODEL_CACHE_DIR: "" } });
+    useLocalModel(w);
+    c = w.client();
+    await c.hello();
+  });
+  after(async () => { if (w) { await w.stop(); host.close(); } });
+
+  test("a download cut off halfway fails the job and leaves nothing that looks finished", skip, async () => {
+    const id = (await c.call("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" })).value.job_id;
+    const { done } = await follow(id);
+    assert.equal(done.status, "failed", JSON.stringify(done));
+    assert.match(done.tasks[0].error, /^Model not cached and no network available\. Run once with internet access to download the model \(~120 MB\): /);
+    assert.ok(!existsSync(join(modelDir(), "config.json")));
+    assert.ok(!existsSync(join(modelDir(), "onnx/model_quantized.onnx")));
+  });
+
+  test("the next run fetches every file, reports a rising percent, then fails on the stand-in weights", skip, async () => {
+    const id = (await c.call("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" })).value.job_id;
+    const { seen, done } = await follow(id);
+    assert.equal(done.status, "failed", JSON.stringify(done));
+    assert.match(done.tasks[0].error, /^Local embedder failed to load: /);
+    const percents = seen.filter((t) => t.phase === "downloading-model").map((t) => t.percent);
+    assert.ok(percents.length >= 2, `phases seen: ${seen.map((t) => t.phase)}`);
+    for (let i = 1; i < percents.length; i++) assert.ok(percents[i] >= percents[i - 1], `percent went down: ${percents}`);
+    assert.ok(percents.every((p) => Number.isInteger(p) && p >= 0 && p <= 99), `${percents}`);
+    for (const [file, body] of Object.entries(host.files)) assert.ok(readFileSync(join(modelDir(), file)).equals(body), `${file} differs`);
+    // config.json, the file whose presence means "cached", is fetched last.
+    assert.equal(host.log.filter((f) => f.endsWith(".json") || f.endsWith(".onnx")).at(-1), "config.json");
   });
 });
 

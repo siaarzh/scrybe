@@ -63,6 +63,47 @@ export async function fakeEmbedder({ delayMs = 0 } = {}) {
   return { url: `http://127.0.0.1:${server.address().port}/v1`, log, close: () => server.close() };
 }
 
+export const LOCAL_MODEL = "Xenova/multilingual-e5-small";
+
+/**
+ * Serves a stand-in for the local model's four files at `<host>/<model>/resolve/main/<file>`. The weights
+ * are 3 MB of noise sent in slow pieces, so a download can be watched; `dropFirst` cuts the first weights
+ * request off halfway.
+ */
+export async function fakeModelHost({ dropFirst = false } = {}) {
+  const weights = Buffer.alloc(3_000_000);
+  for (let i = 0; i < weights.length; i++) weights[i] = (i * 2654435761) >>> 24;
+  const files = { "onnx/model_quantized.onnx": weights, "tokenizer.json": Buffer.from("{}"), "tokenizer_config.json": Buffer.from("{}"), "config.json": Buffer.from('{"model_type":"bert"}') };
+  const log = [];
+  let dropped = false;
+  const server = http.createServer(async (req, res) => {
+    const prefix = `/${LOCAL_MODEL}/resolve/main/`;
+    const file = req.url.startsWith(prefix) ? req.url.slice(prefix.length) : null;
+    log.push(file ?? req.url);
+    const body = file && files[file];
+    if (!body) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": body.length });
+    const drop = dropFirst && !dropped && file.endsWith(".onnx");
+    if (drop) dropped = true;
+    const piece = 100_000;
+    for (let at = 0; at < body.length; at += piece) {
+      if (drop && at >= body.length / 2) { res.destroy(); return; }
+      res.write(body.subarray(at, at + piece));
+      if (body.length > piece) await sleep(40);
+    }
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}`, files, log, close: () => server.close() };
+}
+
+/** Points a world at the local model, as the first-run starter config does. */
+export function useLocalModel(world) {
+  const preset = { provider: "local", model: LOCAL_MODEL, prompt_template: { query: "query: ", passage: "passage: " }, max_input_tokens: 512 };
+  const config = { schema_version: 1, embedding_presets: { "local-default-code": preset, "local-default-text": preset }, assignments: { code_preset: "local-default-code", text_preset: "local-default-text" } };
+  writeFileSync(join(world.data, "config.json"), JSON.stringify(config, null, 2));
+}
+
 export const GITLAB_TOKEN = "contract-gitlab-token";
 export const GITLAB_PROJECT = "demo/tracker";
 
