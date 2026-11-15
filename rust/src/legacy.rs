@@ -173,7 +173,7 @@ pub async fn default_action(store: Store) {
         registry::add_project(&id, "")?;
         registry::add_source(&id, json!({ "source_id": "primary", "source_config": { "type": "code", "root_path": here, "languages": [] } }))?;
         println!("Registered '{id}'. Indexing...");
-        let options = index::Options { branch: None, content_ref: None, cancel: None, job_id: None };
+        let options = index::Options::default();
         index::index_source(&store, &id, "primary", index::Mode::Incremental, &options).await?;
         println!("Done. Try: scrybe search code -P {id} \"your query\"");
         Ok(())

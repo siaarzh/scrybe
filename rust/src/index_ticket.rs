@@ -7,7 +7,7 @@ use crate::embed;
 use crate::embed_api::{self, Entry, Halving};
 use crate::github_issues;
 use crate::gitlab_issues::{self, KnowledgeChunk};
-use crate::index::{check_cancel, cursor_path, hashes_path, now_iso, repair_if_corrupt, Mode, Options};
+use crate::index::{check_cancel, cursor_path, hashes_path, now_iso, repair_if_corrupt, Mode, Options, Progress};
 use crate::phase::{self, Outcome, Phase};
 use crate::registry::{self, EmbedConfig, Source};
 use crate::store::Store;
@@ -105,13 +105,14 @@ struct Run<'a> {
     started: std::time::Instant,
     bytes_embedded: u64,
     phase: Phase,
+    options: &'a Options,
 }
 
 impl Run<'_> {
     async fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         match &mut self.halving {
             Some(session) => embed_api::embed_batched(&self.embedding, &texts, self.delay_ms, session).await,
-            None => embed::embed_passages(&self.embedding.model, &self.embedding.passage_prefix, texts, self.max_chars, self.batch_size).await,
+            None => embed::embed_passages(&self.embedding.model, &self.embedding.passage_prefix, texts, self.max_chars, self.batch_size, self.options.download_progress()).await,
         }
     }
 
@@ -156,6 +157,7 @@ impl Run<'_> {
             self.seen_files.insert(key.clone());
             self.prepared += chunks.len();
         }
+        self.options.report(Progress::Embed(self.prepared));
         save_hashes(&self.hash_path, &self.hashes)?;
         self.bytes_embedded += batch_bytes;
         self.phase.add_work(&[
@@ -240,6 +242,9 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     }
 
     let mut diff_phase = Phase::begin(&ctx, "diff");
+    for n in 1..=merged.0.len() {
+        options.report(Progress::Scan(n));
+    }
     let to_remove: Vec<String> = if effective_cursor { vec![] } else { old_hashes.0.iter().filter(|(p, _)| scanned.get(p).is_none()).map(|(p, _)| p.clone()).collect() };
     let mut to_index: Vec<String> = merged.0.iter().filter(|(p, h)| old_hashes.get(p) != Some(h.as_str())).map(|(p, _)| p.clone()).collect();
     diff_phase.sample();
@@ -291,7 +296,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
 
     let mut phase = Phase::begin(&ctx, "chunk_embed");
     phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase };
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, options };
     let mut batches: Vec<(String, Vec<KnowledgeChunk>)> = vec![];
     let mut pending = 0;
     let mut chunks_seen = 0usize;

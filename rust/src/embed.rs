@@ -200,7 +200,47 @@ fn download_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
 }
 
-async fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
+/// Called with the download's whole percent (0 to 99) each time it changes.
+pub type DownloadProgress = std::sync::Arc<dyn Fn(u8) + Send + Sync>;
+
+/// Byte-weighted percent over every file seen so far, as the pipeline's progress callback computes it:
+/// silent until the files seen add up to 1 MB, so a small file finishing first can't read as 100,
+/// capped at 99 because the job's move to embedding is what says the download finished, and never lower
+/// than the last reading.
+struct Meter {
+    files: Vec<(u64, u64)>,
+    last: Option<u8>,
+    report: Option<DownloadProgress>,
+}
+
+impl Meter {
+    const MIN_REPORT_BYTES: u64 = 1_000_000;
+
+    fn update(&mut self, file: usize, loaded: u64, total: u64) {
+        if total == 0 {
+            return;
+        }
+        if self.files.len() <= file {
+            self.files.resize(file + 1, (0, 0));
+        }
+        self.files[file] = (loaded, total);
+        let (sum_loaded, sum_total) = self.files.iter().fold((0, 0), |(l, t), (fl, ft)| (l + fl, t + ft));
+        if sum_total < Self::MIN_REPORT_BYTES {
+            return;
+        }
+        let percent = ((sum_loaded as f64 / sum_total as f64) * 100.0).round().min(99.0) as u8;
+        // A file joining the total would pull the share down; hold the high point instead.
+        let percent = self.last.map_or(percent, |last| last.max(percent));
+        if self.last != Some(percent) {
+            self.last = Some(percent);
+            if let Some(report) = &self.report {
+                report(percent);
+            }
+        }
+    }
+}
+
+async fn download_file(url: &str, dest: &std::path::Path, meter: &mut Meter, index: usize) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut resp = download_client().get(url).send().await.map_err(|e| anyhow!("fetch failed: {e}"))?;
     if !resp.status().is_success() {
@@ -209,10 +249,15 @@ async fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    let total = resp.content_length().unwrap_or(0);
+    let mut loaded = 0u64;
+    meter.update(index, 0, total);
     let part = dest.with_extension(format!("{}.part", dest.extension().and_then(|e| e.to_str()).unwrap_or("")));
     let mut file = tokio::fs::File::create(&part).await?;
     while let Some(bytes) = resp.chunk().await.map_err(|e| anyhow!("fetch failed: {e}"))? {
         file.write_all(&bytes).await?;
+        loaded += bytes.len() as u64;
+        meter.update(index, loaded, total);
     }
     file.flush().await?;
     drop(file);
@@ -222,18 +267,19 @@ async fn download_file(url: &str, dest: &std::path::Path) -> Result<()> {
 
 /// First-use download into the model cache, as the pipeline does on its first load. Only the index path
 /// calls this; search fails fast instead.
-pub async fn ensure_model(model: &str) -> Result<()> {
+pub async fn ensure_model(model: &str, progress: Option<DownloadProgress>) -> Result<()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _held = LOCK.lock().await;
     let dir = models_dir().join(model);
     let host = model_remote_host();
-    for file in MODEL_FILES {
+    let mut meter = Meter { files: vec![], last: None, report: progress };
+    for (index, file) in MODEL_FILES.iter().enumerate() {
         let dest = dir.join(file);
         if dest.exists() {
             continue;
         }
         let url = format!("{}/{}/resolve/main/{}", host.trim_end_matches('/'), model, file);
-        download_file(&url, &dest).await.map_err(|e| anyhow!("{}", classify_load_error(&format!("{e:#}"))))?;
+        download_file(&url, &dest, &mut meter, index).await.map_err(|e| anyhow!("{}", classify_load_error(&format!("{e:#}"))))?;
     }
     Ok(())
 }
@@ -250,8 +296,8 @@ fn classify_load_error(msg: &str) -> String {
 }
 
 /// `embedLocalBatched`.
-pub async fn embed_passages(model: &str, prefix: &str, texts: Vec<String>, max_chars: usize, batch_size: usize) -> Result<Vec<Vec<f32>>> {
-    ensure_model(model).await?;
+pub async fn embed_passages(model: &str, prefix: &str, texts: Vec<String>, max_chars: usize, batch_size: usize, download: Option<DownloadProgress>) -> Result<Vec<Vec<f32>>> {
+    ensure_model(model, download).await?;
     let (model, prefix) = (model.to_string(), prefix.to_string());
     tokio::task::spawn_blocking(move || {
         let e = embedder(&model).map_err(|e| anyhow!("{}", classify_load_error(&format!("{e:#}"))))?;
@@ -368,6 +414,26 @@ mod tests {
         assert_eq!(classify_load_error("bad graph"), "Local embedder failed to load: bad graph");
         let long = "é".repeat(300);
         assert_eq!(classify_load_error(&long).chars().count(), "Local embedder failed to load: ".len() + 200);
+    }
+
+    #[test]
+    fn download_percent_weighs_bytes_and_never_reads_100() {
+        let seen = std::sync::Arc::new(Mutex::new(vec![]));
+        let sink = seen.clone();
+        let mut meter = Meter { files: vec![], last: None, report: Some(std::sync::Arc::new(move |p| sink.lock().unwrap().push(p))) };
+        // A small file finishing first stays silent.
+        meter.update(3, 500, 500);
+        assert!(seen.lock().unwrap().is_empty());
+        const MB: u64 = 1_000_000;
+        for loaded in [0, 28 * MB, 28 * MB, 56 * MB, 113 * MB] {
+            meter.update(0, loaded, 113 * MB);
+        }
+        // An unknown size never counts.
+        meter.update(1, 10, 0);
+        // A second file joining doesn't send it backwards.
+        meter.update(2, 0, 17 * MB);
+        meter.update(2, 17 * MB, 17 * MB);
+        assert_eq!(*seen.lock().unwrap(), vec![0, 25, 50, 99]);
     }
 
     #[test]

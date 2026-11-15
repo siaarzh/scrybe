@@ -35,6 +35,41 @@ pub struct Options {
     pub cancel: Option<Arc<AtomicBool>>,
     /// The job this run belongs to, stamped on its phase records.
     pub job_id: Option<String>,
+    /// Live counters for whoever started the run: a job's status, or the command line's progress line.
+    pub progress: Option<ProgressSink>,
+}
+
+/// `onScanProgress`, `onEmbedProgress` and `onDownloadProgress`, as one callback.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Progress {
+    /// Files scanned so far.
+    Scan(usize),
+    /// Chunks prepared so far, after each batch.
+    Embed(usize),
+    /// First-use model download, 0 to 99.
+    Download(u8),
+}
+
+#[derive(Clone)]
+pub struct ProgressSink(pub Arc<dyn Fn(Progress) + Send + Sync>);
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
+}
+
+impl Options {
+    pub fn report(&self, p: Progress) {
+        if let Some(sink) = &self.progress {
+            (sink.0)(p);
+        }
+    }
+
+    /// The download half, in the shape the embedder takes.
+    pub fn download_progress(&self) -> Option<embed::DownloadProgress> {
+        self.progress.clone().map(|sink| Arc::new(move |p: u8| (sink.0)(Progress::Download(p))) as embed::DownloadProgress)
+    }
 }
 
 /// The error a cancelled run ends with.
@@ -162,13 +197,14 @@ struct Run<'a> {
     started: std::time::Instant,
     bytes_embedded: u64,
     phase: Phase,
+    options: &'a Options,
 }
 
 impl Run<'_> {
     async fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         match &mut self.halving {
             Some(session) => embed_api::embed_batched(&self.embedding, &texts, self.delay_ms, session).await,
-            None => embed::embed_passages(&self.embedding.model, &self.embedding.passage_prefix, texts, self.max_chars, self.batch_size).await,
+            None => embed::embed_passages(&self.embedding.model, &self.embedding.passage_prefix, texts, self.max_chars, self.batch_size, self.options.download_progress()).await,
         }
     }
 
@@ -214,6 +250,7 @@ impl Run<'_> {
             self.seen_files.insert(key.clone());
             self.prepared += chunks.len();
         }
+        self.options.report(Progress::Embed(self.prepared));
         save_hashes(&self.hash_path, &self.hashes)?;
         self.bytes_embedded += batch_bytes;
         self.phase.add_work(&[
@@ -330,6 +367,9 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     scan_phase.end(Outcome::Ok);
 
     let mut diff_phase = Phase::begin(&ctx, "diff");
+    for n in 1..=current.len() {
+        options.report(Progress::Scan(n));
+    }
     let to_remove: Vec<String> = old_hashes.keys().filter(|p| !current.contains_key(*p)).cloned().collect();
     let mut to_index: HashSet<String> = current.iter().filter(|(p, h)| old_hashes.get(*p) != Some(*h)).map(|(p, _)| p.clone()).collect();
     diff_phase.sample();
@@ -388,7 +428,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
 
     let mut phase = Phase::begin(&ctx, "chunk_embed");
     phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase };
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, options };
     let mut batches: Vec<(String, Vec<Chunk>)> = vec![];
     let mut pending = 0;
     let mut chunks_seen = 0usize;

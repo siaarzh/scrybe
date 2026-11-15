@@ -635,9 +635,44 @@ impl Queue {
         }
     }
 
+    /// The `onDownloadProgress`, `onScanProgress` and `onEmbedProgress` handlers of `runTasks`. Only the
+    /// moves into downloading and embedding reach the stored row; scan counts live in memory.
+    fn on_progress(&self, job_id: &str, task: usize, p: index::Progress) {
+        let mut persist = None;
+        self.update_job(job_id, |job| {
+            let t = &mut job["tasks"][task];
+            match p {
+                index::Progress::Download(percent) => {
+                    if t["phase"] != "downloading-model" {
+                        t["phase"] = json!("downloading-model");
+                        persist = Some("downloading-model");
+                    }
+                    t["percent"] = json!(percent);
+                }
+                index::Progress::Scan(n) => {
+                    t["files_scanned"] = json!(n);
+                    t["phase"] = json!("scanning");
+                }
+                index::Progress::Embed(n) => {
+                    t["chunks_prepared"] = json!(n);
+                    if t["phase"] != "embedding" {
+                        t["phase"] = json!("embedding");
+                        if let Some(o) = t.as_object_mut() {
+                            o.remove("percent");
+                        }
+                        persist = Some("embedding");
+                    }
+                }
+            }
+        });
+        if let Some(phase) = persist {
+            self.rows.set_phase(job_id, phase);
+        }
+    }
+
     /// `runTasks`, then the finishing half of `drain`.
     async fn run(self: Arc<Self>, item: Item, sources: Vec<String>, cancel: Arc<AtomicBool>) {
-        let options = Options { branch: item.branch.clone(), content_ref: item.content_ref.clone(), cancel: Some(cancel.clone()), job_id: Some(item.job_id.clone()) };
+        let options = Options { branch: item.branch.clone(), content_ref: item.content_ref.clone(), cancel: Some(cancel.clone()), job_id: Some(item.job_id.clone()), progress: None };
         for (i, source) in sources.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 self.update_job(&item.job_id, |job| {
@@ -658,6 +693,9 @@ impl Queue {
                 t["phase"] = json!("scanning");
             });
             self.rows.set_phase(&item.job_id, "scanning");
+            let (me, job_id) = (self.clone(), item.job_id.clone());
+            let sink = index::ProgressSink(Arc::new(move |p| me.on_progress(&job_id, i, p)));
+            let options = Options { progress: Some(sink), ..options.clone() };
             let result = index::index_source(&self.store, &item.project, source, item.mode, &options).await;
             let done = now_ms();
             self.update_job(&item.job_id, |job| {

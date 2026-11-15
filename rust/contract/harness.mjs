@@ -39,13 +39,14 @@ export function vectorFor(text) {
   return v.map((x) => x / n);
 }
 
-/** An OpenAI-compatible endpoint whose vectors depend only on the text. */
-export async function fakeEmbedder() {
+/** An OpenAI-compatible endpoint whose vectors depend only on the text, answering after `delayMs`. */
+export async function fakeEmbedder({ delayMs = 0 } = {}) {
   const log = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
-    req.on("end", () => {
+    req.on("end", async () => {
+      if (delayMs) await sleep(delayMs);
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       const input = Array.isArray(body.input) ? body.input : [body.input];
       log.push({ auth: req.headers.authorization, n: input.length, encoding: body.encoding_format });

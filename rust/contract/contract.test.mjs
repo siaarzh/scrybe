@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, RELAY, SERVER, fakeGithub, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
+import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, RELAY, SERVER, fakeEmbedder, fakeGithub, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
 
 // Rows the TypeScript build wrote for the fixture trackers below, with the second one's addition after an edit.
 const GITLAB_ROWS = JSON.parse(readFileSync(new URL("./gitlab-rows.json", import.meta.url), "utf8"));
@@ -2848,6 +2848,66 @@ describe("embedding presets", () => {
     }
     assert.ok(wasRefused(await c.call("add_embedding_preset", { name: "x", provider: "custom" })));
     assert.equal(cfgText(w), saved);
+  });
+});
+
+describe("progress while an index runs", () => {
+  let w, c, fake;
+  before(async () => {
+    // One chunk per request and a slow endpoint, so a job is still embedding when it is looked at.
+    fake = await fakeEmbedder({ delayMs: 150 });
+    w = await makeWorld({ embedder: fake, serverEnv: { SCRYBE_EMBED_BATCH_SIZE: "1" } });
+    c = w.client();
+    await c.hello();
+  });
+  after(async () => { await w.stop(); fake.close(); });
+
+  test("a job moves from scanning to embedding with live counts, and ends without a percent", async () => {
+    const id = (await c.call("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" })).value.job_id;
+    const seen = [];
+    const stored = new Set();
+    const done = await until(async () => {
+      const s = (await c.call("reindex_status", { job_id: id })).value;
+      if (s?.status === "running" && s.tasks[0]) seen.push({ ...s.tasks[0] });
+      const pf = w.pidfile();
+      if (pf && s?.status === "running") {
+        const row = await (await fetch(`http://127.0.0.1:${pf.port}/jobs/${id}`)).json().catch(() => null);
+        if (row?.phase) stored.add(row.phase);
+      }
+      await sleep(40);
+      return ["done", "failed"].includes(s?.status) && s;
+    }, 60_000, "the job");
+    assert.equal(done.status, "done", JSON.stringify(done));
+    const embedding = seen.filter((t) => t.phase === "embedding");
+    assert.ok(embedding.length >= 2, `phases seen: ${seen.map((t) => t.phase).join(",")}`);
+    const counts = embedding.map((t) => t.chunks_prepared);
+    assert.ok(counts[0] > 0, `first embedding count ${counts[0]}`);
+    for (let i = 1; i < counts.length; i++) assert.ok(counts[i] >= counts[i - 1], `counts went down: ${counts}`);
+    assert.ok(counts.at(-1) <= done.tasks[0].chunks_prepared);
+    assert.ok(embedding.every((t) => t.files_scanned === done.tasks[0].files_scanned && t.percent == null), JSON.stringify(embedding[0]));
+    assert.ok(seen.every((t) => ["scanning", "embedding"].includes(t.phase)), `phases seen: ${[...new Set(seen.map((t) => t.phase))]}`);
+    assert.ok(stored.has("embedding"), `stored phases: ${[...stored]}`);
+    assert.equal(done.tasks[0].phase, "done");
+    assert.equal(done.tasks[0].percent, undefined, JSON.stringify(done.tasks[0]));
+  });
+});
+
+describe("progress on the command line", () => {
+  let w;
+  before(async () => { w = await makeWorld(); });
+  after(() => w.stop());
+
+  test("an in-process index rewrites one progress line per source", async () => {
+    const r = await w.index("--full");
+    const files = r.stdout.match(/\[primary\] Scanning\.\.\. (\d+) files/g) ?? [];
+    assert.ok(files.length > 0, r.stdout);
+    const scanned = files.map((m) => Number(m.match(/(\d+) files/)[1]));
+    assert.deepEqual(scanned, scanned.map((_, i) => i + 1));
+    const embedded = (r.stdout.match(/\[primary\] Embedding\.\.\. (\d+) chunks/g) ?? []).map((m) => Number(m.match(/(\d+) chunks/)[1]));
+    const total = Number(r.stdout.match(/\[primary\] Done: (\d+) chunks indexed/)[1]);
+    assert.ok(embedded.length >= 1, r.stdout);
+    assert.equal(embedded.at(-1), total);
+    assert.ok(r.stdout.includes("\r  [primary] Scanning... 1 files"), JSON.stringify(r.stdout.slice(0, 200)));
   });
 });
 

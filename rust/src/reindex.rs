@@ -1,6 +1,6 @@
 //! The `index` command. Mirrors `index` and `runIndexViaDaemon` in `src/cli.ts`.
 use crate::cli::{post, server_state, Server};
-use crate::index::{self, Mode, Options};
+use crate::index::{self, Mode, Options, Progress, ProgressSink};
 use crate::ops::client;
 use crate::store::Store;
 use crate::registry;
@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::Args;
 use serde_json::{json, Value};
 use std::io::Write;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Args)]
@@ -56,7 +57,19 @@ fn given(v: &Option<String>) -> Option<String> {
 }
 
 fn options(a: &IndexArgs) -> Options {
-    Options { branch: given(&a.branch), content_ref: given(&a.content_ref), cancel: None, job_id: None }
+    Options { branch: given(&a.branch), content_ref: given(&a.content_ref), ..Default::default() }
+}
+
+/// The `onScanProgress` and `onEmbedProgress` lines the in-process paths rewrite in place.
+fn progress_line(lead: String) -> Option<ProgressSink> {
+    Some(ProgressSink(Arc::new(move |p| {
+        match p {
+            Progress::Scan(n) => print!("\r{lead}Scanning... {n} files"),
+            Progress::Embed(n) => print!("\r{lead}Embedding... {n} chunks"),
+            Progress::Download(_) => return,
+        }
+        let _ = std::io::stdout().flush();
+    })))
 }
 
 /// The server's job, followed like `runIndexViaDaemon` does: one progress line rewritten each second.
@@ -148,7 +161,7 @@ async fn all_projects(store: &Store, a: &IndexArgs) -> Result<i32> {
         let mut totals = (0, 0, 0);
         let mut error = None;
         for s in &p.sources {
-            match index::index_source(store, &p.id, &s.source_id, Mode::Incremental, &Options { branch: None, content_ref: None, cancel: None, job_id: None }).await {
+            match index::index_source(store, &p.id, &s.source_id, Mode::Incremental, &Options { progress: progress_line("  ".into()), ..Default::default() }).await {
                 Ok(r) => {
                     let (c, i, d) = counts(&r);
                     totals = (totals.0 + c, totals.1 + i, totals.2 + d);
@@ -180,7 +193,7 @@ async fn in_process(store: &Store, a: &IndexArgs, project: &str, sources: &[Stri
         println!("Indexing {} ({mode_word})...", target.join(", "));
         let mut totals = (0, 0, 0);
         for sid in sources {
-            let r = index::index_source(store, project, sid, mode, &Options { branch: opts.branch.clone(), content_ref: opts.content_ref.clone(), cancel: None, job_id: None }).await?;
+            let r = index::index_source(store, project, sid, mode, &Options { progress: progress_line(format!("  [{sid}] ")), ..opts.clone() }).await?;
             let (c, i, d) = counts(&r);
             println!("\n  [{sid}] Done: {}", format_result(c, i, d));
             totals = (totals.0 + c, totals.1 + i, totals.2 + d);
@@ -198,7 +211,7 @@ async fn in_process(store: &Store, a: &IndexArgs, project: &str, sources: &[Stri
     let found = registry::get_project(project).ok_or_else(|| anyhow::anyhow!("Project '{project}' not found"))?;
     let mut totals = (0, 0, 0);
     for s in &found.sources {
-        let r = index::index_source(store, project, &s.source_id, mode, &Options { branch: opts.branch.clone(), content_ref: opts.content_ref.clone(), cancel: None, job_id: None }).await?;
+        let r = index::index_source(store, project, &s.source_id, mode, &Options { progress: progress_line("  ".into()), ..opts.clone() }).await?;
         let (c, i, d) = counts(&r);
         totals = (totals.0 + c, totals.1 + i, totals.2 + d);
     }
