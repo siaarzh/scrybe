@@ -22,6 +22,28 @@ fn thread_count() -> usize {
     std::env::var("SCRYBE_ORT_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
 }
 
+/// The library reads a model section through two throwaway JSON trees, which leaves the live
+/// vocabulary scattered among freed scraps the allocator can't give back. For a unigram model,
+/// free that copy whole and read the vocabulary again straight from the file.
+fn load_tokenizer(path: &std::path::Path) -> Result<Tokenizer> {
+    use tokenizers::models::unigram::Unigram;
+    use tokenizers::ModelWrapper;
+    let mut tokenizer = Tokenizer::from_file(path).map_err(|e| anyhow!("tokenizer: {e}"))?;
+    if matches!(tokenizer.get_model(), ModelWrapper::Unigram(_)) {
+        tokenizer.with_model(ModelWrapper::Unigram(Unigram::default()));
+        release_free_memory();
+        #[derive(serde::Deserialize)]
+        struct File {
+            model: Unigram,
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let file: File = serde_json::from_str(&raw).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        drop(raw);
+        tokenizer.with_model(ModelWrapper::Unigram(file.model));
+    }
+    Ok(tokenizer)
+}
+
 impl Embedder {
     /// transformers.js adds special tokens and then cuts at the limit, so a long text loses its end
     /// marker. Hugging Face's own truncation would keep it, and the vector would differ.
@@ -38,7 +60,7 @@ impl Embedder {
         if !onnx.exists() {
             anyhow::bail!("embedding model not found at {}", onnx.display());
         }
-        let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
         let env = ort::init().build().map_err(|e| anyhow!("onnx: {e}"))?;
         let mut builder = Session::builder(&env).map_err(|e| anyhow!("onnx: {e}"))?;
         builder = builder.with_intra_threads(thread_count()).map_err(|e| anyhow!("onnx: {e}"))?;
@@ -53,7 +75,14 @@ impl Embedder {
             _ => Ok(builder),
         }
         .map_err(|e| anyhow!("onnx: {e}"))?;
-        if std::env::var("SCRYBE_ORT_ARENA").as_deref() == Ok("0") {
+        for kv in std::env::var("SCRYBE_ORT_CONFIG").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
+            if let Some((k, v)) = kv.split_once('=') {
+                builder = builder.with_config_entry(k, v).map_err(|e| anyhow!("onnx: {e}"))?;
+            }
+        }
+        // The arena keeps a job's peak buffers for the life of the process; without it they go
+        // back to malloc and the trim after each pass returns them. Same vectors either way.
+        if std::env::var("SCRYBE_ORT_ARENA").as_deref() != Ok("1") {
             builder = builder.with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()]).map_err(|e| anyhow!("onnx: {e}"))?;
         }
         let session = builder.commit_from_file(&onnx).map_err(|e| anyhow!("onnx: {e}"))?;
@@ -339,9 +368,74 @@ pub async fn embed_passages(model: &str, prefix: &str, texts: Vec<String>, max_c
                 }
             }
         }
+        release_free_memory();
         Ok(results)
     })
     .await?
+}
+
+fn rss_line() -> String {
+    let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |k: &str| st.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) / 1024;
+    #[cfg(target_env = "gnu")]
+    let inuse = {
+        let m = unsafe { libc::mallinfo2() };
+        format!(", malloc in use {} MB, mmapped {} MB", (m.uordblks + m.hblkhd) >> 20, m.hblkhd >> 20)
+    };
+    #[cfg(not(target_env = "gnu"))]
+    let inuse = String::new();
+    format!("rss {} MB (anon {} MB{inuse})", field("VmRSS:"), field("RssAnon:"))
+}
+
+pub fn debug_load_mem(model: &str) -> Result<()> {
+    let dir = models_dir().join(model);
+    println!("start: {}", rss_line());
+    if std::env::var("SCRYBE_LOAD_MEM_PARTS").as_deref() == Ok("1") {
+        let raw = std::fs::read_to_string(dir.join("tokenizer.json"))?;
+        let mut v: serde_json::Value = serde_json::from_str(&raw)?;
+        drop(raw);
+        println!("json parsed: {}", rss_line());
+        let model: tokenizers::ModelWrapper = serde_json::from_value(v["model"].take())?;
+        release_free_memory();
+        println!("model part built (json model dropped): {}", rss_line());
+        let norm: Option<tokenizers::NormalizerWrapper> = serde_json::from_value(v["normalizer"].take())?;
+        release_free_memory();
+        println!("normalizer built: {}", rss_line());
+        drop(v);
+        release_free_memory();
+        println!("rest of json dropped: {}", rss_line());
+        drop(norm);
+        release_free_memory();
+        println!("normalizer dropped: {}", rss_line());
+        drop(model);
+        release_free_memory();
+        println!("model part dropped: {}", rss_line());
+    }
+    let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
+    println!("tokenizer loaded: {}", rss_line());
+    release_free_memory();
+    println!("tokenizer loaded, after trim: {}", rss_line());
+    drop(tokenizer);
+    release_free_memory();
+    println!("tokenizer dropped, after trim: {}", rss_line());
+    let e = Embedder::load(model)?;
+    println!("model loaded: {}", rss_line());
+    release_free_memory();
+    println!("model loaded, after trim: {}", rss_line());
+    let _ = e.embed_group(&["passage: hello world"])?;
+    println!("after one embed: {}", rss_line());
+    drop(e);
+    release_free_memory();
+    println!("model dropped, after trim: {}", rss_line());
+    Ok(())
+}
+
+/// Hand heap pages that are free but still mapped back to the OS.
+pub fn release_free_memory() {
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
 }
 
 static MODELS: OnceLock<Mutex<HashMap<String, Arc<Embedder>>>> = OnceLock::new();
@@ -378,6 +472,8 @@ fn embedder(model: &str) -> Result<Arc<Embedder>> {
         return Ok(e.clone());
     }
     let e = Arc::new(Embedder::load(model)?);
+    // Loading leaves the tokenizer's parse buffers free but mapped.
+    release_free_memory();
     guard.insert(model.to_string(), e.clone());
     Ok(e)
 }
@@ -454,6 +550,20 @@ mod tests {
         meter.update(2, 0, 17 * MB);
         meter.update(2, 17 * MB, 17 * MB);
         assert_eq!(*seen.lock().unwrap(), vec![0, 25, 50, 99]);
+    }
+
+    #[test]
+    fn unigram_picks_the_best_scoring_split_through_the_compact_trie() {
+        use tokenizers::models::unigram::Unigram;
+        use tokenizers::Model;
+        let vocab = [("<unk>", 0.0), ("a", -1.0), ("ab", -0.5), ("abc", -3.0), ("b", -1.0), ("c", -1.0), ("é", -1.0)];
+        let model = Unigram::from(vocab.iter().map(|(t, s)| (t.to_string(), *s)).collect(), Some(0), false).unwrap();
+        let split = |s: &str| model.tokenize(s).unwrap().into_iter().map(|t| t.value).collect::<Vec<_>>();
+        assert_eq!(split("abc"), ["ab", "c"]);
+        assert_eq!(split("abcab"), ["ab", "c", "ab"]);
+        assert_eq!(split("ba"), ["b", "a"]);
+        assert_eq!(split("éab"), ["é", "ab"]);
+        assert_eq!(split("zab"), ["z", "ab"]);
     }
 
     #[test]

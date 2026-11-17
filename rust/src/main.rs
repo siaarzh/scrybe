@@ -137,6 +137,8 @@ enum Command {
     DebugFts,
     /// Time a download with the model client: into memory, or to a file with --to
     DebugFetch { url: String, #[arg(long)] to: Option<String> },
+    /// Load the local model step by step and print resident memory after each step
+    DebugLoadMem { #[arg(long, default_value = "Xenova/multilingual-e5-small")] model: String },
     /// Print a query's vector and keyword lists before fusion, as JSON (parity checks)
     DebugLists { query: String, #[arg(short = 'P', long = "project-id")] project_id: String, #[arg(long = "top-k", default_value_t = 10)] top_k: usize },
     /// Print a query's embedding as JSON (parity checks)
@@ -273,6 +275,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let secs = started.elapsed().as_secs_f64();
             println!("{bytes} bytes in {secs:.2} s, {:.1} MB/s", bytes as f64 / secs / 1e6);
         }
+        Command::DebugLoadMem { model } => embed::debug_load_mem(&model)?,
         Command::DebugFts => {
             for p in registry::list_projects() {
                 for s in &p.sources {
