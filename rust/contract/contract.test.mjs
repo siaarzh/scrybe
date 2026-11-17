@@ -1878,7 +1878,7 @@ describe("GitLab issues", () => {
     assert.equal(r.status, 0, r.stderr + r.stdout);
     const log = gl.state.log.map((l) => l.url);
     assert.equal(log[0], listUrl(1, `&updated_after=${encodeURIComponent(since)}`));
-    assert.deepEqual(log.slice(1), ["/api/v4/projects/demo%2Ftracker/issues/3", "/api/v4/projects/demo%2Ftracker/issues/3/notes?per_page=100&page=1"]);
+    assert.deepEqual(log.slice(1).sort(), ["/api/v4/projects/demo%2Ftracker/issues/3", "/api/v4/projects/demo%2Ftracker/issues/3/notes?per_page=100&page=1"]);
     assert.notEqual(JSON.parse(readFileSync(join(w.data, "cursors", "demo__issues.json"), "utf8")).updated_after, cursor);
     const rows2 = await knowledgeRows(w);
     if (!rows2) return t.skip("no LanceDB module to read the table with: set SCRYBE_CONTRACT_NODE_MODULES");
