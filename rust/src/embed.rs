@@ -16,6 +16,17 @@ pub struct Embedder {
     tokenizer: Tokenizer,
     session: Mutex<Session>,
     wants_token_type_ids: bool,
+    shrink_arena: bool,
+}
+
+/// `SCRYBE_ORT_ARENA`: unset = arena handed back after the last pass of each call (near the
+/// arena's speed, near no-arena idle memory), `0` = no arena, `1` = arena kept for the process.
+fn arena_mode() -> (bool, bool) {
+    match std::env::var("SCRYBE_ORT_ARENA").as_deref() {
+        Ok("0") => (false, false),
+        Ok("1") => (true, false),
+        _ => (true, true),
+    }
 }
 
 fn thread_count() -> usize {
@@ -82,12 +93,13 @@ impl Embedder {
         }
         // The arena keeps a job's peak buffers for the life of the process; without it they go
         // back to malloc and the trim after each pass returns them. Same vectors either way.
-        if std::env::var("SCRYBE_ORT_ARENA").as_deref() != Ok("1") {
+        let (arena, shrink_arena) = arena_mode();
+        if !arena {
             builder = builder.with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()]).map_err(|e| anyhow!("onnx: {e}"))?;
         }
         let session = builder.commit_from_file(&onnx).map_err(|e| anyhow!("onnx: {e}"))?;
         let wants_token_type_ids = session.inputs().iter().any(|i| i.name() == "token_type_ids");
-        Ok(Embedder { tokenizer, session: Mutex::new(session), wants_token_type_ids })
+        Ok(Embedder { tokenizer, session: Mutex::new(session), wants_token_type_ids, shrink_arena })
     }
 
     /// Mean pooling over the attention mask, then L2 normalize.
@@ -126,7 +138,7 @@ impl Embedder {
 
 impl Embedder {
     /// One forward pass over several texts, padded to the longest, as transformers.js does.
-    fn embed_group(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    fn embed_group(&self, texts: &[&str], last: bool) -> Result<Vec<Vec<f32>>> {
         let encs: Vec<Vec<u32>> = texts.iter().map(|t| self.encode_ids(t)).collect::<Result<_>>()?;
         let n = encs.iter().map(Vec::len).max().unwrap_or(0);
         let rows = encs.len();
@@ -147,7 +159,18 @@ impl Embedder {
             inputs.push(("token_type_ids", Tensor::from_array(([rows, n], vec![0i64; rows * n]))?.into_dyn()));
         }
         let mut session = self.session.lock().unwrap();
-        let outputs = session.run(inputs).map_err(|e| anyhow!("onnx: {e}"))?;
+        let shrink_opts = if last && self.shrink_arena {
+            let mut o = ort::session::RunOptions::new().map_err(|e| anyhow!("onnx: {e}"))?;
+            o.set("memory.enable_memory_arena_shrinkage", "cpu:0").map_err(|e| anyhow!("onnx: {e}"))?;
+            Some(o)
+        } else {
+            None
+        };
+        let outputs = match &shrink_opts {
+            Some(o) => session.run_with_options(inputs, o),
+            None => session.run(inputs),
+        }
+        .map_err(|e| anyhow!("onnx: {e}"))?;
         let (shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(|e| anyhow!("onnx: {e}"))?;
         let dim = *shape.last().ok_or_else(|| anyhow!("onnx: empty output shape"))? as usize;
         let mut out = Vec::with_capacity(rows);
@@ -352,6 +375,7 @@ pub async fn embed_passages(model: &str, prefix: &str, texts: Vec<String>, max_c
         let e = embedder(&model).map_err(|e| anyhow!("{}", classify_load_error(&format!("{e:#}"))))?;
         let budget = token_budget();
         let mut results: Vec<Vec<f32>> = vec![vec![]; texts.len()];
+        let windows = texts.len().div_ceil(batch_size.max(1));
         for (b, window) in texts.chunks(batch_size.max(1)).enumerate() {
             let batch: Vec<String> = window
                 .iter()
@@ -360,9 +384,11 @@ pub async fn embed_passages(model: &str, prefix: &str, texts: Vec<String>, max_c
                     format!("{prefix}{}", cap_text(&capped))
                 })
                 .collect();
-            for group in plan_micro_batches(&batch, MAX_SEQ_TOKENS, budget) {
+            let groups = plan_micro_batches(&batch, MAX_SEQ_TOKENS, budget);
+            let n_groups = groups.len();
+            for (g, group) in groups.into_iter().enumerate() {
                 let refs: Vec<&str> = group.iter().map(|&k| batch[k].as_str()).collect();
-                let vectors = e.embed_group(&refs)?;
+                let vectors = e.embed_group(&refs, b + 1 == windows && g + 1 == n_groups)?;
                 for (k, v) in group.into_iter().zip(vectors) {
                     results[b * batch_size.max(1) + k] = v;
                 }
@@ -422,7 +448,7 @@ pub fn debug_load_mem(model: &str) -> Result<()> {
     println!("model loaded: {}", rss_line());
     release_free_memory();
     println!("model loaded, after trim: {}", rss_line());
-    let _ = e.embed_group(&["passage: hello world"])?;
+    let _ = e.embed_group(&["passage: hello world"], true)?;
     println!("after one embed: {}", rss_line());
     drop(e);
     release_free_memory();
