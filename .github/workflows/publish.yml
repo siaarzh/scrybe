@@ -31,6 +31,10 @@ jobs:
       # the full suite is run locally/offline (the model is cached there) before tagging.
       # If a network-free model fixture is added later, restore `npm test` here.
 
+      # Trusted publishing (OIDC) needs npm >= 11.5.1; Node 22 bundles npm 10.
+      # NPM_TOKEN stays as a fallback until a release shows _npmUser "GitHub Actions".
+      - run: npm install -g npm@11
+
       - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
