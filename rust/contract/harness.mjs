@@ -70,7 +70,7 @@ export const LOCAL_MODEL = "Xenova/multilingual-e5-small";
  * are 3 MB of noise sent in slow pieces, so a download can be watched; `dropFirst` cuts the first weights
  * request off halfway.
  */
-export async function fakeModelHost({ dropFirst = false } = {}) {
+export async function fakeModelHost({ dropFirst = false, pieceDelayMs = 40 } = {}) {
   const weights = Buffer.alloc(3_000_000);
   for (let i = 0; i < weights.length; i++) weights[i] = (i * 2654435761) >>> 24;
   const files = { "onnx/model_quantized.onnx": weights, "tokenizer.json": Buffer.from("{}"), "tokenizer_config.json": Buffer.from("{}"), "config.json": Buffer.from('{"model_type":"bert"}') };
@@ -89,7 +89,7 @@ export async function fakeModelHost({ dropFirst = false } = {}) {
     for (let at = 0; at < body.length; at += piece) {
       if (drop && at >= body.length / 2) { res.destroy(); return; }
       res.write(body.subarray(at, at + piece));
-      if (body.length > piece) await sleep(40);
+      if (body.length > piece) await sleep(pieceDelayMs);
     }
     res.end();
   });

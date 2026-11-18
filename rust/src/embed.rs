@@ -343,6 +343,20 @@ pub async fn ensure_model(model: &str, progress: Option<DownloadProgress>) -> Re
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _held = LOCK.lock().await;
     let dir = models_dir().join(model);
+    if MODEL_FILES.iter().all(|f| dir.join(f).exists()) {
+        return Ok(());
+    }
+    // Another process sharing this cache may be downloading the same files: wait for it, then
+    // fetch only what it left, so two writers never share a partial file.
+    let lock_path = dir.join(".download.lock");
+    let _file_lock = tokio::task::spawn_blocking(move || -> std::io::Result<std::fs::File> {
+        std::fs::create_dir_all(lock_path.parent().unwrap())?;
+        let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path)?;
+        f.lock()?;
+        Ok(f)
+    })
+    .await?
+    .map_err(|e| anyhow!("{}", classify_load_error(&format!("model cache lock: {e}"))))?;
     let host = model_remote_host();
     let mut meter = Meter { files: vec![], last: None, report: progress };
     for (index, file) in MODEL_FILES.iter().enumerate() {

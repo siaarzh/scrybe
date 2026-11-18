@@ -6,7 +6,7 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { after, before, describe, test } from "node:test";
+import { after, afterEach, before, beforeEach, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, LOCAL_MODEL, RELAY, SERVER, fakeEmbedder, fakeGithub, fakeModelHost, useLocalModel, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
 
@@ -2957,6 +2957,55 @@ describe("first-use model download from a stand-in host", () => {
     for (const [file, body] of Object.entries(host.files)) assert.ok(readFileSync(join(modelDir(), file)).equals(body), `${file} differs`);
     // config.json, the file whose presence means "cached", is fetched last.
     assert.equal(host.log.filter((f) => f.endsWith(".json") || f.endsWith(".onnx")).at(-1), "config.json");
+  });
+});
+
+describe("first-use model download, two at once and one cut short", () => {
+  const skip = BUILD === "ts" ? { skip: "today's build can't point the download elsewhere" } : {};
+  let w, host;
+  const modelDir = () => join(w.data, "models", LOCAL_MODEL);
+  const intact = () => {
+    for (const [file, body] of Object.entries(host.files)) assert.ok(readFileSync(join(modelDir(), file)).equals(body), `${file} differs`);
+  };
+  beforeEach(async () => {
+    if (BUILD === "ts") return;
+    // Slow enough that the 3 MB weights take several seconds, so the two runs overlap.
+    host = await fakeModelHost({ pieceDelayMs: 150 });
+    w = await makeWorld({ serverEnv: { SCRYBE_MODEL_REMOTE_HOST: host.url, SCRYBE_MODEL_CACHE_DIR: "" } });
+    useLocalModel(w);
+  });
+  afterEach(async () => { if (w) { await w.stop(); host.close(); } });
+
+  test("two processes downloading at once end with one intact copy, fetched once", skip, async () => {
+    const [a, b] = await Promise.all([w.cli("index", "-P", "demo", "-S", "primary", "--full"), (async () => { await sleep(300); return w.cli("index", "-P", "demo", "-S", "primary", "--full"); })()]);
+    // Both get as far as loading the stand-in weights, whose empty tokenizer is the only failure.
+    for (const r of [a, b]) assert.match(r.stderr + r.stdout, /Local embedder failed to load: tokenizer: /, `${r.status}: ${r.stderr}${r.stdout}`);
+    intact();
+    assert.equal(host.log.filter((f) => f.endsWith(".onnx")).length, 1, host.log.join(","));
+  });
+
+  test("a server stopped mid-download leaves nothing that looks cached, and the next run fetches it whole", skip, async () => {
+    const c = w.client();
+    await c.hello();
+    const id = (await c.call("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" })).value.job_id;
+    await until(async () => {
+      const s = (await c.call("reindex_status", { job_id: id })).value;
+      return s?.tasks?.[0]?.phase === "downloading-model" && s.tasks[0].percent > 0;
+    }, 30_000, "the download to start");
+    await w.killServer();
+    assert.ok(!existsSync(join(modelDir(), "config.json")));
+    assert.ok(!existsSync(join(modelDir(), "onnx/model_quantized.onnx")));
+    const c2 = w.client();
+    await c2.hello();
+    const id2 = (await c2.call("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" })).value.job_id;
+    const done = await until(async () => {
+      const s = (await c2.call("reindex_status", { job_id: id2 })).value;
+      await sleep(50);
+      return ["done", "failed"].includes(s?.status) && s;
+    }, 60_000, "the second job");
+    assert.equal(done.status, "failed", JSON.stringify(done));
+    assert.match(done.tasks[0].error, /^Local embedder failed to load: /);
+    intact();
   });
 });
 
