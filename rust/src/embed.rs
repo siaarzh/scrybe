@@ -55,6 +55,22 @@ fn load_tokenizer(path: &std::path::Path) -> Result<Tokenizer> {
     Ok(tokenizer)
 }
 
+/// onnxruntime allows one environment per process, ever: once dropped it can't be made again, so a
+/// model unloaded while idle could never load a second time. Keep it for the life of the process.
+fn ort_env() -> Result<&'static ort::environment::Environment> {
+    static ENV: OnceLock<ort::environment::Environment> = OnceLock::new();
+    if let Some(env) = ENV.get() {
+        return Ok(env);
+    }
+    static INIT: Mutex<()> = Mutex::new(());
+    let _guard = INIT.lock().unwrap();
+    if let Some(env) = ENV.get() {
+        return Ok(env);
+    }
+    let env = ort::init().build().map_err(|e| anyhow!("onnx: {e}"))?;
+    Ok(ENV.get_or_init(|| env))
+}
+
 impl Embedder {
     /// transformers.js adds special tokens and then cuts at the limit, so a long text loses its end
     /// marker. Hugging Face's own truncation would keep it, and the vector would differ.
@@ -66,14 +82,16 @@ impl Embedder {
     }
 
     fn load(model: &str) -> Result<Self> {
-        let dir = models_dir().join(model);
+        Self::load_from(&models_dir().join(model))
+    }
+
+    fn load_from(dir: &std::path::Path) -> Result<Self> {
         let onnx = dir.join("onnx").join("model_quantized.onnx");
         if !onnx.exists() {
             anyhow::bail!("embedding model not found at {}", onnx.display());
         }
         let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
-        let env = ort::init().build().map_err(|e| anyhow!("onnx: {e}"))?;
-        let mut builder = Session::builder(&env).map_err(|e| anyhow!("onnx: {e}"))?;
+        let mut builder = Session::builder(ort_env()?).map_err(|e| anyhow!("onnx: {e}"))?;
         builder = builder.with_intra_threads(thread_count()).map_err(|e| anyhow!("onnx: {e}"))?;
         if std::env::var("SCRYBE_ORT_MEM_PATTERN").as_deref() == Ok("0") {
             builder = builder.with_memory_pattern(false).map_err(|e| anyhow!("onnx: {e}"))?;
@@ -488,11 +506,17 @@ fn start_idle_unload() {
     STARTED.call_once(|| {
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
+            let Some(models) = MODELS.get() else { continue };
+            let mut models = models.lock().unwrap();
+            // A job or search still holding the model is use: the idle clock starts when the last one lets go.
+            if models.values().any(|e| Arc::strong_count(e) > 1) {
+                *LAST_USE.lock().unwrap() = Some(std::time::Instant::now());
+                continue;
+            }
             let idle = LAST_USE.lock().unwrap().is_some_and(|t| t.elapsed().as_secs() >= secs);
             if idle {
-                if let Some(m) = MODELS.get() {
-                    m.lock().unwrap().clear();
-                }
+                models.clear();
+                drop(models);
                 *LAST_USE.lock().unwrap() = None;
                 #[cfg(target_env = "gnu")]
                 unsafe {
@@ -604,6 +628,17 @@ mod tests {
         assert_eq!(split("ba"), ["b", "a"]);
         assert_eq!(split("éab"), ["é", "ab"]);
         assert_eq!(split("zab"), ["z", "ab"]);
+    }
+
+    /// Needs a real model folder, so it runs only when `SCRYBE_TEST_MODEL_DIR` points at one.
+    #[test]
+    fn a_dropped_model_loads_again_with_the_same_vectors() {
+        let Ok(dir) = std::env::var("SCRYBE_TEST_MODEL_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let first = Embedder::load_from(&dir).unwrap().embed("fn main() {}").unwrap();
+        let second = Embedder::load_from(&dir).unwrap().embed("fn main() {}").unwrap();
+        assert_eq!(first, second);
+        assert!(std::ptr::eq(ort_env().unwrap(), ort_env().unwrap()));
     }
 
     #[test]
