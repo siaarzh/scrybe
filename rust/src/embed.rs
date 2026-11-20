@@ -516,8 +516,8 @@ fn start_idle_unload() {
             let idle = LAST_USE.lock().unwrap().is_some_and(|t| t.elapsed().as_secs() >= secs);
             if idle {
                 models.clear();
-                drop(models);
                 *LAST_USE.lock().unwrap() = None;
+                drop(models);
                 #[cfg(target_env = "gnu")]
                 unsafe {
                     libc::malloc_trim(0);
@@ -529,9 +529,10 @@ fn start_idle_unload() {
 
 fn embedder(model: &str) -> Result<Arc<Embedder>> {
     start_idle_unload();
-    *LAST_USE.lock().unwrap() = Some(std::time::Instant::now());
     let models = MODELS.get_or_init(Default::default);
     let mut guard = models.lock().unwrap();
+    // Stamped under the models lock, so a drop in progress can't clear it after this load.
+    *LAST_USE.lock().unwrap() = Some(std::time::Instant::now());
     if let Some(e) = guard.get(model) {
         return Ok(e.clone());
     }
