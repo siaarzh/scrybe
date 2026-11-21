@@ -499,10 +499,21 @@ pub fn release_free_memory() {
 static MODELS: OnceLock<Mutex<HashMap<String, Arc<Embedder>>>> = OnceLock::new();
 static LAST_USE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-/// Experiment: drop the model after this many idle seconds and hand memory back to the OS.
+const DEFAULT_IDLE_SECS: u64 = 300;
+
+/// Idle window in seconds before the model is dropped; `None` when `SCRYBE_EMBED_IDLE_SECS=0` turns it off.
+fn idle_secs(raw: Option<&str>) -> Option<u64> {
+    match raw.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(DEFAULT_IDLE_SECS),
+    }
+}
+
+/// Drops the model after 300 idle seconds and hands memory back to the OS; `SCRYBE_EMBED_IDLE_SECS=0` turns it off.
 fn start_idle_unload() {
     static STARTED: std::sync::Once = std::sync::Once::new();
-    let Some(secs) = std::env::var("SCRYBE_EMBED_IDLE_SECS").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+    let Some(secs) = idle_secs(std::env::var("SCRYBE_EMBED_IDLE_SECS").ok().as_deref()) else { return };
     STARTED.call_once(|| {
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -588,6 +599,15 @@ pub async fn embed_query(model: &str, prefix: &str, query: &str) -> Result<Vec<f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_window_parsing() {
+        assert_eq!(idle_secs(None), Some(300));
+        assert_eq!(idle_secs(Some("0")), None);
+        assert_eq!(idle_secs(Some("45")), Some(45));
+        assert_eq!(idle_secs(Some("abc")), Some(300));
+        assert_eq!(idle_secs(Some("")), Some(300));
+    }
 
     #[test]
     fn load_errors_read_as_todays() {
