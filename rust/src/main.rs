@@ -26,6 +26,7 @@ mod pinned;
 mod presets;
 mod registry;
 mod reindex;
+mod rerank;
 mod scan;
 mod search;
 mod serve;

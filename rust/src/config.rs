@@ -47,7 +47,6 @@ pub struct Settings {
     pub vector_index_min_rows: usize,
     pub vector_refine_factor: u32,
     pub vector_ef: usize,
-    pub rerank_enabled: bool,
     pub skip_branch_filter: bool,
 }
 
@@ -64,7 +63,6 @@ impl Settings {
             vector_index_min_rows: pos_int("SCRYBE_VECTOR_INDEX_MIN_ROWS", 10000) as usize,
             vector_refine_factor: pos_int("SCRYBE_VECTOR_REFINE_FACTOR", 10) as u32,
             vector_ef: pos_int("SCRYBE_VECTOR_EF", 600) as usize,
-            rerank_enabled: env::var("SCRYBE_RERANK").as_deref() == Ok("true"),
             skip_branch_filter: env::var("SCRYBE_SKIP_MIGRATION").as_deref() == Ok("1"),
         }
     }

@@ -2,6 +2,7 @@
 use crate::branches;
 use crate::embed;
 use crate::registry::{self, Project, Source};
+use crate::rerank;
 use crate::store::{escape_sql, Rows, Store};
 use anyhow::Result;
 use futures::future::try_join_all;
@@ -162,9 +163,8 @@ pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: us
         };
         anyhow::bail!("NO_CODE_SOURCES: {hint}");
     }
-    if store.settings.rerank_enabled {
-        anyhow::bail!("rerank is not ported to the Rust read path yet (SCRYBE_RERANK=true)");
-    }
+    let rr = rerank::config();
+    let fetch = rr.fetch_count(top_k);
     let vectors = QueryVectors { query, cache: Mutex::default() };
     let per_source = sources.iter().filter(|s| s.table_name.is_some()).map(|source| {
         let vectors = &vectors;
@@ -190,7 +190,7 @@ pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: us
                 where_ += &format!(" AND chunk_id IN ({})", list.join(", "));
             }
             let mut results = if store.settings.hybrid_enabled {
-                let (v, f) = tokio::join!(store.vector_search(table, &vec, &where_, top_k), store.fts_search(table, query, &where_, top_k));
+                let (v, f) = tokio::join!(store.vector_search(table, &vec, &where_, fetch), store.fts_search(table, query, &where_, fetch));
                 let v = code_rows(&v?, true);
                 let f = match f {
                     Ok(rows) => code_rows(&rows, false),
@@ -199,7 +199,7 @@ pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: us
                 };
                 if f.is_empty() { v } else { merge_rrf(&[v, f], store.settings.rrf_k, |h| h.chunk_id.clone(), |h, s| h.score = s) }
             } else {
-                code_rows(&store.vector_search(table, &vec, &where_, top_k).await?, true)
+                code_rows(&store.vector_search(table, &vec, &where_, fetch).await?, true)
             };
             // Runs after the limit, so it can return fewer than top_k. Kept to match the TypeScript.
             if let Some(ids) = &post {
@@ -217,7 +217,7 @@ pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: us
     } else {
         merge_rrf(&all, store.settings.rrf_k, |h| h.chunk_id.clone(), |h, s| h.score = s)
     };
-    let mut hits: Vec<CodeHit> = merged.into_iter().take(top_k).collect();
+    let mut hits: Vec<CodeHit> = rerank::rerank(rr, query, merged, top_k).await?;
 
     let mut by_source: HashMap<String, Vec<String>> = HashMap::new();
     for h in &hits {
@@ -252,10 +252,9 @@ pub async fn search_knowledge(store: &Store, query: &str, project_id: &str, top_
         };
         anyhow::bail!("NO_KNOWLEDGE_SOURCES: {hint}");
     }
-    if store.settings.rerank_enabled {
-        anyhow::bail!("rerank is not ported to the Rust read path yet (SCRYBE_RERANK=true)");
-    }
-    let key = |h: &KnowledgeHit| format!("{}:{}:{}:{}", h.project_id, h.source_id, h.item_path, js_slice(&h.content, 40));
+    let rr = rerank::config();
+    let fetch = rr.fetch_count(top_k);
+    let key =|h: &KnowledgeHit| format!("{}:{}:{}:{}", h.project_id, h.source_id, h.item_path, js_slice(&h.content, 40));
     let vectors = QueryVectors { query, cache: Mutex::default() };
     let per_source = sources.iter().filter(|s| s.table_name.is_some()).map(|source| {
         let vectors = &vectors;
@@ -264,7 +263,7 @@ pub async fn search_knowledge(store: &Store, query: &str, project_id: &str, top_
             let vec = vectors.get(source).await?;
             let where_ = format!("project_id = '{}'", escape_sql(project_id));
             let mut results = if store.settings.hybrid_enabled {
-                let (v, f) = tokio::join!(store.vector_search(table, &vec, &where_, top_k), store.fts_search(table, query, &where_, top_k));
+                let (v, f) = tokio::join!(store.vector_search(table, &vec, &where_, fetch), store.fts_search(table, query, &where_, fetch));
                 let v = knowledge_rows(&v?, true);
                 let f = match f {
                     Ok(rows) => knowledge_rows(&rows, false),
@@ -273,7 +272,7 @@ pub async fn search_knowledge(store: &Store, query: &str, project_id: &str, top_
                 };
                 if f.is_empty() { v } else { merge_rrf(&[v, f], store.settings.rrf_k, key, |h, s| h.score = s) }
             } else {
-                knowledge_rows(&store.vector_search(table, &vec, &where_, top_k).await?, true)
+                knowledge_rows(&store.vector_search(table, &vec, &where_, fetch).await?, true)
             };
             if let Some(types) = item_types.filter(|t| !t.is_empty()) {
                 results.retain(|r| types.contains(&r.item_type));
@@ -287,7 +286,25 @@ pub async fn search_knowledge(store: &Store, query: &str, project_id: &str, top_
     } else {
         merge_rrf(&all, store.settings.rrf_k, key, |h, s| h.score = s)
     };
-    Ok(merged.into_iter().take(top_k).collect())
+    rerank::rerank(rr, query, merged, top_k).await
+}
+
+impl rerank::Rerankable for CodeHit {
+    fn content(&self) -> &str {
+        &self.content
+    }
+    fn set_score(&mut self, score: f64) {
+        self.score = score;
+    }
+}
+
+impl rerank::Rerankable for KnowledgeHit {
+    fn content(&self) -> &str {
+        &self.content
+    }
+    fn set_score(&mut self, score: f64) {
+        self.score = score;
+    }
 }
 
 #[cfg(test)]

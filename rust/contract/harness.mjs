@@ -63,6 +63,35 @@ export async function fakeEmbedder({ delayMs = 0 } = {}) {
   return { url: `http://127.0.0.1:${server.address().port}/v1`, log, close: () => server.close() };
 }
 
+/** A score that depends only on the query and the document. */
+export function rerankScoreFor(query, doc) {
+  return createHash("sha256").update(`${query}\n${doc}`).digest()[0] / 255;
+}
+
+/** A Voyage-style rerank endpoint. Replies best first, as real ones do, so the caller must use `index`. */
+export async function fakeReranker({ status = 200 } = {}) {
+  const log = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      log.push({ auth: req.headers.authorization, contentType: req.headers["content-type"], url: req.url, body });
+      if (status !== 200) {
+        res.writeHead(status, { "Content-Type": "text/plain" });
+        res.end("reranker is down");
+        return;
+      }
+      const data = body.documents.map((d, index) => ({ index, relevance_score: rerankScoreFor(body.query, d) }));
+      data.sort((a, b) => b.relevance_score - a.relevance_score);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ object: "list", data, model: body.model }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}/v1/rerank`, log, close: () => server.close() };
+}
+
 export const LOCAL_MODEL = "Xenova/multilingual-e5-small";
 
 /**

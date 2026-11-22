@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { after, afterEach, before, beforeEach, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, LOCAL_MODEL, RELAY, SERVER, fakeEmbedder, fakeGithub, fakeModelHost, useLocalModel, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
+import { BUILD, CLI, GITHUB_PROJECT, GITHUB_TOKEN, GITLAB_PROJECT, GITLAB_TOKEN, LOCAL_MODEL, RELAY, SERVER, fakeEmbedder, fakeGithub, fakeModelHost, fakeReranker, rerankScoreFor, useLocalModel, fakeGitlab, makeWorld, sleep, until, vectorFor } from "./harness.mjs";
 
 // Rows the TypeScript build wrote for the fixture trackers below, with the second one's addition after an edit.
 const GITLAB_ROWS = JSON.parse(readFileSync(new URL("./gitlab-rows.json", import.meta.url), "utf8"));
@@ -3011,4 +3011,106 @@ describe("first-use model download, two at once and one cut short", () => {
 
 test("the run's commands", () => {
   assert.ok(SERVER.length && CLI.length && RELAY.length);
+});
+
+// Today's blend, written out from its definition, to judge either build's order and scores.
+function expectedBlend(docs, scores, topK, top3 = [0.75, 0.25], tail = [0.40, 0.60]) {
+  const n = docs.length;
+  const lo = Math.min(...scores), hi = Math.max(...scores), range = hi - lo;
+  const weights = (rank) => {
+    if (rank <= 3) return top3;
+    if (rank >= 11) return tail;
+    const t = (rank - 3) / 8;
+    return [top3[0] + t * (tail[0] - top3[0]), top3[1] + t * (tail[1] - top3[1])];
+  };
+  const rows = docs.map((doc, i) => {
+    const rank = i + 1;
+    const normRank = n === 1 ? 1 : 1 - (rank - 1) / (n - 1);
+    const normRerank = range < 1e-10 ? 1 : (scores[i] - lo) / range;
+    const [wr, wx] = weights(rank);
+    return { doc, score: wr * normRank + wx * normRerank };
+  });
+  rows.sort((a, b) => b.score - a.score);
+  return rows.slice(0, topK);
+}
+
+const RERANK_ENV = (rr) => ({ SCRYBE_RERANK: "true", SCRYBE_RERANK_BASE_URL: rr.url, SCRYBE_RERANK_MODEL: "fake-rerank", SCRYBE_RERANK_API_KEY: "contract-rerank-key" });
+
+function checkRerankCall(rr, query, topK, value) {
+  assert.equal(rr.log.length, 1, "one rerank request per search");
+  const { auth, contentType, body } = rr.log[0];
+  assert.equal(auth, "Bearer contract-rerank-key");
+  assert.match(contentType, /^application\/json/);
+  assert.deepEqual(Object.keys(body), ["model", "query", "documents", "top_k", "return_documents"]);
+  assert.equal(body.model, "fake-rerank");
+  assert.equal(body.query, query);
+  assert.equal(body.return_documents, false);
+  assert.equal(body.top_k, body.documents.length);
+  assert.ok(body.documents.length > topK, `only ${body.documents.length} candidates: the fetch multiplier was not applied`);
+  assert.ok(body.documents.length <= topK * 5);
+  const want = expectedBlend(body.documents, body.documents.map((d) => rerankScoreFor(query, d)), topK);
+  assert.deepEqual(value.map((h) => h.content), want.map((r) => r.doc));
+  for (let i = 0; i < want.length; i++) assert.ok(Math.abs(value[i].score - want[i].score) < 1e-12, `score ${i}: ${value[i].score} vs ${want[i].score}`);
+  // Printed so two builds' runs can be compared line for line.
+  console.log(`RERANK-DUMP ${JSON.stringify({ query, candidates: body.documents.length, out: value.map((h) => [h.item_path, h.score]) })}`);
+}
+
+describe("reranking over HTTP", () => {
+  let rr, gl, w, c;
+  before(async () => {
+    rr = await fakeReranker();
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN, ...RERANK_ENV(rr) } });
+    await w.index("--full");
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    c = w.client();
+    await c.hello();
+  });
+  after(async () => { await w.stop(); gl.close(); rr.close(); });
+
+  test("search_code sends every candidate and returns the blended order", async () => {
+    rr.log.length = 0;
+    const { value, isError, text } = await c.call("search_code", { project_id: "demo", query: "widget", top_k: 2 });
+    assert.equal(isError, false, text);
+    assert.equal(value.length, 2);
+    checkRerankCall(rr, "widget", 2, value);
+  });
+
+  test("search_knowledge reranks issues the same way", async () => {
+    rr.log.length = 0;
+    const { value, isError, text } = await c.call("search_knowledge", { project_id: "demo", query: "Pagination check", top_k: 3, source_id: "issues" });
+    assert.equal(isError, false, text);
+    assert.equal(value.length, 3);
+    checkRerankCall(rr, "Pagination check", 3, value);
+  });
+});
+
+describe("reranking when it can't run", () => {
+  test("a reranker that answers with an error fails the search", async () => {
+    const rr = await fakeReranker({ status: 503 });
+    const w = await makeWorld({ serverEnv: RERANK_ENV(rr) });
+    try {
+      await w.index("--full");
+      const c = w.client();
+      await c.hello();
+      const { isError } = await c.call("search_code", { project_id: "demo", query: "widget", top_k: 2 });
+      assert.equal(isError, true);
+      assert.equal(rr.log.length, 1);
+    } finally { await w.stop(); rr.close(); }
+  });
+
+  test("rerank switched on with no reranker named searches without one", async () => {
+    const w = await makeWorld({ serverEnv: { SCRYBE_RERANK: "true" } });
+    try {
+      await w.index("--full");
+      const c = w.client();
+      await c.hello();
+      const { value, isError, text } = await c.call("search_code", { project_id: "demo", query: "frobnicateWidget", top_k: 2 });
+      assert.equal(isError, false, text);
+      assert.equal(value.length, 2);
+      assert.ok(value.some((h) => h.symbol_name === "frobnicateWidget"));
+    } finally { await w.stop(); }
+  });
 });
