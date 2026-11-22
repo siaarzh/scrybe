@@ -297,6 +297,7 @@ pub struct CrossEncoder {
     max_len: usize,
     pad_id: i64,
     wants_token_type_ids: bool,
+    shrink_arena: bool,
 }
 
 impl CrossEncoder {
@@ -315,12 +316,13 @@ impl CrossEncoder {
         let pad_id = tcfg["pad_token"].as_str().and_then(|t| tokenizer.token_to_id(t)).unwrap_or(0) as i64;
         let mut builder = ort::session::Session::builder(embed::ort_env()?).map_err(|e| anyhow!("onnx: {e}"))?;
         builder = builder.with_intra_threads(embed::thread_count()).map_err(|e| anyhow!("onnx: {e}"))?;
-        if !embed::arena_mode().0 {
+        let (arena, shrink_arena) = embed::arena_mode();
+        if !arena {
             builder = builder.with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()]).map_err(|e| anyhow!("onnx: {e}"))?;
         }
         let session = builder.commit_from_file(&onnx).map_err(|e| anyhow!("onnx: {e}"))?;
         let wants_token_type_ids = session.inputs().iter().any(|i| i.name() == "token_type_ids");
-        Ok(CrossEncoder { tokenizer, session: Mutex::new(session), max_len, pad_id, wants_token_type_ids })
+        Ok(CrossEncoder { tokenizer, session: Mutex::new(session), max_len, pad_id, wants_token_type_ids, shrink_arena })
     }
 
     /// Pair ids and type ids, special tokens added, then cut at the model limit from the end.
@@ -334,9 +336,29 @@ impl CrossEncoder {
     }
 
     /// One relevance score per passage: the raw logit for a one-label model, else the positive class after softmax.
-    pub fn score(&self, query: &str, passages: &[String]) -> Result<Vec<f64>> {
-        use ort::value::Tensor;
+    /// Pairs run in passes of at most `budget` padded token slots, shortest first; `budget` 0 runs them all in
+    /// one pass, as today's build does. The int8 model quantizes each pass as a whole, so a split changes scores.
+    pub fn score_with_budget(&self, query: &str, passages: &[String], budget: usize) -> Result<Vec<f64>> {
         let encs: Vec<(Vec<u32>, Vec<u32>)> = passages.iter().map(|p| self.encode_pair(query, p)).collect::<Result<_>>()?;
+        let groups = plan_passes(&encs.iter().map(|e| e.0.len()).collect::<Vec<_>>(), budget);
+        let mut scores = vec![0.0; encs.len()];
+        let n_groups = groups.len();
+        for (g, group) in groups.into_iter().enumerate() {
+            let part: Vec<&(Vec<u32>, Vec<u32>)> = group.iter().map(|&i| &encs[i]).collect();
+            for (i, s) in group.into_iter().zip(self.score_pass(&part, g + 1 == n_groups)?) {
+                scores[i] = s;
+            }
+        }
+        crate::embed::release_free_memory();
+        Ok(scores)
+    }
+
+    pub fn score(&self, query: &str, passages: &[String]) -> Result<Vec<f64>> {
+        self.score_with_budget(query, passages, pass_budget())
+    }
+
+    fn score_pass(&self, encs: &[&(Vec<u32>, Vec<u32>)], last: bool) -> Result<Vec<f64>> {
+        use ort::value::Tensor;
         let rows = encs.len();
         let n = encs.iter().map(|e| e.0.len()).max().unwrap_or(0).min(self.max_len);
         let mut ids = vec![self.pad_id; rows * n];
@@ -354,7 +376,19 @@ impl CrossEncoder {
             inputs.push(("token_type_ids", Tensor::from_array(([rows, n], types))?.into_dyn()));
         }
         let mut session = self.session.lock().unwrap();
-        let outputs = session.run(inputs).map_err(|e| anyhow!("onnx: {e}"))?;
+        // Hand the pass buffers back after the last pass: one batch of 50 long pairs needs about 3 GB.
+        let shrink = if last && self.shrink_arena {
+            let mut o = ort::session::RunOptions::new().map_err(|e| anyhow!("onnx: {e}"))?;
+            o.set("memory.enable_memory_arena_shrinkage", "cpu:0").map_err(|e| anyhow!("onnx: {e}"))?;
+            Some(o)
+        } else {
+            None
+        };
+        let outputs = match &shrink {
+            Some(o) => session.run_with_options(inputs, o),
+            None => session.run(inputs),
+        }
+        .map_err(|e| anyhow!("onnx: {e}"))?;
         let (shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(|e| anyhow!("onnx: {e}"))?;
         let labels = shape.get(1).copied().unwrap_or(1).max(1) as usize;
         let mut scores = Vec::with_capacity(rows);
@@ -374,6 +408,36 @@ impl CrossEncoder {
         }
         Ok(scores)
     }
+}
+
+/// `SCRYBE_RERANK_TOKEN_BUDGET`: padded token slots per pass; unset or `0` runs every pair in one pass.
+fn pass_budget() -> usize {
+    std::env::var("SCRYBE_RERANK_TOKEN_BUDGET").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0)
+}
+
+/// Groups of indices, shortest first, each within `budget` padded slots (always at least one pair).
+fn plan_passes(lens: &[usize], budget: usize) -> Vec<Vec<usize>> {
+    if budget == 0 || lens.is_empty() {
+        return if lens.is_empty() { vec![] } else { vec![(0..lens.len()).collect()] };
+    }
+    let mut order: Vec<usize> = (0..lens.len()).collect();
+    order.sort_by_key(|&i| lens[i]);
+    let mut groups = vec![];
+    let mut i = 0;
+    while i < order.len() {
+        let (mut padded, mut n) = (0, 0);
+        while i + n < order.len() {
+            let next = padded.max(lens[order[i + n]]);
+            if n > 0 && next * (n + 1) > budget {
+                break;
+            }
+            padded = next;
+            n += 1;
+        }
+        groups.push(order[i..i + n].to_vec());
+        i += n;
+    }
+    groups
 }
 
 /// Kept for the life of the process, as the pipeline cache is.
@@ -437,6 +501,17 @@ mod tests {
         assert_ne!(long[511], 102);
         let scores = ce.score(q, &["Search results are reranked by a cross-encoder and blended with their rank.".into(), "The fan spins at three thousand RPM.".into()]).unwrap();
         assert!(scores[0] > scores[1], "{scores:?}");
+    }
+
+    #[test]
+    fn passes_stay_within_the_budget_and_cover_every_pair() {
+        assert_eq!(plan_passes(&[5, 1, 3], 0), vec![vec![0, 1, 2]]);
+        assert!(plan_passes(&[], 4096).is_empty());
+        let lens = [512, 10, 300, 512, 40, 512];
+        let groups = plan_passes(&lens, 1024);
+        assert_eq!(groups, vec![vec![1, 4, 2], vec![0, 3], vec![5]]);
+        // A pair longer than the budget still gets a pass of its own.
+        assert_eq!(plan_passes(&[600], 512), vec![vec![0]]);
     }
 
     #[test]
