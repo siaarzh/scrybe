@@ -14,4 +14,6 @@ For the TypeScript build, use `SCRYBE_CONTRACT_BUILD=ts`, `["node","<dist>/index
 
 The GitLab and GitHub issues tests read the knowledge table with the Node LanceDB package. They find it next to a TypeScript `dist` command line, or in the `node_modules` named by `SCRYBE_CONTRACT_NODE_MODULES`; with neither they skip.
 
+The local reranking tests need the `Xenova/ms-marco-MiniLM-L-6-v2` cross-encoder in a model cache folder, named by `SCRYBE_CONTRACT_RERANK_CACHE`; without it they skip. The HTTP reranking tests use a fake endpoint and always run.
+
 A test the Rust build can't pass yet is listed in `RUST_GAPS` and runs as a todo. A tool it doesn't have yet shows as skipped. Neither counts as a pass.

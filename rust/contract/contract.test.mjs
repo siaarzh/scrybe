@@ -3114,3 +3114,32 @@ describe("reranking when it can't run", () => {
     } finally { await w.stop(); }
   });
 });
+
+describe("reranking with the local cross-encoder", () => {
+  // Needs the model folder's parent cache, so it runs only when SCRYBE_CONTRACT_RERANK_CACHE points at one.
+  const cache = process.env.SCRYBE_CONTRACT_RERANK_CACHE;
+  let gl, w, c;
+  before(async () => {
+    if (!cache) return;
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN, SCRYBE_RERANK: "true", SCRYBE_RERANK_PROVIDER: "local", SCRYBE_MODEL_CACHE_DIR: cache } });
+    await w.index("--full");
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    c = w.client();
+    await c.hello();
+  });
+  after(async () => { if (cache) { await w.stop(); gl.close(); } });
+
+  for (const [tool, args] of [["search_code", { query: "widen the widget", top_k: 3 }], ["search_knowledge", { query: "Pagination check", top_k: 5, source_id: "issues" }]]) {
+    test(`${tool} reranks locally`, async (t) => {
+      if (!cache) return t.skip("set SCRYBE_CONTRACT_RERANK_CACHE to a model cache holding the cross-encoder");
+      const { value, isError, text } = await c.call(tool, { project_id: "demo", ...args });
+      assert.equal(isError, false, text);
+      assert.equal(value.length, args.top_k);
+      for (let i = 1; i < value.length; i++) assert.ok(value[i - 1].score >= value[i].score);
+      console.log(`RERANK-LOCAL-DUMP ${JSON.stringify({ tool, out: value.map((h) => [h.item_path, Number(h.score.toFixed(3))]) })}`);
+    });
+  }
+});
