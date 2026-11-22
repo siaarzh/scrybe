@@ -21,7 +21,7 @@ pub struct Embedder {
 
 /// `SCRYBE_ORT_ARENA`: unset = arena handed back after the last pass of each call (near the
 /// arena's speed, near no-arena idle memory), `0` = no arena, `1` = arena kept for the process.
-fn arena_mode() -> (bool, bool) {
+pub(crate) fn arena_mode() -> (bool, bool) {
     match std::env::var("SCRYBE_ORT_ARENA").as_deref() {
         Ok("0") => (false, false),
         Ok("1") => (true, false),
@@ -29,14 +29,14 @@ fn arena_mode() -> (bool, bool) {
     }
 }
 
-fn thread_count() -> usize {
+pub(crate) fn thread_count() -> usize {
     std::env::var("SCRYBE_ORT_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
 }
 
 /// The library reads a model section through two throwaway JSON trees, which leaves the live
 /// vocabulary scattered among freed scraps the allocator can't give back. For a unigram model,
 /// free that copy whole and read the vocabulary again straight from the file.
-fn load_tokenizer(path: &std::path::Path) -> Result<Tokenizer> {
+pub(crate) fn load_tokenizer(path: &std::path::Path) -> Result<Tokenizer> {
     use tokenizers::models::unigram::Unigram;
     use tokenizers::ModelWrapper;
     let mut tokenizer = Tokenizer::from_file(path).map_err(|e| anyhow!("tokenizer: {e}"))?;
@@ -57,7 +57,7 @@ fn load_tokenizer(path: &std::path::Path) -> Result<Tokenizer> {
 
 /// onnxruntime allows one environment per process, ever: once dropped it can't be made again, so a
 /// model unloaded while idle could never load a second time. Keep it for the life of the process.
-fn ort_env() -> Result<&'static ort::environment::Environment> {
+pub(crate) fn ort_env() -> Result<&'static ort::environment::Environment> {
     static ENV: OnceLock<ort::environment::Environment> = OnceLock::new();
     if let Some(env) = ENV.get() {
         return Ok(env);

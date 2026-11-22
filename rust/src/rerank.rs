@@ -2,8 +2,10 @@
 //!
 //! Two backends: an HTTP rerank endpoint (Voyage-compatible) and a local cross-encoder.
 //! Both blend the reranker's score with the original rank by position.
-use anyhow::{bail, Result};
-use std::sync::OnceLock;
+use crate::jsstr::{js_len, js_slice};
+use anyhow::{anyhow, bail, Result};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Never ask the reranker about more than this many candidates.
@@ -285,8 +287,114 @@ pub async fn rerank<T: Rerankable>(cfg: &RerankConfig, query: &str, candidates: 
     Ok(apply_blend(candidates, &scores, top_k, cfg.blend_top3, cfg.blend_tail))
 }
 
-async fn local_scores<T: Rerankable>(_model: &str, _query: &str, _candidates: &[T]) -> Result<Vec<f64>> {
-    bail!("the local cross-encoder is not ported yet")
+/// The passage half of each pair is cut to this many UTF-16 units before tokenizing.
+const LOCAL_MAX_PASSAGE_CHARS: usize = 1500;
+
+/// A sequence-classification model run on (query, passage) pairs, as the text-classification pipeline runs it.
+pub struct CrossEncoder {
+    tokenizer: tokenizers::Tokenizer,
+    session: Mutex<ort::session::Session>,
+    max_len: usize,
+    pad_id: i64,
+    wants_token_type_ids: bool,
+}
+
+impl CrossEncoder {
+    pub fn load_from(dir: &std::path::Path) -> Result<Self> {
+        use crate::embed;
+        let onnx = dir.join("onnx").join("model_quantized.onnx");
+        if !onnx.exists() {
+            bail!("reranker model not found at {}", onnx.display());
+        }
+        let mut tokenizer = embed::load_tokenizer(&dir.join("tokenizer.json"))?;
+        // transformers.js ignores any truncation or padding the file declares and does its own, below.
+        tokenizer.with_truncation(None).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        tokenizer.with_padding(None);
+        let tcfg: serde_json::Value = std::fs::read_to_string(dir.join("tokenizer_config.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let max_len = tcfg["model_max_length"].as_u64().map(|n| n as usize).unwrap_or(512);
+        let pad_id = tcfg["pad_token"].as_str().and_then(|t| tokenizer.token_to_id(t)).unwrap_or(0) as i64;
+        let mut builder = ort::session::Session::builder(embed::ort_env()?).map_err(|e| anyhow!("onnx: {e}"))?;
+        builder = builder.with_intra_threads(embed::thread_count()).map_err(|e| anyhow!("onnx: {e}"))?;
+        if !embed::arena_mode().0 {
+            builder = builder.with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()]).map_err(|e| anyhow!("onnx: {e}"))?;
+        }
+        let session = builder.commit_from_file(&onnx).map_err(|e| anyhow!("onnx: {e}"))?;
+        let wants_token_type_ids = session.inputs().iter().any(|i| i.name() == "token_type_ids");
+        Ok(CrossEncoder { tokenizer, session: Mutex::new(session), max_len, pad_id, wants_token_type_ids })
+    }
+
+    /// Pair ids and type ids, special tokens added, then cut at the model limit from the end.
+    pub fn encode_pair(&self, query: &str, passage: &str) -> Result<(Vec<u32>, Vec<u32>)> {
+        let enc = self.tokenizer.encode((query, passage), true).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        let mut ids = enc.get_ids().to_vec();
+        let mut types = enc.get_type_ids().to_vec();
+        ids.truncate(self.max_len);
+        types.truncate(self.max_len);
+        Ok((ids, types))
+    }
+
+    /// One relevance score per passage: the raw logit for a one-label model, else the positive class after softmax.
+    pub fn score(&self, query: &str, passages: &[String]) -> Result<Vec<f64>> {
+        use ort::value::Tensor;
+        let encs: Vec<(Vec<u32>, Vec<u32>)> = passages.iter().map(|p| self.encode_pair(query, p)).collect::<Result<_>>()?;
+        let rows = encs.len();
+        let n = encs.iter().map(|e| e.0.len()).max().unwrap_or(0).min(self.max_len);
+        let mut ids = vec![self.pad_id; rows * n];
+        let mut mask = vec![0i64; rows * n];
+        let mut types = vec![0i64; rows * n];
+        for (r, (e, t)) in encs.iter().enumerate() {
+            for c in 0..e.len() {
+                ids[r * n + c] = e[c] as i64;
+                mask[r * n + c] = 1;
+                types[r * n + c] = t[c] as i64;
+            }
+        }
+        let mut inputs = vec![("input_ids", Tensor::from_array(([rows, n], ids))?.into_dyn()), ("attention_mask", Tensor::from_array(([rows, n], mask))?.into_dyn())];
+        if self.wants_token_type_ids {
+            inputs.push(("token_type_ids", Tensor::from_array(([rows, n], types))?.into_dyn()));
+        }
+        let mut session = self.session.lock().unwrap();
+        let outputs = session.run(inputs).map_err(|e| anyhow!("onnx: {e}"))?;
+        let (shape, data) = outputs[0].try_extract_tensor::<f32>().map_err(|e| anyhow!("onnx: {e}"))?;
+        let labels = shape.get(1).copied().unwrap_or(1).max(1) as usize;
+        let mut scores = Vec::with_capacity(rows);
+        for r in 0..rows {
+            let row: Vec<f64> = data.get(r * labels..(r + 1) * labels).map(|s| s.iter().map(|&v| v as f64).collect()).unwrap_or_default();
+            let s = match row.len() {
+                0 => 0.0,
+                1 => row[0],
+                _ => {
+                    let max = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let exps: Vec<f64> = row.iter().map(|x| (x - max).exp()).collect();
+                    let sum: f64 = exps.iter().sum();
+                    exps[1] / sum
+                }
+            };
+            scores.push(if s.is_finite() { s } else { 0.0 });
+        }
+        Ok(scores)
+    }
+}
+
+/// Kept for the life of the process, as the pipeline cache is.
+fn cross_encoder(model: &str) -> Result<Arc<CrossEncoder>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<CrossEncoder>>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    if let Some(ce) = cache.get(model) {
+        return Ok(ce.clone());
+    }
+    let ce = Arc::new(CrossEncoder::load_from(&crate::embed::models_dir().join(model))?);
+    crate::embed::release_free_memory();
+    cache.insert(model.to_string(), ce.clone());
+    Ok(ce)
+}
+
+async fn local_scores<T: Rerankable>(model: &str, query: &str, candidates: &[T]) -> Result<Vec<f64>> {
+    // The pipeline downloads on first use, on the search path.
+    crate::embed::ensure_model(model, None).await?;
+    let passages: Vec<String> = candidates.iter().map(|c| if js_len(c.content()) > LOCAL_MAX_PASSAGE_CHARS { js_slice(c.content(), LOCAL_MAX_PASSAGE_CHARS) } else { c.content().to_string() }).collect();
+    let (model, query) = (model.to_string(), query.to_string());
+    tokio::task::spawn_blocking(move || cross_encoder(&model)?.score(&query, &passages)).await?
 }
 
 #[cfg(test)]
@@ -310,6 +418,25 @@ mod tests {
         let mut warnings = vec![];
         let c = build(|k| m.get(k).cloned(), &mut |w| warnings.push(w));
         (c, warnings)
+    }
+
+    /// Needs the cross-encoder's folder, so it runs only when `SCRYBE_TEST_RERANK_MODEL_DIR` points at one.
+    #[test]
+    fn cross_encoder_pairs_match_transformers_js_and_rank_sensibly() {
+        let Ok(dir) = std::env::var("SCRYBE_TEST_RERANK_MODEL_DIR") else { return };
+        let ce = CrossEncoder::load_from(std::path::Path::new(&dir)).unwrap();
+        let q = "how are search results reranked";
+        // Ids as transformers.js 2.17.2 gives them for the same pair.
+        let (ids, types) = ce.encode_pair(q, "def calibrate_gadget(level):\n    return level * 3\n").unwrap();
+        assert_eq!(ids, [101, 2129, 2024, 3945, 3463, 2128, 26763, 2098, 102, 13366, 10250, 12322, 11657, 1035, 11721, 24291, 1006, 2504, 1007, 1024, 2709, 2504, 1008, 1017, 102]);
+        assert_eq!(types.iter().filter(|&&t| t == 0).count(), 9);
+        assert_eq!(ce.encode_pair(q, "").unwrap().0, [101, 2129, 2024, 3945, 3463, 2128, 26763, 2098, 102, 102]);
+        // Cut from the end at the model limit, so the closing separator is lost.
+        let (long, _) = ce.encode_pair(q, &"rerank the results ".repeat(400)).unwrap();
+        assert_eq!(long.len(), 512);
+        assert_ne!(long[511], 102);
+        let scores = ce.score(q, &["Search results are reranked by a cross-encoder and blended with their rank.".into(), "The fan spins at three thousand RPM.".into()]).unwrap();
+        assert!(scores[0] > scores[1], "{scores:?}");
     }
 
     #[test]

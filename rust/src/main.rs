@@ -142,6 +142,8 @@ enum Command {
     DebugLoadMem { #[arg(long, default_value = "Xenova/multilingual-e5-small")] model: String },
     /// Print a query's vector and keyword lists before fusion, as JSON (parity checks)
     DebugLists { query: String, #[arg(short = 'P', long = "project-id")] project_id: String, #[arg(long = "top-k", default_value_t = 10)] top_k: usize },
+    /// Score `{"query", "passages"}` from a JSON file with the local reranker; prints token ids and scores (parity checks)
+    DebugRerank { file: String, #[arg(long, default_value = rerank::DEFAULT_LOCAL_MODEL)] model: String },
     /// Print a query's embedding as JSON (parity checks)
     Embed { text: String, #[arg(long, default_value = "Xenova/multilingual-e5-small")] model: String, #[arg(long, default_value = "query: ")] prefix: String },
 }
@@ -291,6 +293,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::DebugLists { query, project_id, top_k } => {
             println!("{}", serde_json::to_string(&search::debug_lists(&store, &query, &project_id, top_k).await?)?);
+        }
+        Command::DebugRerank { file, model } => {
+            let input: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file)?)?;
+            let query = input["query"].as_str().unwrap_or_default();
+            let passages: Vec<String> = serde_json::from_value(input["passages"].clone())?;
+            let ce = rerank::CrossEncoder::load_from(&embed::models_dir().join(&model))?;
+            let ids: Vec<Vec<u32>> = passages.iter().map(|p| ce.encode_pair(query, p).map(|e| e.0)).collect::<anyhow::Result<_>>()?;
+            println!("{}", serde_json::json!({ "ids": ids, "scores": ce.score(query, &passages)? }));
         }
         Command::Embed { text, model, prefix } => {
             println!("{}", serde_json::to_string(&embed::embed_query(&model, &prefix, &text).await?)?);
