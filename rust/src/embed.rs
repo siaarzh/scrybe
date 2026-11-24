@@ -236,9 +236,16 @@ pub fn plan_micro_batches(texts: &[String], max_seq: usize, budget: usize) -> Ve
     groups
 }
 
+/// Padded token slots per pass. 1,024 keeps searches quick and memory low while indexing.
+const DEFAULT_TOKEN_BUDGET: usize = 1024;
+
 fn token_budget() -> usize {
-    let raw = std::env::var("SCRYBE_LOCAL_EMBED_TOKEN_BUDGET").ok().and_then(|v| v.parse::<f64>().ok()).filter(|n| n.is_finite() && *n > 0.0);
-    (raw.map(|n| n as usize).unwrap_or(4096)).max(MAX_SEQ_TOKENS)
+    token_budget_from(std::env::var("SCRYBE_LOCAL_EMBED_TOKEN_BUDGET").ok().as_deref())
+}
+
+fn token_budget_from(raw: Option<&str>) -> usize {
+    let given = raw.and_then(|v| v.parse::<f64>().ok()).filter(|n| n.is_finite() && *n > 0.0).map(|n| n as usize);
+    given.unwrap_or(DEFAULT_TOKEN_BUDGET).max(MAX_SEQ_TOKENS)
 }
 
 /// `resolveModelCacheDir`.
@@ -599,6 +606,15 @@ pub async fn embed_query(model: &str, prefix: &str, query: &str) -> Result<Vec<f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pass_size_parsing() {
+        assert_eq!(token_budget_from(None), 1024);
+        assert_eq!(token_budget_from(Some("4096")), 4096);
+        assert_eq!(token_budget_from(Some("0")), 1024);
+        assert_eq!(token_budget_from(Some("junk")), 1024);
+        assert_eq!(token_budget_from(Some("10")), MAX_SEQ_TOKENS, "a pass holds at least one full row");
+    }
 
     #[test]
     fn idle_window_parsing() {

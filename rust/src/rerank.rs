@@ -410,9 +410,16 @@ impl CrossEncoder {
     }
 }
 
-/// `SCRYBE_RERANK_TOKEN_BUDGET`: padded token slots per pass; unset or `0` runs every pair in one pass.
+/// Splitting the pairs keeps a search's peak under 1 GB instead of 3.
+const DEFAULT_PASS_BUDGET: usize = 4096;
+
+/// `SCRYBE_RERANK_TOKEN_BUDGET`: padded token slots per pass; `0` runs every pair in one pass.
 fn pass_budget() -> usize {
-    std::env::var("SCRYBE_RERANK_TOKEN_BUDGET").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0)
+    pass_budget_from(std::env::var("SCRYBE_RERANK_TOKEN_BUDGET").ok().as_deref())
+}
+
+fn pass_budget_from(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_PASS_BUDGET)
 }
 
 /// Groups of indices, shortest first, each within `budget` padded slots (always at least one pair).
@@ -482,6 +489,14 @@ mod tests {
         let mut warnings = vec![];
         let c = build(|k| m.get(k).cloned(), &mut |w| warnings.push(w));
         (c, warnings)
+    }
+
+    #[test]
+    fn pass_size_parsing() {
+        assert_eq!(pass_budget_from(None), 4096);
+        assert_eq!(pass_budget_from(Some("0")), 0, "0 is still one pass");
+        assert_eq!(pass_budget_from(Some(" 1024 ")), 1024);
+        assert_eq!(pass_budget_from(Some("junk")), 4096);
     }
 
     /// Needs the cross-encoder's folder, so it runs only when `SCRYBE_TEST_RERANK_MODEL_DIR` points at one.
