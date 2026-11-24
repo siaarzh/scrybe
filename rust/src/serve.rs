@@ -17,6 +17,7 @@ use crate::locks::{self, Lock};
 use crate::manage;
 use crate::mcp::{self, Answer, Failed, Reason};
 use crate::mcp_http;
+use crate::ops::DRAINING;
 use crate::registry;
 use crate::span::Span;
 use crate::store::Store;
@@ -34,7 +35,6 @@ use tokio::net::{TcpListener, TcpStream};
 
 pub const DEFAULT_PORT: u16 = 58451;
 const DAEMON_TOOLS: &str = include_str!("daemon_tools.json");
-const DRAINING: &str = "The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call.";
 /// How long jobs that aren't index runs may hold up leaving.
 const OTHER_JOBS_CAP: Duration = Duration::from_secs(30);
 /// How often a call's memory is read for its record.

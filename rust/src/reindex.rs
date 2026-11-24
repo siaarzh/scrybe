@@ -1,7 +1,7 @@
 //! The `index` command. Mirrors `index` and `runIndexViaDaemon` in `src/cli.ts`.
-use crate::cli::{post, server_state, Server};
+use crate::cli::post;
 use crate::index::{self, Mode, Options, Progress, ProgressSink};
-use crate::ops::client;
+use crate::ops::{self, client, Server};
 use crate::store::Store;
 use crate::registry;
 use anyhow::Result;
@@ -17,7 +17,7 @@ pub struct IndexArgs {
     #[arg(short = 'P', long = "project-id", value_name = "id")]
     project_id: Option<String>,
     /// Comma-separated source IDs (e.g. primary,gitlab-issues)
-    #[arg(short = 'S', long = "source-ids", alias = "source-id", value_name = "ids")]
+    #[arg(short = 'S', long = "source-ids", value_name = "ids")]
     source_ids: Option<String>,
     /// Incrementally reindex all registered projects
     #[arg(short = 'a', long)]
@@ -234,6 +234,7 @@ async fn run(store: Store, a: IndexArgs) -> Result<i32> {
         return Ok(1);
     }
     if a.all {
+        crate::leave_on_signal();
         return all_projects(&store, &a).await;
     }
     let Some(project) = given(&a.project_id) else {
@@ -246,7 +247,7 @@ async fn run(store: Store, a: IndexArgs) -> Result<i32> {
         eprintln!("Error: --full requires --source-ids (e.g. --source-ids primary,gitlab-issues)");
         return Ok(1);
     }
-    match server_state().await {
+    match ops::server().await {
         Server::Up(port) => {
             return match via_server(port, &a, &project, if sources.len() == 1 { Some(sources[0].as_str()) } else { None }, word).await {
                 Ok(code) => Ok(code),
@@ -260,8 +261,13 @@ async fn run(store: Store, a: IndexArgs) -> Result<i32> {
             eprintln!("[scrybe] Error: the scrybe daemon is shutting down and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call.");
             return Ok(1);
         }
-        Server::Down => {}
+        Server::Failed => {
+            eprintln!("[scrybe] Error: the scrybe daemon failed to start.\nReindex requires the daemon to coordinate writes.\nDiagnose with: scrybe doctor\nSingle-shot:   SCRYBE_NO_AUTO_DAEMON=1 scrybe index ...");
+            return Ok(1);
+        }
+        Server::None => {}
     }
+    crate::leave_on_signal();
     in_process(&store, &a, &project, &sources, mode, word).await
 }
 

@@ -7,13 +7,13 @@ use crate::store::db_path;
 use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 
-struct ModelSpec {
-    dim: i32,
-    profile: &'static str,
+pub struct ModelSpec {
+    pub dim: i32,
+    pub profile: &'static str,
 }
 
 /// `PROVIDERS[*].embedding_models`: provider, model, dimensions, profile.
-const MODELS: &[(&str, &str, i32, &str)] = &[
+pub const MODELS: &[(&str, &str, i32, &str)] = &[
     ("voyage", "voyage-code-3", 1024, "code"),
     ("voyage", "voyage-3", 1024, "text"),
     ("voyage", "voyage-3-large", 1024, "text"),
@@ -30,12 +30,12 @@ const MODELS: &[(&str, &str, i32, &str)] = &[
 ];
 
 /// `getProvider` succeeds for these four.
-fn provider_known(provider: &str) -> bool {
+pub fn provider_known(provider: &str) -> bool {
     matches!(provider, "voyage" | "openai" | "local" | "custom")
 }
 
 /// The catalog's embedding base URL; the local provider has none and the custom one takes it from the preset.
-fn provider_base_url(provider: &str) -> Option<&'static str> {
+pub fn provider_base_url(provider: &str) -> Option<&'static str> {
     match provider {
         "voyage" => Some("https://api.voyageai.com/v1"),
         "openai" => Some("https://api.openai.com/v1"),
@@ -44,7 +44,7 @@ fn provider_base_url(provider: &str) -> Option<&'static str> {
     }
 }
 
-fn model_spec(provider: &str, model: &str) -> Option<ModelSpec> {
+pub fn model_spec(provider: &str, model: &str) -> Option<ModelSpec> {
     MODELS.iter().find(|(p, m, _, _)| *p == provider && *m == model).map(|(_, _, dim, profile)| ModelSpec { dim: *dim, profile })
 }
 
@@ -138,7 +138,7 @@ fn given(a: &Value, key: &str) -> bool {
 }
 
 /// A string argument that is truthy in JavaScript.
-fn text<'a>(a: &'a Value, key: &str) -> Option<&'a str> {
+pub fn text<'a>(a: &'a Value, key: &str) -> Option<&'a str> {
     a.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
@@ -147,7 +147,8 @@ fn starter_config() -> Value {
     json!({ "schema_version": 1, "embedding_presets": {}, "assignments": { "code_preset": "", "text_preset": "" } })
 }
 
-fn add_inner(a: &Value) -> Result<()> {
+/// `runPresetAdd`.
+pub fn add_preset(a: &Value) -> Result<()> {
     let name = a["name"].as_str().unwrap_or("");
     let provider = a["provider"].as_str().unwrap_or("");
     let model = a["model"].as_str().unwrap_or("");
@@ -209,10 +210,58 @@ fn add_inner(a: &Value) -> Result<()> {
 
 pub fn add_embedding_preset(a: &Value) -> Value {
     let name = a["name"].as_str().unwrap_or("");
-    match add_inner(a) {
+    match add_preset(a) {
         Ok(()) => json!({ "ok": true, "preset_name": name }),
         Err(e) => json!({ "ok": false, "preset_name": name, "error": e.to_string() }),
     }
+}
+
+/// `runPresetRm`.
+pub fn remove_preset(name: &str) -> Result<()> {
+    let _guard = registry::write_lock();
+    let Some(mut cfg) = read_scrybe_config()? else { bail!("No config.json found. Nothing to remove.") };
+    if !has(cfg["embedding_presets"].as_object(), name) {
+        bail!("Preset '{name}' not found in embedding_presets.");
+    }
+    if ["code_preset", "text_preset", "rerank_preset"].iter().any(|slot| cfg["assignments"][slot] == name) {
+        bail!("Cannot remove preset '{name}': it is currently assigned. Use 'scrybe model assign' to switch to a different preset first.");
+    }
+    for (table, kind) in [("embedding_presets", "preset"), ("reranker_presets", "reranker preset")] {
+        if let Some((user, _)) = cfg[table].as_object().and_then(|t| t.iter().find(|(_, p)| p["credentials_from"] == name)) {
+            bail!("Cannot remove preset '{name}': it is referenced via credentials_from by {kind} '{user}'.");
+        }
+    }
+    if let Some(presets) = cfg["embedding_presets"].as_object_mut() {
+        presets.shift_remove(name);
+    }
+    write_scrybe_config(&cfg)
+}
+
+/// `runAssign`: all of them or none. True when the rerank slot was cleared.
+pub fn assign_presets(code: Option<&str>, text: Option<&str>, rerank: Option<&str>) -> Result<bool> {
+    let _guard = registry::write_lock();
+    let Some(mut cfg) = read_scrybe_config()? else { bail!("No config.json found. Run 'scrybe model preset add' first.") };
+    for (name, slot) in [(code, "code_preset"), (text, "text_preset")] {
+        let Some(name) = name else { continue };
+        if !has(cfg["embedding_presets"].as_object(), name) {
+            bail!("Preset '{name}' not found in embedding_presets.");
+        }
+        resolve_preset(name, slot, &cfg, true)?;
+        cfg["assignments"][slot] = json!(name);
+    }
+    if let Some(name) = rerank {
+        if name == "none" {
+            if let Some(assignments) = cfg["assignments"].as_object_mut() {
+                assignments.shift_remove("rerank_preset");
+            }
+        } else if has(cfg["reranker_presets"].as_object(), name) {
+            cfg["assignments"]["rerank_preset"] = json!(name);
+        } else {
+            bail!("Reranker preset '{name}' not found in reranker_presets.");
+        }
+    }
+    write_scrybe_config(&cfg)?;
+    Ok(rerank == Some("none"))
 }
 
 // ─── assign_preset ───────────────────────────────────────────────────────────

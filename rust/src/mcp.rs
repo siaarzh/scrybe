@@ -313,6 +313,7 @@ pub async fn handle(store: &Store, req: &Value) -> Option<Value> {
     })
 }
 
+/// `mcp --legacy-in-process`: the read tools, with no server.
 pub async fn serve(store: &Store) -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut out = tokio::io::stdout();

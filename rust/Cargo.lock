@@ -5155,6 +5155,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rusqlite",
+ "scrybe-relay",
  "serde",
  "serde_json",
  "sha2",

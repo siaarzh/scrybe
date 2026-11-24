@@ -282,7 +282,6 @@ struct Run<'a> {
     persisted: usize,
     files_reindexed: usize,
     seen_files: HashSet<String>,
-    started: std::time::Instant,
     bytes_embedded: u64,
     phase: Phase,
     records: Records,
@@ -362,14 +361,12 @@ impl Run<'_> {
         }));
         self.phase.maybe_roll();
         batches.clear();
-        eprintln!("chunks {} persisted {} files {} after {:.0}s", self.prepared, self.persisted, self.seen_files.len(), self.started.elapsed().as_secs_f64());
         Ok(())
     }
 }
 
 pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode: Mode, options: &Options) -> Result<Value> {
     refuse_live_data_dir()?;
-    let started = std::time::Instant::now();
     let project = registry::get_project(project_id).with_context(|| format!("Project '{project_id}' not found"))?;
     let source: &Source = project.sources.iter().find(|s| s.source_id == source_id).with_context(|| format!("Source '{source_id}' not found in project '{project_id}'"))?;
     if source.kind() == "ticket" {
@@ -530,7 +527,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
 
     let mut phase = Phase::begin(&ctx, "chunk_embed");
     phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, records, options };
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), bytes_embedded: 0, phase, records, options };
     let mut batches: Vec<(String, Vec<Chunk>)> = vec![];
     let mut pending = 0;
     let mut chunks_seen = 0usize;

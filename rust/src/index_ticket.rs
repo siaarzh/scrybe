@@ -103,7 +103,6 @@ struct Run<'a> {
     persisted: usize,
     files_reindexed: usize,
     seen_files: HashSet<String>,
-    started: std::time::Instant,
     bytes_embedded: u64,
     phase: Phase,
     records: Records,
@@ -182,14 +181,12 @@ impl Run<'_> {
         }));
         self.phase.maybe_roll();
         batches.clear();
-        eprintln!("chunks {} persisted {} files {} after {:.0}s", self.prepared, self.persisted, self.seen_files.len(), self.started.elapsed().as_secs_f64());
         Ok(())
     }
 }
 
 pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Source, mode: Mode, options: &Options) -> Result<Value> {
     let source_id = source.source_id.as_str();
-    let started = std::time::Instant::now();
     // Anything but "github" goes to the GitLab plugin.
     let github = source.source_config.get("provider").and_then(Value::as_str) == Some("github");
     let embedding = registry::resolve_embedding(source)?;
@@ -311,7 +308,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
 
     let mut phase = Phase::begin(&ctx, "chunk_embed");
     phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, records, options };
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), bytes_embedded: 0, phase, records, options };
     let mut batches: Vec<(String, Vec<KnowledgeChunk>)> = vec![];
     let mut pending = 0;
     let mut chunks_seen = 0usize;

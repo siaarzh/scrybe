@@ -1266,6 +1266,8 @@ describe("the daemon commands", () => {
     assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Daemon is not running.\n", ""]);
     r = await w.cli("daemon", "refresh");
     assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Daemon is not running (no pidfile or port not yet bound).\n"]);
+    r = await w.cliWith({ SCRYBE_NO_DEPRECATION_WARNING: "1" }, "daemon", "kick");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "Daemon is not running (no pidfile or port not yet bound).\n"]);
   });
 
   test("up starts nothing when starting is switched off, and says so only when asked", async () => {
@@ -1293,6 +1295,13 @@ describe("the daemon commands", () => {
     assert.equal(queued.jobs[0].projectId, "demo");
     assert.match(queued.jobs[0].jobId, /^[0-9a-f]{8}$/);
     await until(async () => (await w.cli("jobs", "--running")).stdout === "No jobs found.\n", 60_000, "the refresh job");
+
+    r = await w.cliLive("daemon", "kick", "--project-id", "demo", "--source-id", "primary");
+    assert.deepEqual([r.status, r.stderr], [0, "[deprecated] 'daemon kick' renamed to 'daemon refresh'; will be removed in v1.0\n"]);
+    assert.match(JSON.parse(r.stdout).jobs[0].jobId, /^[0-9a-f]{8}$/);
+    r = await w.cliLive("daemon", "kick", "-P", "demo");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "error: unknown option '-P'\n"]);
+    await until(async () => (await w.cli("jobs", "--running")).stdout === "No jobs found.\n", 60_000, "the kicked job");
 
     r = await w.cliLive("daemon", "stop");
     assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Daemon stopped.\n", ""]);
@@ -3873,7 +3882,7 @@ const changeConfig = (w, change) => {
 };
 /** The tools over stdio in one process of their own, where a failure keeps its type and details. */
 const stdioTools = (w, extra = {}) => {
-  const p = spawn(CLI[0], [...CLI.slice(1), "mcp", ...(BUILD === "ts" ? ["--legacy-in-process"] : [])], { env: { ...w.env, SCRYBE_NO_AUTO_DAEMON: "1", ...extra }, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+  const p = spawn(CLI[0], [...CLI.slice(1), "mcp", "--legacy-in-process"], { env: { ...w.env, SCRYBE_NO_AUTO_DAEMON: "1", ...extra }, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
   const waiting = new Map();
   let buf = "", next = 0;
   p.stdout.on("data", (d) => {
@@ -4827,4 +4836,396 @@ describe("the tiny client and a server of another version", () => {
     assert.match((await c.call("search_code", { project_id: "demo", query: "x" })).value.error, /^Run: scrybe daemon restart --force   \(then reconnect\)\n\nscrybe v0\.34\.0 upgraded lancedb\./);
     assert.equal((await c.call("status")).value.daemon_running, false);
   });
+});
+
+describe("the old flat commands", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  const note = (old, now) => `[deprecated] '${old}' renamed to '${now}'; will be removed in v1.0\n`;
+  const uncaught = (message) => `scrybe error: Error: ${message}\n`;
+  const same = async (args, want) => {
+    const r = await w.cli(...args);
+    assert.deepEqual([r.status, r.stdout, r.stderr], want, args.join(" "));
+  };
+
+  test("projects are added, described, listed and removed under their old names", async () => {
+    const added = note("add-project", "project add");
+    await same(["add-project", "--id", "extra", "--desc", "Second"], [0, "Added project 'extra'\n", added]);
+    await same(["add-project", "--id", "extra"], [1, "", added + uncaught("Project 'extra' already exists")]);
+    await same(["update-project", "--id", "extra", "--desc", ""], [0, "Updated project 'extra'\n", note("update-project", "project update")]);
+    const r = await w.cli("list-projects");
+    assert.deepEqual([r.status, r.stderr], [0, note("list-projects", "project list")]);
+    assert.match(r.stdout, /\nextra\n {2}\(no sources\)\n$/);
+    await same(["remove-project", "--id", "extra"], [0, "Removed project 'extra'\n", note("remove-project", "project remove")]);
+    await same(["remove-project", "--id", "extra"], [1, "", note("remove-project", "project remove") + uncaught("Project 'extra' not found")]);
+  });
+
+  test("sources are added, changed and removed under their old names", async () => {
+    let r = await w.cli("add-source", "-P", "demo", "-S", "two", "--type", "code", "--root", w.repo);
+    assert.deepEqual([r.status, r.stderr], [0, note("add-source", "source add")]);
+    assert.match(r.stdout, /^Added source 'two' to project 'demo' — reindex job: [0-9a-f]{8}\n$/);
+    await same(["update-source", "-P", "demo", "-S", "two", "--languages", "ts"], [0, "Updated source 'two' in project 'demo'\n", note("update-source", "source update")]);
+    await same(["remove-source", "--project-id", "demo", "--source-id", "two"], [0, "Removed source 'two' from project 'demo'\n", note("remove-source", "source remove")]);
+    await same(["remove-source", "-P", "demo"], [1, "", "error: required option '--project-id <id>' not specified\n"]);
+    r = await w.cliWith({ SCRYBE_NO_DEPRECATION_WARNING: "1" }, "add-source", "-P", "gone", "-S", "a", "--type", "code", "--root", w.repo);
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", uncaught("Project 'gone' not found")]);
+  });
+
+  test("knowledge is searched under its old name", async () => {
+    const told = note("search-knowledge", "search knowledge");
+    await same(["search-knowledge", "--project-id", "demo"], [1, "", "error: missing required argument 'query'\n"]);
+    const r = await w.cli("search-knowledge", "--project-id", "gone", "q");
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.startsWith(`${told}scrybe error: Error: `), r.stderr);
+  });
+});
+
+describe("the model commands", () => {
+  let w;
+  before(async () => {
+    w = await makeWorld();
+    await w.index("--full");
+    await w.cli("projects");
+  });
+  after(() => w.stop());
+
+  const config = () => JSON.parse(readFileSync(join(w.data, "config.json"), "utf8"));
+  const same = async (args, want) => {
+    const r = await w.cli("model", ...args);
+    assert.deepEqual([r.status, r.stdout, r.stderr], want, args.join(" "));
+  };
+  const refused = (message) => [1, "", `[scrybe] ${message}\n`];
+
+  test("list is the catalog as a table", async () => {
+    const r = await w.cli("model", "list");
+    assert.deepEqual([r.status, r.stderr], [0, ""]);
+    const lines = r.stdout.split("\n");
+    assert.deepEqual(lines.slice(0, 3), ["Provider            Model                           Dim   Profile Notes", "-".repeat(71), "Voyage AI           voyage-code-3                   1024  code    "]);
+    assert.ok(lines.includes("                    rerank-2                        -     rerank  "));
+    assert.equal(lines.at(-2), "Custom (OpenAI-compatible)(user-defined)                  -     -       base_url + dim required");
+  });
+
+  test("show gives the assignments and what they resolve to, and no secret", async () => {
+    const one = (label, resolved) => `=== ${label} preset: 'fake' ===\n\n  provider    : custom\n  model       : fake-model\n  base_url    : ${w.fake.url}\n  dim         : 8\n  credentials : \${CONTRACT_EMBED_KEY}\n  resolved    : ${resolved}\n\n`;
+    const head = "=== Current Assignments ===\n\n  code_preset   : fake\n  text_preset   : fake\n  rerank_preset : (none)\n\n";
+    await same(["show"], [0, head + one("code", "ok") + one("text", "ok"), ""]);
+    const r = await w.cliBare({ SCRYBE_NO_AUTO_DAEMON: "1", CONTRACT_EMBED_KEY: undefined }, "model", "show");
+    const why = "ERROR — env var CONTRACT_EMBED_KEY not set (referenced in scrybe config)";
+    assert.deepEqual([r.status, r.stdout], [0, head + one("code", why) + one("text", why)]);
+  });
+
+  test("a preset is added, and refused when it makes no sense", async () => {
+    const add = (...rest) => ["preset", "add", "mine", ...rest];
+    await same(add("--provider", "nope", "--model", "m"), refused("Unknown provider: \"nope\". Run 'scrybe model list' to see available providers."));
+    await same(add("--provider", "voyage", "--model", "m"), refused("Model \"m\" not found in provider \"voyage\". Run 'scrybe model list' to see available models."));
+    await same(add("--provider", "voyage", "--model", "voyage-4", "--dim", "5"), refused("--dim is only valid for custom providers. Catalog providers derive dim from the model spec."));
+    await same(add("--provider", "custom", "--model", "m", "--base-url", "http://x/v1"), refused("--dim is required for custom providers."));
+    await same(["preset", "add", "--provider", "voyage", "--model", "voyage-4"], [1, "", "error: missing required argument 'name'\n"]);
+    await same(add("--provider", "custom", "--model", "m", "--base-url", w.fake.url, "--dim", "8", "--encoding-format", "float", "--credentials-from", "fake"), [0, "Preset 'mine' added to config.json.\n", ""]);
+    assert.deepEqual(config().embedding_presets.mine, { provider: "custom", model: "m", credentials_from: "fake", base_url: w.fake.url, dim: 8, encoding_format: "float" });
+    await same(add("--provider", "voyage", "--model", "voyage-4"), refused("Preset 'mine' already exists. Edit its config.json entry, or add a new preset and assign it."));
+  });
+
+  test("presets are assigned together or not at all", async () => {
+    const before = config();
+    await same(["assign"], refused("At least one of --code, --text, or --rerank must be specified."));
+    await same(["assign", "--code", "mine", "--text", "gone"], refused("Preset 'gone' not found in embedding_presets."));
+    await same(["assign", "--text", "mine", "--rerank", "gone"], refused("Reranker preset 'gone' not found in reranker_presets."));
+    assert.deepEqual(config(), before);
+    await same(["assign", "--code", "mine", "--rerank", "none"], [0, "Rerank preset cleared.\nAssignments updated in config.json.\n", ""]);
+    assert.deepEqual(config().assignments, { code_preset: "mine", text_preset: "fake" });
+  });
+
+  test("a preset in use stays", async () => {
+    await same(["preset", "rm", "gone"], refused("Preset 'gone' not found in embedding_presets."));
+    await same(["preset", "rm", "mine"], refused("Cannot remove preset 'mine': it is currently assigned. Use 'scrybe model assign' to switch to a different preset first."));
+    await same(["assign", "--code", "mine", "--text", "mine"], [0, "Assignments updated in config.json.\n", ""]);
+    await same(["preset", "rm", "fake"], refused("Cannot remove preset 'fake': it is referenced via credentials_from by preset 'mine'."));
+    await same(["assign", "--code", "fake", "--text", "fake"], [0, "Assignments updated in config.json.\n", ""]);
+    await same(["preset", "remove", "mine"], [0, "Preset 'mine' removed from config.json.\n", ""]);
+    assert.deepEqual(Object.keys(config().embedding_presets), ["fake"]);
+  });
+
+  test("switch asks first, and only a person can answer", async () => {
+    await same(["switch", "--source-type", "both"], refused("--source-type must be 'code' or 'text', got: 'both'"));
+    await same(["switch", "--source-type", "text"], [0, "No text sources found. Nothing to switch.\n", ""]);
+    const r = await w.cli("model", "switch", "--source-type", "code");
+    assert.deepEqual([r.status, r.stderr], [1, "[scrybe] Non-interactive input. Pass --yes to confirm without a prompt.\n"]);
+    assert.match(r.stdout, /^\nSwitching 1 code source\(s\) to preset 'fake':\n {2}Provider : custom\n {2}Model {4}: fake-model\n {2}Dim {6}: 8\n\n {2}demo\/primary {2}\((\d+) chunks currently indexed\)\n\n {2}Estimated tokens to re-embed: ~[\d,]+ \(\1 chunks × 500 tokens avg\)\. Check your provider's pricing for cost\.\n\n {2}This will drop and fully reindex the affected tables\. All existing vectors will be replaced\.\n$/);
+  });
+
+  test("switch rebuilds the sources and notes what built them", async () => {
+    const calls = w.fake.log.length;
+    const r = await w.cli("model", "switch", "--source-type", "code", "--yes");
+    assert.deepEqual([r.status, r.stderr], [0, ""]);
+    const tail = r.stdout.slice(r.stdout.indexOf("\nReindexing...")).replace(/\r[^\r\n]*/g, "");
+    assert.equal(tail, "\nReindexing...\n  demo/primary...\n    Done.\n\nAll 1 source(s) reindexed with preset 'fake'.\n\nTables recreated. If an MCP client (Claude Code, Cline) is connected, restart it to pick up the new tables.\n");
+    assert.ok(w.fake.log.length > calls);
+    const [{ sources: [source] }] = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"));
+    const meta = JSON.parse(readFileSync(join(w.data, "lancedb", `${source.table_name}-meta.json`), "utf8"));
+    assert.deepEqual([meta.model, meta.dim, meta.provider, meta.preset_at_index_time], ["fake-model", 8, "custom", "fake"]);
+    assert.ok(Date.parse(meta.indexed_at) > 0 && meta.chunk_id_scheme >= 1, JSON.stringify(meta));
+    assert.match((await w.cli("search", "code", "-P", "demo", "frobnicateWidget")).stdout, /src\/widget\.ts/);
+  });
+});
+
+describe("a command that needs a server", () => {
+  let w, gl, container;
+  before(async () => {
+    gl = await fakeGitlab();
+    w = await makeWorld();
+    container = (await w.cliBare({}, "daemon", "up", "--verbose")).stdout.startsWith("Skipping daemon start (container)");
+    await w.killServer();
+  });
+  afterEach(() => w.killServer());
+  after(async () => { await w.stop(); gl.close(); });
+
+  const sources = () => JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources.map((s) => s.source_id);
+  /** A slow machine may need longer than a command waits; the server it began is there for the next try. */
+  const patient = async (run) => {
+    for (let i = 0; ; i++) {
+      const r = await run();
+      if (r.status === 0 || i === 5 || !/failed to start/.test(r.stderr)) return r;
+      await sleep(2000);
+    }
+  };
+
+  test("starts it to index", async (t) => {
+    if (container) return t.skip("this host counts as a container");
+    const r = await patient(() => w.cliLive("index", "-P", "demo", "-S", "primary", "--detach"));
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^Job \w+: [0-9a-f]{8}( \(queue position: \d+\))?\n$/);
+    assert.ok(await w.health());
+  });
+
+  test("starts it to add a source, with the variable the source's token names", async (t) => {
+    if (container) return t.skip("this host counts as a container");
+    const r = await patient(() => w.cliBare({ CONTRACT_PAT: GITLAB_TOKEN }, "source", "add", "-P", "demo", "-S", "tickets", "--type", "ticket", "--url", gl.url, "--project", GITLAB_PROJECT, "--token", "${CONTRACT_PAT}"));
+    assert.deepEqual([r.status, r.stderr], [0, ""]);
+    assert.match(r.stdout, /^Added source 'tickets' to project 'demo' — reindex job: [0-9a-f]{8}\n$/);
+    const id = r.stdout.match(/job: (\w+)/)[1];
+    const c = w.client();
+    await c.hello();
+    const done = await until(async () => { const s = (await c.call("reindex_status", { job_id: id })).value; return s?.status !== "running" && s?.status !== "queued" && s; }, 60_000, "the job to finish");
+    assert.equal(done.status, "done", JSON.stringify(done));
+  });
+
+  test("won't work without one that can't start, and takes back the source it saved", async (t) => {
+    if (container) return t.skip("this host counts as a container");
+    let r = await w.cliBare({ SCRYBE_DAEMON_PORT: "9999999" }, "index", "-P", "demo", "-S", "primary");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "[scrybe] Error: the scrybe daemon failed to start.\nReindex requires the daemon to coordinate writes.\nDiagnose with: scrybe doctor\nSingle-shot:   SCRYBE_NO_AUTO_DAEMON=1 scrybe index ...\n"]);
+    const before = sources();
+    r = await w.cliBare({ SCRYBE_DAEMON_PORT: "9999999" }, "source", "add", "-P", "demo", "-S", "late", "--type", "code", "--root", w.repo);
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "[scrybe] The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\nDiagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ...\n"]);
+    assert.deepEqual(sources(), before);
+  });
+
+  test("gives up on one that is on its way out", async (t) => {
+    if (container) return t.skip("this host counts as a container");
+    const fake = createHttpServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ready: true, draining: true }));
+    });
+    await new Promise((r) => fake.listen(0, "127.0.0.1", r));
+    writeFileSync(join(w.data, "daemon.pid"), JSON.stringify({ pid: 999_999_991, port: fake.address().port }));
+    const retry = "Retry in a moment — a replacement daemon starts on the next call.\n";
+    try {
+      let r = await w.cliLive("index", "-P", "demo", "-S", "primary");
+      assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", `[scrybe] Error: the scrybe daemon is shutting down and is not accepting new jobs.\n${retry}`]);
+      const leaving = `[scrybe] The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\n${retry}`;
+      const before = sources();
+      r = await w.cliLive("source", "add", "-P", "demo", "-S", "late", "--type", "code", "--root", w.repo);
+      assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", leaving]);
+      assert.deepEqual(sources(), before);
+      r = await w.cliLive("drop-ephemeral", "-P", "demo", "--label", "_ephemeral/x");
+      assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", leaving]);
+    } finally {
+      rmSync(join(w.data, "daemon.pid"), { force: true });
+      fake.closeAllConnections();
+      fake.close();
+    }
+  });
+});
+
+describe("the mcp command", () => {
+  let w, container;
+  const command = [...CLI, "mcp"];
+  before(async () => {
+    w = await makeWorld();
+    container = (await w.cliBare({}, "daemon", "up", "--verbose")).stdout.startsWith("Skipping daemon start (container)");
+    await w.killServer();
+  });
+  after(() => w.stop());
+
+  test("with starting switched off, offers only what needs no server", async () => {
+    const c = w.client({ command, extraEnv: { SCRYBE_NO_AUTO_DAEMON: "1", SCRYBE_MCP_COLD_START_WAIT_MS: "0" } });
+    const m = await c.hello();
+    assert.equal(m.result.serverInfo.name, "scrybe");
+    assert.deepEqual(await c.toolNames(), ["status", "doctor", "init"]);
+    assert.equal(w.pidfile(), null);
+  });
+
+  test("starts the shared server and carries the calls", async (t) => {
+    if (container) return t.skip("this host counts as a container");
+    const c = w.client({ command, extraEnv: { SCRYBE_MCP_COLD_START_WAIT_MS: "20000" } });
+    await c.hello();
+    assert.equal(w.pidfile(), null, "the handshake needs no server");
+    await c.toolNames();
+    await until(() => w.health(), 60_000, "the server");
+    const names = await c.toolNames();
+    for (const name of ["search_code", "list_projects", "reindex_project", "gc"]) assert.ok(names.includes(name), name);
+    const r = await c.call("list_projects");
+    assert.equal(r.value[0].id, "demo");
+    await until(async () => { const pf = w.pidfile(); return (await (await fetch(`http://127.0.0.1:${pf.port}/status`)).json()).clientCount >= 1; }, 30_000, "the client to be counted");
+  });
+
+  test("--legacy-in-process answers by itself, and says it is going away", async () => {
+    await w.killServer();
+    const c = w.client({ command: [...command, "--legacy-in-process"], extraEnv: { SCRYBE_NO_AUTO_DAEMON: "1" }, keepErrors: true });
+    await c.hello();
+    assert.equal((await c.call("list_projects")).value[0].id, "demo");
+    assert.ok(c.errors.includes("[scrybe] in-process MCP mode is deprecated, will be removed in v0.34.0. See `scrybe daemon install`.\n"), c.errors);
+    assert.equal(w.pidfile(), null);
+  });
+});
+
+describe("a signal to a command at work", { skip: process.platform === "win32" ? "no signals on Windows" : false }, () => {
+  let w, embedder, release;
+  before(async () => {
+    embedder = await fakeEmbedder();
+    w = await makeWorld({ embedder });
+    await w.cli("projects");
+    embedder.gate.hold = new Promise((r) => { release = r; });
+  });
+  after(async () => { release(); await w.stop(); embedder.close(); });
+
+  for (const [signal, args] of [["SIGINT", ["index", "-P", "demo", "-S", "primary"]], ["SIGTERM", ["index", "--all"]], ["SIGTERM", ["source", "add", "-P", "demo", "-S", "two", "--type", "code"]]]) {
+    test(`${signal} ends ${args[0]} ${args[1]} at once, without an error`, async () => {
+      const waiting = embedder.gate.waiting;
+      const p = spawn(CLI[0], [...CLI.slice(1), ...args, ...(args[0] === "source" ? ["--root", w.repo] : [])], { env: { ...w.env, SCRYBE_NO_AUTO_DAEMON: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+      let errors = "";
+      p.stderr.on("data", (d) => { errors += d; });
+      p.stdout.resume();
+      const gone = new Promise((r) => p.on("exit", (code, by) => r([code, by])));
+      await until(() => embedder.gate.waiting > waiting, 60_000, "the embedding request");
+      p.kill(signal);
+      assert.deepEqual(await gone, [0, null]);
+      assert.equal(errors, "");
+    });
+  }
+
+  test("leaves its job as it was, for the next server to close", async () => {
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"), { readOnly: true });
+    try {
+      assert.deepEqual(db.prepare("SELECT status, finished_at FROM jobs").all().map((r) => ({ ...r })), [{ status: "running", finished_at: null }]);
+    } finally { db.close(); }
+  });
+});
+
+describe("a server of another version", () => {
+  let w, own;
+  before(async () => {
+    w = await makeWorld();
+    await w.cli("projects");
+    own = (await w.cli("--version")).stdout.trim();
+  });
+  after(async () => { rmSync(join(w.data, "daemon.pid"), { force: true }); await w.stop(); });
+
+  const pidfile = (version) => writeFileSync(join(w.data, "daemon.pid"), JSON.stringify({ pid: 999_999_991, port: 1, version }));
+
+  test("is mentioned once by any command", async () => {
+    pidfile("0.0.1");
+    const notice = `[scrybe] daemon is running v0.0.1 but CLI is v${own}.\n[scrybe] Restart to pick up new code: scrybe daemon stop  (auto-respawns on next call)\n`;
+    for (const args of [["projects"], ["model", "list"], ["--version"], ["index", "--help"]]) {
+      const r = await w.cli(...args);
+      assert.deepEqual([r.status, r.stderr], [0, notice], args.join(" "));
+    }
+    assert.equal((await w.cli("completion")).stderr, `${notice}error: missing required argument 'shell'\n`);
+  });
+
+  test("is not mentioned where a program reads the output, or for the same version", async () => {
+    pidfile("0.0.1");
+    assert.equal((await w.cli("ignore", "list", "--json")).stderr, "");
+    assert.equal((await w.cliWith({ SCRYBE_JSON_OUTPUT: "1" }, "projects")).stderr, "");
+    for (const version of [own, undefined, ""]) {
+      pidfile(version);
+      assert.equal((await w.cli("projects")).stderr, "", String(version));
+    }
+  });
+});
+
+describe("what the command line says when it is misused", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  for (const [line, text] of [
+    ["search code", "required option '-P, --project-id <id>' not specified"],
+    ["search code -P demo", "missing required argument 'query'"],
+    ["search knowledge -P demo", "missing required argument 'query'"],
+    ["search code -P", "option '-P, --project-id <id>' argument missing"],
+    ["search code -P demo --nope q", "unknown option '--nope'"],
+    ["index --project-idd demo", "unknown option '--project-idd'\n(Did you mean --project-id?)"],
+    ["index -P demo extra", "too many arguments for 'index'. Expected 0 arguments but got 1: extra."],
+    ["gc -z", "unknown option '-z'"],
+    ["project lst", "unknown command 'lst'\n(Did you mean one of list, ls?)"],
+    ["daemon zzzzzz", "unknown command 'zzzzzz'"],
+    ["completion bash zsh", "too many arguments for 'completion'. Expected 1 argument but got 2: bash, zsh."],
+    ["nonsense", "too many arguments. Expected 0 arguments but got 1: nonsense."],
+    ["drop-ephemeral -P demo", "required option '--label <label>' not specified"],
+  ]) {
+    test(`scrybe ${line}`, async () => {
+      const r = await w.cli(...line.split(" "));
+      assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", `error: ${text}\n`]);
+    });
+  }
+
+  test("the last of a repeated option wins, and a value may start with a dash", async () => {
+    let r = await w.cli("project", "add", "--id", "one", "--id", "two", "--desc", "x", "--desc", "--dashed");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "Added project 'two'\n", ""]);
+    assert.equal(JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8")).find((p) => p.id === "two").description, "--dashed");
+    r = await w.cli("ignore", "list", "-P", "nope", "-P", "demo", "--json", "--json");
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, "[]\n", ""]);
+    r = await w.cli("ignore", "list", "-P", "-odd");
+    assert.deepEqual([r.status, r.stderr], [1, "[scrybe] Project '-odd' not found\n"]);
+    r = await w.cli("branch", "pin", "-P", "demo", "-5");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout).added, ["-5"]);
+  });
+});
+
+describe("help", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  const help = async (...args) => {
+    const r = await w.cli(...args, "--help");
+    assert.deepEqual([r.status, r.stderr], [0, ""], args.join(" "));
+    return r.stdout.replace(/\s+/g, " ");
+  };
+
+  test("lists the commands people use and none of the others", async () => {
+    const text = await help();
+    for (const part of ["Usage: scrybe ", "Self-hosted semantic code search", "Manage registered projects", "Edit per-source private ignore rules (stored in DATA_DIR — never committed)", "Manage embedding model presets and assignments"]) assert.ok(text.includes(part), part);
+    for (const hidden of ["add-project", "search-knowledge", "deprecated", "debug-", " mcp "]) assert.ok(!text.includes(hidden), hidden);
+    assert.ok(!(await help("daemon")).includes("kick"));
+  });
+
+  for (const [command, ...parts] of [
+    ["index", "Usage: scrybe index ", "Comma-separated source IDs (e.g. primary,gitlab-issues)", "Examples: scrybe index -P myrepo scrybe index -P myrepo -S primary,gitlab-issues scrybe index --all"],
+    ["source add", "auto-enqueue a reindex", "[deprecated: use --token] GitLab personal access token", "scrybe source add -P myrepo -S gh-issues --type ticket --provider github"],
+    ["search code", "Search query", "Branch to search (default: current HEAD)", 'Example: scrybe search code -P myrepo "auth flow"'],
+    ["daemon stop", "Gracefully stop the running daemon", "Abandon the drain", "scrybe daemon stop --force # don't wait for an in-flight reindex"],
+    ["model preset add", "Provider key (voyage, openai, local, custom)", "scrybe model preset add together-bert --provider custom"],
+    ["ignore", "It is applied additively on top of .gitignore and .scrybeignore."],
+  ]) {
+    test(`scrybe ${command}`, async () => {
+      const text = await help(...command.split(" "));
+      for (const part of parts) assert.ok(text.includes(part), `${part}\n${text}`);
+    });
+  }
 });

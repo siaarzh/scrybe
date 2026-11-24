@@ -69,7 +69,7 @@ jobs:
         run: cargo build --locked --workspace --bins
 
       - name: Unit tests
-        run: cargo test --locked --workspace --bins
+        run: cargo test --locked --workspace --lib --bins
 
       - name: Contract suite
         run: |

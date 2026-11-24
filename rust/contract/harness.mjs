@@ -390,10 +390,10 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
   return world;
 }
 
-/** The tiny client over stdio, starting the server named by this run. */
+/** The tiny client over stdio, starting the server named by this run, or another `command` that serves stdio. */
 export class Client {
-  constructor(env, { start = SERVER, extraEnv = {}, keepErrors = false } = {}) {
-    this.p = spawn(RELAY[0], [...RELAY.slice(1), "--start", ...start], { env: { ...env, ...extraEnv }, stdio: ["pipe", "pipe", keepErrors ? "pipe" : "ignore"], windowsHide: true });
+  constructor(env, { start = SERVER, command = [...RELAY, "--start", ...start], extraEnv = {}, keepErrors = false } = {}) {
+    this.p = spawn(command[0], command.slice(1), { env: { ...env, ...extraEnv }, stdio: ["pipe", "pipe", keepErrors ? "pipe" : "ignore"], windowsHide: true });
     this.errors = "";
     this.p.stderr?.on("data", (d) => { this.errors += d; });
     this.pending = new Map();

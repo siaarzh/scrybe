@@ -84,8 +84,19 @@ pub enum DaemonAction {
         #[arg(long)]
         watch: bool,
     },
+    /// [deprecated] Use: scrybe daemon refresh
+    Kick {
+        #[arg(long = "project-id", value_name = "id")]
+        project_id: Option<String>,
+        #[arg(long = "source-id", value_name = "id")]
+        source_id: Option<String>,
+        #[arg(long, value_name = "branch")]
+        branch: Option<String>,
+        #[arg(long, value_name = "mode", default_value = "incremental")]
+        mode: String,
+    },
     /// Start the daemon if not running (idempotent, quiet by default)
-    #[command(alias = "ensure-running")]
+    #[command(visible_alias = "ensure-running")]
     Up {
         /// Print status to stdout
         #[arg(long)]
@@ -267,7 +278,7 @@ fn given(v: &Option<String>) -> Option<&str> {
     v.as_deref().filter(|s| !s.is_empty())
 }
 
-fn confirm(prompt: &str) -> Result<bool> {
+pub(crate) fn confirm(prompt: &str) -> Result<bool> {
     print!("{prompt}");
     std::io::stdout().flush()?;
     let mut line = String::new();
@@ -617,7 +628,7 @@ async fn wait_for_server(deadline: Instant) -> Result<bool, &'static str> {
     }
 }
 
-/// `ensureRunning` as `daemon up` uses it: Ok(draining) once a server answers, Err(reason) otherwise.
+/// `ensureRunning`: Ok(draining) once a server answers, Err(reason) otherwise.
 async fn ensure_running(budget: Duration) -> Result<bool, &'static str> {
     if std::env::var("SCRYBE_NO_AUTO_DAEMON").as_deref() == Ok("1") {
         return Err("opted-out");
@@ -652,6 +663,46 @@ async fn ensure_running(budget: Duration) -> Result<bool, &'static str> {
         return Err("spawn-failed");
     }
     wait_for_server(deadline).await
+}
+
+/// The budget a command that needs a server gives it.
+const ENSURE_WAIT: Duration = Duration::from_secs(3);
+pub(crate) const DRAINING: &str = "The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call.";
+pub(crate) const NOT_STARTED: &str = "The scrybe daemon failed to start. Reindex requires the daemon to coordinate writes.\nDiagnose: scrybe doctor  |  Single-shot: SCRYBE_NO_AUTO_DAEMON=1 scrybe index ...";
+
+pub(crate) enum Server {
+    Up(u16),
+    Draining,
+    /// It should run and doesn't.
+    Failed,
+    /// No server by design: starting is switched off, or this is a container.
+    None,
+}
+
+/// The server a command hands its work to, started if need be.
+pub(crate) async fn server() -> Server {
+    match Box::pin(ensure_running(ENSURE_WAIT)).await {
+        Ok(true) => Server::Draining,
+        Ok(false) => pidfile().and_then(|(_, port)| u16::try_from(port).ok()).filter(|p| *p > 0).map_or(Server::None, Server::Up),
+        Err("opted-out" | "container") => Server::None,
+        Err(_) => Server::Failed,
+    }
+}
+
+/// What a command says of a running server of another version.
+fn skew_notice(daemon: &str) -> Option<String> {
+    (!daemon.is_empty() && daemon != config::VERSION).then(|| format!("[scrybe] daemon is running v{daemon} but CLI is v{}.\n[scrybe] Restart to pick up new code: scrybe daemon stop  (auto-respawns on next call)", config::VERSION))
+}
+
+/// Quiet where the output is for a program to read.
+pub fn warn_version_skew(json: bool) {
+    if json || std::env::var("SCRYBE_JSON_OUTPUT").as_deref() == Ok("1") {
+        return;
+    }
+    let pidfile = std::fs::read_to_string(config::pidfile_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    if let Some(notice) = pidfile.and_then(|v| skew_notice(v["version"].as_str().unwrap_or(""))) {
+        eprintln!("{notice}");
+    }
 }
 
 async fn up(verbose: bool) -> Result<()> {
@@ -732,6 +783,23 @@ pub async fn daemon(store: Store, action: DaemonAction) {
         DaemonAction::Status { watch } => old_status(watch).await,
         DaemonAction::Stop { force } => stop(force).await,
         DaemonAction::Refresh { project_id, source_id, branch, mode } => refresh(project_id, source_id, branch, mode).await,
+        DaemonAction::Kick { project_id, source_id, branch, mode } => {
+            crate::legacy::warn_deprecated("daemon kick", "daemon refresh");
+            refresh(project_id, source_id, branch, mode).await
+        }
         DaemonAction::Up { verbose } => up(verbose).await,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_of_another_version_is_mentioned() {
+        assert_eq!(skew_notice(""), None);
+        assert_eq!(skew_notice(config::VERSION), None);
+        let told = skew_notice("0.1.0").unwrap();
+        assert_eq!(told, format!("[scrybe] daemon is running v0.1.0 but CLI is v{}.\n[scrybe] Restart to pick up new code: scrybe daemon stop  (auto-respawns on next call)", config::VERSION));
+    }
 }

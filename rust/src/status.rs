@@ -182,7 +182,7 @@ fn relative_iso(iso: Option<&str>) -> String {
 }
 
 /// `n.toLocaleString()` in English: thousands separated by commas.
-fn grouped(n: usize) -> String {
+pub(crate) fn grouped(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {

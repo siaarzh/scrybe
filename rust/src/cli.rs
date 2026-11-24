@@ -1,7 +1,8 @@
 //! The management commands of the command line. Mirrors the registration loop, the plural shorthands
-//! and the branch group in `src/cli.ts`. Every command runs in this process, like today's does without a daemon.
+//! and the branch group in `src/cli.ts`.
 use crate::jobs::{now_ms, Queue, Request};
 use crate::jsstr::js_trim;
+use crate::ops::{self, Server};
 use crate::store::Store;
 use crate::{ephemeral, manage, pinned, registry, source_add, tools};
 use anyhow::{anyhow, bail, Result};
@@ -17,7 +18,7 @@ const SOURCE_FLAG: &str = "-S, --source-id <id>";
 #[derive(Subcommand)]
 pub enum ProjectAction {
     /// List all registered projects and their sources
-    #[command(alias = "ls")]
+    #[command(visible_alias = "ls")]
     List,
     /// Register a new project container
     Add {
@@ -36,7 +37,7 @@ pub enum ProjectAction {
         desc: Option<String>,
     },
     /// Unregister a project and drop all its source tables
-    #[command(aliases = ["rm", "delete"])]
+    #[command(visible_alias = "rm", alias = "delete")]
     Remove {
         #[arg(value_name = "id")]
         target: Option<String>,
@@ -45,66 +46,72 @@ pub enum ProjectAction {
     },
 }
 
+#[derive(Args)]
+pub struct SourceAddArgs {
+    #[arg(short = 'P', long = "project-id", value_name = "id")]
+    project_id: Option<String>,
+    #[arg(short = 'S', long = "source-id", value_name = "id")]
+    source_id: Option<String>,
+    #[arg(long = "type", value_name = "type")]
+    kind: Option<String>,
+    #[arg(long, value_name = "path")]
+    root: Option<String>,
+    #[arg(long, value_name = "langs")]
+    languages: Option<String>,
+    #[arg(long, value_name = "provider")]
+    provider: Option<String>,
+    #[arg(long, value_name = "url")]
+    url: Option<String>,
+    #[arg(long, value_name = "id")]
+    project: Option<String>,
+    #[arg(long, value_name = "token")]
+    token: Option<String>,
+    #[arg(long = "gitlab-url", value_name = "url")]
+    gitlab_url: Option<String>,
+    #[arg(long = "gitlab-project-id", value_name = "id")]
+    gitlab_project_id: Option<String>,
+    #[arg(long = "gitlab-token", value_name = "token")]
+    gitlab_token: Option<String>,
+}
+
+#[derive(Args)]
+pub struct SourceUpdateArgs {
+    #[arg(short = 'P', long = "project-id", value_name = "id")]
+    project_id: Option<String>,
+    #[arg(short = 'S', long = "source-id", value_name = "id")]
+    source_id: Option<String>,
+    #[arg(long, value_name = "url")]
+    url: Option<String>,
+    #[arg(long, value_name = "id")]
+    project: Option<String>,
+    #[arg(long, value_name = "token")]
+    token: Option<String>,
+    #[arg(long = "gitlab-token", value_name = "token")]
+    gitlab_token: Option<String>,
+    #[arg(long = "gitlab-url", value_name = "url")]
+    gitlab_url: Option<String>,
+    #[arg(long = "gitlab-project-id", value_name = "id")]
+    gitlab_project_id: Option<String>,
+    #[arg(long, value_name = "path")]
+    root: Option<String>,
+    #[arg(long, value_name = "langs")]
+    languages: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum SourceAction {
     /// List all sources (optionally filter by project)
-    #[command(alias = "ls")]
+    #[command(visible_alias = "ls")]
     List {
         #[arg(short = 'P', long = "project-id", value_name = "id")]
         project_id: Option<String>,
     },
     /// Add an indexable source to a project and queue its first index
-    Add {
-        #[arg(short = 'P', long = "project-id", value_name = "id")]
-        project_id: Option<String>,
-        #[arg(short = 'S', long = "source-id", value_name = "id")]
-        source_id: Option<String>,
-        #[arg(long = "type", value_name = "type")]
-        kind: Option<String>,
-        #[arg(long, value_name = "path")]
-        root: Option<String>,
-        #[arg(long, value_name = "langs")]
-        languages: Option<String>,
-        #[arg(long, value_name = "provider")]
-        provider: Option<String>,
-        #[arg(long, value_name = "url")]
-        url: Option<String>,
-        #[arg(long, value_name = "id")]
-        project: Option<String>,
-        #[arg(long, value_name = "token")]
-        token: Option<String>,
-        #[arg(long = "gitlab-url", value_name = "url")]
-        gitlab_url: Option<String>,
-        #[arg(long = "gitlab-project-id", value_name = "id")]
-        gitlab_project_id: Option<String>,
-        #[arg(long = "gitlab-token", value_name = "token")]
-        gitlab_token: Option<String>,
-    },
+    Add(SourceAddArgs),
     /// Update an existing source's config
-    Update {
-        #[arg(short = 'P', long = "project-id", value_name = "id")]
-        project_id: Option<String>,
-        #[arg(short = 'S', long = "source-id", value_name = "id")]
-        source_id: Option<String>,
-        #[arg(long, value_name = "url")]
-        url: Option<String>,
-        #[arg(long, value_name = "id")]
-        project: Option<String>,
-        #[arg(long, value_name = "token")]
-        token: Option<String>,
-        #[arg(long = "gitlab-token", value_name = "token")]
-        gitlab_token: Option<String>,
-        #[arg(long = "gitlab-url", value_name = "url")]
-        gitlab_url: Option<String>,
-        #[arg(long = "gitlab-project-id", value_name = "id")]
-        gitlab_project_id: Option<String>,
-        #[arg(long, value_name = "path")]
-        root: Option<String>,
-        #[arg(long, value_name = "langs")]
-        languages: Option<String>,
-    },
+    Update(SourceUpdateArgs),
     /// Remove a source from a project and drop its vector table
-    #[command(aliases = ["rm", "delete"])]
+    #[command(visible_alias = "rm", alias = "delete")]
     Remove {
         #[arg(short = 'P', long = "project-id", value_name = "id")]
         project_id: Option<String>,
@@ -126,10 +133,10 @@ pub enum JobAction {
 #[derive(Subcommand)]
 pub enum BranchAction {
     /// List indexed branches, or pinned ones with --pinned
-    #[command(alias = "ls")]
+    #[command(visible_alias = "ls")]
     List(BranchListArgs),
     /// Pin branches for background indexing
-    #[command(alias = "p")]
+    #[command(visible_alias = "p")]
     Pin {
         #[arg(short = 'P', long = "project-id", value_name = "id")]
         project_id: Option<String>,
@@ -139,7 +146,7 @@ pub enum BranchAction {
         branches: Vec<String>,
     },
     /// Remove pinned branches
-    #[command(alias = "u")]
+    #[command(visible_alias = "u")]
     Unpin {
         #[arg(short = 'P', long = "project-id", value_name = "id")]
         project_id: Option<String>,
@@ -247,39 +254,6 @@ async fn settle(queue: &Arc<Queue>) {
     }
 }
 
-pub(crate) enum Server {
-    /// No server to use: none running, starting is switched off, or this is a container.
-    Down,
-    Up(u16),
-    Draining,
-}
-
-/// `ensureRunning` without the starting: TS would spawn a server here when auto-start is allowed; this never does.
-pub(crate) async fn server_state() -> Server {
-    if std::env::var("SCRYBE_NO_AUTO_DAEMON").as_deref() == Ok("1") || crate::ops::in_container() {
-        return Server::Down;
-    }
-    let Some(port) = std::fs::read_to_string(crate::config::pidfile_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()) else { return Server::Down };
-    let Ok(client) = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build() else { return Server::Down };
-    let Ok(res) = client.get(format!("http://127.0.0.1:{port}/health")).send().await else { return Server::Down };
-    if !res.status().is_success() {
-        return Server::Down;
-    }
-    if res.json::<Value>().await.is_ok_and(|h| h["draining"] == true) {
-        return Server::Draining;
-    }
-    Server::Up(port as u16)
-}
-
-/// The port of a live server on this data dir; a draining one is an error, as it refuses new work.
-async fn live_server() -> Result<Option<u16>> {
-    match server_state().await {
-        Server::Down => Ok(None),
-        Server::Up(port) => Ok(Some(port)),
-        Server::Draining => bail!("The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call."),
-    }
-}
-
 pub(crate) async fn post(port: u16, path: &str, body: &Value) -> Result<Value> {
     let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build()?;
     let res = client.post(format!("http://127.0.0.1:{port}{path}")).json(body).send().await?;
@@ -313,7 +287,7 @@ fn id_of(target: Option<String>, flag: Option<String>) -> Result<String> {
     }
 }
 
-async fn project_inner(store: Store, action: ProjectAction) -> Result<()> {
+pub(crate) async fn project_inner(store: Store, action: ProjectAction) -> Result<()> {
     match action {
         ProjectAction::List => say(&tools::format_projects(&tools::list_projects())),
         ProjectAction::Add { id, desc } => {
@@ -334,10 +308,15 @@ async fn project_inner(store: Store, action: ProjectAction) -> Result<()> {
         }
         ProjectAction::Remove { target, id } => {
             let id = id_of(target, id)?;
-            manage::remove_project(&queue_of(store)?, &id).await?;
-            say(&format!("Removed project '{id}'"));
+            remove_project(store, &id).await?;
         }
     }
+    Ok(())
+}
+
+pub(crate) async fn remove_project(store: Store, id: &str) -> Result<()> {
+    manage::remove_project(&queue_of(store)?, id).await?;
+    say(&format!("Removed project '{id}'"));
     Ok(())
 }
 
@@ -347,10 +326,10 @@ pub async fn source(store: Store, action: SourceAction) {
     finish(source_inner(store, action).await);
 }
 
-async fn source_inner(store: Store, action: SourceAction) -> Result<()> {
+pub(crate) async fn source_inner(store: Store, action: SourceAction) -> Result<()> {
     match action {
         SourceAction::List { project_id } => list_sources(project_id.filter(|p| !p.is_empty()))?,
-        SourceAction::Add { project_id, source_id, kind, root, languages, provider, url, project, token, gitlab_url, gitlab_project_id, gitlab_token } => {
+        SourceAction::Add(SourceAddArgs { project_id, source_id, kind, root, languages, provider, url, project, token, gitlab_url, gitlab_project_id, gitlab_token }) => {
             let project_id = need(project_id, PROJECT_FLAG);
             let source_id = need(source_id, SOURCE_FLAG);
             let kind = need(kind, "--type <type>");
@@ -371,9 +350,21 @@ async fn source_inner(store: Store, action: SourceAction) -> Result<()> {
             let config = source_add::prepare(&a).await?;
             let check = source_add::env_ref_to_check(&config);
             let referenced_before = check.as_ref().is_some_and(|n| crate::spawn::config_env_refs(&crate::config::data_dir()).contains(n));
-            let port = live_server().await?;
+            // Saved first, so a server started here sees the variable its token names.
             source_add::save(&a, config)?;
-            if let Some(port) = port {
+            let server = ops::server().await;
+            if let Some(problem) = match server {
+                Server::Draining => Some(ops::DRAINING),
+                Server::Failed => Some(ops::NOT_STARTED),
+                Server::Up(_) | Server::None => None,
+            } {
+                // A source that was never indexed must not stay registered.
+                if let Ok(queue) = queue_of(store) {
+                    let _ = manage::remove_source(&queue, &a).await;
+                }
+                bail!(problem);
+            }
+            if let Server::Up(port) = server {
                 if let Some(name) = check {
                     source_add::warn_if_server_lacks(&name, referenced_before);
                 }
@@ -387,7 +378,7 @@ async fn source_inner(store: Store, action: SourceAction) -> Result<()> {
             say(&format!("Added source '{source_id}' to project '{project_id}' — reindex job: {}", text(&added, "job_id")));
             settle(&queue).await;
         }
-        SourceAction::Update { project_id, source_id, url, project, token, gitlab_token, gitlab_url, gitlab_project_id, root, languages } => {
+        SourceAction::Update(SourceUpdateArgs { project_id, source_id, url, project, token, gitlab_token, gitlab_url, gitlab_project_id, root, languages }) => {
             let project_id = need(project_id, PROJECT_FLAG);
             let source_id = need(source_id, SOURCE_FLAG);
             let mut a = Map::new();
@@ -570,15 +561,16 @@ async fn drop_ephemeral_inner(store: Store, args: DropEphemeralArgs) -> Result<(
     let dropped = ephemeral::drop_label(&queue, &a)?;
     // With a server up the gc runs there; its job row lands in the same database this process reads. A server
     // that accepts no job gives zeros; one that can't be reached falls back to an in-process gc.
-    let job = match live_server().await? {
-        Some(port) => match post(port, "/gc", &json!({ "scope": [dropped.project], "sourceId": dropped.source, "mode": "purge" })).await {
+    let job = match ops::server().await {
+        Server::Draining => bail!(ops::DRAINING),
+        Server::Up(port) => match post(port, "/gc", &json!({ "scope": [dropped.project], "sourceId": dropped.source, "mode": "purge" })).await {
             Ok(sent) => match sent["jobs"][0]["jobId"].as_str() {
                 Some(id) => Some(id.to_string()),
                 None => return show(&json!({ "label": dropped.label, "dropped": dropped.existed, "orphans_deleted": 0, "bytes_freed": 0 })),
             },
             Err(_) => None,
         },
-        None => None,
+        Server::Failed | Server::None => None,
     };
     let job = job.unwrap_or_else(|| queue.submit(Request { project: dropped.project.clone(), source: Some(dropped.source.clone()), gc_purge: Some(true), ..Default::default() }).job_id);
     show(&ephemeral::drop_result(&queue, &job, &dropped).await)

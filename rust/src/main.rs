@@ -24,6 +24,7 @@ mod locks;
 mod manage;
 mod mcp;
 mod mcp_http;
+mod model;
 mod ops;
 mod phase;
 mod pinned;
@@ -41,9 +42,10 @@ mod status;
 mod store;
 mod ticket_poll;
 mod tools;
+mod usage;
 mod watch;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use store::Store;
 
 #[cfg(feature = "mimalloc")]
@@ -51,7 +53,7 @@ use store::Store;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
-#[command(name = "scrybe-rs", version = config::VERSION, about = "Unfinished Rust port of scrybe")]
+#[command(name = "scrybe", bin_name = "scrybe", version = config::VERSION)]
 struct Cli {
     /// With none, scrybe offers to register the repository it is run in.
     #[command(subcommand)]
@@ -60,8 +62,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the read tools over MCP stdio
-    Mcp,
     /// Serve the read tools to many clients over HTTP on loopback (scratch data dirs only)
     Serve,
     /// Search code or knowledge
@@ -117,7 +117,7 @@ enum Command {
         action: Option<ops::IgnoreAction>,
     },
     /// Show scrybe health (daemon + all projects)
-    #[command(alias = "ps")]
+    #[command(visible_alias = "ps")]
     Status(status::StatusArgs),
     /// Manage the background scrybe daemon
     Daemon {
@@ -140,6 +140,13 @@ enum Command {
     Index(reindex::IndexArgs),
     /// Chunk every file of a code source and print one line per chunk (parity checks)
     DebugChunks { #[arg(short = 'P', long = "project-id")] project_id: String, #[arg(short = 'S', long = "source-id")] source_id: String },
+    /// Manage embedding model presets and assignments
+    Model {
+        #[command(subcommand)]
+        action: model::ModelAction,
+    },
+    #[command(flatten)]
+    Old(legacy::OldCommand),
     /// Try a keyword search on every registered table and report which fail (read-only)
     DebugFts,
     /// Time a download with the model client: into memory, or to a file with --to
@@ -177,24 +184,24 @@ struct SearchArgs {
 enum SearchKind {
     Code {
         query: String,
-        #[arg(short = 'P', long = "project-id")]
+        #[arg(short = 'P', long = "project-id", value_name = "id")]
         project_id: String,
         // Accepted and ignored, as today's build does: the parent `search --top-k` takes the value.
-        #[arg(long = "top-k", default_value = "10")]
+        #[arg(long = "top-k", value_name = "n", default_value = "10")]
         _top_k: String,
-        #[arg(long)]
+        #[arg(long, value_name = "name")]
         branch: Option<String>,
     },
     Knowledge {
         query: String,
-        #[arg(short = 'P', long = "project-id")]
+        #[arg(short = 'P', long = "project-id", value_name = "id")]
         project_id: String,
-        #[arg(short = 'S', long = "source-id")]
+        #[arg(short = 'S', long = "source-id", value_name = "id")]
         source_id: Option<String>,
-        #[arg(long = "item-types")]
+        #[arg(long = "item-types", value_name = "types")]
         item_types: Option<String>,
         // Accepted and ignored, as `search code`'s is.
-        #[arg(long = "top-k", default_value = "10")]
+        #[arg(long = "top-k", value_name = "n", default_value = "10")]
         _top_k: String,
     },
 }
@@ -215,16 +222,20 @@ fn fail(e: tools::ToolError) -> ! {
 
 fn main() -> anyhow::Result<()> {
     config::load_env_file();
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    let mcp = args.first().is_some_and(|a| a == "mcp");
+    if mcp && !args.iter().any(|a| a == "--legacy-in-process") {
+        let exe = std::env::current_exe().map_or_else(|_| "scrybe".to_string(), |p| p.to_string_lossy().into_owned());
+        scrybe_relay::run(vec![exe, "daemon".into(), "up".into()]);
+    }
     if let Err(message) = chunk::Sizes::from_env().check() {
         eprintln!("scrybe error: Error: {message}");
         std::process::exit(1);
     }
-    // A usage error exits 1, like the TypeScript command line; help and version still exit 0.
-    let cli = Cli::try_parse().unwrap_or_else(|e| {
-        let code = i32::from(e.use_stderr());
-        let _ = e.print();
-        std::process::exit(code)
-    });
+    if !mcp {
+        ops::warn_version_skew(args.iter().any(|a| a == "--json"));
+    }
+    let cli = if mcp { None } else { Some(parse(&args)) };
     // Deep ASTs recurse: chunking runs on blocking threads with room for them.
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(64 << 20).enable_all().build()?;
     // The command future is big and Windows gives the main thread 1 MB, so it runs boxed on a thread with room.
@@ -232,14 +243,70 @@ fn main() -> anyhow::Result<()> {
     main_task.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+/// The command line with the last of a repeated option winning, and its own help and descriptions.
+pub(crate) fn command() -> clap::Command {
+    usage::dress(Cli::command(), usage::Spec::load().as_ref())
+}
+
+/// A usage error exits 1; help and version exit 0.
+fn parse(args: &[String]) -> Cli {
+    if let Some(spec) = usage::Spec::load() {
+        match usage::check(&spec, args, &|name| Cli::command().find_subcommand(name).is_some()) {
+            usage::Verdict::Run => {}
+            usage::Verdict::Version => {
+                println!("{}", config::VERSION);
+                std::process::exit(0)
+            }
+            usage::Verdict::Refuse(text) => {
+                eprintln!("{text}");
+                std::process::exit(1)
+            }
+        }
+    }
+    command().try_get_matches().and_then(|m| Cli::from_arg_matches(&m)).unwrap_or_else(|e| {
+        let code = i32::from(e.use_stderr());
+        let _ = e.print();
+        std::process::exit(code)
+    })
+}
+
+/// Ctrl-C and SIGTERM end a command at once with exit code 0, whatever it was doing.
+pub(crate) fn leave_on_signal() {
+    tokio::spawn(async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let Ok(mut term) = signal(SignalKind::terminate()) else { return };
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+            // SAFETY: skips exit handlers, which would race the threads still at work.
+            unsafe { libc::_exit(0) }
+        }
+        #[cfg(not(unix))]
+        if tokio::signal::ctrl_c().await.is_ok() {
+            std::process::exit(0)
+        }
+    });
+}
+
+async fn run(cli: Option<Cli>) -> anyhow::Result<()> {
     let store = Store::new(config::Settings::from_env());
+    let Some(cli) = cli else {
+        eprintln!("[scrybe] in-process MCP mode is deprecated, will be removed in v0.34.0. See `scrybe daemon install`.");
+        leave_on_signal();
+        return mcp::serve(&store).await;
+    };
+    // A server, and an index run that follows one, see to signals themselves.
+    if !matches!(cli.command, Some(Command::Serve | Command::Daemon { .. } | Command::Index(_))) {
+        leave_on_signal();
+    }
     let Some(command) = cli.command else {
         legacy::default_action(store).await;
         return Ok(());
     };
     match command {
-        Command::Mcp => mcp::serve(&store).await?,
         Command::Serve => serve::serve(store).await?,
         Command::Project { action } => cli::project(store, action).await,
         Command::Source { action } => cli::source(store, action).await,
@@ -278,6 +345,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&ids)?);
         }
         Command::Index(args) => reindex::index(store, args).await,
+        Command::Model { action } => Box::pin(model::model(store, action)).await,
+        Command::Old(old) => Box::pin(legacy::old(store, old)).await,
         Command::DebugChunks { project_id, source_id } => {
             let handle = std::thread::Builder::new().stack_size(256 << 20).spawn(move || debug_chunks(&project_id, &source_id))?;
             handle.join().map_err(|_| anyhow::anyhow!("chunker thread panicked"))??;
