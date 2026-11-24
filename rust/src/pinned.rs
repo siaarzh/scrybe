@@ -12,6 +12,8 @@ pub enum PinError {
     InvalidSourceType(String, String),
     SourceNotFound(String, String),
     ProjectNotFound(String),
+    /// The registry couldn't be saved.
+    Save(String),
 }
 
 impl PinError {
@@ -20,23 +22,19 @@ impl PinError {
             PinError::InvalidSourceType(p, s) => format!("Source '{s}' in project '{p}' is not a code source. Pinned branches only apply to code sources."),
             PinError::SourceNotFound(p, s) => format!("Source '{s}' not found in project '{p}'"),
             PinError::ProjectNotFound(p) => format!("Project '{p}' not found"),
+            PinError::Save(m) => m.clone(),
         }
     }
 
-    pub fn error_type(&self) -> &'static str {
-        match self {
-            PinError::InvalidSourceType(..) => "invalid_source_type",
-            PinError::SourceNotFound(..) => "source_not_found",
-            PinError::ProjectNotFound(_) => "project_not_found",
-        }
-    }
-
-    /// The status the HTTP route answers with.
-    pub fn status(&self) -> &'static str {
-        match self {
-            PinError::InvalidSourceType(..) => "400 Bad Request",
-            _ => "404 Not Found",
-        }
+    /// The status and body the HTTP route answers with.
+    pub fn response(&self) -> (&'static str, Value) {
+        let (status, kind) = match self {
+            PinError::InvalidSourceType(..) => ("400 Bad Request", "invalid_source_type"),
+            PinError::SourceNotFound(..) => ("404 Not Found", "source_not_found"),
+            PinError::ProjectNotFound(_) => ("404 Not Found", "project_not_found"),
+            PinError::Save(m) => return ("500 Internal Server Error", json!({ "error": format!("Error: {m}") })),
+        };
+        (status, json!({ "error": self.message(), "error_type": kind }))
     }
 }
 
@@ -49,9 +47,8 @@ fn code_source(project: &str, source: &str) -> Result<Source, PinError> {
     Ok(s)
 }
 
-fn save(project: &str, source: &str, branches: &[String]) {
-    // Like today, a failed write is not reported back to the caller of the pure helpers.
-    let _ = registry::update_source(project, source, &[("pinned_branches", json!(branches))]);
+fn save(project: &str, source: &str, branches: &[String]) -> Result<(), PinError> {
+    registry::update_source(project, source, &[("pinned_branches", json!(branches))]).map_err(|e| PinError::Save(format!("{e:#}")))
 }
 
 pub fn list(project: &str, source: &str) -> Result<Vec<String>, PinError> {
@@ -87,7 +84,7 @@ pub fn add(project: &str, source: &str, branches: &[String], set: bool) -> Resul
         next.extend(incoming.iter().cloned());
         (next, incoming)
     };
-    save(project, source, &next);
+    save(project, source, &next)?;
     let warnings = if next.len() > WARNING_THRESHOLD {
         vec![format!(
             "Project '{project}' source '{source}' has {} pinned branches. Indexing many branches increases disk usage and fetch time. Review with: scrybe pin list --project-id {project} --source-id {source}",
@@ -114,13 +111,13 @@ pub fn remove(project: &str, source: &str, branches: &[String]) -> Result<Remove
     let existing = code_source(project, source)?.pinned_branches.unwrap_or_default();
     let removed = branches.iter().filter(|b| existing.contains(b)).cloned().collect();
     let next: Vec<String> = existing.into_iter().filter(|b| !branches.contains(b)).collect();
-    save(project, source, &next);
+    save(project, source, &next)?;
     Ok(Removed { branches: next, removed })
 }
 
 pub fn clear(project: &str, source: &str) -> Result<Removed, PinError> {
     let removed = code_source(project, source)?.pinned_branches.unwrap_or_default();
-    save(project, source, &[]);
+    save(project, source, &[])?;
     Ok(Removed { branches: vec![], removed })
 }
 
@@ -191,8 +188,9 @@ mod tests {
     fn errors_carry_todays_texts_and_codes() {
         let e = PinError::InvalidSourceType("p".into(), "s".into());
         assert_eq!(e.message(), "Source 's' in project 'p' is not a code source. Pinned branches only apply to code sources.");
-        assert_eq!((e.error_type(), e.status()), ("invalid_source_type", "400 Bad Request"));
+        assert_eq!(e.response(), ("400 Bad Request", json!({ "error": e.message(), "error_type": "invalid_source_type" })));
         assert_eq!(PinError::SourceNotFound("p".into(), "s".into()).message(), "Source 's' not found in project 'p'");
-        assert_eq!(PinError::ProjectNotFound("p".into()).status(), "404 Not Found");
+        assert_eq!(PinError::ProjectNotFound("p".into()).response().0, "404 Not Found");
+        assert_eq!(PinError::Save("disk full".into()).response(), ("500 Internal Server Error", json!({ "error": "Error: disk full" })));
     }
 }

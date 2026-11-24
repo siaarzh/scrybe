@@ -24,6 +24,17 @@ pub fn js_trim(s: &str) -> &str {
     s.trim_matches(is_js_space)
 }
 
+/// `parseInt(s, 10)`: the number `s` starts with, `None` for NaN.
+pub fn parse_int(s: &str) -> Option<f64> {
+    let s = s.trim_start_matches(is_js_space);
+    let (sign, rest) = match s.strip_prefix('-') {
+        Some(rest) => (-1.0, rest),
+        None => (1.0, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let digits = &rest[..rest.bytes().take_while(u8::is_ascii_digit).count()];
+    Some(sign * digits.parse::<f64>().ok()?)
+}
+
 /// `s.split(/^/m)`: breaks after \n, \r, U+2028 and U+2029, with no empty tail.
 pub fn split_lines(s: &str) -> Vec<&str> {
     if s.is_empty() {
@@ -74,6 +85,12 @@ mod tests {
     fn trim_follows_js_not_rust() {
         assert_eq!(js_trim("\u{FEFF} a \u{A0}"), "a");
         assert_eq!(js_trim("\u{85}a"), "\u{85}a");
+    }
+
+    #[test]
+    fn integers_are_read_from_the_front() {
+        assert_eq!([" 42", "80abc", "-1", "+7", "0x1F", "70000"].map(parse_int), [42.0, 80.0, -1.0, 7.0, 0.0, 70000.0].map(Some));
+        assert_eq!(["", "abc", "-", " ", "é1"].map(parse_int), [None; 5]);
     }
 
     #[test]

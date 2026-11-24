@@ -5,8 +5,9 @@
 use crate::autogc::{self, AutoGc};
 use crate::pinned;
 use crate::vecindex;
-use crate::config::{data_dir, VERSION};
+use crate::config::{data_dir, pidfile_path, VERSION};
 use crate::ephemeral;
+use crate::jsstr::{js_trim, parse_int};
 use crate::presets;
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
@@ -25,10 +26,9 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-const MAX_BODY: usize = 8 << 20;
 pub const DEFAULT_PORT: u16 = 58451;
 const DAEMON_TOOLS: &str = include_str!("daemon_tools.json");
 
@@ -132,6 +132,107 @@ async fn respond(s: &mut TcpStream, status: &str, kind: &str, body: &str) -> Res
 
 async fn json_res(s: &mut TcpStream, status: &str, body: &Value) -> Result<()> {
     respond(s, status, "application/json", &body.to_string()).await
+}
+
+/// The server's catch-all answer to a thrown error.
+async fn boom(s: &mut TcpStream, message: &str) -> Result<()> {
+    json_res(s, "500 Internal Server Error", &json!({ "error": message })).await
+}
+
+/// `readBody`: an empty body is `{}`.
+fn read_json(body: &[u8]) -> Result<Value, String> {
+    let text = String::from_utf8_lossy(body);
+    if js_trim(&text).is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("SyntaxError: {e}"))
+}
+
+/// `read_json`, for a route that then reads fields, `first` before any other.
+fn read_fields(body: &[u8], first: &str) -> Result<Value, String> {
+    match read_json(body)? {
+        Value::Null => Err(format!("TypeError: Cannot read properties of null (reading '{first}')")),
+        v => Ok(v),
+    }
+}
+
+/// A field as an id. JavaScript takes any type here, so one that isn't a string is its JSON text rather than nothing.
+fn id_field(body: &Value, key: &str) -> Option<String> {
+    match &body[key] {
+        Value::Null | Value::Bool(false) => None,
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) if n.as_f64() == Some(0.0) => None,
+        other => Some(other.to_string()),
+    }
+}
+
+/// Reads up to the next line end and returns the line. `None` when it is too long or the sender left.
+async fn chunk_line<R: AsyncRead + Unpin>(r: &mut R, buf: &mut Vec<u8>) -> std::io::Result<Option<String>> {
+    loop {
+        if let Some(i) = buf.windows(2).position(|w| w == b"\r\n") {
+            let line = String::from_utf8_lossy(&buf[..i]).into_owned();
+            buf.drain(..i + 2);
+            return Ok(Some(line));
+        }
+        if buf.len() > 16 << 10 || r.read_buf(buf).await? == 0 {
+            return Ok(None);
+        }
+    }
+}
+
+/// A body sent with `Transfer-Encoding: chunked`, `buf` being what has already arrived. `None` when it is malformed or cut short.
+async fn read_chunked<R: AsyncRead + Unpin>(r: &mut R, mut buf: Vec<u8>) -> std::io::Result<Option<Vec<u8>>> {
+    let mut body = vec![];
+    loop {
+        let Some(line) = chunk_line(r, &mut buf).await? else { return Ok(None) };
+        let digits = line.split(';').next().unwrap_or("").trim();
+        let size = match usize::from_str_radix(digits, 16) {
+            Ok(n) if digits.bytes().all(|b| b.is_ascii_hexdigit()) && n < usize::MAX - 2 => n,
+            _ => return Ok(None),
+        };
+        if size == 0 {
+            // The trailer, up to its empty line.
+            loop {
+                match chunk_line(r, &mut buf).await? {
+                    None => return Ok(None),
+                    Some(line) if line.is_empty() => return Ok(Some(body)),
+                    Some(_) => {}
+                }
+            }
+        }
+        while buf.len() < size + 2 {
+            if r.read_buf(&mut buf).await? == 0 {
+                return Ok(None);
+            }
+        }
+        if &buf[size..size + 2] != b"\r\n" {
+            return Ok(None);
+        }
+        body.extend(buf.drain(..size + 2).take(size));
+    }
+}
+
+/// The request's body, `buf` being what arrived with its head. `None` when its framing is malformed or it was cut short.
+async fn read_body<R: AsyncRead + Unpin>(r: &mut R, head: &str, mut buf: Vec<u8>) -> std::io::Result<Option<Vec<u8>>> {
+    let length = header(head, "content-length");
+    if let Some(encoding) = header(head, "transfer-encoding") {
+        if length.is_some() || !encoding.eq_ignore_ascii_case("chunked") {
+            return Ok(None);
+        }
+        return read_chunked(r, buf).await;
+    }
+    let len = match length.map(str::parse::<usize>) {
+        None => 0,
+        Some(Ok(n)) => n,
+        Some(Err(_)) => return Ok(None),
+    };
+    while buf.len() < len {
+        if r.read_buf(&mut buf).await? == 0 {
+            return Ok(None);
+        }
+    }
+    buf.truncate(len);
+    Ok(Some(buf))
 }
 
 fn query_param(query: &str, name: &str) -> Option<String> {
@@ -257,17 +358,26 @@ impl Daemon {
         })
     }
 
-    fn kick(&self, body: &Value) -> Value {
+    fn kick(&self, body: &Value) -> Result<Value, String> {
         let text = |k: &str| body[k].as_str().map(String::from);
-        let ids: Vec<String> = match text("projectId") {
+        let source = id_field(body, "sourceId");
+        let ids: Vec<String> = match id_field(body, "projectId").filter(|p| !p.is_empty()) {
             Some(p) => vec![p],
             None => registry::list_projects().into_iter().map(|p| p.id).collect(),
         };
+        let full = body["mode"] == "full";
+        if full && source.as_ref().is_none_or(String::is_empty) {
+            // A project that isn't registered gets the failed job it always gets.
+            let registry_exists = data_dir().join("projects.json").exists();
+            if ids.iter().any(|id| !registry_exists || registry::get_project(id).is_some()) {
+                return Err(format!("Error: {}", jobs::FULL_NEEDS_SOURCES));
+            }
+        }
         let jobs: Vec<Value> = ids
             .into_iter()
             .map(|project| {
-                let r = self.queue.submit(Request { project: project.clone(), source: text("sourceId"), branch: text("branch"), content_ref: text("contentRef"), full: body["mode"] == "full", gc_purge: None });
-                let mut job = json!({ "jobId": r.job_id, "projectId": project, "sourceId": text("sourceId").unwrap_or_else(|| "all".into()), "branch": text("branch").unwrap_or_else(|| "HEAD".into()), "status": r.status });
+                let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: text("branch"), content_ref: text("contentRef"), full, gc_purge: None });
+                let mut job = json!({ "jobId": r.job_id, "projectId": project, "sourceId": source.clone().unwrap_or_else(|| "all".into()), "branch": text("branch").unwrap_or_else(|| "HEAD".into()), "status": r.status });
                 if let Some(q) = r.queue_position {
                     job["queuePosition"] = json!(q);
                 }
@@ -275,7 +385,7 @@ impl Daemon {
                 job
             })
             .collect();
-        json!({ "jobs": jobs })
+        Ok(json!({ "jobs": jobs }))
     }
 
     fn submit_tool(&self, a: &Value, source: Option<String>) -> Result<Value> {
@@ -283,6 +393,9 @@ impl Daemon {
         let full = a["mode"] == "full";
         if registry::get_project(&project).is_none() {
             anyhow::bail!("Project '{project}' not found");
+        }
+        if full && source.as_ref().is_none_or(String::is_empty) {
+            anyhow::bail!(jobs::FULL_NEEDS_SOURCES);
         }
         let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: a["branch"].as_str().map(String::from), content_ref: a["content_ref"].as_str().map(String::from), full, gc_purge: None });
         let mut out = json!({ "job_id": r.job_id, "status": r.status, "project_id": project });
@@ -351,7 +464,7 @@ impl Daemon {
         let boom = |m: &str| ("500 Internal Server Error", json!({ "error": m }));
         let (Some(project), Some(source)) = (decode_component(ids.0), decode_component(ids.1)) else { return boom("URIError: URI malformed") };
         let (project, source) = (project.as_str(), source.as_str());
-        let failed = |e: pinned::PinError| (e.status(), json!({ "error": e.message(), "error_type": e.error_type() }));
+        let failed = |e: pinned::PinError| e.response();
         if method == "GET" {
             return match pinned::list(project, source) {
                 Ok(branches) => ("200 OK", json!({ "branches": branches })),
@@ -359,16 +472,10 @@ impl Daemon {
             };
         }
         let all = method == "DELETE" && query_param(query, "all").as_deref() == Some("true");
-        let mut parsed = json!({});
-        if !all && !body.iter().all(u8::is_ascii_whitespace) {
-            parsed = match serde_json::from_slice(body) {
-                Ok(v) => v,
-                Err(e) => return boom(&format!("SyntaxError: {e}")),
-            };
-            if parsed.is_null() {
-                return boom("TypeError: Cannot read properties of null (reading 'branches')");
-            }
-        }
+        let parsed = match read_fields(if all { b"" } else { body }, "branches") {
+            Ok(v) => v,
+            Err(e) => return boom(&e),
+        };
         let event = |action: &str, branches: &[String]| {
             self.queue.push(json!({ "ts": jobs::now_iso(), "level": "info", "event": "pinned.changed", "projectId": project, "sourceId": source, "detail": { "action": action, "branches": branches } }));
         };
@@ -450,7 +557,10 @@ impl Daemon {
     async fn rpc(&self, req: &Value) -> String {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let name = req.get("method").and_then(Value::as_str).unwrap_or("");
-        let args = req.get("params").cloned().unwrap_or_else(|| json!({}));
+        if req.get("id").is_none() || name.is_empty() {
+            return json!({ "id": id, "error": { "code": -32600, "message": "invalid request: missing id or method" } }).to_string();
+        }
+        let args = req.get("params").filter(|p| p.is_object()).cloned().unwrap_or_else(|| json!({}));
         let tools: Value = serde_json::from_str(DAEMON_TOOLS).unwrap_or(Value::Null);
         let Some(spec) = tools.as_array().and_then(|t| t.iter().find(|x| x["name"] == name)) else {
             return mcp::rpc(&self.store, req).await;
@@ -511,7 +621,7 @@ impl Daemon {
 static OWNER: Mutex<Option<locks::Held>> = Mutex::new(None);
 
 fn leave() -> ! {
-    let _ = std::fs::remove_file(data_dir().join("daemon.pid"));
+    let _ = std::fs::remove_file(pidfile_path());
     drop(OWNER.lock().unwrap_or_else(|e| e.into_inner()).take());
     std::process::exit(0)
 }
@@ -556,20 +666,9 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
         return json_res(&mut s, "503 Service Unavailable", &json!({ "error": "daemon is shutting down — not accepting new work", "draining": true })).await;
     }
 
-    let mut body = buf[head_end + 4..].to_vec();
-    let len: usize = header(&head, "content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
-    if len > MAX_BODY {
-        return respond(&mut s, "413 Payload Too Large", "text/plain", "too large").await;
-    }
-    while body.len() < len {
-        let mut chunk = vec![0u8; (len - body.len()).min(64 << 10)];
-        let n = s.read(&mut chunk).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        body.extend_from_slice(&chunk[..n]);
-    }
-    let parsed: Value = if body.iter().all(u8::is_ascii_whitespace) { json!({}) } else { serde_json::from_slice(&body).unwrap_or(Value::Null) };
+    let Some(body) = read_body(&mut s, &head, buf.split_off(head_end + 4)).await? else {
+        return respond(&mut s, "400 Bad Request", "text/plain", "").await;
+    };
 
     match (method, path) {
         ("GET", "/status") => json_res(&mut s, "200 OK", &d.status()).await,
@@ -584,14 +683,22 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
                 .collect();
             json_res(&mut s, "200 OK", &json!({ "projects": projects })).await
         }
-        ("POST", "/kick") => json_res(&mut s, "200 OK", &d.kick(&parsed)).await,
+        ("POST", "/kick") => match read_fields(&body, "projectId").and_then(|b| d.kick(&b)) {
+            Ok(answer) => json_res(&mut s, "200 OK", &answer).await,
+            Err(e) => boom(&mut s, &e).await,
+        },
         ("POST", "/gc") => {
-            let purge = parsed["mode"].as_str() != Some("grace");
-            let scope: Vec<String> = match parsed["scope"].as_array().filter(|a| !a.is_empty()) {
-                Some(list) => list.iter().filter_map(Value::as_str).map(String::from).collect(),
-                None => registry::list_projects().into_iter().filter(|p| p.sources.iter().any(|x| x.kind() == "code")).map(|p| p.id).collect(),
+            let parsed = match read_fields(&body, "mode") {
+                Ok(v) => v,
+                Err(e) => return boom(&mut s, &e).await,
             };
-            json_res(&mut s, "200 OK", &d.gc(scope, parsed["sourceId"].as_str().map(String::from), purge)).await
+            let purge = parsed["mode"].is_null() || parsed["mode"] == "purge";
+            let scope: Vec<String> = match &parsed["scope"] {
+                Value::Array(list) if !list.is_empty() => list.iter().filter_map(Value::as_str).map(String::from).collect(),
+                Value::String(text) if !text.is_empty() => return boom(&mut s, "TypeError: scope.map is not a function").await,
+                _ => registry::list_projects().into_iter().filter(|p| p.sources.iter().any(|x| x.kind() == "code")).map(|p| p.id).collect(),
+            };
+            json_res(&mut s, "200 OK", &d.gc(scope, id_field(&parsed, "sourceId"), purge)).await
         }
         ("GET", "/jobs") => {
             let (status, project) = (query_param(query, "status"), query_param(query, "project_id"));
@@ -630,15 +737,18 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
             tokio::spawn(d.clone().shutdown("HTTP /shutdown".to_string()));
             Ok(())
         }
-        ("POST", "/clients/heartbeat") => {
-            if let Some(id) = parsed["clientId"].as_str() {
-                d.lifecycle.lock().unwrap().heartbeat(id, Instant::now());
-            }
-            json_res(&mut s, "200 OK", &json!({ "ok": true })).await
-        }
-        ("POST", "/clients/unregister") => {
-            if let Some(id) = parsed["clientId"].as_str() {
-                d.lifecycle.lock().unwrap().unregister(id, Instant::now());
+        ("POST", "/clients/heartbeat" | "/clients/unregister") => {
+            let parsed = match read_fields(&body, "clientId") {
+                Ok(v) => v,
+                Err(e) => return boom(&mut s, &e).await,
+            };
+            if let Some(id) = parsed["clientId"].as_str().filter(|id| !id.is_empty()) {
+                let mut lifecycle = d.lifecycle.lock().unwrap();
+                if path == "/clients/heartbeat" {
+                    lifecycle.heartbeat(id, Instant::now());
+                } else {
+                    lifecycle.unregister(id, Instant::now());
+                }
             }
             json_res(&mut s, "200 OK", &json!({ "ok": true })).await
         }
@@ -648,9 +758,11 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
         }
         ("GET", "/mcp/manifest") => json_res(&mut s, "200 OK", &d.manifest()).await,
         ("POST", "/mcp/rpc") => {
-            if parsed.is_null() {
-                return json_res(&mut s, "200 OK", &json!({ "id": null, "error": { "code": -32600, "message": "invalid request: body is not valid JSON" } })).await;
-            }
+            let parsed = match read_json(&body) {
+                Ok(Value::Null) => return boom(&mut s, "TypeError: Cannot read properties of null (reading 'id')").await,
+                Ok(v) => v,
+                Err(_) => return json_res(&mut s, "200 OK", &json!({ "id": null, "error": { "code": -32600, "message": "invalid request: body is not valid JSON" } })).await,
+            };
             let answer = d.rpc(&parsed).await;
             respond(&mut s, "200 OK", "application/json", &answer).await
         }
@@ -662,6 +774,9 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
             if method != "POST" {
                 return json_res(&mut s, "405 Method Not Allowed", &json!({ "jsonrpc": "2.0", "error": { "code": -32000, "message": "Method not allowed." }, "id": null })).await;
             }
+            let Ok(parsed) = serde_json::from_slice::<Value>(&body) else {
+                return json_res(&mut s, "400 Bad Request", &json!({ "jsonrpc": "2.0", "error": { "code": -32700, "message": "Parse error: Invalid JSON" }, "id": null })).await;
+            };
             match mcp::handle(&d.store, &parsed).await {
                 Some(answer) => respond(&mut s, "200 OK", "application/json", &answer.to_string()).await,
                 None => respond(&mut s, "202 Accepted", "text/plain", "").await,
@@ -703,23 +818,37 @@ fn port_candidates(stale: Option<u16>) -> Vec<u16> {
     out
 }
 
-async fn bind_sticky() -> Result<TcpListener> {
-    if let Some(p) = std::env::var("SCRYBE_DAEMON_PORT").ok().and_then(|p| p.parse::<u16>().ok()) {
-        return Ok(TcpListener::bind(("127.0.0.1", p)).await?);
+/// The port `SCRYBE_DAEMON_PORT` names, or what Node says about one it can't listen on.
+fn port_from(text: &str) -> Result<u16> {
+    let n = parse_int(text);
+    if let Some(p) = n.filter(|n| (0.0..65536.0).contains(n)) {
+        return Ok(p as u16);
     }
-    let stale = std::fs::read_to_string(data_dir().join("daemon.pid")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()).map(|p| p as u16);
-    let mut last = None;
+    anyhow::bail!("options.port should be >= 0 and < 65536. Received type number ({}).", n.map_or("NaN".to_string(), |n| n.to_string()))
+}
+
+/// What to say when the port asked for is refused to this process.
+fn reserved_port(port: u16) -> String {
+    format!("Port {port} (from SCRYBE_DAEMON_PORT) is unavailable to this process. On Windows this usually means another component (Hyper-V, WSL, etc.) has reserved it at boot. Run `netsh interface ipv4 show excludedportrange protocol=tcp` to see the reserved ranges, or unset SCRYBE_DAEMON_PORT to let the daemon pick a free port itself.")
+}
+
+async fn bind_sticky() -> Result<TcpListener> {
+    if let Some(asked) = std::env::var_os("SCRYBE_DAEMON_PORT") {
+        let port = port_from(&asked.to_string_lossy())?;
+        return TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => anyhow::anyhow!(reserved_port(port)),
+            _ => e.into(),
+        });
+    }
+    let stale = std::fs::read_to_string(pidfile_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()).map(|p| p as u16);
     for port in port_candidates(stale) {
         match TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => return Ok(l),
-            Err(e) if retryable_bind(&e) => {
-                eprintln!("[scrybe daemon] port {port} refused ({e})");
-                last = Some(e);
-            }
+            Err(e) if port == 0 || retryable_bind(&e) => eprintln!("[scrybe daemon] port {port} refused ({e})"),
             Err(e) => return Err(e.into()),
         }
     }
-    Err(anyhow::anyhow!("All candidate ports were refused (stale pidfile port, {DEFAULT_PORT}, and an OS-assigned ephemeral port): {last:?}"))
+    Err(anyhow::anyhow!("All candidate ports were refused (stale pidfile port, {DEFAULT_PORT}, and an OS-assigned ephemeral port). On Windows this usually means an unusually large block of ports is reserved at boot (Hyper-V, WSL, etc.). Run `netsh interface ipv4 show excludedportrange protocol=tcp` to see the reserved ranges."))
 }
 
 async fn wait_for_signal() -> &'static str {
@@ -751,7 +880,7 @@ fn close_orphaned_jobs(queue: &Queue, cutoff: i64) {
 }
 
 pub async fn serve(store: Store) -> Result<()> {
-    // daemon.pid would point real clients at this unfinished server.
+    // The pidfile would point real clients at this unfinished server.
     refuse_live_data_dir()?;
     std::fs::create_dir_all(data_dir())?;
     crate::config::mark_server();
@@ -789,7 +918,7 @@ pub async fn serve(store: Store) -> Result<()> {
     }
     let started_iso = jobs::now_iso();
     let pid = json!({ "pid": std::process::id(), "port": port, "startedAt": started_iso, "version": VERSION, "dataDir": data_dir().to_string_lossy(), "execPath": exec });
-    std::fs::write(data_dir().join("daemon.pid"), pid.to_string())?;
+    std::fs::write(pidfile_path(), pid.to_string())?;
     eprintln!("[scrybe daemon] started pid={} port={port} dataDir={}", std::process::id(), data_dir().display());
 
     let now = Instant::now();
@@ -886,6 +1015,51 @@ mod tests {
         assert_eq!(decode_component("a%20b+c").as_deref(), Some("a b+c"));
         assert_eq!(decode_component("%zz"), None);
         assert_eq!(decode_component("%ff"), None);
+    }
+
+    #[test]
+    fn a_port_is_read_like_node_reads_it_and_refused_like_node_refuses_it() {
+        assert_eq!(["0", "8080", " 80abc"].map(|p| port_from(p).unwrap()), [0, 8080, 80]);
+        for (text, got) in [("abc", "NaN"), ("", "NaN"), ("70000", "70000"), ("-1", "-1")] {
+            assert_eq!(port_from(text).unwrap_err().to_string(), format!("options.port should be >= 0 and < 65536. Received type number ({got})."));
+        }
+    }
+
+    async fn body_of(head: &str, first: &str, rest: &str) -> Option<String> {
+        let head = format!("POST /kick HTTP/1.1\r\nHost: localhost\r\n{head}");
+        read_body(&mut rest.as_bytes(), &head, first.as_bytes().to_vec()).await.unwrap().map(|b| String::from_utf8(b).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_body_is_read_whole_however_it_is_framed() {
+        assert_eq!(body_of("", "extra", "").await.as_deref(), Some(""));
+        assert_eq!(body_of("Content-Length: 5", "ab", "cdefgh").await.as_deref(), Some("abcde"));
+        let chunked = "Transfer-Encoding: Chunked";
+        assert_eq!(body_of(chunked, "3\r", "\nabc\r\nA;x=1\r\n0123456789\r\n0\r\nT: v\r\n\r\n").await.as_deref(), Some("abc0123456789"));
+        assert_eq!(body_of(chunked, "0\r\n\r\n", "").await.as_deref(), Some(""));
+        let big = "x".repeat(9 << 20);
+        assert_eq!(body_of(chunked, "", &format!("{:x}\r\n{big}\r\n0\r\n\r\n", big.len())).await.map(|b| b.len()), Some(big.len()));
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_cut_short_or_badly_framed_is_no_body() {
+        assert_eq!(body_of("Content-Length: 5", "ab", "c").await, None);
+        assert_eq!(body_of("Content-Length: five", "abcde", "").await, None);
+        let chunked = "Transfer-Encoding: chunked";
+        for bad in ["zz\r\nabc\r\n0\r\n\r\n", "+3\r\nabc\r\n0\r\n\r\n", "3\r\nabcd\r\n0\r\n\r\n", "3\r\nabc\r\n", "3\r\nabc\r\n0\r\n", "ffffffffffffffff\r\nabc", ""] {
+            assert_eq!(body_of(chunked, bad, "").await, None, "{bad:?}");
+        }
+        assert_eq!(body_of("Transfer-Encoding: gzip, chunked", "0\r\n\r\n", "").await, None);
+        assert_eq!(body_of("Content-Length: 5\r\nTransfer-Encoding: chunked", "0\r\n\r\n", "").await, None);
+    }
+
+    #[test]
+    fn only_an_empty_body_stands_for_no_fields() {
+        assert_eq!(read_fields(b" \r\n\xEF\xBB\xBF", "a").unwrap(), json!({}));
+        assert!(read_fields(b"{\"a\":", "a").unwrap_err().starts_with("SyntaxError: "));
+        assert_eq!(read_fields(b"null", "a").unwrap_err(), "TypeError: Cannot read properties of null (reading 'a')");
+        let body = json!({ "s": "x", "e": "", "n": 5, "z": 0, "f": false, "l": ["a"] });
+        assert_eq!(["s", "e", "n", "z", "f", "l", "missing"].map(|k| id_field(&body, k)), [Some("x"), Some(""), Some("5"), None, None, Some("[\"a\"]"), None].map(|v| v.map(String::from)));
     }
 
     #[test]

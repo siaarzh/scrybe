@@ -211,6 +211,10 @@ fn fail(e: tools::ToolError) -> ! {
 
 fn main() -> anyhow::Result<()> {
     config::load_env_file();
+    if let Err(message) = chunk::Sizes::from_env().check() {
+        eprintln!("scrybe error: Error: {message}");
+        std::process::exit(1);
+    }
     // A usage error exits 1, like the TypeScript command line; help and version still exit 0.
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         let code = i32::from(e.use_stderr());

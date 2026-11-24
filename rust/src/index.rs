@@ -367,8 +367,14 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     scan_phase.end(Outcome::Ok);
 
     let mut diff_phase = Phase::begin(&ctx, "diff");
-    for n in 1..=current.len() {
-        options.report(Progress::Scan(n));
+    for n in 0..=current.len() {
+        if let Err(e) = check_cancel(options) {
+            diff_phase.end(Outcome::of(&e));
+            return Err(e);
+        }
+        if n > 0 {
+            options.report(Progress::Scan(n));
+        }
     }
     let to_remove: Vec<String> = old_hashes.keys().filter(|p| !current.contains_key(*p)).cloned().collect();
     let mut to_index: HashSet<String> = current.iter().filter(|(p, h)| old_hashes.get(*p) != Some(*h)).map(|(p, _)| p.clone()).collect();

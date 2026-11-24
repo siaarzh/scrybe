@@ -242,8 +242,14 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     }
 
     let mut diff_phase = Phase::begin(&ctx, "diff");
-    for n in 1..=merged.0.len() {
-        options.report(Progress::Scan(n));
+    for n in 0..=merged.0.len() {
+        if let Err(e) = check_cancel(options) {
+            diff_phase.end(Outcome::of(&e));
+            return Err(e);
+        }
+        if n > 0 {
+            options.report(Progress::Scan(n));
+        }
     }
     let to_remove: Vec<String> = if effective_cursor { vec![] } else { old_hashes.0.iter().filter(|(p, _)| scanned.get(p).is_none()).map(|(p, _)| p.clone()).collect() };
     let mut to_index: Vec<String> = merged.0.iter().filter(|(p, h)| old_hashes.get(p) != Some(h.as_str())).map(|(p, _)| p.clone()).collect();

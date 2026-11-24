@@ -3214,6 +3214,7 @@ describe("first-use model download from a stand-in host", () => {
     for (const [file, body] of Object.entries(host.files)) assert.ok(readFileSync(join(modelDir(), file)).equals(body), `${file} differs`);
     // config.json, the file whose presence means "cached", is fetched last.
     assert.equal(host.log.filter((f) => f.endsWith(".json") || f.endsWith(".onnx")).at(-1), "config.json");
+    assert.ok(host.agents.every((a) => a), `user agents: ${host.agents}`);
   });
 });
 
@@ -3399,4 +3400,464 @@ describe("reranking with the local cross-encoder", () => {
       console.log(`RERANK-LOCAL-DUMP ${JSON.stringify({ tool, out: value.map((h) => [h.item_path, Number(h.score.toFixed(3))]) })}`);
     });
   }
+});
+
+/** One request, its body sent in the pieces given, as chunks unless the headers name a length. */
+const rawRequest = (port, method, path, pieces, headers = {}) => new Promise((resolve, reject) => {
+  const framing = pieces.length > 0 && !("Content-Length" in headers) ? { "Transfer-Encoding": "chunked" } : {};
+  const req = httpRequest({ host: "127.0.0.1", port, method, path, headers: { "Content-Type": "application/json", ...framing, ...headers } }, (res) => {
+    let text = "";
+    res.on("data", (d) => { text += d; });
+    res.on("end", () => {
+      let body;
+      try { body = JSON.parse(text); } catch { /* not JSON */ }
+      resolve({ status: res.statusCode, text, body });
+    });
+  });
+  req.on("error", reject);
+  (async () => {
+    for (const p of pieces) { req.write(p); await sleep(30); }
+    req.end();
+  })();
+});
+
+const startedServer = async (w) => {
+  const c = w.client();
+  await c.hello();
+  await c.rpc("tools/list");
+  await until(() => w.pidfile(), 10_000, "the pidfile");
+  return { c, port: w.pidfile().port, base: `http://127.0.0.1:${w.pidfile().port}` };
+};
+
+describe("request bodies", () => {
+  let w, c, port;
+  const PINNED = "/projects/demo/sources/primary/pinned-branches";
+  const jobCount = async () => (await c.call("list_jobs")).value.count;
+  before(async () => {
+    w = await makeWorld();
+    await w.index("--full");
+    ({ c, port } = await startedServer(w));
+  });
+  after(() => w.stop());
+
+  test("a malformed body is a 500 and starts nothing", async () => {
+    const jobs = await jobCount();
+    for (const [method, path, field] of [["POST", "/kick", "projectId"], ["POST", "/gc", "mode"], ["POST", "/clients/heartbeat", "clientId"], ["POST", "/clients/unregister", "clientId"], ["POST", PINNED, "branches"], ["DELETE", PINNED, "branches"]]) {
+      const broken = await rawRequest(port, method, path, ['{"projectId": "demo"']);
+      assert.equal(broken.status, 500, `${path}: ${broken.text}`);
+      assert.deepEqual(Object.keys(broken.body), ["error"]);
+      assert.match(broken.body.error, /^SyntaxError: /);
+      const none = await rawRequest(port, method, path, ["null"]);
+      assert.deepEqual([none.status, none.body], [500, { error: `TypeError: Cannot read properties of null (reading '${field}')` }], path);
+    }
+    const scope = await rawRequest(port, "POST", "/gc", ['{"scope": "demo"}']);
+    assert.deepEqual([scope.status, scope.body], [500, { error: "TypeError: scope.map is not a function" }]);
+    assert.equal(await jobCount(), jobs);
+    assert.deepEqual((await rawRequest(port, "GET", PINNED, [])).body, { branches: [] });
+  });
+
+  test("an id that isn't text never widens the request", async () => {
+    const demoJobs = async () => (await c.call("list_jobs")).value.jobs.filter((j) => j.project_id === "demo").length;
+    const jobs = await demoJobs();
+    const r = await rawRequest(port, "POST", "/kick", ['{"projectId": ["demo"]}']);
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.body.jobs.length, 1);
+    assert.equal(await demoJobs(), jobs);
+  });
+
+  test("a full run without a source is refused, and a project that isn't there gets its failed job", async () => {
+    const embedded = w.fake.log.length;
+    for (const body of ['{"mode": "full"}', '{"projectId": "demo", "mode": "full"}', '{"projectId": "demo", "sourceId": "", "mode": "full"}']) {
+      const r = await rawRequest(port, "POST", "/kick", [body]);
+      assert.deepEqual([r.status, r.body], [500, { error: "Error: full reindex requires explicit source_ids" }], body);
+    }
+    const gone = await rawRequest(port, "POST", "/kick", ['{"projectId": "nope", "mode": "full"}']);
+    assert.equal(gone.status, 200, gone.text);
+    assert.equal((await c.call("reindex_status", { job_id: gone.body.jobs[0].jobId })).value.error, "project no longer exists");
+    const r = await c.call("reindex_source", { project_id: "demo", source_id: "", mode: "full" });
+    assert.ok(r.isError || r.rpcError || (await until(async () => (await c.call("reindex_status", { job_id: r.value.job_id })).value?.status !== "running", 10_000, "the job")), r.text);
+    assert.equal(w.fake.log.length, embedded, "nothing was embedded again");
+    assert.equal((await c.call("lookup_symbol", { project_id: "demo", symbol_name: "frobnicateWidget" })).value.length, 1);
+  });
+
+  test("empty ids stand for every project and every source", async () => {
+    const r = await rawRequest(port, "POST", "/kick", ['{"projectId": "", "sourceId": ""}']);
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.body.jobs.map((j) => j.projectId), ["demo"]);
+    const done = await until(async () => {
+      const s = (await c.call("reindex_status", { job_id: r.body.jobs[0].jobId })).value;
+      return ["done", "failed"].includes(s?.status) && s;
+    }, 30_000, "the job");
+    assert.equal(done.status, "done", JSON.stringify(done));
+    assert.deepEqual(done.tasks.map((t) => t.source_id), ["primary"]);
+  });
+
+  test("a body sent in chunks is read, and a large one isn't refused", async () => {
+    const chunked = await rawRequest(port, "POST", "/kick", ['{"project', 'Id": "no', 'pe"}']);
+    assert.equal(chunked.status, 200, chunked.text);
+    assert.deepEqual(chunked.body.jobs.map((j) => j.projectId), ["nope"]);
+    const big = JSON.stringify({ projectId: "nope", padding: "x".repeat(9 << 20) });
+    for (const headers of [{}, { "Content-Length": big.length }]) {
+      const r = await rawRequest(port, "POST", "/kick", [big], headers);
+      assert.equal(r.status, 200, r.text);
+      assert.deepEqual(r.body.jobs.map((j) => j.projectId), ["nope"]);
+    }
+  });
+
+  test("a call without an id or a method is an invalid request", async () => {
+    const rpc = async (body) => (await rawRequest(port, "POST", "/mcp/rpc", [body])).body;
+    const invalid = (id) => ({ id, error: { code: -32600, message: "invalid request: missing id or method" } });
+    for (const body of ['{"method": "list_projects", "params": {}}', "{}", "", "[]", "5"]) assert.deepEqual(await rpc(body), invalid(null), body);
+    for (const body of ['{"id": 7}', '{"id": 7, "method": 5}', '{"id": 7, "method": ""}', '{"id": 7, "method": null}']) assert.deepEqual(await rpc(body), invalid(7), body);
+    assert.deepEqual(await rpc("{nope"), { id: null, error: { code: -32600, message: "invalid request: body is not valid JSON" } });
+    const none = await rawRequest(port, "POST", "/mcp/rpc", ["null"]);
+    assert.deepEqual([none.status, none.body], [500, { error: "TypeError: Cannot read properties of null (reading 'id')" }]);
+    for (const params of ["", ', "params": null', ', "params": []', ', "params": "x"']) {
+      const r = await rpc(`{"id": null, "method": "list_projects"${params}}`);
+      assert.equal(r.id, null);
+      assert.equal(r.result[0].id, "demo", JSON.stringify(r));
+    }
+  });
+});
+
+describe("a malformed body on the opt-in MCP endpoint", () => {
+  test("is a parse error", async () => {
+    const w = await makeWorld();
+    w.env.SCRYBE_DAEMON_MCP_HTTP = "1";
+    try {
+      const { port } = await startedServer(w);
+      const r = await rawRequest(port, "POST", "/mcp", ["{nope"], { Accept: "application/json, text/event-stream" });
+      assert.deepEqual([r.status, r.body], [400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error: Invalid JSON" }, id: null }]);
+    } finally { await w.stop(); }
+  });
+});
+
+describe("garbage collection when the tags can't be read", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.index("--full"); await w.cli("projects"); });
+  after(() => w.stop());
+  const sql = (text) => {
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"));
+    db.exec(text);
+    db.close();
+  };
+  // A view in the table's place is there for a schema check and fails every read.
+  const breakTags = () => sql("ALTER TABLE branch_tags RENAME TO kept_tags; CREATE VIEW branch_tags AS SELECT * FROM no_such_table;");
+  const mendTags = () => sql("DROP VIEW branch_tags; ALTER TABLE kept_tags RENAME TO branch_tags;");
+  const stillThere = async () => {
+    const r = await w.cli("gc", "--dry-run");
+    assert.deepEqual([r.status, r.stdout], [0, "No orphan chunks found.\n"], r.stderr);
+    const found = await w.cli("search", "code", "-P", "demo", "frobnicateWidget");
+    assert.match(found.stdout, /src\/widget\.ts/, found.stderr);
+  };
+
+  test("the command fails and deletes nothing", async () => {
+    breakTags();
+    try {
+      const r = await w.cli("gc");
+      assert.notEqual(r.status, 0, r.stdout);
+      assert.ok(!r.stdout.includes("orphan chunk(s) deleted"), r.stdout);
+    } finally { mendTags(); }
+    await stillThere();
+  });
+
+  test("the server's job fails and deletes nothing", async () => {
+    const { c, port } = await startedServer(w);
+    breakTags();
+    try {
+      const { body } = await rawRequest(port, "POST", "/gc", ['{"scope": ["demo"]}']);
+      const id = body.jobs[0].jobId;
+      const done = await until(async () => {
+        const s = (await c.call("reindex_status", { job_id: id })).value;
+        return ["done", "failed"].includes(s?.status) && s;
+      }, 30_000, "the gc job");
+      assert.equal(done.status, "failed", JSON.stringify(done));
+      assert.match(done.error, /no_such_table/);
+    } finally { mendTags(); }
+    const { body } = await rawRequest(port, "POST", "/gc", ['{"scope": ["demo"], "sourceId": ""}']);
+    const done = await until(async () => {
+      const s = (await c.call("reindex_status", { job_id: body.jobs[0].jobId })).value;
+      return ["done", "failed"].includes(s?.status) && s;
+    }, 30_000, "the next gc job");
+    assert.equal(done.status, "done", JSON.stringify(done));
+    assert.equal(JSON.parse(done.result).orphans_deleted, 0);
+    await w.killServer();
+    await stillThere();
+  });
+});
+
+describe("a full run cancelled while it scans", () => {
+  let gl, w, c, base;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN } });
+    await w.index("--full");
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+  });
+  after(async () => { await w.stop(); gl.close(); });
+  const ended = (id) => until(async () => {
+    const s = (await c.call("reindex_status", { job_id: id })).value;
+    return s?.status !== "running" && s;
+  }, 30_000, "the job to end");
+
+  test("keeps the issues it had", async (t) => {
+    ({ c, base } = await startedServer(w));
+    const before = await knowledgeRows(w);
+    if (!before) return t.skip("no LanceDB module to read the table with: set SCRYBE_CONTRACT_NODE_MODULES");
+    const asked = gl.state.log.length;
+    let release;
+    gl.state.hold = new Promise((r) => { release = r; });
+    const id = (await c.call("reindex_source", { project_id: "demo", source_id: "issues", mode: "full" })).value.job_id;
+    await until(() => gl.state.log.length > asked, 10_000, "the scan to start");
+    const answer = await (await fetch(`${base}/jobs/${id}`, { method: "DELETE" })).json();
+    assert.deepEqual(answer, { job_id: id, cancelled: true });
+    release();
+    gl.state.hold = null;
+    assert.equal((await ended(id)).status, "cancelled");
+    assert.deepEqual(summarize(await knowledgeRows(w)), summarize(before));
+  });
+
+  // Today's build reads the git tree without a pause, so a cancel can't reach it until the scan is over.
+  const skip = BUILD === "ts" ? "today's build can't hear a cancel during this scan" : process.platform === "win32" ? "needs a shell script in git's place" : false;
+  test("keeps the code it had", { skip }, async () => {
+    const bin = join(w.dir, "bin"), held = join(w.dir, "held"), seen = join(w.dir, "seen");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ "$1" = ls-tree ] && [ -e "${held}" ]; then touch "${seen}"; while [ -e "${held}" ]; do sleep 0.1; done; fi\nPATH="\${PATH#*:}" exec git "$@"\n`, { mode: 0o755 });
+    await w.killServer();
+    w.env.PATH = `${bin}:${w.env.PATH}`;
+    let r = await w.cli("index", "-P", "demo", "-S", "primary", "--branch", "side");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    ({ c, base } = await startedServer(w));
+    writeFileSync(held, "");
+    const id = (await c.call("reindex_source", { project_id: "demo", source_id: "primary", mode: "full", branch: "side" })).value.job_id;
+    await until(() => existsSync(seen), 10_000, "the scan to start");
+    await fetch(`${base}/jobs/${id}`, { method: "DELETE" });
+    rmSync(held);
+    assert.equal((await ended(id)).status, "cancelled");
+    for (const name of ["frobnicateWidget", "onlyOnTheSideBranch"]) {
+      assert.equal((await c.call("lookup_symbol", { project_id: "demo", symbol_name: name, branch: "side" })).value.length, 1, name);
+    }
+  });
+});
+
+describe("odd project lists", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+  const path = () => join(w.data, "projects.json");
+  const write = (list) => writeFileSync(path(), JSON.stringify(list, null, 2));
+
+  test("a project in the old flat shape becomes a primary source, and the file is saved that way", async () => {
+    write([
+      { id: "flat", description: "old", root_path: w.repo, languages: ["ts"], last_indexed: "2026-01-02T03:04:05.000Z", extra: 1 },
+      { id: "tracker", source_config: { type: "ticket", provider: "gitlab", base_url: "", project_id: "1", token: "${X}" }, sources: null },
+      { id: "demo", description: "A demo", sources: [] },
+    ]);
+    const r = await w.cli("project", "list");
+    assert.equal(r.status, 0, r.stderr);
+    for (const id of ["flat", "tracker"]) {
+      assert.ok(r.stderr.includes(`[scrybe] Migrated project '${id}' to multi-source model (source_id: "primary"). Run a full reindex to rebuild its vector table.`), r.stderr);
+    }
+    assert.match(r.stdout, /\nflat — old\n {2}\S primary +code +2026-01-02 03:04\n/);
+    assert.match(r.stdout, /\ndemo — A demo\n/);
+    const want = [
+      { id: "flat", description: "old", extra: 1, sources: [{ source_id: "primary", source_config: { type: "code", root_path: w.repo, languages: ["ts"] }, last_indexed: "2026-01-02T03:04:05.000Z" }] },
+      { id: "tracker", sources: [{ source_id: "primary", source_config: { type: "ticket", provider: "gitlab", base_url: "", project_id: "1", token: "${X}" } }] },
+      { id: "demo", description: "A demo", sources: [] },
+    ];
+    assert.equal(readFileSync(path(), "utf8"), JSON.stringify(want, null, 2));
+    const again = await w.cli("project", "list");
+    assert.deepEqual([again.stdout, again.stderr], [r.stdout, ""]);
+  });
+
+  test("-P shows a flat project in its new shape", async () => {
+    write([{ id: "flat", root_path: w.repo }]);
+    const r = await w.cli("status", "-P", "flat");
+    assert.equal(r.status, 0, r.stderr);
+    const shown = JSON.parse(r.stdout.slice(0, r.stdout.indexOf("\nData dir: ")));
+    assert.deepEqual(shown.sources.map((s) => [s.source_id, s.source_config]), [["primary", { type: "code", root_path: w.repo, languages: [] }]]);
+  });
+
+  test("a field of the wrong type in one entry hides nothing else", async () => {
+    write([
+      { id: "odd", description: 3, sources: [{ source_id: "s", source_config: { type: "code", root_path: w.repo, languages: "ts" }, table_name: 5, pinned_branches: "main" }] },
+      { description: "no id", sources: [] },
+      { id: "demo", description: "A demo", sources: [{ source_id: "primary", source_config: { type: "code", root_path: w.repo, languages: [] } }] },
+    ]);
+    const { c } = await startedServer(w);
+    const { value, isError, text } = await c.call("list_projects");
+    assert.equal(isError, false, text);
+    assert.deepEqual(value.filter((p) => p.id).map((p) => [p.id, p.sources.map((s) => s.source_id)]), [["odd", ["s"]], ["demo", ["primary"]]]);
+    await w.killServer();
+  });
+
+  test("a file that isn't a list is not replaced by a new one", async () => {
+    writeFileSync(path(), '{"not": "a list"}');
+    const r = await w.cli("project", "add", "--id", "fresh");
+    assert.equal(r.status, 1, r.stdout);
+    assert.equal(readFileSync(path(), "utf8"), '{"not": "a list"}');
+  });
+
+  test("source add before any project says the project isn't there", async () => {
+    rmSync(path());
+    const r = await w.cli("source", "add", "-P", "demo", "-S", "x", "--type", "code", "--root", w.repo);
+    assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", "[scrybe] Project 'demo' not found\n"]);
+  });
+});
+
+describe("a project list that can't be saved", () => {
+  let w, c, port;
+  const PINNED = "/projects/demo/sources/primary/pinned-branches";
+  // A folder where the new file is first written fails for any user.
+  const block = () => mkdirSync(join(w.data, "projects.json.tmp"));
+  const unblock = () => rmSync(join(w.data, "projects.json.tmp"), { recursive: true });
+  before(async () => {
+    w = await makeWorld({ pinned: ["side"] });
+    ({ c, port } = await startedServer(w));
+    await until(async () => (await c.call("queue_status")).value.running.length === 0, 30_000, "the queue to settle");
+  });
+  after(() => w.stop());
+
+  test("fails every change to it and keeps what was there", async () => {
+    const before = readFileSync(join(w.data, "projects.json"), "utf8");
+    block();
+    try {
+      for (const [method, path, body] of [["POST", PINNED, '{"branches": ["x"]}'], ["DELETE", PINNED, '{"branches": ["side"]}'], ["DELETE", `${PINNED}?all=true`, ""]]) {
+        const r = await rawRequest(port, method, path, [body]);
+        assert.equal(r.status, 500, r.text);
+        assert.deepEqual(Object.keys(r.body), ["error"]);
+        assert.match(r.body.error, /^Error: .*projects\.json\.tmp/s);
+      }
+      for (const [tool, args] of [["pin_branches", { source_id: "primary", branches: ["y"] }], ["unpin_branches", { source_id: "primary", branches: ["side"] }], ["update_project", { description: "new" }], ["update_source", { source_id: "primary", root_path: w.dir }]]) {
+        const r = await c.call(tool, { project_id: "demo", ...args });
+        assert.ok(r.isError || r.rpcError, `${tool}: ${r.text}`);
+      }
+      const r = await c.call("add_project", { project_id: "fresh" });
+      assert.ok(r.isError || r.rpcError, r.text);
+      const cli = await w.cli("branch", "pin", "-P", "demo", "z");
+      assert.equal(cli.status, 1, cli.stdout);
+    } finally { unblock(); }
+    assert.equal(readFileSync(join(w.data, "projects.json"), "utf8"), before);
+    assert.deepEqual((await rawRequest(port, "GET", PINNED, [])).body, { branches: ["side"] });
+  });
+});
+
+describe("start-up settings", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  after(() => w.stop());
+
+  test("an overlap as long as the chunk is refused by every command", async () => {
+    for (const [size, overlap, said] of [["10", "10", "(10) must be less than SCRYBE_CHUNK_SIZE (10)"], ["5 lines", "", "(10) must be less than SCRYBE_CHUNK_SIZE (5)"], ["20", "30", "(30) must be less than SCRYBE_CHUNK_SIZE (20)"]]) {
+      const r = await w.cliWith({ SCRYBE_CHUNK_SIZE: size, ...(overlap ? { SCRYBE_CHUNK_OVERLAP: overlap } : {}) }, "project", "list");
+      assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", `scrybe error: Error: Invalid chunking config: SCRYBE_CHUNK_OVERLAP ${said}. Defaults: size=60, overlap=10.\n`]);
+    }
+    const ok = await w.cliWith({ SCRYBE_CHUNK_SIZE: "11" }, "project", "list");
+    assert.equal(ok.status, 0, ok.stderr);
+  });
+
+  test("a port that isn't one stops the server, and 0 takes any", async (t) => {
+    for (const [port, got] of [["abc", "NaN"], ["", "NaN"], ["70000", "70000"], ["-1", "-1"]]) {
+      const r = await w.cliWith({ SCRYBE_DAEMON_PORT: port }, "daemon", "start");
+      assert.equal(r.status, 1, r.stdout);
+      assert.ok(r.stderr.includes(`options.port should be >= 0 and < 65536. Received type number (${got}).`), r.stderr);
+      assert.equal(w.pidfile(), null);
+    }
+    const c = w.client({ extraEnv: { SCRYBE_DAEMON_PORT: "0xyz" } });
+    await c.hello();
+    await c.rpc("tools/list");
+    if (!w.pidfile()) return t.skip("no server on this host");
+    assert.ok(w.pidfile().port > 0);
+    await w.killServer();
+  });
+
+  const privileged = process.platform !== "linux" || process.getuid() === 0 || Number(readFileSync("/proc/sys/net/ipv4/ip_unprivileged_port_start", "utf8")) <= 1;
+  test("a port this user may not have says where to look", { skip: privileged ? "this user may bind any port" : false }, async () => {
+    const r = await w.cliWith({ SCRYBE_DAEMON_PORT: "1" }, "daemon", "start");
+    assert.equal(r.status, 1, r.stdout);
+    assert.ok(r.stderr.includes("Error: Port 1 (from SCRYBE_DAEMON_PORT) is unavailable to this process. On Windows this usually means another component (Hyper-V, WSL, etc.) has reserved it at boot. Run `netsh interface ipv4 show excludedportrange protocol=tcp` to see the reserved ranges, or unset SCRYBE_DAEMON_PORT to let the daemon pick a free port itself."), r.stderr);
+  });
+});
+
+describe("a pidfile somewhere else", () => {
+  test("is the one the server, the client and the command line use", async (t) => {
+    const w = await makeWorld();
+    const file = join(w.dir, "elsewhere.pid");
+    w.env.SCRYBE_DAEMON_PIDFILE = file;
+    const read = () => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
+    try {
+      const first = w.client();
+      await first.hello();
+      await first.toolNames();
+      const pf = await until(read, 10_000, "the pidfile");
+      assert.equal(w.pidfile(), null, "nothing in the usual place");
+      const second = w.client();
+      await second.hello();
+      assert.equal((await second.call("status")).value.daemon_pid, pf.pid);
+      const shown = await w.cliLive("daemon", "status");
+      if (!shown.stdout.startsWith("{")) return t.skip(`this host's command line sees no server: ${shown.stdout}`);
+      assert.equal(JSON.parse(shown.stdout).pid, pf.pid);
+      const json = JSON.parse((await w.cliLive("status", "--json")).stdout);
+      assert.equal(json.daemon.pid, pf.pid);
+      const r = await w.cliLive("daemon", "stop");
+      assert.deepEqual([r.status, r.stdout], [0, "Daemon stopped.\n"], r.stderr);
+      assert.equal(read(), null);
+    } finally {
+      const pf = read();
+      if (pf) { try { process.kill(pf.pid, "SIGKILL"); } catch { /* gone */ } }
+      await w.stop();
+    }
+  });
+});
+
+describe("status when something else answers on the port", () => {
+  test("only a server's own 2xx answer counts as running", async () => {
+    const w = await makeWorld();
+    const stand = spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { stdio: "ignore", windowsHide: true });
+    let answer;
+    const { createServer } = await import("node:http");
+    const server = createServer((req, res) => { res.writeHead(answer[0], { "Content-Type": "application/json" }); res.end(JSON.stringify(answer[1])); });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const good = { pid: stand.pid, uptimeMs: 1, queue: { active: 0, pending: 0 } };
+    try {
+      writeFileSync(join(w.data, "daemon.pid"), JSON.stringify({ pid: stand.pid, port: server.address().port, startedAt: "", version: "", dataDir: w.data, execPath: "" }));
+      const running = async () => JSON.parse((await w.cli("status", "--json")).stdout.replace(/^[^{]*/, "")).daemon.running;
+      answer = [200, good];
+      assert.equal(await running(), true);
+      for (answer of [[500, good], [404, { error: "Not found" }], [503, good], [200, {}]]) assert.equal(await running(), false, JSON.stringify(answer));
+    } finally {
+      rmSync(join(w.data, "daemon.pid"), { force: true });
+      server.close();
+      stand.kill();
+      await w.stop();
+    }
+  });
+});
+
+describe("the client named on requests going out", () => {
+  test("the trackers, the embedder and the reranker all see one", async () => {
+    const gl = await fakeGitlab(), gh = await fakeGithub(), rr = await fakeReranker();
+    seedGitlab(gl);
+    seedGithub(gh);
+    const w = await makeWorld({ extraSources: [ticketSource(gl), { ...githubSource(gh), source_id: "hub" }], serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN, CONTRACT_GITHUB_TOKEN: GITHUB_TOKEN, ...RERANK_ENV(rr) } });
+    try {
+      await w.index("--full");
+      for (const source of ["issues", "hub"]) {
+        const r = await w.cli("index", "-P", "demo", "-S", source, "--full");
+        assert.equal(r.status, 0, r.stderr + r.stdout);
+      }
+      const r = await w.cli("search", "code", "-P", "demo", "widget");
+      assert.equal(r.status, 0, r.stderr);
+      for (const log of [gl.state.log, gh.state.log, rr.log]) {
+        assert.ok(log.length > 0);
+        assert.deepEqual([...new Set(log.map((l) => l.agent))], ["node"]);
+      }
+      assert.ok(w.fake.log.length > 0 && w.fake.log.every((l) => l.agent), JSON.stringify(w.fake.log[0]));
+    } finally {
+      await w.stop();
+      for (const s of [gl, gh, rr]) s.close();
+    }
+  });
 });

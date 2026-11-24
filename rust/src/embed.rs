@@ -276,7 +276,7 @@ fn download_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     // HTTP/1.1, as today's build fetches: one HTTP/2 stream's flow-control window caps a long-distance
     // download at about a third of the line speed.
-    CLIENT.get_or_init(|| reqwest::Client::builder().http1_only().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
+    CLIENT.get_or_init(|| reqwest::Client::builder().user_agent(crate::config::USER_AGENT).http1_only().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
 }
 
 /// Called with the download's whole percent (0 to 99) each time it changes.

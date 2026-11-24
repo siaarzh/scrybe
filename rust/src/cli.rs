@@ -259,7 +259,7 @@ pub(crate) async fn server_state() -> Server {
     if std::env::var("SCRYBE_NO_AUTO_DAEMON").as_deref() == Ok("1") || crate::ops::in_container() {
         return Server::Down;
     }
-    let Some(port) = std::fs::read_to_string(crate::config::data_dir().join("daemon.pid")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()) else { return Server::Down };
+    let Some(port) = std::fs::read_to_string(crate::config::pidfile_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()) else { return Server::Down };
     let Ok(client) = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build() else { return Server::Down };
     let Ok(res) = client.get(format!("http://127.0.0.1:{port}/health")).send().await else { return Server::Down };
     if !res.status().is_success() {

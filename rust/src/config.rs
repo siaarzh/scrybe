@@ -24,6 +24,14 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+/// `getPidfilePath`.
+pub fn pidfile_path() -> PathBuf {
+    env::var_os("SCRYBE_DAEMON_PIDFILE").map_or_else(|| data_dir().join("daemon.pid"), PathBuf::from)
+}
+
+/// Sent on every request to a tracker, a model host or an API: some refuse a request that names no client.
+pub const USER_AGENT: &str = "node";
+
 static DOT_ENV_KEYS: OnceLock<HashSet<String>> = OnceLock::new();
 static IN_SERVER: AtomicBool = AtomicBool::new(false);
 

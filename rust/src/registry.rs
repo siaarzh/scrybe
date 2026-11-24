@@ -1,26 +1,34 @@
-//! Read-only view of `projects.json` and `config.json`. Mirrors `src/registry.ts` and the preset
-//! lookups it needs. Old flat-shape projects are shown, never rewritten.
+//! `projects.json` and `config.json`. Mirrors `src/registry.ts` and the preset lookups it needs.
 use crate::config::data_dir;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Source {
     pub source_id: String,
-    #[serde(default)]
     pub source_config: Value,
-    #[serde(default)]
     pub table_name: Option<String>,
-    #[serde(default)]
     pub last_indexed: Option<String>,
-    #[serde(default)]
     pub pinned_branches: Option<Vec<String>>,
 }
 
 impl Source {
+    /// `None` without a usable id. Any other field of the wrong type counts as absent.
+    fn from_json(v: &Value) -> Option<Self> {
+        let text = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(String::from);
+        Some(Source {
+            source_id: v["source_id"].as_str()?.to_string(),
+            source_config: v["source_config"].clone(),
+            table_name: text("table_name"),
+            last_indexed: text("last_indexed"),
+            pinned_branches: v["pinned_branches"].as_array().map(|b| b.iter().filter_map(|b| b.as_str().map(String::from)).collect()),
+        })
+    }
+
     pub fn kind(&self) -> &str {
         self.source_config.get("type").and_then(Value::as_str).unwrap_or("unknown")
     }
@@ -37,41 +45,106 @@ impl Source {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Project {
     pub id: String,
-    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
     pub sources: Vec<Source>,
 }
 
+impl Project {
+    fn from_json(v: &Value) -> Option<Self> {
+        let sources = v["sources"].as_array().into_iter().flatten().filter_map(Source::from_json).collect();
+        Some(Project { id: v["id"].as_str()?.to_string(), description: v["description"].as_str().map(String::from), sources })
+    }
+}
+
+fn projects_path() -> PathBuf {
+    data_dir().join("projects.json")
+}
+
+/// The file as it stands: no file is an empty list, one that doesn't parse is `None`, anything but a list is an error.
+fn parse_list(text: Option<&[u8]>) -> Result<Option<Vec<Value>>> {
+    let Some(bytes) = text else { return Ok(None) };
+    match serde_json::from_str(&String::from_utf8_lossy(bytes)) {
+        Ok(Value::Array(list)) => Ok(Some(list)),
+        Ok(_) => anyhow::bail!("projects.json is not a list"),
+        Err(_) => Ok(None),
+    }
+}
+
+fn read_list() -> Result<Option<Vec<Value>>> {
+    let path = projects_path();
+    if !path.exists() {
+        return Ok(Some(vec![]));
+    }
+    parse_list(std::fs::read(path).ok().as_deref())
+}
+
+/// The old flat shape becomes one source named `primary`. Returns the ids it changed.
+fn migrate(list: &mut [Value]) -> Vec<String> {
+    let mut changed = vec![];
+    for p in list.iter_mut().filter_map(Value::as_object_mut) {
+        if p.get("sources").is_some_and(Value::is_array) {
+            continue;
+        }
+        let given = |k: &str| p.get(k).filter(|v| !v.is_null()).cloned();
+        let config = given("source_config").unwrap_or_else(|| serde_json::json!({ "type": "code", "root_path": given("root_path").unwrap_or_else(|| "".into()), "languages": given("languages").unwrap_or_else(|| Value::Array(vec![])) }));
+        let mut source = serde_json::json!({ "source_id": "primary", "source_config": config });
+        if let Some(at) = p.get("last_indexed") {
+            source["last_indexed"] = at.clone();
+        }
+        p.insert("sources".into(), Value::Array(vec![source]));
+        for k in ["root_path", "languages", "source_config", "last_indexed"] {
+            p.shift_remove(k);
+        }
+        changed.push(p.get("id").and_then(Value::as_str).unwrap_or("undefined").to_string());
+    }
+    changed
+}
+
+/// `load` for a reader: `None` when the file can't be read as a list. A flat project is saved in its new shape.
+fn load() -> Option<Vec<Value>> {
+    let mut list = read_list().ok()??;
+    if !migrate(&mut list).is_empty() && crate::index::refuse_live_data_dir().is_ok() {
+        // A writer holding the lock saves the new shape itself.
+        if let Ok(_guard) = WRITE.try_lock() {
+            if let Err(e) = load_list() {
+                eprintln!("[scrybe] could not save the migrated projects.json: {e:#}");
+            }
+        }
+    }
+    Some(list)
+}
+
+fn load_projects() -> Option<Vec<Project>> {
+    Some(load()?.iter().filter_map(Project::from_json).collect())
+}
+
 pub fn list_projects() -> Vec<Project> {
-    let Ok(text) = std::fs::read_to_string(data_dir().join("projects.json")) else { return vec![] };
-    serde_json::from_str(&text).unwrap_or_default()
+    load_projects().unwrap_or_default()
 }
 
 /// The registry as read now: `None` when there is no file, an error when it can't be read or parsed.
 pub fn read_projects() -> Result<Option<Vec<Project>>> {
-    let path = data_dir().join("projects.json");
-    if !path.exists() {
+    if !projects_path().exists() {
         return Ok(None);
     }
-    Ok(Some(serde_json::from_str(&std::fs::read_to_string(&path)?)?))
+    load_projects().context("projects.json can't be read as a list").map(Some)
 }
 
 /// Project ids, or `None` when projects.json exists and can't be read as a list.
 pub fn project_ids_if_readable() -> Option<Vec<String>> {
-    let path = data_dir().join("projects.json");
-    if !path.exists() {
-        return Some(vec![]);
-    }
-    let list: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    Some(list.as_array()?.iter().filter_map(|p| p["id"].as_str().map(String::from)).collect())
+    Some(load()?.iter().filter_map(|p| p["id"].as_str().map(String::from)).collect())
 }
 
 pub fn get_project(id: &str) -> Option<Project> {
     list_projects().into_iter().find(|p| p.id == id)
+}
+
+/// A project as it is stored, fields this code doesn't know included.
+pub fn raw_project(id: &str) -> Option<Value> {
+    load()?.into_iter().find(|p| p["id"] == id)
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -320,114 +393,98 @@ pub fn write_lock() -> std::sync::MutexGuard<'static, ()> {
     WRITE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// `load`: a missing or unparseable file is an empty list. Entries stay JSON so unknown fields survive.
-fn load_list() -> Vec<Value> {
-    let Ok(text) = std::fs::read_to_string(data_dir().join("projects.json")) else { return vec![] };
-    match serde_json::from_str::<Value>(&text) {
-        Ok(Value::Array(list)) => list,
-        _ => vec![],
+/// `load` for a caller that holds the write lock: no file or one that doesn't parse is an empty list, and a flat
+/// project is saved in its new shape first. Entries stay JSON so fields this code doesn't know survive.
+fn load_list() -> Result<Vec<Value>> {
+    let mut list = read_list()?.unwrap_or_default();
+    let changed = migrate(&mut list);
+    for id in &changed {
+        eprintln!("[scrybe] Migrated project '{id}' to multi-source model (source_id: \"primary\"). Run a full reindex to rebuild its vector table.");
     }
+    if !changed.is_empty() {
+        save_list(&list)?;
+    }
+    Ok(list)
 }
 
 /// `save`: writes beside the file, then renames over it.
-fn save_list(list: Vec<Value>) -> Result<()> {
-    let path = data_dir().join("projects.json");
+fn save_list(list: &[Value]) -> Result<()> {
+    let path = projects_path();
     std::fs::create_dir_all(data_dir())?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&Value::Array(list))?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    std::fs::write(&tmp, serde_json::to_string_pretty(list)?).with_context(|| format!("could not write '{}'", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("could not replace '{}'", path.display()))
 }
 
-/// `addSource`: appends to the registry as JSON so fields this code doesn't know survive.
+fn entry<'a>(list: &'a mut [Value], project: &str) -> Result<&'a mut Value> {
+    list.iter_mut().find(|p| p["id"] == project).with_context(|| format!("Project '{project}' not found"))
+}
+
+/// `addSource`.
 pub fn add_source(project: &str, source: Value) -> Result<()> {
     let _guard = write_lock();
-    let path = data_dir().join("projects.json");
-    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-    let Some(p) = doc.as_array_mut().context("projects.json is not a list")?.iter_mut().find(|p| p["id"] == project) else {
-        anyhow::bail!("Project '{project}' not found");
-    };
-    let source_id = source["source_id"].as_str().unwrap_or("").to_string();
-    if p["sources"].as_array().is_some_and(|s| s.iter().any(|s| s["source_id"] == source_id)) {
-        anyhow::bail!("Source '{source_id}' already exists in project '{project}'");
+    let mut list = load_list()?;
+    let p = entry(&mut list, project)?;
+    let sources = p["sources"].as_array_mut().context("sources is not a list")?;
+    if sources.iter().any(|s| s["source_id"] == source["source_id"]) {
+        anyhow::bail!("Source '{}' already exists in project '{project}'", source["source_id"].as_str().unwrap_or(""));
     }
-    match p["sources"].as_array_mut() {
-        Some(list) => list.push(source),
-        None => p["sources"] = Value::Array(vec![source]),
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&doc)?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    sources.push(source);
+    save_list(&list)
 }
 
-/// `updateSource`: patches the registry as JSON so fields this code doesn't know survive.
+/// `updateSource`.
 pub fn update_source(project: &str, source: &str, patch: &[(&str, Value)]) -> Result<()> {
     let _guard = write_lock();
-    let path = data_dir().join("projects.json");
-    let mut doc: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-    for p in doc.as_array_mut().context("projects.json is not a list")? {
-        if p["id"] != project {
-            continue;
-        }
-        for s in p["sources"].as_array_mut().into_iter().flatten() {
-            if s["source_id"] == source {
-                for (k, v) in patch {
-                    s[*k] = v.clone();
-                }
-            }
-        }
+    let mut list = load_list()?;
+    let found = entry(&mut list, project)?["sources"].as_array_mut().and_then(|s| s.iter_mut().find(|s| s["source_id"] == source));
+    let s = found.with_context(|| format!("Source '{source}' not found in project '{project}'"))?;
+    for (k, v) in patch {
+        s[*k] = v.clone();
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&doc)?)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    save_list(&list)
 }
 
 /// `addProject`.
 pub fn add_project(id: &str, description: &str) -> Result<()> {
     let _guard = write_lock();
-    let mut list = load_list();
+    let mut list = load_list()?;
     if list.iter().any(|p| p["id"] == id) {
         anyhow::bail!("Project '{id}' already exists");
     }
     list.push(serde_json::json!({ "id": id, "description": description, "sources": [] }));
-    save_list(list)
+    save_list(&list)
 }
 
 /// `updateProject`: sets the description when one is given and returns the whole project.
 pub fn update_project(id: &str, description: Option<Value>) -> Result<Value> {
     let _guard = write_lock();
-    let mut list = load_list();
-    let Some(p) = list.iter_mut().find(|p| p["id"] == id) else {
-        anyhow::bail!("Project '{id}' not found");
-    };
+    let mut list = load_list()?;
+    let p = entry(&mut list, id)?;
     if let Some(d) = description {
         p["description"] = d;
     }
     let out = p.clone();
-    save_list(list)?;
+    save_list(&list)?;
     Ok(out)
 }
 
 /// The last step of `removeProject`: the entry leaves the file.
 pub fn remove_project_entry(id: &str) -> Result<()> {
     let _guard = write_lock();
-    let mut list = load_list();
+    let mut list = load_list()?;
     list.retain(|p| p["id"] != id);
-    save_list(list)
+    save_list(&list)
 }
 
 /// The last step of `removeSource`: the source leaves its project's list.
 pub fn remove_source_entry(project: &str, source: &str) -> Result<()> {
     let _guard = write_lock();
-    let mut list = load_list();
-    for p in list.iter_mut().filter(|p| p["id"] == project) {
-        if let Some(sources) = p["sources"].as_array_mut() {
-            sources.retain(|s| s["source_id"] != source);
-        }
+    let mut list = load_list()?;
+    if let Some(sources) = entry(&mut list, project)?["sources"].as_array_mut() {
+        sources.retain(|s| s["source_id"] != source);
     }
-    save_list(list)
+    save_list(&list)
 }
 
 /// Mirrors `isSearchable`.
@@ -465,4 +522,55 @@ pub fn is_searchable(source: &Source) -> (bool, Option<String>) {
         return (false, Some(format!("Requires env var {var} (model: {}) — not set in current environment{}", preset.model, env_ref_remedy(var, false, crate::config::in_server()))));
     }
     (true, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_flat_project_becomes_one_primary_source_in_place() {
+        let mut list = vec![
+            json!({ "id": "flat", "description": "d", "root_path": "/r", "languages": ["ts"], "last_indexed": "t", "kept": 1 }),
+            json!({ "id": "bare" }),
+            json!({ "sources": null, "id": "own", "source_config": { "type": "ticket" }, "root_path": "/x", "last_indexed": null }),
+            json!({ "id": "new", "sources": [] }),
+            json!("noise"),
+            Value::Null,
+        ];
+        assert_eq!(migrate(&mut list), ["flat", "bare", "own"]);
+        let text = |v: &Value| v.to_string();
+        assert_eq!(text(&list[0]), r#"{"id":"flat","description":"d","kept":1,"sources":[{"source_id":"primary","source_config":{"type":"code","root_path":"/r","languages":["ts"]},"last_indexed":"t"}]}"#);
+        assert_eq!(text(&list[1]), r#"{"id":"bare","sources":[{"source_id":"primary","source_config":{"type":"code","root_path":"","languages":[]}}]}"#);
+        assert_eq!(text(&list[2]), r#"{"sources":[{"source_id":"primary","source_config":{"type":"ticket"},"last_indexed":null}],"id":"own"}"#);
+        assert_eq!(migrate(&mut list), [""; 0], "a second look finds nothing to do");
+    }
+
+    #[test]
+    fn one_bad_entry_or_source_hides_nothing_else() {
+        let list = json!([null, 5, "x", [], {}, { "id": 7, "sources": [] }, {
+            "id": "good", "description": 3, "sources": [
+                null, "x", {}, { "source_id": 9 },
+                { "source_id": "odd", "source_config": "text", "table_name": 4, "last_indexed": {}, "pinned_branches": "main" },
+                { "source_id": "mixed", "source_config": { "type": "code" }, "table_name": "t", "pinned_branches": ["a", 1, "b"] },
+            ],
+        }]);
+        let found: Vec<Project> = list.as_array().unwrap().iter().filter_map(Project::from_json).collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].id.as_str(), &found[0].description), ("good", &None));
+        let [odd, mixed] = &found[0].sources[..] else { panic!("{:?}", found[0].sources) };
+        assert_eq!((odd.kind(), &odd.table_name, &odd.last_indexed, &odd.pinned_branches), ("unknown", &None, &None, &None));
+        assert_eq!((mixed.kind(), mixed.table_name.as_deref(), mixed.pinned_branches.as_deref()), ("code", Some("t"), Some(&["a".to_string(), "b".to_string()][..])));
+    }
+
+    #[test]
+    fn a_file_that_parses_to_anything_but_a_list_is_not_taken_for_an_empty_one() {
+        assert_eq!(parse_list(Some(b"[]")).unwrap(), Some(vec![]));
+        assert_eq!(parse_list(Some(b"[1,")).unwrap(), None);
+        assert_eq!(parse_list(None).unwrap(), None);
+        for text in ["{}", "null", "\"x\"", "5"] {
+            assert!(parse_list(Some(text.as_bytes())).is_err(), "{text}");
+        }
+    }
 }

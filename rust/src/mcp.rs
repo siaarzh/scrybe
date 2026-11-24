@@ -169,7 +169,7 @@ pub async fn rpc(store: &Store, req: &Value) -> String {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let fail = |code: i64, message: &str| json!({ "id": id, "error": { "code": code, "message": message } }).to_string();
     let name = req.get("method").and_then(Value::as_str).unwrap_or("");
-    let args = req.get("params").cloned().unwrap_or_else(|| json!({}));
+    let args = req.get("params").filter(|p| p.is_object()).cloned().unwrap_or_else(|| json!({}));
     let tools = tool_list();
     let Some(tool) = tools.as_array().and_then(|t| t.iter().find(|x| x["name"] == name)) else {
         return fail(-32601, &format!("method not found: {name}"));

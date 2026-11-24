@@ -169,10 +169,12 @@ impl Rows {
         );
     }
 
-    pub fn tagged_chunk_ids(&self, project: &str, source: &str) -> HashSet<String> {
+    /// `getAllChunkIdsForSource`. A failed read is an error, never "no tags": gc deletes what isn't listed.
+    pub fn tagged_chunk_ids(&self, project: &str, source: &str) -> Result<HashSet<String>> {
         let conn = self.lock();
-        let Ok(mut stmt) = conn.prepare("SELECT DISTINCT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?") else { return HashSet::new() };
-        stmt.query_map([project, source], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
+        let mut stmt = conn.prepare("SELECT DISTINCT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?")?;
+        let rows = stmt.query_map([project, source], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// `getLastGcTime` as `status` calls it: when the last good gc finished, whatever came after.
@@ -374,6 +376,31 @@ struct State {
     ring: VecDeque<Value>,
 }
 
+impl State {
+    /// The next job that may run, marked active in the same step: none while the cap is reached or its project is busy.
+    fn take_next(&mut self, cap: usize) -> Option<Item> {
+        if self.active.len() >= cap {
+            return None;
+        }
+        let idx = self.pending.iter().position(|p| !self.active.values().any(|project| *project == p.project))?;
+        let item = self.pending.remove(idx)?;
+        self.active.insert(item.job_id.clone(), item.project.clone());
+        Some(item)
+    }
+}
+
+/// What a full run of a project without naming its sources is refused with.
+pub const FULL_NEEDS_SOURCES: &str = "full reindex requires explicit source_ids";
+
+/// A panic counts as the work's own error.
+async fn caught<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    use futures::FutureExt;
+    std::panic::AssertUnwindSafe(work).catch_unwind().await.unwrap_or_else(|p| {
+        let text = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+        Err(anyhow::anyhow!("{}", text.unwrap_or_else(|| "the job stopped unexpectedly".into())))
+    })
+}
+
 pub struct Queue {
     pub rows: Rows,
     store: Arc<Store>,
@@ -446,7 +473,7 @@ impl Queue {
     fn fire(&self, event: JobEvent, item: &Item) {
         let hooks = self.hooks.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for hook in hooks {
-            hook(event, item);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(event, item)));
         }
     }
 
@@ -496,7 +523,7 @@ impl Queue {
                 return Submitted { job_id, status: "rejected", queue_position: None, duplicate_of_pending: false };
             }
         }
-        let item = Item { job_id: job_id.clone(), project: req.project, source: req.source, branch: req.branch, content_ref: req.content_ref, mode, gc_purge: req.gc_purge };
+        let item = Item { job_id: job_id.clone(), project: req.project, source: req.source.filter(|s| !s.is_empty()), branch: req.branch, content_ref: req.content_ref, mode, gc_purge: req.gc_purge };
         let duplicate = self.lock().pending.iter().any(|p| p.project == item.project && p.source == item.source && p.mode == item.mode && p.branch == item.branch);
         if item.gc_purge.is_some() {
             self.rows.insert_queued_gc(&item);
@@ -516,21 +543,20 @@ impl Queue {
 
     fn drain(self: &Arc<Self>) {
         loop {
-            let item = {
-                let mut st = self.lock();
-                if st.active.len() >= self.max_concurrent {
-                    return;
-                }
-                let idx = st.pending.iter().position(|p| !st.active.values().any(|proj| *proj == p.project));
-                let Some(idx) = idx else { return };
-                let Some(item) = st.pending.remove(idx) else { return };
-                item
-            };
+            let Some(item) = self.lock().take_next(self.max_concurrent) else { return };
             let ts = now_iso();
             if registry::get_project(&item.project).is_none() && data_dir().join("projects.json").exists() {
                 self.rows.finish(&item.job_id, "failed", now_ms(), Some("project no longer exists"));
                 self.emit(json!({ "ts": ts, "level": "warn", "event": "job.failed", "projectId": item.project, "detail": { "jobId": item.job_id, "type": "reindex", "skippedOrphan": true, "reason": "project no longer exists" } }));
                 self.fire(JobEvent::Failed, &item);
+                self.lock().active.remove(&item.job_id);
+                continue;
+            }
+            if item.gc_purge.is_none() && item.mode == Mode::Full && item.source.is_none() {
+                self.rows.finish(&item.job_id, "failed", now_ms(), Some(FULL_NEEDS_SOURCES));
+                self.emit(json!({ "ts": ts, "level": "error", "event": "job.failed", "projectId": item.project, "error": { "message": FULL_NEEDS_SOURCES }, "detail": { "jobId": item.job_id } }));
+                self.fire(JobEvent::Failed, &item);
+                self.lock().active.remove(&item.job_id);
                 continue;
             }
             if item.gc_purge.is_some() {
@@ -557,7 +583,6 @@ impl Queue {
     }
 
     fn start_gc(self: &Arc<Self>, item: Item, ts: String) {
-        self.lock().active.insert(item.job_id.clone(), item.project.clone());
         self.rows.set_started(&item.job_id, now_ms());
         let purge = item.gc_purge == Some(true);
         let mut event = json!({ "ts": ts, "level": "info", "event": "job.started", "projectId": item.project });
@@ -569,7 +594,7 @@ impl Queue {
         let me = self.clone();
         self.rt.spawn(async move {
             let started = std::time::Instant::now();
-            let outcome = me.collect_garbage(&item, purge).await;
+            let outcome = caught(me.collect_garbage(&item, purge)).await;
             let at = now_ms();
             let mut event = json!({ "ts": now_iso(), "projectId": item.project });
             if let Some(s) = &item.source {
@@ -614,8 +639,9 @@ impl Queue {
         let (mut orphans, mut freed) = (0, 0);
         for source in project.sources.iter().filter(|s| item.source.as_ref().is_none_or(|want| *want == s.source_id)) {
             let Some(table) = source.table_name.as_ref().filter(|_| source.kind() == "code") else { continue };
-            let tagged = self.rows.tagged_chunk_ids(&item.project, &source.source_id);
-            let stale: Vec<String> = self.store.list_chunk_ids(table, &item.project).await?.into_iter().filter(|id| !tagged.contains(id)).collect();
+            let present = self.store.list_chunk_ids(table, &item.project).await?;
+            let tagged = self.rows.tagged_chunk_ids(&item.project, &source.source_id)?;
+            let stale: Vec<String> = present.into_iter().filter(|id| !tagged.contains(id)).collect();
             self.store.delete_chunks(table, &stale).await?;
             orphans += stale.len();
             freed += self.store.compact_measured(table, purge).await?;
@@ -650,7 +676,6 @@ impl Queue {
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut st = self.lock();
-            st.active.insert(item.job_id.clone(), item.project.clone());
             st.jobs.insert(item.job_id.clone(), state);
             st.cancels.insert(item.job_id.clone(), cancel.clone());
         }
@@ -737,7 +762,7 @@ impl Queue {
             let (me, job_id) = (self.clone(), item.job_id.clone());
             let sink = index::ProgressSink(Arc::new(move |p| me.on_progress(&job_id, i, p)));
             let options = Options { progress: Some(sink), ..options.clone() };
-            let result = index::index_source(&self.store, &item.project, source, item.mode, &options).await;
+            let result = caught(index::index_source(&self.store, &item.project, source, item.mode, &options)).await;
             let done = now_ms();
             self.update_job(&item.job_id, |job| {
                 let t = &mut job["tasks"][i];
@@ -819,7 +844,7 @@ impl Queue {
             'projects: for p in registry::list_projects() {
                 me.update_job(&job, |j| j["current_project"] = json!(p.id));
                 for s in &p.sources {
-                    if let Err(e) = index::index_source(&me.store, &p.id, &s.source_id, Mode::Incremental, &options).await {
+                    if let Err(e) = caught(index::index_source(&me.store, &p.id, &s.source_id, Mode::Incremental, &options)).await {
                         if e.to_string() == index::CANCELLED {
                             let at = now_ms();
                             me.update_job(&job, |j| {
@@ -942,6 +967,58 @@ mod tests {
         assert_eq!(rows.reconcile(100, Some(&[])).unwrap().cancelled, 1);
         drop(rows);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tags_that_cannot_be_read_are_an_error_and_not_an_empty_set() {
+        let (rows, dir) = rows_with(&[]);
+        assert!(rows.tagged_chunk_ids("p", "s").unwrap().is_empty());
+        rows.lock().execute("INSERT INTO branch_tags VALUES ('p','s','b','f','c',1,2)", []).unwrap();
+        assert_eq!(rows.tagged_chunk_ids("p", "s").unwrap().len(), 1);
+        rows.lock().execute("INSERT INTO branch_tags VALUES ('p','s','b','f',x'00',1,2)", []).unwrap();
+        assert!(rows.tagged_chunk_ids("p", "s").is_err(), "an unreadable row");
+        rows.lock().execute("DROP TABLE branch_tags", []).unwrap();
+        assert!(rows.tagged_chunk_ids("p", "s").is_err(), "no table");
+        drop(rows);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn waiting(jobs: &[(&str, &str)]) -> State {
+        let item = |id: &str, project: &str| Item { job_id: id.into(), project: project.into(), source: None, branch: None, content_ref: None, mode: Mode::Incremental, gc_purge: None };
+        State { pending: jobs.iter().map(|(id, p)| item(id, p)).collect(), active: HashMap::new(), jobs: HashMap::new(), cancels: HashMap::new(), ring: VecDeque::new() }
+    }
+
+    #[test]
+    fn taking_a_job_holds_its_project_and_its_place_under_the_cap_at_once() {
+        let mut st = waiting(&[("1", "a"), ("2", "a"), ("3", "b"), ("4", "c")]);
+        let next = |st: &mut State| st.take_next(2).map(|i| i.job_id);
+        assert_eq!(next(&mut st).as_deref(), Some("1"));
+        assert_eq!(next(&mut st).as_deref(), Some("3"), "project a is busy");
+        assert_eq!(next(&mut st), None, "the cap is reached");
+        st.active.remove("3");
+        assert_eq!(next(&mut st).as_deref(), Some("4"), "project a is still busy");
+        st.active.remove("1");
+        assert_eq!(next(&mut st).as_deref(), Some("2"));
+        assert_eq!((next(&mut st), st.pending.len(), st.active.len()), (None, 0, 2));
+    }
+
+    #[test]
+    fn two_threads_never_take_the_same_project() {
+        for _ in 0..200 {
+            let st = Arc::new(Mutex::new(waiting(&[("1", "a"), ("2", "a")])));
+            let taken: usize = [st.clone(), st].map(|st| std::thread::spawn(move || usize::from(st.lock().unwrap().take_next(8).is_some()))).map(|t| t.join().unwrap()).iter().sum();
+            assert_eq!(taken, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panic_in_the_work_is_its_error() {
+        let literal = caught(async { if true { panic!("boom") } else { Ok(1) } }).await.unwrap_err();
+        assert_eq!(literal.to_string(), "boom");
+        let formatted = caught(async { if true { panic!("boom {}", 2) } else { Ok(1) } }).await.unwrap_err();
+        assert_eq!(formatted.to_string(), "boom 2");
+        assert_eq!(caught(async { Ok(3) }).await.unwrap(), 3);
+        assert_eq!(caught::<()>(async { anyhow::bail!("plain") }).await.unwrap_err().to_string(), "plain");
     }
 
     #[test]

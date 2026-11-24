@@ -96,12 +96,12 @@ pub enum DaemonAction {
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
 pub(crate) fn pidfile() -> Option<(i64, i64)> {
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(config::data_dir().join("daemon.pid")).ok()?).ok()?;
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(config::pidfile_path()).ok()?).ok()?;
     Some((v["pid"].as_i64()?, v["port"].as_i64()?))
 }
 
 fn remove_pidfile() {
-    let _ = std::fs::remove_file(config::data_dir().join("daemon.pid"));
+    let _ = std::fs::remove_file(config::pidfile_path());
 }
 
 pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client> {
@@ -302,7 +302,7 @@ async fn gc_via_server(projects: &[registry::Project]) -> bool {
         return false;
     }
     let scope: Vec<&str> = projects.iter().map(|p| p.id.as_str()).collect();
-    let Ok(res) = http.post(format!("http://127.0.0.1:{port}/gc")).json(&json!({ "scope": scope, "mode": "purge" })).send().await else { return false };
+    let Ok(res) = http.post(format!("http://127.0.0.1:{port}/gc")).json(&json!({ "scope": scope, "mode": "purge" })).send().await.and_then(reqwest::Response::error_for_status) else { return false };
     let Ok(result) = res.json::<Value>().await else { return false };
     let Some(jobs) = result["jobs"].as_array() else { return false };
     if result["cancelledPending"].as_u64().unwrap_or(0) > 0 {
@@ -318,7 +318,9 @@ async fn gc_via_server(projects: &[registry::Project]) -> bool {
 
 /// Projects with no sources: listed on a dry run, offered for removal when a person is at the terminal.
 async fn prune_empty(queue: &Arc<Queue>, dry_run: bool) -> Result<()> {
-    let empty: Vec<String> = registry::list_projects().into_iter().filter(|p| p.sources.is_empty()).map(|p| p.id).collect();
+    // Asked of the file as it is: a source this build can't read still counts.
+    let no_sources = |id: &str| registry::raw_project(id).is_some_and(|p| p["sources"].as_array().is_some_and(Vec::is_empty));
+    let empty: Vec<String> = registry::list_projects().into_iter().map(|p| p.id).filter(|id| no_sources(id)).collect();
     if empty.is_empty() {
         return Ok(());
     }
@@ -362,8 +364,9 @@ async fn gc_inner(store: Store, args: GcArgs) -> Result<()> {
     for p in &projects {
         for s in &p.sources {
             let Some(table) = s.table_name.as_ref().filter(|_| s.kind() == "code") else { continue };
-            let tagged = queue.rows.tagged_chunk_ids(&p.id, &s.source_id);
-            let orphans: Vec<String> = store.list_chunk_ids(table, &p.id).await?.into_iter().filter(|id| !tagged.contains(id)).collect();
+            let present = store.list_chunk_ids(table, &p.id).await?;
+            let tagged = queue.rows.tagged_chunk_ids(&p.id, &s.source_id)?;
+            let orphans: Vec<String> = present.into_iter().filter(|id| !tagged.contains(id)).collect();
             if orphans.is_empty() {
                 continue;
             }
@@ -713,10 +716,19 @@ async fn old_status(watch: bool) -> Result<()> {
     Ok(())
 }
 
+/// A server that couldn't start: the top-level error line, not a command's own.
+fn finish_start(result: Result<()>) -> Result<()> {
+    if let Err(e) = result {
+        eprintln!("scrybe error: Error: {e:#}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 pub async fn daemon(store: Store, action: DaemonAction) {
     finish(match action {
-        DaemonAction::Start => start(store).await,
-        DaemonAction::Restart { force } => restart(store, force).await,
+        DaemonAction::Start => finish_start(start(store).await),
+        DaemonAction::Restart { force } => finish_start(restart(store, force).await),
         DaemonAction::Status { watch } => old_status(watch).await,
         DaemonAction::Stop { force } => stop(force).await,
         DaemonAction::Refresh { project_id, source_id, branch, mode } => refresh(project_id, source_id, branch, mode).await,

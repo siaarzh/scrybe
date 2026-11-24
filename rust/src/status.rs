@@ -51,14 +51,13 @@ pub(crate) fn no_dashboard() -> ! {
 }
 
 fn project_info(id: &str) -> Result<Value> {
-    let raw = std::fs::read_to_string(config::data_dir().join("projects.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
-    let Some(mut project) = raw.as_ref().and_then(Value::as_array).and_then(|a| a.iter().find(|p| p["id"] == id)).cloned() else {
+    let Some(mut project) = registry::raw_project(id) else {
         eprintln!("Project '{id}' not found");
         std::process::exit(1);
     };
     let queue_rows = crate::jobs::Rows::open()?;
     if let Some(sources) = project["sources"].as_array_mut() {
-        for s in sources {
+        for s in sources.iter_mut().filter(|s| s.is_object()) {
             let branches = if s["source_config"]["type"] == "code" {
                 queue_rows.list_branches(id, s["source_id"].as_str().unwrap_or(""))
             } else {
@@ -74,8 +73,8 @@ fn project_info(id: &str) -> Result<Value> {
 async fn daemon_info() -> Value {
     let Some((_, port)) = pidfile().filter(|(_, port)| *port > 0) else { return json!({ "running": false }) };
     let Ok(http) = client(Duration::from_secs(2)) else { return json!({ "running": false }) };
-    let Ok(res) = http.get(format!("http://127.0.0.1:{port}/status")).send().await else { return json!({ "running": false }) };
-    let Ok(s) = res.json::<Value>().await else { return json!({ "running": false }) };
+    let Ok(res) = http.get(format!("http://127.0.0.1:{port}/status")).send().await.and_then(reqwest::Response::error_for_status) else { return json!({ "running": false }) };
+    let Some(s) = res.json::<Value>().await.ok().filter(|s| s["queue"].is_object()) else { return json!({ "running": false }) };
     let active = s["queue"]["active"].as_i64().unwrap_or(0) + s["queue"]["pending"].as_i64().unwrap_or(0);
     json!({
         "running": true,

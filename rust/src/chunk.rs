@@ -1,6 +1,6 @@
 //! Cuts a file into chunks. Mirrors `src/plugins/code.ts` and `chunkLines` in `src/chunker.ts`
 //! byte for byte, including their known defects, so ids stay valid.
-use crate::jsstr::{js_len, js_slice, js_trim, split_lines};
+use crate::jsstr::{js_len, js_slice, js_trim, parse_int, split_lines};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -33,8 +33,16 @@ pub struct Sizes {
 
 impl Sizes {
     pub fn from_env() -> Self {
-        let get = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let get = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| parse_int(&v)).filter(|n| *n >= 0.0).map_or(d, |n| n as usize);
         Sizes { chunk_size: get("SCRYBE_CHUNK_SIZE", 60), overlap: get("SCRYBE_CHUNK_OVERLAP", 10) }
+    }
+
+    /// An overlap as long as the chunk would never move forward.
+    pub fn check(self) -> Result<(), String> {
+        if self.overlap < self.chunk_size {
+            return Ok(());
+        }
+        Err(format!("Invalid chunking config: SCRYBE_CHUNK_OVERLAP ({}) must be less than SCRYBE_CHUNK_SIZE ({}). Defaults: size=60, overlap=10.", self.overlap, self.chunk_size))
     }
 }
 

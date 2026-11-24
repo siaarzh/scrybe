@@ -232,7 +232,7 @@ pub fn apply_blend<T: Rerankable>(candidates: Vec<T>, scores: &[f64], top_k: usi
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(600)).build().expect("HTTP client"))
+    CLIENT.get_or_init(|| reqwest::Client::builder().user_agent(crate::config::USER_AGENT).timeout(Duration::from_secs(600)).build().expect("HTTP client"))
 }
 
 async fn scores_http(cfg: &RerankConfig, url: &str, model: &str, query: &str, docs: &[&str]) -> Result<Vec<f64>> {

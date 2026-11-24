@@ -49,7 +49,7 @@ export async function fakeEmbedder({ delayMs = 0 } = {}) {
       if (delayMs) await sleep(delayMs);
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       const input = Array.isArray(body.input) ? body.input : [body.input];
-      log.push({ auth: req.headers.authorization, n: input.length, encoding: body.encoding_format });
+      log.push({ auth: req.headers.authorization, agent: req.headers["user-agent"], n: input.length, encoding: body.encoding_format });
       const data = input.map((t, index) => {
         const vec = vectorFor(t);
         const embedding = body.encoding_format === "base64" ? Buffer.from(new Float32Array(vec).buffer).toString("base64") : vec;
@@ -76,7 +76,7 @@ export async function fakeReranker({ status = 200 } = {}) {
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-      log.push({ auth: req.headers.authorization, contentType: req.headers["content-type"], url: req.url, body });
+      log.push({ auth: req.headers.authorization, agent: req.headers["user-agent"], contentType: req.headers["content-type"], url: req.url, body });
       if (status !== 200) {
         res.writeHead(status, { "Content-Type": "text/plain" });
         res.end("reranker is down");
@@ -104,11 +104,13 @@ export async function fakeModelHost({ dropFirst = false, pieceDelayMs = 40 } = {
   for (let i = 0; i < weights.length; i++) weights[i] = (i * 2654435761) >>> 24;
   const files = { "onnx/model_quantized.onnx": weights, "tokenizer.json": Buffer.from("{}"), "tokenizer_config.json": Buffer.from("{}"), "config.json": Buffer.from('{"model_type":"bert"}') };
   const log = [];
+  const agents = [];
   let dropped = false;
   const server = http.createServer(async (req, res) => {
     const prefix = `/${LOCAL_MODEL}/resolve/main/`;
     const file = req.url.startsWith(prefix) ? req.url.slice(prefix.length) : null;
     log.push(file ?? req.url);
+    agents.push(req.headers["user-agent"]);
     const body = file && files[file];
     if (!body) { res.writeHead(404); res.end(); return; }
     res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": body.length });
@@ -123,7 +125,7 @@ export async function fakeModelHost({ dropFirst = false, pieceDelayMs = 40 } = {
     res.end();
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  return { url: `http://127.0.0.1:${server.address().port}`, files, log, close: () => server.close() };
+  return { url: `http://127.0.0.1:${server.address().port}`, files, log, agents, close: () => server.close() };
 }
 
 /** Points a world at the local model, as the first-run starter config does. */
@@ -136,11 +138,12 @@ export function useLocalModel(world) {
 export const GITLAB_TOKEN = "contract-gitlab-token";
 export const GITLAB_PROJECT = "demo/tracker";
 
-/** A minimal GitLab issues API: list, one issue and its notes, 100 per page, `updated_after`, bearer auth. */
+/** A minimal GitLab issues API: list, one issue and its notes, 100 per page, `updated_after`, bearer auth. Answers wait for `state.hold`. */
 export async function fakeGitlab({ token = GITLAB_TOKEN } = {}) {
-  const state = { issues: [], notes: {}, log: [] };
-  const server = http.createServer((req, res) => {
-    state.log.push({ url: req.url, auth: req.headers.authorization, contentType: req.headers["content-type"] });
+  const state = { issues: [], notes: {}, log: [], hold: null };
+  const server = http.createServer(async (req, res) => {
+    state.log.push({ url: req.url, auth: req.headers.authorization, agent: req.headers["user-agent"], contentType: req.headers["content-type"] });
+    await state.hold;
     const send = (code, body) => {
       res.writeHead(code, { "Content-Type": "application/json" });
       res.end(JSON.stringify(body));
@@ -175,7 +178,7 @@ export const GITHUB_PROJECT = "acme/widgets";
 export async function fakeGithub({ token = GITHUB_TOKEN } = {}) {
   const state = { issues: [], comments: {}, log: [], intercept: null };
   const server = http.createServer((req, res) => {
-    state.log.push({ url: req.url, auth: req.headers.authorization, accept: req.headers.accept, version: req.headers["x-github-api-version"] });
+    state.log.push({ url: req.url, auth: req.headers.authorization, agent: req.headers["user-agent"], accept:req.headers.accept, version: req.headers["x-github-api-version"] });
     const send = (code, body, headers = {}) => {
       res.writeHead(code, { "Content-Type": "application/json", ...headers });
       res.end(JSON.stringify(body));

@@ -98,13 +98,13 @@ impl AutoGc {
         }
     }
 
-    /// Any code source whose table holds more rows than its branches tag.
+    /// Any code source whose table holds more rows than its branches tag, or whose counts can't be read.
     async fn has_orphans(&self, project: &str) -> bool {
         let Some(p) = registry::get_project(project) else { return false };
         for source in p.sources.iter().filter(|s| s.kind() == "code") {
             let Some(table) = &source.table_name else { continue };
             let lance = self.queue.store().count_rows(table).await.unwrap_or(0);
-            if lance > self.queue.rows.tagged_chunk_ids(project, &source.source_id).len() {
+            if self.queue.rows.tagged_chunk_ids(project, &source.source_id).map_or(true, |tagged| lance > tagged.len()) {
                 return true;
             }
         }
@@ -122,10 +122,10 @@ impl AutoGc {
         let (mut lance, mut tagged) = (0usize, 0usize);
         for s in p.sources.iter().filter(|s| s.kind() == "code" && source.is_none_or(|want| want == s.source_id)) {
             let Some(table) = &s.table_name else { continue };
-            if let Ok(ids) = self.queue.store().list_chunk_ids(table, project).await {
-                lance += ids.len();
-                tagged += self.queue.rows.tagged_chunk_ids(project, &s.source_id).len();
-            }
+            let Ok(ids) = self.queue.store().list_chunk_ids(table, project).await else { continue };
+            let Ok(tags) = self.queue.rows.tagged_chunk_ids(project, &s.source_id) else { continue };
+            lance += ids.len();
+            tagged += tags.len();
         }
         if lance == 0 || (lance as f64 - tagged as f64) / lance as f64 <= threshold {
             return;

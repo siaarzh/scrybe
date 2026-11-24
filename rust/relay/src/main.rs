@@ -62,7 +62,8 @@ fn stop_inheriting_std_handles() {
 }
 
 fn read_pidfile() -> Option<String> {
-    std::fs::read_to_string(data_dir().join("daemon.pid")).ok()
+    let path = std::env::var_os("SCRYBE_DAEMON_PIDFILE").map_or_else(|| data_dir().join("daemon.pid"), PathBuf::from);
+    std::fs::read_to_string(path).ok()
 }
 
 fn pidfile_port() -> Option<u16> {

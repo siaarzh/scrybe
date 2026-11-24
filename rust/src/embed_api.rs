@@ -25,7 +25,7 @@ pub struct ApiError {
 
 pub fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(600)).build().expect("HTTP client"))
+    CLIENT.get_or_init(|| reqwest::Client::builder().user_agent(crate::config::USER_AGENT).timeout(Duration::from_secs(600)).build().expect("HTTP client"))
 }
 
 pub fn decode_embedding(v: &Value) -> Option<Vec<f32>> {
