@@ -42,15 +42,22 @@ export function vectorFor(text) {
 
 /**
  * An OpenAI-compatible endpoint whose vectors depend only on the text, answering after `delayMs`. `refuse(n)` may
- * turn the nth request away with `{ code, headers }`; `tls` is the key and certificate to serve HTTPS with.
+ * turn the nth request away with `{ code, headers }`; `tls` is the key and certificate to serve HTTPS with. While
+ * `gate.hold` is a promise, requests wait for it, and `gate.waiting` counts them.
  */
 export async function fakeEmbedder({ delayMs = 0, refuse, tls } = {}) {
   const log = [];
+  const gate = { hold: null, waiting: 0 };
   const answer = (req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", async () => {
       if (delayMs) await sleep(delayMs);
+      if (gate.hold) {
+        gate.waiting++;
+        await gate.hold;
+        gate.waiting--;
+      }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       const input = Array.isArray(body.input) ? body.input : [body.input];
       log.push({ at: Date.now(), auth: req.headers.authorization, agent: req.headers["user-agent"], organization: req.headers["openai-organization"], project: req.headers["openai-project"], n: input.length, encoding: body.encoding_format });
@@ -71,7 +78,7 @@ export async function fakeEmbedder({ delayMs = 0, refuse, tls } = {}) {
   };
   const server = tls ? https.createServer(tls, answer) : http.createServer(answer);
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  return { url: `${tls ? "https" : "http"}://127.0.0.1:${server.address().port}/v1`, log, close: () => server.close() };
+  return { url: `${tls ? "https" : "http"}://127.0.0.1:${server.address().port}/v1`, log, gate, close: () => server.close() };
 }
 
 /** A score that depends only on the query and the document. */
@@ -385,8 +392,10 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
 
 /** The tiny client over stdio, starting the server named by this run. */
 export class Client {
-  constructor(env, { start = SERVER, extraEnv = {} } = {}) {
-    this.p = spawn(RELAY[0], [...RELAY.slice(1), "--start", ...start], { env: { ...env, ...extraEnv }, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+  constructor(env, { start = SERVER, extraEnv = {}, keepErrors = false } = {}) {
+    this.p = spawn(RELAY[0], [...RELAY.slice(1), "--start", ...start], { env: { ...env, ...extraEnv }, stdio: ["pipe", "pipe", keepErrors ? "pipe" : "ignore"], windowsHide: true });
+    this.errors = "";
+    this.p.stderr?.on("data", (d) => { this.errors += d; });
     this.pending = new Map();
     this.notes = [];
     this.next = 0;

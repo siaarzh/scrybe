@@ -6,7 +6,7 @@ use crate::registry::{self, Project, Source};
 use crate::watch::{env_ms, Idle};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -120,12 +120,13 @@ pub struct TicketPoller {
     warned_literal: Mutex<HashSet<String>>,
     polls_running: AtomicUsize,
     hosts_busy: Mutex<HashSet<String>>,
+    stopped: AtomicBool,
 }
 
 /// Starts a poller for every ticket source and keeps them in step with the registry.
-pub fn start(queue: Arc<Queue>, idle: Arc<Idle>, projects: &[Project]) {
+pub fn start(queue: Arc<Queue>, idle: Arc<Idle>, projects: &[Project]) -> Option<Arc<TicketPoller>> {
     if std::env::var("SCRYBE_DAEMON_NO_TICKET_FETCH").as_deref() == Ok("1") {
-        return;
+        return None;
     }
     let me = Arc::new(TicketPoller {
         queue: queue.clone(),
@@ -136,19 +137,34 @@ pub fn start(queue: Arc<Queue>, idle: Arc<Idle>, projects: &[Project]) {
         warned_literal: Mutex::new(HashSet::new()),
         polls_running: AtomicUsize::new(0),
         hosts_busy: Mutex::new(HashSet::new()),
+        stopped: AtomicBool::new(false),
     });
     let hook = me.clone();
     queue.add_hook(Arc::new(move |event, item| hook.on_job_event(event, item)));
     let hot = me.clone();
-    idle.set_on_hot(Arc::new(move || hot.on_hot()));
+    idle.add_on_change(Arc::new(move |now_hot| {
+        if now_hot {
+            hot.on_hot();
+        }
+    }));
     for project in projects {
         for source in project.sources.iter().filter(|s| s.kind() == "ticket") {
             me.register(project, source);
         }
     }
+    Some(me)
 }
 
 impl TicketPoller {
+    /// Ends every poller and takes on no more.
+    pub fn stop(&self) {
+        let mut pollers = self.pollers.lock().unwrap();
+        self.stopped.store(true, Ordering::SeqCst);
+        for (_, p) in pollers.drain() {
+            p.stop();
+        }
+    }
+
     fn emit(&self, level: &str, project: &str, detail: Value) {
         self.queue.emit(json!({ "ts": now_iso(), "level": level, "event": "watcher.event", "projectId": project, "detail": detail }));
     }
@@ -158,7 +174,7 @@ impl TicketPoller {
         let field = |k: &str| source.source_config.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         let token = field("token");
         let mut pollers = self.pollers.lock().unwrap();
-        if pollers.contains_key(&key) {
+        if self.stopped.load(Ordering::SeqCst) || pollers.contains_key(&key) {
             return;
         }
         if !has_env_ref(&token) && !token.is_empty() && self.warned_literal.lock().unwrap().insert(key.clone()) {

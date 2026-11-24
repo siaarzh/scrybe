@@ -12,7 +12,7 @@ use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,42 +28,64 @@ pub(crate) fn env_ms(name: &str, default: u64) -> Duration {
     Duration::from_millis(env_pos_int(name).map_or(default, |n| n as u64))
 }
 
+type OnChange = Arc<dyn Fn(bool) + Send + Sync>;
+
 /// Hot after any event, cold again after a quiet minute. Cold waits longer before acting.
 pub struct Idle {
-    last_active: Mutex<Option<Instant>>,
+    /// The last event, while hot.
+    hot: Mutex<Option<Instant>>,
     hot_for: Duration,
     cold_multiplier: u32,
-    on_hot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    on_change: Mutex<Vec<OnChange>>,
 }
 
 impl Idle {
     pub fn from_env() -> Self {
         let multiplier = env_pos_int("SCRYBE_DAEMON_COLD_MULTIPLIER").map_or(5, |n| n as u32);
-        Idle { last_active: Mutex::new(None), hot_for: env_ms("SCRYBE_DAEMON_HOT_MS", 60_000), cold_multiplier: multiplier, on_hot: Mutex::new(None) }
+        Idle { hot: Mutex::new(None), hot_for: env_ms("SCRYBE_DAEMON_HOT_MS", 60_000), cold_multiplier: multiplier, on_change: Mutex::new(vec![]) }
     }
 
-    /// Runs `f` on every cold to hot change, like `onStateChange`.
-    pub fn set_on_hot(&self, f: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_hot.lock().unwrap() = Some(f);
+    /// Runs `f` on every change, true for hot, like `onStateChange`.
+    pub fn add_on_change(&self, f: OnChange) {
+        self.on_change.lock().unwrap().push(f);
     }
 
-    pub fn touch(&self) {
-        let was_hot = {
-            let mut last = self.last_active.lock().unwrap();
-            let was_hot = last.is_some_and(|t| t.elapsed() < self.hot_for);
-            *last = Some(Instant::now());
-            was_hot
-        };
-        if !was_hot {
-            let hook = self.on_hot.lock().unwrap().clone();
-            if let Some(f) = hook {
-                f();
+    fn changed(&self, hot: bool) {
+        let hooks = self.on_change.lock().unwrap().clone();
+        for f in hooks {
+            f(hot);
+        }
+    }
+
+    pub fn touch(self: &Arc<Self>) {
+        if self.hot.lock().unwrap().replace(Instant::now()).is_some() {
+            return;
+        }
+        self.changed(true);
+        let me = self.clone();
+        spawn_named("idle".into(), move || me.cool());
+    }
+
+    /// Waits out the quiet time, then turns cold.
+    fn cool(&self) {
+        loop {
+            let left = {
+                let mut hot = self.hot.lock().unwrap();
+                let left = hot.map_or(Duration::ZERO, |t| self.hot_for.saturating_sub(t.elapsed()));
+                if left.is_zero() {
+                    *hot = None;
+                }
+                left
+            };
+            if left.is_zero() {
+                return self.changed(false);
             }
+            std::thread::sleep(left);
         }
     }
 
     pub fn is_hot(&self) -> bool {
-        self.last_active.lock().unwrap().is_some_and(|t| t.elapsed() < self.hot_for)
+        self.hot.lock().unwrap().is_some()
     }
 
     fn debounce(&self, base: Duration) -> Duration {
@@ -82,6 +104,40 @@ struct Ctx {
     queue: Arc<Queue>,
     idle: Arc<Idle>,
     health: Arc<WatchHealth>,
+    stopped: AtomicBool,
+}
+
+impl Ctx {
+    fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
+    fn set_health(&self, of: &Mutex<HashMap<String, bool>>, project: &str, healthy: bool) {
+        let mut map = of.lock().unwrap();
+        if !self.stopped() {
+            map.insert(project.to_string(), healthy);
+        }
+    }
+
+    fn set_branch(&self, project: &str, branch: &str) {
+        let mut map = self.health.branch.lock().unwrap();
+        if !self.stopped() {
+            map.insert(project.to_string(), branch.to_string());
+        }
+    }
+}
+
+/// The watchers and the fetch poller of a running server.
+pub struct Watching(Arc<Ctx>);
+
+impl Watching {
+    /// From here on nothing is queued or announced, and the threads end when they next wake.
+    pub fn stop(&self) {
+        self.0.stopped.store(true, Ordering::SeqCst);
+        self.0.health.files.lock().unwrap().clear();
+        self.0.health.git.lock().unwrap().clear();
+        self.0.health.branch.lock().unwrap().clear();
+    }
 }
 
 fn retry_delay(retries: u32) -> Duration {
@@ -89,11 +145,16 @@ fn retry_delay(retries: u32) -> Duration {
 }
 
 fn watcher_event(ctx: &Ctx, level: &str, project: &str, detail: serde_json::Value) {
+    if ctx.stopped() {
+        return;
+    }
     ctx.queue.push(json!({ "ts": now_iso(), "level": level, "event": "watcher.event", "projectId": project, "detail": detail }));
 }
 
 fn enqueue(ctx: &Ctx, project: &str) {
-    ctx.queue.submit(Request { project: project.to_string(), ..Default::default() });
+    if !ctx.stopped() {
+        ctx.queue.submit(Request { project: project.to_string(), ..Default::default() });
+    }
 }
 
 fn spawn_named(name: String, f: impl FnOnce() + Send + 'static) {
@@ -170,9 +231,12 @@ fn watch_files(ctx: Arc<Ctx>, project: String, source: String, root: PathBuf) {
         let setup = new_watcher(tx).and_then(|mut w| add_file_watches(&mut w, &root, &rules).map(|_| w));
         match setup {
             Ok(mut w) => {
-                ctx.health.files.lock().unwrap().insert(project.clone(), true);
+                ctx.set_health(&ctx.health.files, &project, true);
                 retries = 0;
                 let reason = pump_files(&ctx, &project, &root, &rules, &mut w, &rx, base);
+                if ctx.stopped() {
+                    return;
+                }
                 eprintln!("[scrybe watcher] {project}: {reason}");
                 watcher_event(&ctx, "warn", &project, json!({ "error": reason, "retries": retries }));
             }
@@ -181,7 +245,10 @@ fn watch_files(ctx: Arc<Ctx>, project: String, source: String, root: PathBuf) {
                 watcher_event(&ctx, "warn", &project, json!({ "error": e.to_string(), "retries": retries }));
             }
         }
-        ctx.health.files.lock().unwrap().insert(project.clone(), false);
+        ctx.set_health(&ctx.health.files, &project, false);
+        if ctx.stopped() {
+            return;
+        }
         if retries >= MAX_RETRIES {
             ctx.queue.emit(json!({ "ts": now_iso(), "level": "error", "event": "watcher.unhealthy", "projectId": project, "error": { "message": format!("Watcher gave up after {MAX_RETRIES} retries") } }));
             return;
@@ -198,7 +265,11 @@ fn pump_files(ctx: &Ctx, project: &str, root: &Path, rules: &IgnoreRules, w: &mu
     let real_root = real_path(root);
     loop {
         let wait = deadline.map_or(Duration::from_secs(3600), |d| d.saturating_duration_since(Instant::now()));
-        match rx.recv_timeout(wait) {
+        let got = rx.recv_timeout(wait);
+        if ctx.stopped() {
+            return "stopped".to_string();
+        }
+        match got {
             Ok(Err(e)) => return e.to_string(),
             Ok(Ok(event)) => {
                 if !is_change(&event.kind) {
@@ -277,18 +348,22 @@ fn watch_git(ctx: Arc<Ctx>, project: String, root: PathBuf) {
     let debounce = env_ms("SCRYBE_DAEMON_GIT_DEBOUNCE_MS", 300);
     let real_git_dir = real_path(&git_dir);
     let mut last_branch = branches::resolve_branch_for_path(&root);
-    ctx.health.branch.lock().unwrap().insert(project.clone(), last_branch.clone());
+    ctx.set_branch(&project, &last_branch);
     let mut retries = 0;
     loop {
         let (tx, rx) = channel();
         match new_watcher(tx).and_then(|mut w| add_git_watches(&mut w, &git_dir).map(|_| w)) {
             Ok(mut w) => {
-                ctx.health.git.lock().unwrap().insert(project.clone(), true);
+                ctx.set_health(&ctx.health.git, &project, true);
                 retries = 0;
                 let mut deadline: Option<Instant> = None;
                 let reason = loop {
                     let wait = deadline.map_or(Duration::from_secs(3600), |d| d.saturating_duration_since(Instant::now()));
-                    match rx.recv_timeout(wait) {
+                    let got = rx.recv_timeout(wait);
+                    if ctx.stopped() {
+                        return;
+                    }
+                    match got {
                         Ok(Err(e)) => break e.to_string(),
                         Ok(Ok(event)) => {
                             if !is_change(&event.kind) {
@@ -314,7 +389,7 @@ fn watch_git(ctx: Arc<Ctx>, project: String, root: PathBuf) {
                                     detail["prevBranch"] = json!(last_branch);
                                 }
                                 last_branch = branch.clone();
-                                ctx.health.branch.lock().unwrap().insert(project.clone(), branch);
+                                ctx.set_branch(&project, &branch);
                                 ctx.idle.touch();
                                 watcher_event(&ctx, "info", &project, detail);
                                 enqueue(&ctx, &project);
@@ -331,7 +406,10 @@ fn watch_git(ctx: Arc<Ctx>, project: String, root: PathBuf) {
                 watcher_event(&ctx, "warn", &project, json!({ "error": e.to_string(), "retries": retries }));
             }
         }
-        ctx.health.git.lock().unwrap().insert(project.clone(), false);
+        ctx.set_health(&ctx.health.git, &project, false);
+        if ctx.stopped() {
+            return;
+        }
         if retries >= MAX_RETRIES {
             ctx.queue.emit(json!({ "ts": now_iso(), "level": "error", "event": "watcher.unhealthy", "projectId": project, "error": { "message": format!("Git watcher gave up after {MAX_RETRIES} retries") } }));
             return;
@@ -359,8 +437,11 @@ fn poll_project(ctx: &Ctx, project: &str, source: &str, root: &Path, warned: &mu
     if !git::run_with_timeout(root, &["fetch", "origin", "--prune", "--quiet"], Duration::from_secs(120)) {
         return Err(format!("git fetch failed for {project}"));
     }
-    let mut changed = vec![];
+    let (mut changed, mut out_of_band) = (vec![], 0);
     for branch in &pinned {
+        if ctx.stopped() {
+            return Ok(());
+        }
         let remote = format!("origin/{branch}");
         let Some(after) = remote_sha(root, &remote) else {
             if warned.insert(branch.clone()) {
@@ -377,6 +458,7 @@ fn poll_project(ctx: &Ctx, project: &str, source: &str, root: &Path, warned: &mu
             }
             Some(ref sha) if *sha == after => continue,
             Some(ref sha) if before.get(branch).and_then(|b| b.as_deref()) == Some(after.as_str()) => {
+                out_of_band += 1;
                 watcher_event(ctx, "info", project, json!({ "phase": "fetch-poller", "outOfBandFetch": true, "branch": remote, "lastSha": sha, "shaAfter": after }));
             }
             _ => {}
@@ -387,6 +469,9 @@ fn poll_project(ctx: &Ctx, project: &str, source: &str, root: &Path, warned: &mu
     if !changed.is_empty() {
         watcher_event(ctx, "info", project, json!({ "phase": "fetch-poller", "shaChanged": changed }));
     }
+    if std::env::var("SCRYBE_DEBUG_FETCH_POLLER").as_deref() == Ok("1") {
+        watcher_event(ctx, "info", project, json!({ "phase": "fetch-poller.tick", "branchesPolled": pinned.len(), "deltasFound": changed.len(), "outOfBandDetected": out_of_band }));
+    }
     Ok(())
 }
 
@@ -395,7 +480,7 @@ fn fetch_loop(ctx: Arc<Ctx>, project: String, source: String, root: PathBuf) {
     let idle = env_ms("SCRYBE_DAEMON_FETCH_IDLE_MS", 30 * 60_000);
     let mut retries = 0u32;
     let mut warned = HashSet::new();
-    loop {
+    while !ctx.stopped() {
         if ACTIVE_FETCHES.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_FETCHES {
             ACTIVE_FETCHES.fetch_sub(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_secs(5));
@@ -418,8 +503,8 @@ fn fetch_loop(ctx: Arc<Ctx>, project: String, source: String, root: PathBuf) {
 }
 
 /// Starts everything for every registered project. One code source per project is watched, like today.
-pub fn start(queue: Arc<Queue>, idle: Arc<Idle>, health: Arc<WatchHealth>, projects: &[Project]) {
-    let ctx = Arc::new(Ctx { queue, idle, health });
+pub fn start(queue: Arc<Queue>, idle: Arc<Idle>, health: Arc<WatchHealth>, projects: &[Project]) -> Watching {
+    let ctx = Arc::new(Ctx { queue, idle, health, stopped: AtomicBool::new(false) });
     let skip_fetch = std::env::var("SCRYBE_DAEMON_NO_FETCH").as_deref() == Ok("1");
     for p in projects {
         if let Some((s, root)) = p.sources.iter().find_map(|s| (s.kind() == "code").then(|| s.root_path().map(|r| (s, PathBuf::from(r)))).flatten()) {
@@ -436,6 +521,7 @@ pub fn start(queue: Arc<Queue>, idle: Arc<Idle>, health: Arc<WatchHealth>, proje
             }
         }
     }
+    Watching(ctx)
 }
 
 #[cfg(test)]
@@ -489,7 +575,7 @@ mod tests {
 
     #[test]
     fn a_cold_server_waits_longer() {
-        let idle = Idle { last_active: Mutex::new(None), hot_for: Duration::from_secs(60), cold_multiplier: 5, on_hot: Mutex::new(None) };
+        let idle = Arc::new(Idle { hot: Mutex::new(None), hot_for: Duration::from_secs(60), cold_multiplier: 5, on_change: Mutex::new(vec![]) });
         assert!(!idle.is_hot());
         assert_eq!(idle.debounce(Duration::from_secs(1)), Duration::from_secs(5));
         idle.touch();
@@ -498,16 +584,24 @@ mod tests {
     }
 
     #[test]
-    fn only_a_cold_to_hot_change_runs_the_hook() {
-        let idle = Idle { last_active: Mutex::new(None), hot_for: Duration::from_millis(80), cold_multiplier: 5, on_hot: Mutex::new(None) };
-        let count = Arc::new(AtomicUsize::new(0));
-        let c = count.clone();
-        idle.set_on_hot(Arc::new(move || { c.fetch_add(1, Ordering::SeqCst); }));
+    fn only_a_change_runs_the_hooks() {
+        let idle = Arc::new(Idle { hot: Mutex::new(None), hot_for: Duration::from_millis(200), cold_multiplier: 5, on_change: Mutex::new(vec![]) });
+        let seen = Arc::new(Mutex::new(vec![]));
+        let s = seen.clone();
+        idle.add_on_change(Arc::new(move |hot| s.lock().unwrap().push(hot)));
+        let wait_for = |n: usize| {
+            let end = Instant::now() + Duration::from_secs(10);
+            while seen.lock().unwrap().len() < n && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            seen.lock().unwrap().clone()
+        };
         idle.touch();
         idle.touch();
-        assert_eq!(count.load(Ordering::SeqCst), 1);
-        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(*seen.lock().unwrap(), [true]);
+        assert_eq!(wait_for(2), [true, false]);
+        assert!(!idle.is_hot());
         idle.touch();
-        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(wait_for(4), [true, false, true, false]);
     }
 }

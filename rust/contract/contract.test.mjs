@@ -2,7 +2,8 @@
 // the Rust build can be held to it. A tool a build doesn't have yet shows as skipped, not passed.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { request as httpRequest } from "node:http";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -4308,5 +4309,522 @@ describe("SCRYBE_DEBUG_SEARCH", () => {
       server?.kill("SIGKILL");
       await w.stop();
     }
+  });
+});
+
+/** A server of this run's own, with what it printed. `exited` settles when it has gone. */
+const ownServer = async (w, extraEnv = {}) => {
+  const p = spawn(SERVER[0], SERVER.slice(1), { env: { ...w.env, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const server = { p, out: "", err: "", gone: false };
+  p.stdout.on("data", (d) => { server.out += d; });
+  p.stderr.on("data", (d) => { server.err += d; });
+  server.exited = new Promise((resolve) => p.on("exit", (code) => { server.gone = true; resolve(code); }));
+  await until(() => w.health(), 30_000, "the server");
+  server.port = w.pidfile().port;
+  server.base = `http://127.0.0.1:${server.port}`;
+  server.rpc = async (method, params = {}, headers = {}) => (await rawRequest(server.port, "POST", "/mcp/rpc", [JSON.stringify({ id: 1, method, params })], headers)).body;
+  server.status = async () => (await fetch(`${server.base}/status`)).json();
+  server.kill = async () => { p.kill("SIGKILL"); await server.exited; };
+  return server;
+};
+
+const holdable = async () => {
+  const fake = await fakeEmbedder();
+  let release = () => {};
+  return {
+    fake,
+    hold: () => { fake.gate.hold = new Promise((resolve) => { release = () => { fake.gate.hold = null; resolve(); }; }); },
+    release: () => release(),
+    waiting: (n) => until(() => fake.gate.waiting >= n, 20_000, `${n} held embedding request(s)`),
+  };
+};
+
+describe("the opt-in MCP endpoint", () => {
+  let w, server;
+  const BOTH = { Accept: "application/json, text/event-stream" };
+  const post = (message, headers = {}) => rawRequest(server.port, "POST", "/mcp", [JSON.stringify(message)], { ...BOTH, ...headers });
+  const request = (method, params, id = 1) => ({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+  const hello = { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "contract", version: "1" } };
+  const ok = (result, id = 1) => ({ result, jsonrpc: "2.0", id });
+  const refused = (code, message) => ({ jsonrpc: "2.0", error: { code, message }, id: null });
+  const failed = (text) => ok({ content: [{ type: "text", text: JSON.stringify({ error: text }, null, 2) }], isError: true });
+  const clients = async () => (await server.status()).clientCount;
+  before(async () => {
+    w = await makeWorld();
+    w.env.SCRYBE_DAEMON_MCP_HTTP = "true";
+    await w.index("--full");
+    server = await ownServer(w);
+  });
+  after(async () => { await server?.kill(); await w.stop(); });
+
+  test("counts as a client once a request reaches it, and not before", async () => {
+    for (const method of ["GET", "DELETE"]) {
+      const r = await rawRequest(server.port, method, "/mcp", [], BOTH);
+      assert.deepEqual([r.status, r.body], [405, refused(-32000, "Method not allowed.")], method);
+    }
+    assert.equal(await clients(), 0);
+    assert.deepEqual((await post(request("ping"))).body, ok({}));
+    assert.equal(await clients(), 1);
+    assert.equal((await rawRequest(server.port, "PUT", "/mcp", ["{}"], BOTH)).status, 405);
+  });
+
+  test("settles the protocol version", async () => {
+    const versionFor = async (asked) => (await post(request("initialize", { ...hello, protocolVersion: asked }))).body.result;
+    const known = await versionFor("2025-06-18");
+    assert.deepEqual([known.protocolVersion, known.capabilities, known.serverInfo.name], ["2025-06-18", { tools: {} }, "scrybe"]);
+    assert.equal((await versionFor("1999-01-01")).protocolVersion, "2025-11-25");
+    const odd = await post(request("ping"), { "Mcp-Protocol-Version": "1999" });
+    assert.deepEqual([odd.status, odd.body], [400, refused(-32000, "Bad Request: Unsupported protocol version: 1999 (supported versions: 2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05, 2024-10-07)")]);
+    assert.equal((await post(request("initialize", hello), { "Mcp-Protocol-Version": "1999" })).status, 200);
+    assert.equal((await post(request("ping"), { "Mcp-Protocol-Version": "2024-11-05" })).status, 200);
+  });
+
+  test("offers the same tools as the manifest", async () => {
+    const manifest = await (await fetch(`${server.base}/mcp/manifest`)).json();
+    const listed = (await post(request("tools/list", {}, "list"))).body;
+    assert.deepEqual([listed.id, listed.result.tools], ["list", manifest.tools]);
+    assert.ok(listed.result.tools.length > 20);
+  });
+
+  test("runs a tool, checks its arguments and masks an internal fault", async () => {
+    const call = async (name, args) => (await post(request("tools/call", { name, ...(args === undefined ? {} : { arguments: args }) }))).body;
+    const listed = await call("list_projects");
+    assert.deepEqual(Object.keys(listed.result), ["content"]);
+    assert.equal(JSON.parse(listed.result.content[0].text)[0].id, "demo");
+    const hits = await call("search_code", { project_id: "demo", query: "frobnicate widget" });
+    assert.match(hits.result.content[0].text, /^\[\n  \{\n/);
+    assert.deepEqual(await call("nope", {}), failed("method not found: nope"));
+    assert.deepEqual(await call("search_code", { project_ids: ["demo"] }), failed("invalid params for search_code: unknown key 'project_ids' (did you mean 'project_id'?)"));
+    assert.deepEqual(await call("search_code", { project_id: "gone", query: "x" }), failed("Project 'gone' not found"));
+    assert.deepEqual(await call("reindex_project", { project_id: "gone" }), failed("internal error"));
+    const issue = (expected, path, received) => [{ expected, code: "invalid_type", path, message: `Invalid input: expected ${expected}, received ${received}` }];
+    for (const [params, problem] of [[{}, issue("string", ["params", "name"], "undefined")], [undefined, issue("object", ["params"], "undefined")], [{ name: "list_projects", arguments: [] }, issue("record", ["params", "arguments"], "array")]]) {
+      const r = (await post(request("tools/call", params))).body;
+      assert.deepEqual([r.error.code, JSON.parse(r.error.message)], [-32603, problem]);
+    }
+    assert.deepEqual((await post(request("resources/list"))).body, { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "Method not found" } });
+  });
+
+  test("answers requests, stays silent on the rest and refuses what isn't a message", async () => {
+    const note = { jsonrpc: "2.0", method: "notifications/initialized" };
+    for (const quiet of [note, [note], [], { jsonrpc: "2.0", id: 1, result: {} }]) {
+      const r = await post(quiet);
+      assert.deepEqual([r.status, r.text], [202, ""], JSON.stringify(quiet));
+    }
+    assert.deepEqual((await post([note, request("ping", {}, 7)])).body, ok({}, 7));
+    assert.deepEqual((await post([request("ping", {}, 1), request("ping", {}, "b")])).body, [ok({}, 1), ok({}, "b")]);
+    const alone = await post([request("initialize", hello), request("ping", {}, 2)]);
+    assert.deepEqual([alone.status, alone.body], [400, refused(-32600, "Invalid Request: Only one initialization request is allowed")]);
+    for (const bad of [5, null, [5], { id: 1, method: "ping" }, { ...request("ping"), id: null }, { ...request("ping"), id: 1.5 }, { ...request("ping"), extra: 1 }, request("ping", [])]) {
+      const r = await post(bad);
+      assert.deepEqual([r.status, r.body], [400, refused(-32700, "Parse error: Invalid JSON-RPC message")], JSON.stringify(bad));
+    }
+    const json = await post(request("ping"), { Accept: "application/json" });
+    assert.deepEqual([json.status, json.body], [406, refused(-32000, "Not Acceptable: Client must accept both application/json and text/event-stream")]);
+    const text = await post(request("ping"), { "Content-Type": "text/plain" });
+    assert.deepEqual([text.status, text.body], [415, refused(-32000, "Unsupported Media Type: Content-Type must be application/json")]);
+  });
+});
+
+describe("a server finishing its work", () => {
+  let w, held, server, jobsBefore;
+  const jobCount = async () => (await server.rpc("list_jobs")).result.count;
+  before(async () => {
+    held = await holdable();
+    w = await makeWorld({ embedder: held.fake, serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_GIT_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_DAEMON_MAX_CONCURRENT: "1" } });
+    await w.index("--full");
+    server = await ownServer(w);
+    await until(async () => (await server.status()).projects[0].watcherHealthy, 20_000, "the watcher");
+    held.hold();
+    await server.rpc("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" });
+    await held.waiting(1);
+    jobsBefore = await jobCount();
+    assert.equal((await rawRequest(server.port, "POST", "/shutdown", [])).status, 200);
+    await until(async () => (await w.health())?.draining, 10_000, "the drain");
+  });
+  after(async () => { held.release(); await server?.kill(); await w.stop(); held.fake.close(); });
+
+  test("answers reads, and refuses work and pausing", async () => {
+    for (const path of ["/kick", "/gc", "/pause", "/resume"]) {
+      const r = await rawRequest(server.port, "POST", path, ["{}"]);
+      assert.deepEqual([r.status, r.body], [503, { error: "daemon is shutting down — not accepting new work", draining: true }], path);
+    }
+    const status = await server.status();
+    assert.equal(status.draining, true);
+    assert.equal((await server.rpc("list_projects")).result[0].id, "demo");
+  });
+
+  test("has stopped watching", async () => {
+    const [p] = await until(async () => { const { projects } = await server.status(); return !projects[0].watcherHealthy && projects; }, 5000, "the watchers to stop");
+    assert.deepEqual([p.gitWatcherHealthy, p.currentBranch], [false, null]);
+    writeFileSync(join(w.repo, "src/late.ts"), "export function savedTooLate() { return 1; }\n");
+    await sleep(1500);
+    assert.equal(await jobCount(), jobsBefore);
+    rmSync(join(w.repo, "src/late.ts"));
+  });
+
+  test("refuses the tools that would queue work, and says why in its log", async () => {
+    const calls = [["reindex_project", { project_id: "demo" }], ["reindex_source", { project_id: "demo", source_id: "primary" }], ["gc", {}], ["index_ephemeral", { project_id: "demo", branch: "side" }], ["add_source", { project_id: "demo", source_id: "second", source_type: "code", root_path: w.repo }]];
+    const answers = await Promise.all(calls.map(([name, args]) => server.rpc(name, args)));
+    answers.forEach((a, i) => assert.deepEqual(a, { id: 1, error: { code: -32603, message: "internal error" } }, calls[i][0]));
+    assert.equal(await jobCount(), jobsBefore);
+    const [project] = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"));
+    assert.deepEqual(project.sources.map((s) => s.source_id), ["primary"], "the source is taken back out");
+    for (const [name] of calls) {
+      const [span] = w.logged("activity-span").filter((r) => r.method === name && r.outcome === "error");
+      assert.equal(span?.error, "The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.?Retry in a moment — a replacement daemon starts on the next call.", name);
+    }
+  });
+
+  test("leaves once the work is done", async () => {
+    held.release();
+    assert.equal(await Promise.race([server.exited, sleep(20_000).then(() => "still there")]), 0);
+    assert.equal(w.pidfile(), null);
+  });
+});
+
+describe("a signal to a server already leaving", { skip: process.platform === "win32" ? "no SIGTERM on Windows" : false }, () => {
+  test("makes it leave at once, and is recorded", async () => {
+    const held = await holdable();
+    const w = await makeWorld({ embedder: held.fake });
+    let server;
+    try {
+      await w.index("--full");
+      server = await ownServer(w);
+      held.hold();
+      await server.rpc("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" });
+      await held.waiting(1);
+      await rawRequest(server.port, "POST", "/shutdown", []);
+      await until(async () => (await w.health())?.draining, 10_000, "the drain");
+      server.p.kill("SIGTERM");
+      assert.equal(await Promise.race([server.exited, sleep(10_000).then(() => "still there")]), 0);
+      assert.equal(w.pidfile(), null);
+      const [r] = w.logged("daemon.shutdown.escalated");
+      assert.deepEqual([Object.keys(r), r.level, r.signal], [["ts", "pid", "level", "event", "signal"], "warn", "SIGTERM"]);
+    } finally {
+      held.release();
+      await server?.kill();
+      await w.stop();
+      held.fake.close();
+    }
+  });
+});
+
+describe("a request still open when the server leaves", () => {
+  test("gets its answer, and an event stream just ends", async () => {
+    const held = await holdable();
+    const w = await makeWorld({ embedder: held.fake });
+    let server;
+    try {
+      await w.index("--full");
+      server = await ownServer(w);
+      const stream = (await fetch(`${server.base}/events`)).body.getReader();
+      const ended = (async () => { while (!(await stream.read()).done) { /* events */ } })();
+      held.hold();
+      const search = server.rpc("search_code", { project_id: "demo", query: "frobnicate widget" });
+      await held.waiting(1);
+      await rawRequest(server.port, "POST", "/shutdown", []);
+      assert.equal(await Promise.race([ended.then(() => "ended"), sleep(10_000)]), "ended");
+      await sleep(500);
+      assert.equal(server.gone, false, "it waits for the search");
+      held.release();
+      const answer = await search;
+      assert.ok(Array.isArray(answer.result) && answer.result.length > 0, JSON.stringify(answer));
+      assert.equal(await Promise.race([server.exited, sleep(10_000).then(() => "still there")]), 0);
+    } finally {
+      held.release();
+      await server?.kill();
+      await w.stop();
+      held.fake.close();
+    }
+  });
+});
+
+describe("the state word", () => {
+  test("follows activity and the last thing set, and only activity is announced", async () => {
+    const w = await makeWorld({ serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_DAEMON_HOT_MS: "1500" } });
+    let server;
+    try {
+      await w.index("--full");
+      server = await ownServer(w);
+      await until(async () => (await server.status()).projects[0].watcherHealthy, 20_000, "the watcher");
+      const state = async () => (await server.status()).state;
+      const announced = async () => (await server.status()).recentEvents.filter((e) => e.event === "state.changed").map((e) => e.detail.state);
+      // macOS may report the repository's own creation late.
+      await sleep(2000);
+      await until(async () => (await state()) === "cold", 15_000, "a quiet start");
+      const earlier = (await announced()).length;
+      assert.equal((await post(server.base, "/pause")).state, "paused");
+      assert.equal(await state(), "paused");
+      const heard = [];
+      const stream = (await fetch(`${server.base}/events`)).body;
+      (async () => { for await (const piece of stream) heard.push(Buffer.from(piece).toString("utf8")); })().catch(() => {});
+      writeFileSync(join(w.repo, "src/active.ts"), "export function wakesTheServer() { return 1; }\n");
+      await until(async () => (await announced())[earlier] === "hot", 10_000, "hot");
+      await until(async () => (await announced()).at(-1) === "cold", 15_000, "cold");
+      assert.equal(await state(), "cold", "the pause is forgotten");
+      const line = heard.join("").split("\n").find((l) => l.includes('"state.changed"'));
+      assert.deepEqual(Object.keys(JSON.parse(line.slice("data: ".length))), ["ts", "level", "event", "detail"]);
+      const before = await announced();
+      assert.equal((await post(server.base, "/resume")).state, "hot");
+      await sleep(2500);
+      assert.deepEqual([await state(), await announced()], ["hot", before], "a resume is not activity");
+    } finally {
+      await server?.kill();
+      await w.stop();
+    }
+  });
+});
+
+describe("the server's own log file", () => {
+  const started = (port) => new RegExp(`^\\d{4}-\\d\\d-\\d\\dT[\\d:.]+Z \\[scrybe daemon\\] started pid=\\d+ port=${port} `, "m");
+  test("holds its lines, is set aside when it is too big, and moves with SCRYBE_DAEMON_LOG_PATH", async () => {
+    const w = await makeWorld();
+    const file = (suffix = "") => readFileSync(join(w.data, "logs", `daemon.log${suffix}`), "utf8");
+    let server;
+    try {
+      await w.cli("projects");
+      server = await ownServer(w);
+      const first = server.port;
+      await until(() => started(first).test(file()), 5000, "the line");
+      await until(() => started(first).test(server.err), 5000, "the line on standard error");
+      assert.equal((await server.rpc("reindex_project", { project_id: "gone" })).error.message, "internal error");
+      // Today's build names the cause on standard output, which a background server doesn't have.
+      if (BUILD === "rust") assert.match(file(), /Z \[mcp-rpc\] client=anon method=reindex_project → error: Project 'gone' not found$/m);
+      await server.kill();
+      rmSync(join(w.data, "daemon.pid"), { force: true });
+      server = await ownServer(w, { SCRYBE_DAEMON_LOG_MAX_BYTES: "10", SCRYBE_DAEMON_LOG_BACKUPS: "2" });
+      await until(() => started(server.port).test(file()), 5000, "the new line");
+      assert.match(file(".1"), started(first));
+      assert.equal(file().match(/started pid=/g).length, 1);
+      await server.kill();
+      rmSync(join(w.data, "daemon.pid"), { force: true });
+      const own = join(w.dir, "own.log");
+      server = await ownServer(w, { SCRYBE_DAEMON_LOG_PATH: own });
+      await until(() => started(server.port).test(readFileSync(own, "utf8")), 5000, "the line in the named file");
+      assert.equal(file().match(/started pid=/g).length, 1);
+    } finally {
+      await server?.kill();
+      await w.stop();
+    }
+  });
+});
+
+describe("call and job records in the server log", () => {
+  const readings = ["startRssBytes", "peakRssBytes", "endRssBytes"];
+  const stamp = ["ts", "pid", "event", "level"];
+  const measured = (r) => {
+    if (process.platform !== "linux") return;
+    assert.ok(r.startRssBytes > 0 && r.peakRssBytes >= r.startRssBytes && r.peakRssBytes >= r.endRssBytes, JSON.stringify(r));
+  };
+
+  test("a call and a job each leave a span, and the call a line with the caller's name", async () => {
+    const w = await makeWorld();
+    let server;
+    try {
+      await w.index("--full");
+      server = await ownServer(w);
+      await server.rpc("list_projects", {}, { "X-Scrybe-Client-Id": "host:1:2" });
+      await server.rpc("search_code", { project_ids: 1 });
+      await server.rpc("nope");
+      const spans = (type) => w.logged("activity-span").filter((r) => r.spanType === type);
+      await until(() => spans("mcp-call").length === 2, 5000, "the spans");
+      const [good, bad] = spans("mcp-call");
+      const call = [...stamp, "spanType", "method", "clientId", "durationMs", "outcome", ...readings];
+      assert.deepEqual([Object.keys(good), good.method, good.clientId, good.outcome, good.level], [call, "list_projects", "host:1:2", "ok", "info"]);
+      assert.deepEqual([Object.keys(bad), bad.clientId, bad.outcome], [[...call, "error"], "anon", "error"]);
+      assert.equal(bad.error, "invalid params for search_code: unknown key 'project_ids' (did you mean 'project_id'?)");
+      measured(good);
+      for (const line of ["[mcp-rpc] client=host:1:2 method=list_projects", "[mcp-rpc] client=anon method=search_code", `[mcp-rpc] client=anon method=search_code → error: ${bad.error}`, "[mcp-rpc] client=anon method=nope → method not found"]) {
+        await until(() => server.out.split("\n").includes(line), 5000, line);
+      }
+      const { job_id } = (await server.rpc("reindex_project", { project_id: "demo" })).result;
+      const [job] = await until(() => spans("reindex").length > 0 && spans("reindex"), 20_000, "the job's span");
+      assert.deepEqual(Object.keys(job), [...stamp, "spanType", "projectId", "sourceId", "jobId", "mode", "durationMs", "outcome", ...readings, "provider"]);
+      assert.deepEqual([job.projectId, job.sourceId, job.jobId, job.mode, job.outcome, job.provider], ["demo", null, job_id, "incremental", "ok", "api"]);
+      measured(job);
+    } finally {
+      await server?.kill();
+      await w.stop();
+    }
+  });
+
+  test("a job turned away by a full queue is recorded", async () => {
+    const held = await holdable();
+    const w = await makeWorld({ embedder: held.fake, serverEnv: { SCRYBE_DAEMON_MAX_QUEUE_DEPTH: "1" } });
+    let server;
+    try {
+      await w.index("--full");
+      server = await ownServer(w);
+      held.hold();
+      await server.rpc("reindex_source", { project_id: "demo", source_id: "primary", mode: "full" });
+      await held.waiting(1);
+      const kick = async (body) => (await rawRequest(server.port, "POST", "/kick", [JSON.stringify(body)])).body.jobs[0].status;
+      assert.equal(await kick({ projectId: "demo" }), "queued");
+      assert.equal(await kick({ projectId: "demo", sourceId: "primary" }), "rejected");
+      const [r] = w.logged("queue.backpressure");
+      assert.deepEqual([Object.keys(r), r.level], [[...stamp, "detail"], "warn"]);
+      assert.deepEqual(r.detail, { currentDepth: 1, maxDepth: 1, projectId: "demo", sourceId: "primary", type: "reindex" });
+    } finally {
+      held.release();
+      await server?.kill();
+      await w.stop();
+      held.fake.close();
+    }
+  });
+
+  test("a port that is taken, and the one tried next, are recorded", async () => {
+    const w = await makeWorld();
+    const taken = createServer((s) => s.destroy());
+    let server;
+    try {
+      await w.cli("projects");
+      // Whatever already holds it will do just as well.
+      await new Promise((r) => { taken.on("error", r); taken.listen(58451, "127.0.0.1", r); });
+      server = await ownServer(w);
+      const [r] = w.logged("daemon.bind.fallback");
+      assert.deepEqual([Object.keys(r), r.level], [["ts", "pid", "level", "event", "detail"], "warn"]);
+      assert.deepEqual([r.detail.refusedPort, r.detail.nextPort], [58451, "ephemeral"]);
+      assert.match(r.detail.code, /^E(ADDRINUSE|ACCES)$/);
+    } finally {
+      await server?.kill();
+      taken.close();
+      await w.stop();
+    }
+  });
+});
+
+describe("one source of a running job, and a run over every project", () => {
+  test("a waiting source can be cancelled alone, and a finished run says where the projects stand", async () => {
+    const held = await holdable();
+    const w = await makeWorld({ embedder: held.fake });
+    let server;
+    try {
+      await w.index("--full");
+      const list = JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"));
+      list[0].sources.push({ source_id: "second", source_config: { type: "code", root_path: w.repo, languages: [] } });
+      writeFileSync(join(w.data, "projects.json"), JSON.stringify(list));
+      writeFileSync(join(w.repo, "src/changed.ts"), "export function somethingToEmbed() { return 1; }\n");
+      server = await ownServer(w);
+      held.hold();
+      const { job_id } = (await server.rpc("reindex_project", { project_id: "demo" })).result;
+      await held.waiting(1);
+      const cancel = async (source_id) => (await server.rpc("cancel_reindex", { job_id, source_id })).result;
+      assert.deepEqual(await cancel("second"), { job_id, cancelled: true });
+      assert.deepEqual(await cancel("second"), { job_id, cancelled: false });
+      assert.deepEqual(await cancel("nope"), { job_id, cancelled: false });
+      const status = async (id) => (await server.rpc("reindex_status", { job_id: id })).result;
+      const ended = (id) => until(async () => { const s = await status(id); return s.status !== "running" && s; }, 30_000, "the job");
+      const running = await status(job_id);
+      assert.deepEqual(running.tasks.map((t) => t.status), ["running", "cancelled"]);
+      assert.ok(running.tasks[1].finished_at > 0 && running.tasks[1].started_at === null);
+      held.release();
+      const done = await ended(job_id);
+      assert.deepEqual([done.status, done.tasks.map((t) => t.status)], ["cancelled", ["done", "cancelled"]]);
+      assert.equal(JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources[1].last_indexed, undefined, "it never ran");
+
+      const all = await ended((await server.rpc("reindex_all")).result.job_id);
+      assert.equal(all.status, "done", JSON.stringify(all));
+      assert.deepEqual(all.projects.map((p) => [Object.keys(p), p.project_id, p.sources.map((s) => s.source_id)]), [[["project_id", "sources"], "demo", ["primary", "second"]]]);
+      for (const s of all.projects[0].sources) assert.ok(Date.parse(s.last_indexed) > 0, JSON.stringify(s));
+      assert.equal("projects" in done, false);
+    } finally {
+      held.release();
+      await server?.kill();
+      await w.stop();
+      held.fake.close();
+    }
+  });
+});
+
+describe("SCRYBE_DEBUG_FETCH_POLLER", () => {
+  test("announces every round of the fetch poller", async () => {
+    const w = await makeWorld({ pinned: ["side"], withOrigin: true, serverEnv: { SCRYBE_DAEMON_NO_FETCH: "", SCRYBE_DEBUG_FETCH_POLLER: "1" } });
+    let server;
+    try {
+      await w.index("--full");
+      server = await ownServer(w);
+      const tick = await until(async () => {
+        const { recentEvents } = await server.status();
+        return recentEvents.find((e) => e.event === "watcher.event" && e.detail?.phase === "fetch-poller.tick");
+      }, 20_000, "the round");
+      assert.deepEqual([tick.level, tick.projectId, tick.detail], ["info", "demo", { phase: "fetch-poller.tick", branchesPolled: 1, deltasFound: 1, outOfBandDetected: 0 }]);
+    } finally {
+      await server?.kill();
+      await w.stop();
+    }
+  });
+});
+
+describe("the tiny client and a server of another version", () => {
+  let w, fake, port, version, calls;
+  const own = async () => (await w.client({ extraEnv: { SCRYBE_NO_AUTO_DAEMON: "1" } }).hello()).result.serverInfo.version;
+  const pidfile = (pid) => writeFileSync(join(w.data, "daemon.pid"), JSON.stringify({ pid, port }));
+  const client = (opts = {}) => w.client({ extraEnv: { SCRYBE_NO_AUTO_DAEMON: "1", SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS: "100" }, ...opts });
+  before(async () => {
+    w = await makeWorld();
+    calls = 0;
+    fake = createHttpServer((req, res) => {
+      req.resume();
+      const answer = (body) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+      if (req.url === "/health") return answer({ ready: true, draining: false });
+      if (req.url === "/mcp/manifest") return answer({ daemon_version: version, tools: [{ name: "list_projects", description: "d", inputSchema: { type: "object" } }] });
+      if (req.url === "/mcp/rpc") { calls++; return answer({ id: "x", result: ["served"] }); }
+      answer({ ok: true });
+    });
+    await new Promise((r) => fake.listen(0, "127.0.0.1", r));
+    ({ port } = fake.address());
+    pidfile(999_999_991);
+  });
+  after(async () => { rmSync(join(w.data, "daemon.pid"), { force: true }); await w.stop(); fake.close(); });
+
+  test("the same version, or one that can't be told, is served without a word", async () => {
+    for (const same of [`${await own()}-rs.1`, "", "unknown"]) {
+      version = same;
+      const c = client({ keepErrors: true });
+      await c.hello();
+      assert.deepEqual((await c.call("list_projects")).value, ["served"], same);
+      assert.deepEqual(await c.toolNames(), ["list_projects"]);
+      assert.equal(c.errors, "");
+    }
+  });
+
+  test("another minor or patch version is served, with one warning on standard error", async () => {
+    const mine = await own();
+    version = mine.replace(/\d+$/, (n) => String(Number(n) + 1));
+    const c = client({ keepErrors: true });
+    await c.hello();
+    assert.deepEqual(await c.toolNames(), ["list_projects"]);
+    assert.deepEqual((await c.call("list_projects")).value, ["served"]);
+    await c.toolNames();
+    await until(() => c.errors.includes("\n"), 5000, "the warning");
+    assert.equal(c.errors, `[scrybe] daemon version ${version} differs from shim ${mine} (minor/patch) — restart daemon to refresh tool surface\n`);
+  });
+
+  test("another major version is refused, and served again once the server is replaced", async () => {
+    const mine = await own();
+    version = "99.1.0";
+    const c = client();
+    await c.hello();
+    const served = calls;
+    const told = `daemon version 99.1.0 is major-incompatible with shim ${mine}. Restart to update: scrybe daemon restart`;
+    const refused = await c.call("list_projects");
+    assert.deepEqual([refused.value, refused.isError], [{ error: told }, false]);
+    const { tools } = (await c.rpc("tools/list")).result;
+    assert.deepEqual(tools, [{ name: "scrybe_daemon_unavailable", description: told, inputSchema: { type: "object", properties: {}, required: [] } }]);
+    assert.equal(calls, served, "nothing was sent on");
+    version = mine;
+    pidfile(999_999_992);
+    await until(() => c.notes.includes("notifications/tools/list_changed"), 10_000, "the notice");
+    assert.deepEqual((await c.call("list_projects")).value, ["served"]);
+  });
+
+  test("a server from before the index format changed offers only what needs none", async () => {
+    version = "0.33.2";
+    const c = client();
+    await c.hello();
+    assert.deepEqual(await c.toolNames(), ["status", "doctor", "init"]);
+    assert.match((await c.call("search_code", { project_id: "demo", query: "x" })).value.error, /^Run: scrybe daemon restart --force   \(then reconnect\)\n\nscrybe v0\.34\.0 upgraded lancedb\./);
+    assert.equal((await c.call("status")).value.daemon_running, false);
   });
 });

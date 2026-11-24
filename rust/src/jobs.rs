@@ -5,6 +5,7 @@ use crate::branches;
 use crate::config::data_dir;
 use crate::index::{self, Mode, Options};
 use crate::registry;
+use crate::span::Span;
 use crate::store::{Fault, Health, Store};
 use anyhow::Result;
 use rusqlite::{params, types::Value as SqlValue, Connection};
@@ -367,12 +368,34 @@ pub struct Submitted {
     pub duplicate_of_pending: bool,
 }
 
+/// A job that holds its project.
+struct Active {
+    project: String,
+    gc: bool,
+}
+
+/// The flags that stop a running job: the whole of it, and each source's own.
+#[derive(Default)]
+struct Cancels {
+    job: Arc<AtomicBool>,
+    tasks: Vec<(String, Arc<AtomicBool>)>,
+}
+
+impl Cancels {
+    fn all(&self) {
+        self.job.store(true, Ordering::SeqCst);
+        for (_, task) in &self.tasks {
+            task.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 struct State {
     pending: VecDeque<Item>,
-    active: HashMap<String, String>,
+    active: HashMap<String, Active>,
     /// Every job this process started, with its tasks. Rows have no task detail.
     jobs: HashMap<String, Value>,
-    cancels: HashMap<String, Arc<AtomicBool>>,
+    cancels: HashMap<String, Cancels>,
     ring: VecDeque<Value>,
 }
 
@@ -382,18 +405,49 @@ impl State {
         if self.active.len() >= cap {
             return None;
         }
-        let idx = self.pending.iter().position(|p| !self.active.values().any(|project| *project == p.project))?;
+        let idx = self.pending.iter().position(|p| !self.active.values().any(|a| a.project == p.project))?;
         let item = self.pending.remove(idx)?;
-        self.active.insert(item.job_id.clone(), item.project.clone());
+        self.active.insert(item.job_id.clone(), Active { project: item.project.clone(), gc: item.gc_purge.is_some() });
         Some(item)
+    }
+
+    /// `cancelJob`: a running job, or one source of it that hasn't ended yet.
+    fn cancel(&mut self, id: &str, source: Option<&str>) -> bool {
+        let Some(job) = self.jobs.get_mut(id).filter(|j| j["status"] == "running") else { return false };
+        let Some(cancels) = self.cancels.get(id) else { return false };
+        let Some(source) = source.filter(|s| !s.is_empty()) else {
+            cancels.all();
+            return true;
+        };
+        let task = job["tasks"].as_array_mut().and_then(|tasks| tasks.iter_mut().find(|t| t["source_id"] == source));
+        let Some(task) = task.filter(|t| t["status"] == "pending" || t["status"] == "running") else { return false };
+        task["status"] = json!("cancelled");
+        task["finished_at"] = json!(now_ms());
+        if let Some((_, flag)) = cancels.tasks.iter().find(|(s, _)| s == source) {
+            flag.store(true, Ordering::SeqCst);
+        }
+        true
     }
 }
 
 /// What a full run of a project without naming its sources is refused with.
 pub const FULL_NEEDS_SOURCES: &str = "full reindex requires explicit source_ids";
 
+/// How often a running job's memory is read for its record.
+const SPAN_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `resolveReindexProvider`: where the job's first source embeds, when that can be told.
+fn provider_of(project: &str, source: Option<&str>) -> Option<&'static str> {
+    let project = registry::get_project(project)?;
+    let source = match source {
+        Some(id) => project.sources.iter().find(|s| s.source_id == id)?,
+        None => project.sources.first()?,
+    };
+    registry::resolve_embedding(source).ok().map(|e| if e.local { "local" } else { "api" })
+}
+
 /// A panic counts as the work's own error.
-async fn caught<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+pub(crate) async fn caught<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
     use futures::FutureExt;
     std::panic::AssertUnwindSafe(work).catch_unwind().await.unwrap_or_else(|p| {
         let text = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
@@ -408,6 +462,7 @@ pub struct Queue {
     max_concurrent: usize,
     max_depth: usize,
     pub events: broadcast::Sender<String>,
+    stopped: AtomicBool,
     hooks: Mutex<Vec<Hook>>,
     // Watcher threads submit jobs from outside the runtime, so spawn through a stored handle.
     rt: tokio::runtime::Handle,
@@ -437,6 +492,7 @@ impl Queue {
             max_concurrent: env_num("SCRYBE_DAEMON_MAX_CONCURRENT").unwrap_or((cpus / 2).max(1)),
             max_depth: env_num("SCRYBE_DAEMON_MAX_QUEUE_DEPTH").unwrap_or(1000),
             events,
+            stopped: AtomicBool::new(false),
             hooks: Mutex::new(Vec::new()),
             rt: tokio::runtime::Handle::current(),
         }))
@@ -513,6 +569,11 @@ impl Queue {
         self.lock().active.len()
     }
 
+    /// `getActiveReindexCount`: garbage collection isn't counted.
+    pub fn active_reindexes(&self) -> usize {
+        self.lock().active.values().filter(|a| !a.gc).count()
+    }
+
     /// `submitToQueue`. Returns at once: a job only ever runs in the background.
     pub fn submit(self: &Arc<Self>, req: Request) -> Submitted {
         let job_id = random_id();
@@ -520,6 +581,10 @@ impl Queue {
         {
             let st = self.lock();
             if st.pending.len() >= self.max_depth {
+                let depth = st.pending.len();
+                drop(st);
+                let detail = json!({ "currentDepth": depth, "maxDepth": self.max_depth, "projectId": req.project, "sourceId": req.source, "type": if req.gc_purge.is_some() { "gc" } else { "reindex" } });
+                diag(json!({ "event": "queue.backpressure", "level": "warn", "detail": detail }));
                 return Submitted { job_id, status: "rejected", queue_position: None, duplicate_of_pending: false };
             }
         }
@@ -543,6 +608,9 @@ impl Queue {
 
     fn drain(self: &Arc<Self>) {
         loop {
+            if self.is_stopped() {
+                return;
+            }
             let Some(item) = self.lock().take_next(self.max_concurrent) else { return };
             let ts = now_iso();
             if registry::get_project(&item.project).is_none() && data_dir().join("projects.json").exists() {
@@ -705,11 +773,12 @@ impl Queue {
         if let Some(c) = &item.content_ref {
             state["contentRef"] = json!(c);
         }
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancels = Cancels { job: Arc::default(), tasks: sources.iter().map(|s| (s.clone(), Arc::default())).collect() };
+        let (cancel, tasks) = (cancels.job.clone(), cancels.tasks.clone());
         {
             let mut st = self.lock();
             st.jobs.insert(item.job_id.clone(), state);
-            st.cancels.insert(item.job_id.clone(), cancel.clone());
+            st.cancels.insert(item.job_id.clone(), cancels);
         }
         self.rows.set_started(&item.job_id, started);
         let mut event = json!({ "ts": ts, "level": "info", "event": "job.started", "projectId": item.project });
@@ -723,7 +792,7 @@ impl Queue {
         self.emit(event);
         let me = self.clone();
         self.rt.spawn(async move {
-            me.run(item, sources, cancel).await;
+            me.run(item, tasks, cancel, started).await;
         });
     }
 
@@ -769,9 +838,11 @@ impl Queue {
     }
 
     /// `runTasks`, then the finishing half of `drain`.
-    async fn run(self: Arc<Self>, item: Item, sources: Vec<String>, cancel: Arc<AtomicBool>) {
-        let options = Options { branch: item.branch.clone(), content_ref: item.content_ref.clone(), cancel: Some(cancel.clone()), job_id: Some(item.job_id.clone()), progress: None };
-        for (i, source) in sources.iter().enumerate() {
+    async fn run(self: Arc<Self>, item: Item, tasks: Vec<(String, Arc<AtomicBool>)>, cancel: Arc<AtomicBool>, started: i64) {
+        let mut span = Span::start();
+        let provider = provider_of(&item.project, item.source.as_deref());
+        let options = Options { branch: item.branch.clone(), content_ref: item.content_ref.clone(), cancel: None, job_id: Some(item.job_id.clone()), progress: None };
+        for (i, (source, task_cancel)) in tasks.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 self.update_job(&item.job_id, |job| {
                     for t in job["tasks"].as_array_mut().into_iter().flatten() {
@@ -784,17 +855,25 @@ impl Queue {
                 break;
             }
             let at = now_ms();
+            let mut waiting = false;
             self.update_job(&item.job_id, |job| {
                 let t = &mut job["tasks"][i];
-                t["status"] = json!("running");
-                t["started_at"] = json!(at);
-                t["phase"] = json!("scanning");
+                waiting = t["status"] == "pending";
+                if waiting {
+                    t["status"] = json!("running");
+                    t["started_at"] = json!(at);
+                    t["phase"] = json!("scanning");
+                }
             });
+            if !waiting {
+                continue;
+            }
             self.rows.set_phase(&item.job_id, "scanning");
             let (me, job_id) = (self.clone(), item.job_id.clone());
             let sink = index::ProgressSink(Arc::new(move |p| me.on_progress(&job_id, i, p)));
-            let options = Options { progress: Some(sink), ..options.clone() };
-            let result = caught(index::index_source(&self.store, &item.project, source, item.mode, &options)).await;
+            let options = Options { progress: Some(sink), cancel: Some(task_cancel.clone()), ..options.clone() };
+            let work = caught(index::index_source(&self.store, &item.project, source, item.mode, &options));
+            let result = span.watch(SPAN_POLL, work).await;
             let done = now_ms();
             self.update_job(&item.job_id, |job| {
                 let t = &mut job["tasks"][i];
@@ -855,6 +934,13 @@ impl Queue {
         event["detail"] = json!({ "jobId": item.job_id });
         self.fire(match status { "done" => JobEvent::Completed, "failed" => JobEvent::Failed, _ => JobEvent::Cancelled }, &item);
         self.emit(event);
+        let outcome = match status { "done" => "ok", "cancelled" => "cancelled", _ => "error" };
+        let mut record = json!({ "event": "activity-span", "level": "info", "spanType": "reindex", "projectId": item.project, "sourceId": item.source, "jobId": item.job_id, "mode": item.mode_str(), "durationMs": finished - started, "outcome": outcome });
+        if let Some(o) = record.as_object_mut() {
+            span.close(o);
+            o.insert("provider".into(), json!(provider));
+        }
+        diag(record);
         self.drain();
     }
 
@@ -862,11 +948,12 @@ impl Queue {
     pub fn submit_all(self: &Arc<Self>) -> String {
         let id = random_id();
         let started = now_ms();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancels = Cancels::default();
+        let cancel = cancels.job.clone();
         {
             let mut st = self.lock();
             st.jobs.insert(id.clone(), json!({ "job_id": id, "project_id": "*", "mode": "incremental", "status": "running", "tasks": [], "started_at": started, "finished_at": null, "error": null }));
-            st.cancels.insert(id.clone(), cancel.clone());
+            st.cancels.insert(id.clone(), cancels);
         }
         self.rows.insert_running_all(&id, started);
         let (me, job) = (self.clone(), id.clone());
@@ -931,28 +1018,19 @@ impl Queue {
 
     /// `cancelJob`. A job still waiting in the queue can't be cancelled, the same as today.
     pub fn cancel(&self, id: &str, source: Option<&str>) -> bool {
-        let st = self.lock();
-        let Some(job) = st.jobs.get(id) else { return false };
-        if job["status"] != "running" {
-            return false;
-        }
-        if source.is_some() {
-            // One source of a job can't be stopped yet, only the whole job.
-            return false;
-        }
-        match st.cancels.get(id) {
-            Some(flag) => {
-                flag.store(true, Ordering::SeqCst);
-                true
-            }
-            None => false,
+        self.lock().cancel(id, source)
+    }
+
+    /// `stopQueue` and `cancelAllJobs`: nothing starts from here on, and what runs is told to stop.
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        for cancels in self.lock().cancels.values() {
+            cancels.all();
         }
     }
 
-    pub fn cancel_all(&self) {
-        for flag in self.lock().cancels.values() {
-            flag.store(true, Ordering::SeqCst);
-        }
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
@@ -1032,6 +1110,27 @@ mod tests {
         st.active.remove("1");
         assert_eq!(next(&mut st).as_deref(), Some("2"));
         assert_eq!((next(&mut st), st.pending.len(), st.active.len()), (None, 0, 2));
+    }
+
+    #[test]
+    fn one_source_of_a_running_job_can_be_cancelled_until_it_ends() {
+        let mut st = waiting(&[]);
+        let task = |id: &str, status: &str| json!({ "source_id": id, "status": status, "finished_at": null });
+        st.jobs.insert("j".into(), json!({ "status": "running", "tasks": [task("a", "done"), task("b", "running"), task("c", "pending")] }));
+        let cancels = Cancels { job: Arc::default(), tasks: ["a", "b", "c"].map(|s| (s.to_string(), Arc::default())).to_vec() };
+        let (job, flags) = (cancels.job.clone(), cancels.tasks.clone());
+        let set = |i: usize| flags[i].1.load(Ordering::SeqCst);
+        st.cancels.insert("j".into(), cancels);
+        assert_eq!(["a", "nope"].map(|s| st.cancel("j", Some(s))), [false, false], "ended, and not there");
+        assert!(st.cancel("j", Some("c")));
+        assert!(!st.cancel("j", Some("c")), "already cancelled");
+        assert_eq!((set(1), set(2), job.load(Ordering::SeqCst)), (false, true, false));
+        assert_eq!(st.jobs["j"]["tasks"][2]["status"], "cancelled");
+        assert!(st.jobs["j"]["tasks"][2]["finished_at"].is_i64());
+        assert!(st.cancel("j", Some("")), "no source is the whole job");
+        assert!(set(1) && job.load(Ordering::SeqCst));
+        st.jobs.get_mut("j").unwrap()["status"] = json!("done");
+        assert!(!st.cancel("j", None));
     }
 
     #[test]

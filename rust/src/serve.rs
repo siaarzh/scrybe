@@ -6,6 +6,7 @@ use crate::autogc::{self, AutoGc};
 use crate::pinned;
 use crate::vecindex;
 use crate::config::{data_dir, pidfile_path, VERSION};
+use crate::daemon_log;
 use crate::ephemeral;
 use crate::jsstr::{js_trim, parse_int};
 use crate::presets;
@@ -14,16 +15,18 @@ use crate::jobs::{self, Queue, Request};
 use crate::lifecycle::Lifecycle;
 use crate::locks::{self, Lock};
 use crate::manage;
-use crate::mcp;
+use crate::mcp::{self, Answer, Failed, Reason};
+use crate::mcp_http;
 use crate::registry;
+use crate::span::Span;
 use crate::store::Store;
 use crate::source_add;
-use crate::ticket_poll;
-use crate::watch::{self, Idle, WatchHealth};
+use crate::ticket_poll::{self, TicketPoller};
+use crate::watch::{self, Idle, WatchHealth, Watching};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -31,6 +34,14 @@ use tokio::net::{TcpListener, TcpStream};
 
 pub const DEFAULT_PORT: u16 = 58451;
 const DAEMON_TOOLS: &str = include_str!("daemon_tools.json");
+const DRAINING: &str = "The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call.";
+/// How long jobs that aren't index runs may hold up leaving.
+const OTHER_JOBS_CAP: Duration = Duration::from_secs(30);
+/// How often a call's memory is read for its record.
+const CALL_POLL: Duration = Duration::from_millis(25);
+
+/// `setDaemonState`: the last word anything set, whoever set it.
+type StateWord = Arc<Mutex<&'static str>>;
 
 struct Daemon {
     store: Arc<Store>,
@@ -38,15 +49,60 @@ struct Daemon {
     autogc: Arc<AutoGc>,
     backfill: Arc<vecindex::Backfill>,
     lifecycle: Mutex<Lifecycle>,
-    idle: Arc<Idle>,
     health: Arc<WatchHealth>,
-    paused: AtomicBool,
+    state: StateWord,
+    watching: Watching,
+    tickets: Option<Arc<TicketPoller>>,
     started_at: Instant,
     started_iso: String,
     port: u16,
     draining: AtomicBool,
     closing: AtomicBool,
     shutting_down: AtomicBool,
+    /// True once the server takes no more connections.
+    stopping: tokio::sync::watch::Sender<bool>,
+    in_flight: Arc<AtomicUsize>,
+}
+
+/// A request being answered.
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        InFlight(count.clone())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Drain {
+    Done,
+    Wait,
+    GiveUp,
+}
+
+/// `runShutdownDrain`: an index run may take up to `cap`, anything else 30 seconds.
+fn drain_step(elapsed: Duration, active: usize, reindexes: usize, cap: Duration) -> Drain {
+    if active == 0 {
+        return Drain::Done;
+    }
+    if elapsed >= if reindexes > 0 { cap } else { OTHER_JOBS_CAP } { Drain::GiveUp } else { Drain::Wait }
+}
+
+/// `sanitizeForLog`: a caller's text can't start a line of its own.
+fn one_line(s: &str) -> String {
+    s.chars().map(|c| if c < ' ' || c == '\u{7f}' { '?' } else { c }).collect()
+}
+
+/// `getClientId`.
+fn client_id(head: &str) -> &str {
+    header(head, "x-scrybe-client-id").filter(|id| !id.is_empty()).unwrap_or("anon")
 }
 
 fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
@@ -95,7 +151,7 @@ fn allowed(head: &str) -> bool {
 }
 
 fn work_accepting(method: &str, path: &str) -> bool {
-    matches!((method, path), ("POST", "/kick" | "/gc")) || (method == "DELETE" && path.starts_with("/jobs/")) || (method != "GET" && pinned_ids(path).is_some())
+    matches!((method, path), ("POST", "/kick" | "/gc" | "/pause" | "/resume")) || (method == "DELETE" && path.starts_with("/jobs/")) || (method != "GET" && pinned_ids(path).is_some())
 }
 
 /// `PINNED_RE`: the two raw (still encoded) ids in `/projects/:p/sources/:s/pinned-branches`.
@@ -271,14 +327,12 @@ impl Daemon {
         self.started_at.elapsed().as_millis() as u64
     }
 
-    fn state_word(&self) -> &'static str {
-        if self.paused.load(Ordering::SeqCst) {
-            "paused"
-        } else if self.idle.is_hot() {
-            "hot"
-        } else {
-            "cold"
+    /// `daemonWriteUnavailableError`: no new work once jobs are only being finished.
+    fn refuse_if_draining(&self) -> Result<()> {
+        if self.draining.load(Ordering::SeqCst) {
+            anyhow::bail!(DRAINING);
         }
+        Ok(())
     }
 
     /// The `/gc` route: replace any waiting gc in scope, then queue one for each project.
@@ -310,6 +364,7 @@ impl Daemon {
         if scope.is_empty() {
             return Ok(json!({ "message": "No projects registered." }));
         }
+        self.refuse_if_draining()?;
         let result = self.gc(scope, a["source_id"].as_str().map(String::from), true);
         let cancelled = result["cancelledPending"].as_u64().unwrap_or(0);
         let hint = if cancelled > 0 { format!(" ({cancelled} pending auto-gc job(s) preempted)") } else { String::new() };
@@ -343,7 +398,7 @@ impl Daemon {
             "pid": std::process::id(),
             "port": self.port,
             "uptimeMs": self.uptime_ms(),
-            "state": self.state_word(),
+            "state": *self.state.lock().unwrap(),
             "startedAt": self.started_iso,
             "dataDir": data_dir().to_string_lossy(),
             "projects": projects,
@@ -397,6 +452,7 @@ impl Daemon {
         if full && source.as_ref().is_none_or(String::is_empty) {
             anyhow::bail!(jobs::FULL_NEEDS_SOURCES);
         }
+        self.refuse_if_draining()?;
         let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: a["branch"].as_str().map(String::from), content_ref: a["content_ref"].as_str().map(String::from), full, gc_purge: None });
         let mut out = json!({ "job_id": r.job_id, "status": r.status, "project_id": project });
         if let Some(s) = source {
@@ -435,7 +491,7 @@ impl Daemon {
             "reindex_source" => self.submit_tool(a, a["source_id"].as_str().map(String::from)),
             "reindex_status" => {
                 let id = a["job_id"].as_str().unwrap_or("");
-                self.queue.job_status(id).with_context(|| format!("Job '{id}' not found"))
+                self.queue.job_status(id).map(with_projects).with_context(|| format!("Job '{id}' not found"))
             }
             "cancel_reindex" => {
                 let id = a["job_id"].as_str().unwrap_or("");
@@ -538,9 +594,7 @@ impl Daemon {
     /// `drop_ephemeral`: forget the label, then a gc scoped to its source reclaims the rows only it used.
     async fn drop_ephemeral(&self, a: &Value) -> Result<Value> {
         let dropped = ephemeral::drop_label(&self.queue, a)?;
-        if self.draining.load(Ordering::SeqCst) {
-            anyhow::bail!("The scrybe daemon is shutting down (finishing in-flight work) and is not accepting new jobs.\nRetry in a moment — a replacement daemon starts on the next call.");
-        }
+        self.refuse_if_draining()?;
         let queued = self.gc(vec![dropped.project.clone()], Some(dropped.source.clone()), true);
         let job = queued["jobs"][0]["jobId"].as_str().unwrap_or("");
         Ok(ephemeral::drop_result(&self.queue, job, &dropped).await)
@@ -554,39 +608,70 @@ impl Daemon {
         out
     }
 
-    async fn rpc(&self, req: &Value) -> String {
+    /// Runs any tool, its arguments already checked.
+    async fn run_any(&self, name: &str, args: &Value) -> Result<Answer, Reason> {
+        let outcome = match name {
+            "add_source" => Some(source_add::add(&self.queue, args, || self.refuse_if_draining()).await),
+            "remove_source" => Some(manage::remove_source(&self.queue, args).await),
+            "index_ephemeral" => Some(ephemeral::index_branch(&self.queue, args, || self.refuse_if_draining()).await),
+            "drop_ephemeral" => Some(self.drop_ephemeral(args).await),
+            "remove_project" => Some(self.remove_project(args["project_id"].as_str().unwrap_or("")).await),
+            _ => self.run_tool(name, args),
+        };
+        let Some(outcome) = outcome else { return mcp::call(&self.store, name, args).await };
+        outcome.map(Answer::Json).map_err(|e| match e.downcast_ref::<registry::CallerFacing>() {
+            Some(c) => Reason { message: c.0.clone(), caller_facing: true },
+            None => Reason { message: format!("{e:#}"), caller_facing: false },
+        })
+    }
+
+    /// `dispatchMcpTool`: one tool call, however it came in, with its log lines and its record.
+    async fn dispatch(&self, name: &str, args: &Value, client: &str) -> Result<Answer, Failed> {
+        let who = format!("[mcp-rpc] client={} method={}", one_line(client), one_line(name));
+        let manifest = self.manifest();
+        let Some(spec) = manifest["tools"].as_array().and_then(|t| t.iter().find(|x| x["name"] == name)) else {
+            daemon_log::say(&format!("{who} → method not found"));
+            return Err(Failed { code: -32601, message: format!("method not found: {name}") });
+        };
+        daemon_log::say(&who);
+        let mut span = Span::start();
+        let outcome = match mcp::validate_params(name, &spec["inputSchema"], args) {
+            Err(message) => Err(Reason { message, caller_facing: true }),
+            Ok(()) => {
+                let work = jobs::caught(async { Ok(self.run_any(name, args).await) });
+                span.watch(CALL_POLL, work).await.unwrap_or_else(|e| Err(Reason { message: e.to_string(), caller_facing: false }))
+            }
+        };
+        let mut record = json!({ "event": "activity-span", "level": "info", "spanType": "mcp-call", "method": one_line(name), "clientId": one_line(client), "durationMs": span.elapsed_ms(), "outcome": if outcome.is_ok() { "ok" } else { "error" } });
+        if let Some(o) = record.as_object_mut() {
+            span.close(o);
+        }
+        let answer = outcome.map_err(|reason| {
+            let said = one_line(&reason.message);
+            let line = format!("{who} → error: {said}");
+            daemon_log::say(&line);
+            record["error"] = json!(said);
+            if reason.caller_facing {
+                return Failed { code: -32602, message: reason.message };
+            }
+            // The caller isn't told why, so the log must.
+            daemon_log::quiet(&line);
+            Failed { code: -32603, message: "internal error".into() }
+        });
+        jobs::diag(record);
+        answer
+    }
+
+    async fn rpc(&self, req: &Value, client: &str) -> String {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let name = req.get("method").and_then(Value::as_str).unwrap_or("");
         if req.get("id").is_none() || name.is_empty() {
             return json!({ "id": id, "error": { "code": -32600, "message": "invalid request: missing id or method" } }).to_string();
         }
         let args = req.get("params").filter(|p| p.is_object()).cloned().unwrap_or_else(|| json!({}));
-        let tools: Value = serde_json::from_str(DAEMON_TOOLS).unwrap_or(Value::Null);
-        let Some(spec) = tools.as_array().and_then(|t| t.iter().find(|x| x["name"] == name)) else {
-            return mcp::rpc(&self.store, req).await;
-        };
-        let fail = |code: i64, message: &str| json!({ "id": id, "error": { "code": code, "message": message } }).to_string();
-        if let Err(message) = mcp::validate_params(name, &spec["inputSchema"], &args) {
-            return fail(-32602, &message);
-        }
-        let outcome = match name {
-            "add_source" => Some(source_add::add(&self.queue, &args).await),
-            "remove_source" => Some(manage::remove_source(&self.queue, &args).await),
-            "index_ephemeral" => Some(ephemeral::index_branch(&self.queue, &args).await),
-            "drop_ephemeral" => Some(self.drop_ephemeral(&args).await),
-            "remove_project" => Some(self.remove_project(args["project_id"].as_str().unwrap_or("")).await),
-            _ => self.run_tool(name, &args),
-        };
-        match outcome {
-            Some(Ok(result)) => json!({ "id": id, "result": result }).to_string(),
-            Some(Err(e)) => match e.downcast_ref::<registry::CallerFacing>() {
-                Some(c) => fail(-32602, &c.0),
-                None => {
-                    eprintln!("tool {name} failed: {e:#}");
-                    fail(-32603, "internal error")
-                }
-            },
-            None => fail(-32601, &format!("method not found: {name}")),
+        match self.dispatch(name, &args, client).await {
+            Ok(answer) => format!(r#"{{"id":{id},"result":{}}}"#, answer.raw()),
+            Err(f) => json!({ "id": id, "error": { "code": f.code, "message": f.message } }).to_string(),
         }
     }
 
@@ -599,22 +684,81 @@ impl Daemon {
         json!({ "daemon_version": VERSION, "tools": all })
     }
 
-    /// `shutdown` in main.ts: keep answering while jobs finish, then close and exit.
+    /// True for the first call only.
+    fn begin_shutdown(&self) -> bool {
+        !self.shutting_down.swap(true, Ordering::SeqCst)
+    }
+
     async fn shutdown(self: Arc<Self>, why: String) {
-        if self.shutting_down.swap(true, Ordering::SeqCst) {
-            return;
+        if self.begin_shutdown() {
+            self.drain_and_leave(why).await;
         }
-        eprintln!("[scrybe daemon] {why} — shutting down");
+    }
+
+    /// `shutdown` in main.ts: keep answering while jobs finish, then close and exit.
+    async fn drain_and_leave(self: Arc<Self>, why: String) {
+        daemon_log::line(&format!("[scrybe daemon] {why} — shutting down"));
         self.draining.store(true, Ordering::SeqCst);
-        let cap = crate::jsstr::env_int("SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS").map_or(30 * 60 * 1000, |n| n as u64);
-        let end = Instant::now() + Duration::from_millis(cap);
-        while self.queue.active_count() > 0 && Instant::now() < end {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        self.watching.stop();
+        if let Some(tickets) = &self.tickets {
+            tickets.stop();
+        }
+        let cap = Duration::from_millis(crate::jsstr::env_int("SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS").map_or(30 * 60 * 1000, |n| n as u64));
+        let begun = Instant::now();
+        loop {
+            let active = self.queue.active_count();
+            match drain_step(begun.elapsed(), active, self.queue.active_reindexes(), cap) {
+                Drain::Wait => tokio::time::sleep(Duration::from_millis(200)).await,
+                Drain::Done => break,
+                Drain::GiveUp => {
+                    daemon_log::line(&format!("[scrybe daemon] shutdown cap hit — {active} job(s) still active, force-stopping"));
+                    jobs::append_log(&json!({ "ts": jobs::now_iso(), "event": "gc.force-killed", "detail": { "activeJobs": active } }).to_string());
+                    break;
+                }
+            }
         }
         self.closing.store(true, Ordering::SeqCst);
-        self.queue.cancel_all();
+        self.queue.stop();
+        self.stop_serving().await;
         leave();
     }
+
+    /// `stopHttpServer`: no more connections, event streams end, and every request being answered gets its answer.
+    async fn stop_serving(&self) {
+        self.stopping.send_replace(true);
+        while self.in_flight.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// `handleTerminationSignal`: the first asks, one during any shutdown insists.
+    fn signalled(self: &Arc<Self>, signal: &'static str) {
+        if self.begin_shutdown() {
+            tokio::spawn(self.clone().drain_and_leave(signal.to_string()));
+            return;
+        }
+        daemon_log::line(&format!("[scrybe daemon] {signal} received again while shutting down — forcing immediate exit"));
+        jobs::diag(json!({ "level": "warn", "event": "daemon.shutdown.escalated", "signal": signal }));
+        leave();
+    }
+}
+
+/// A finished run over every project says where each of them stands.
+fn with_projects(mut job: Value) -> Value {
+    if job["status"] == "done" && job["project_id"] == "*" {
+        let projects: Vec<Value> = registry::list_projects().iter().map(|p| {
+            let sources: Vec<Value> = p.sources.iter().map(|s| {
+                let mut one = json!({ "source_id": s.source_id });
+                if let Some(at) = &s.last_indexed {
+                    one["last_indexed"] = json!(at);
+                }
+                one
+            }).collect();
+            json!({ "project_id": p.id, "sources": sources })
+        }).collect();
+        job["projects"] = json!(projects);
+    }
+    job
 }
 
 /// Held for the server's life; `None` on a data dir that can't hold a lock.
@@ -666,13 +810,23 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
         return json_res(&mut s, "503 Service Unavailable", &json!({ "error": "daemon is shutting down — not accepting new work", "draining": true })).await;
     }
 
-    let Some(body) = read_body(&mut s, &head, buf.split_off(head_end + 4)).await? else {
+    let answering = InFlight::new(&d.in_flight);
+    let mut stopping = d.stopping.subscribe();
+    let body = tokio::select! {
+        body = read_body(&mut s, &head, buf.split_off(head_end + 4)) => body?,
+        // A sender that stalls must not hold up leaving.
+        _ = stopping.wait_for(|stop| *stop) => return Ok(()),
+    };
+    let Some(body) = body else {
         return respond(&mut s, "400 Bad Request", "text/plain", "").await;
     };
 
     match (method, path) {
         ("GET", "/status") => json_res(&mut s, "200 OK", &d.status()).await,
-        ("GET", "/events") => events(s, d, query).await,
+        ("GET", "/events") => {
+            drop(answering);
+            events(s, d, query).await
+        }
         ("GET", "/projects") => {
             let projects: Vec<Value> = registry::list_projects()
                 .iter()
@@ -724,12 +878,11 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
         }
         ("POST", "/pause") => {
             // A status word only, as today: jobs and watchers carry on.
-            d.paused.store(true, Ordering::SeqCst);
+            *d.state.lock().unwrap() = "paused";
             json_res(&mut s, "200 OK", &json!({ "state": "paused" })).await
         }
         ("POST", "/resume") => {
-            d.paused.store(false, Ordering::SeqCst);
-            d.idle.touch();
+            *d.state.lock().unwrap() = "hot";
             json_res(&mut s, "200 OK", &json!({ "state": "hot" })).await
         }
         ("POST", "/shutdown") => {
@@ -763,24 +916,25 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
                 Ok(v) => v,
                 Err(_) => return json_res(&mut s, "200 OK", &json!({ "id": null, "error": { "code": -32600, "message": "invalid request: body is not valid JSON" } })).await,
             };
-            let answer = d.rpc(&parsed).await;
+            let answer = d.rpc(&parsed, client_id(&head)).await;
             respond(&mut s, "200 OK", "application/json", &answer).await
         }
-        (_, "/mcp") => {
-            let enabled = std::env::var("SCRYBE_DAEMON_MCP_HTTP").ok().is_some_and(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true"));
-            if !enabled {
-                return json_res(&mut s, "404 Not Found", &json!({ "error": "Not found" })).await;
+        (_, "/mcp") if mcp_http::enabled() => {
+            if matches!(method, "GET" | "DELETE") {
+                let r = mcp_http::method_not_allowed();
+                return respond(&mut s, r.status, r.kind, &r.body).await;
             }
+            // Only a request that reaches the handler keeps the server up.
+            d.lifecycle.lock().unwrap().heartbeat("mcp-http", Instant::now());
             if method != "POST" {
-                return json_res(&mut s, "405 Method Not Allowed", &json!({ "jsonrpc": "2.0", "error": { "code": -32000, "message": "Method not allowed." }, "id": null })).await;
+                let r = mcp_http::method_not_allowed();
+                let body = if method == "HEAD" { "" } else { r.body.as_str() };
+                return respond(&mut s, r.status, &format!("{}\r\nAllow: GET, POST, DELETE", r.kind), body).await;
             }
-            let Ok(parsed) = serde_json::from_slice::<Value>(&body) else {
-                return json_res(&mut s, "400 Bad Request", &json!({ "jsonrpc": "2.0", "error": { "code": -32700, "message": "Parse error: Invalid JSON" }, "id": null })).await;
-            };
-            match mcp::handle(&d.store, &parsed).await {
-                Some(answer) => respond(&mut s, "200 OK", "application/json", &answer.to_string()).await,
-                None => respond(&mut s, "202 Accepted", "text/plain", "").await,
-            }
+            let (me, client) = (&d, client_id(&head));
+            let call = |name: String, args: Value| async move { me.dispatch(&name, &args, client).await };
+            let r = mcp_http::answer(|name| header(&head, name), &body, &me.manifest()["tools"], call).await;
+            respond(&mut s, r.status, r.kind, &r.body).await
         }
         _ => json_res(&mut s, "404 Not Found", &json!({ "error": "Not found" })).await,
     }
@@ -795,8 +949,13 @@ async fn events(mut s: TcpStream, d: Arc<Daemon>, query: &str) -> Result<()> {
             s.write_all(format!("data: {e}\n\n").as_bytes()).await?;
         }
     }
+    let mut stopping = d.stopping.subscribe();
     loop {
-        match feed.recv().await {
+        let got = tokio::select! {
+            got = feed.recv() => got,
+            _ = stopping.wait_for(|stop| *stop) => return Ok(()),
+        };
+        match got {
             Ok(line) => s.write_all(format!("data: {line}\n\n").as_bytes()).await?,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(_) => return Ok(()),
@@ -806,6 +965,13 @@ async fn events(mut s: TcpStream, d: Arc<Daemon>, query: &str) -> Result<()> {
 
 fn retryable_bind(e: &std::io::Error) -> bool {
     matches!(e.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied)
+}
+
+/// The record of a port refused and the one tried instead.
+fn bind_fallback(refused: u16, e: &std::io::Error, next: u16) -> Value {
+    let code = if e.kind() == std::io::ErrorKind::AddrInUse { "EADDRINUSE" } else { "EACCES" };
+    let next = if next == 0 { json!("ephemeral") } else { json!(next) };
+    json!({ "level": "warn", "event": "daemon.bind.fallback", "detail": { "refusedPort": refused, "code": code, "nextPort": next } })
 }
 
 /// The order `bindSticky` tries: the last port, the default, then whatever the system gives.
@@ -841,35 +1007,56 @@ async fn bind_sticky() -> Result<TcpListener> {
         });
     }
     let stale = std::fs::read_to_string(pidfile_path()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["port"].as_u64()).map(|p| p as u16);
-    for port in port_candidates(stale) {
+    let candidates = port_candidates(stale);
+    for (i, port) in candidates.iter().copied().enumerate() {
         match TcpListener::bind(("127.0.0.1", port)).await {
             Ok(l) => return Ok(l),
-            Err(e) if port == 0 || retryable_bind(&e) => eprintln!("[scrybe daemon] port {port} refused ({e})"),
+            Err(e) if port != 0 && retryable_bind(&e) => jobs::diag(bind_fallback(port, &e, candidates[i + 1])),
+            Err(_) if port == 0 => {}
             Err(e) => return Err(e.into()),
         }
     }
     Err(anyhow::anyhow!("All candidate ports were refused (stale pidfile port, {DEFAULT_PORT}, and an OS-assigned ephemeral port). On Windows this usually means an unusually large block of ports is reserved at boot (Hyper-V, WSL, etc.). Run `netsh interface ipv4 show excludedportrange protocol=tcp` to see the reserved ranges."))
 }
 
-async fn wait_for_signal() -> &'static str {
+/// Hands every termination signal to the server, for as long as it runs.
+async fn listen_for_signals(d: Arc<Daemon>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        if let Ok(mut term) = signal(SignalKind::terminate()) {
-            tokio::select! {
-                _ = term.recv() => return "SIGTERM",
-                _ = tokio::signal::ctrl_c() => return "SIGINT",
+        if let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+            loop {
+                let name = tokio::select! {
+                    _ = term.recv() => "SIGTERM",
+                    _ = int.recv() => "SIGINT",
+                };
+                d.signalled(name);
             }
         }
     }
-    let _ = tokio::signal::ctrl_c().await;
-    "SIGINT"
+    while tokio::signal::ctrl_c().await.is_ok() {
+        d.signalled("SIGINT");
+    }
+}
+
+/// A panic's record, in the shape of an uncaught exception's.
+fn crash_record(message: &str, at: Option<String>) -> Value {
+    let stack = at.map(|at| format!("{message}\n    at {at}"));
+    json!({ "level": "error", "event": "process.uncaughtException", "error": { "message": message, "stack": stack, "name": "panic" } })
+}
+
+fn record_panics() {
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        jobs::diag(crash_record(info.payload_as_str().unwrap_or("panic"), info.location().map(|l| l.to_string())));
+        before(info);
+    }));
 }
 
 /// `reconcileJobsAtStartup`: a failure is reported and the server goes on.
 fn close_orphaned_jobs(queue: &Queue, cutoff: i64) {
     match queue.rows.reconcile(cutoff, registry::project_ids_if_readable().as_deref()) {
-        Err(e) => eprintln!("[scrybe daemon] job reconciliation failed: {e:#}"),
+        Err(e) => daemon_log::line(&format!("[scrybe daemon] job reconciliation failed: {e:#}")),
         Ok(r) if r.interrupted + r.cancelled > 0 => {
             let detail = json!({ "interrupted": r.interrupted, "cancelled": r.cancelled, "sampleJobIds": r.sample, "cutoffMs": cutoff });
             queue.push(json!({ "ts": jobs::now_iso(), "level": "info", "event": "jobs.reconciled", "detail": detail }));
@@ -908,6 +1095,8 @@ pub async fn serve(store: Store) -> Result<()> {
         prediction[k] = v.clone();
     }
     jobs::diag(prediction);
+    record_panics();
+    daemon_log::open();
     let listener = bind_sticky().await?;
     let port = listener.local_addr()?.port();
     let store = Arc::new(store);
@@ -919,16 +1108,24 @@ pub async fn serve(store: Store) -> Result<()> {
     let started_iso = jobs::now_iso();
     let pid = json!({ "pid": std::process::id(), "port": port, "startedAt": started_iso, "version": VERSION, "dataDir": data_dir().to_string_lossy(), "execPath": exec });
     std::fs::write(pidfile_path(), pid.to_string())?;
-    eprintln!("[scrybe daemon] started pid={} port={port} dataDir={}", std::process::id(), data_dir().display());
+    daemon_log::line(&format!("[scrybe daemon] started pid={} port={port} dataDir={}", std::process::id(), data_dir().display()));
 
     let now = Instant::now();
-    let (idle, health) = (Arc::new(Idle::from_env()), Arc::new(WatchHealth::default()));
-    let d = Arc::new(Daemon { store, queue: queue.clone(), autogc: AutoGc::new(queue.clone()), backfill: vecindex::Backfill::new(queue.clone()), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
-    d.autogc.start();
-    d.backfill.start();
+    let (idle, health, state) = (Arc::new(Idle::from_env()), Arc::new(WatchHealth::default()), StateWord::new(Mutex::new("cold")));
+    let (word, announcer) = (state.clone(), queue.clone());
+    idle.add_on_change(Arc::new(move |hot| {
+        let now = if hot { "hot" } else { "cold" };
+        *word.lock().unwrap() = now;
+        announcer.push(json!({ "ts": jobs::now_iso(), "level": "info", "event": "state.changed", "detail": { "state": now } }));
+    }));
+    let (autogc, backfill) = (AutoGc::new(queue.clone()), vecindex::Backfill::new(queue.clone()));
+    autogc.start();
+    backfill.start();
     let projects = registry::list_projects();
-    ticket_poll::start(queue.clone(), idle.clone(), &projects);
-    watch::start(queue.clone(), idle, health, &projects);
+    let tickets = ticket_poll::start(queue.clone(), idle.clone(), &projects);
+    let watching = watch::start(queue.clone(), idle, health.clone(), &projects);
+    let (stopping, mut stop) = tokio::sync::watch::channel(false);
+    let d = Arc::new(Daemon { store, queue: queue.clone(), autogc, backfill, lifecycle: Mutex::new(Lifecycle::from_env(now)), health, state, watching, tickets, started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false), stopping, in_flight: Arc::default() });
     autogc::sweep_ephemeral(&queue);
     let checker = queue.clone();
     tokio::spawn(async move { checker.check_tables().await });
@@ -937,26 +1134,22 @@ pub async fn serve(store: Store) -> Result<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let active = ticking.queue.active_count();
+            let active = ticking.queue.active_reindexes();
             let leave_now = ticking.lifecycle.lock().unwrap().tick(Instant::now(), active);
             if let Some(reason) = leave_now {
-                eprintln!("[scrybe daemon] no active clients ({}) — shutting down", reason.as_str());
+                daemon_log::line(&format!("[scrybe daemon] no active clients ({}) — shutting down", reason.as_str()));
                 ticking.clone().shutdown(reason.as_str().to_string()).await;
             }
         }
     });
 
-    let signals = d.clone();
-    tokio::spawn(async move {
-        let first = wait_for_signal().await;
-        tokio::spawn(signals.clone().shutdown(first.to_string()));
-        let second = wait_for_signal().await;
-        eprintln!("[scrybe daemon] {second} received again while shutting down — forcing immediate exit");
-        leave();
-    });
+    tokio::spawn(listen_for_signals(d.clone()));
 
     loop {
-        let (socket, _) = listener.accept().await?;
+        let (socket, _) = tokio::select! {
+            got = listener.accept() => got?,
+            _ = stop.wait_for(|stop| *stop) => break,
+        };
         let d = d.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(socket, d).await {
@@ -964,6 +1157,9 @@ pub async fn serve(store: Store) -> Result<()> {
             }
         });
     }
+    drop(listener);
+    // The shutdown that stopped the listener ends the process.
+    std::future::pending().await
 }
 
 #[cfg(test)]
@@ -1000,6 +1196,7 @@ mod tests {
     #[test]
     fn work_routes_are_refused_while_draining_and_reads_are_not() {
         assert!(work_accepting("POST", "/kick"));
+        assert!(work_accepting("POST", "/pause") && work_accepting("POST", "/resume"));
         assert!(work_accepting("DELETE", "/jobs/abc"));
         assert!(work_accepting("POST", "/projects/a/sources/b/pinned-branches"));
         assert!(!work_accepting("GET", "/jobs/abc"));
@@ -1062,6 +1259,41 @@ mod tests {
         assert_eq!(read_fields(b"null", "a").unwrap_err(), "TypeError: Cannot read properties of null (reading 'a')");
         let body = json!({ "s": "x", "e": "", "n": 5, "z": 0, "f": false, "l": ["a"] });
         assert_eq!(["s", "e", "n", "z", "f", "l", "missing"].map(|k| id_field(&body, k)), [Some("x"), Some(""), Some("5"), None, None, Some("[\"a\"]"), None].map(|v| v.map(String::from)));
+    }
+
+    #[test]
+    fn only_an_index_run_may_hold_up_leaving_past_half_a_minute() {
+        let (s, cap) = (Duration::from_secs, Duration::from_secs(600));
+        assert_eq!(drain_step(s(900), 0, 0, cap), Drain::Done);
+        assert_eq!(drain_step(s(29), 1, 0, cap), Drain::Wait);
+        assert_eq!(drain_step(s(30), 1, 0, cap), Drain::GiveUp);
+        assert_eq!(drain_step(s(599), 2, 1, cap), Drain::Wait);
+        assert_eq!(drain_step(s(600), 2, 1, cap), Drain::GiveUp);
+        assert_eq!(drain_step(s(2), 1, 1, s(2)), Drain::GiveUp, "a cap below the other one");
+    }
+
+    #[test]
+    fn a_refused_port_and_a_crash_are_recorded_in_todays_shapes() {
+        let taken = bind_fallback(40000, &std::io::ErrorKind::AddrInUse.into(), DEFAULT_PORT);
+        assert_eq!(taken.to_string(), r#"{"level":"warn","event":"daemon.bind.fallback","detail":{"refusedPort":40000,"code":"EADDRINUSE","nextPort":58451}}"#);
+        assert_eq!(bind_fallback(DEFAULT_PORT, &std::io::ErrorKind::PermissionDenied.into(), 0)["detail"], json!({ "refusedPort": 58451, "code": "EACCES", "nextPort": "ephemeral" }));
+        assert_eq!(crash_record("boom", Some("src/a.rs:1:2".into())).to_string(), r#"{"level":"error","event":"process.uncaughtException","error":{"message":"boom","stack":"boom\n    at src/a.rs:1:2","name":"panic"}}"#);
+    }
+
+    #[test]
+    fn a_callers_text_stays_on_one_line() {
+        assert_eq!(one_line("a\r\nb\tc\u{7f}é"), "a??b?c?é");
+        assert_eq!(client_id("GET / HTTP/1.1\r\nX-Scrybe-Client-Id:  me:1 "), "me:1");
+        assert_eq!(client_id("GET / HTTP/1.1\r\nX-Scrybe-Client-Id: "), "anon");
+        assert_eq!(client_id("GET / HTTP/1.1"), "anon");
+    }
+
+    #[test]
+    fn only_a_finished_run_over_everything_lists_the_projects() {
+        assert!(with_projects(json!({ "status": "done", "project_id": "*" }))["projects"].is_array());
+        for job in [json!({ "status": "running", "project_id": "*" }), json!({ "status": "done", "project_id": "a" })] {
+            assert!(with_projects(job).get("projects").is_none());
+        }
     }
 
     #[test]

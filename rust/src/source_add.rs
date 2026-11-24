@@ -109,9 +109,14 @@ pub fn save(a: &Value, config: Value) -> Result<()> {
     registry::add_source(&project, json!({ "source_id": source_id, "source_config": config }))
 }
 
-pub async fn add(queue: &Arc<Queue>, a: &Value) -> Result<Value> {
+pub async fn add(queue: &Arc<Queue>, a: &Value, refuse: impl FnOnce() -> Result<()>) -> Result<Value> {
     let config = prepare(a).await?;
     save(a, config)?;
+    if let Err(e) = refuse() {
+        // A source that was never indexed must not stay registered.
+        let _ = crate::manage::remove_source(queue, a).await;
+        return Err(e);
+    }
     submit(queue, &text(a, "project_id").unwrap_or_default(), &text(a, "source_id").unwrap_or_default())
 }
 

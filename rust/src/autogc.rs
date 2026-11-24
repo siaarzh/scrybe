@@ -172,7 +172,7 @@ pub fn sweep_ephemeral(queue: &Arc<Queue>) {
         }
         if !swept.is_empty() {
             let names: Vec<String> = swept.iter().map(|e| format!("{}/{}:{}", e["projectId"].as_str().unwrap_or(""), e["sourceId"].as_str().unwrap_or(""), e["label"].as_str().unwrap_or(""))).collect();
-            eprintln!("[scrybe daemon] ephemeral sweep: reclaimed {} leaked '_ephemeral/*' label(s): {}", swept.len(), names.join(", "));
+            crate::daemon_log::line(&format!("[scrybe daemon] ephemeral sweep: reclaimed {} leaked '_ephemeral/*' label(s): {}", swept.len(), names.join(", ")));
             q.push(json!({ "ts": now_iso(), "level": "info", "event": "ephemeral.swept", "detail": { "count": swept.len(), "entries": swept } }));
         }
     });

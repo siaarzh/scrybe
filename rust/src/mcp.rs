@@ -104,7 +104,7 @@ fn suggest_key(unknown: &str, known: &[&str]) -> Option<String> {
     best.filter(|(_, d)| *d <= 3).map(|(k, _)| k.to_string())
 }
 
-fn json_type_of(v: &Value) -> &'static str {
+pub(crate) fn json_type_of(v: &Value) -> &'static str {
     match v {
         Value::Array(_) => "array",
         Value::Null => "null",
@@ -164,27 +164,48 @@ fn caller_facing(tool: &str, message: &str) -> bool {
     matches!(tool, "search_code" | "search_knowledge") && ((message.starts_with("Project '") && message.ends_with("not found")) || message.starts_with("NO_CODE_SOURCES") || message.starts_with("NO_KNOWLEDGE_SOURCES"))
 }
 
-/// Answers the shared-client call route. The tool's JSON goes out as written, with no text wrapping.
-pub async fn rpc(store: &Store, req: &Value) -> String {
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
-    let fail = |code: i64, message: &str| json!({ "id": id, "error": { "code": code, "message": message } }).to_string();
-    let name = req.get("method").and_then(Value::as_str).unwrap_or("");
-    let args = req.get("params").filter(|p| p.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let tools = tool_list();
-    let Some(tool) = tools.as_array().and_then(|t| t.iter().find(|x| x["name"] == name)) else {
-        return fail(-32601, &format!("method not found: {name}"));
-    };
-    if let Err(message) = validate_params(name, &tool["inputSchema"], &args) {
-        return fail(-32602, &message);
-    }
-    match run_tool(store, name, &args).await {
-        Ok(Ok(text)) => format!(r#"{{"id":{id},"result":{text}}}"#),
-        Ok(Err(e)) if e.caller_facing || caller_facing(name, &e.message) => fail(-32602, &e.message),
-        Ok(Err(e)) => {
-            eprintln!("tool {name} failed: {}", e.message);
-            fail(-32603, "internal error")
+/// A tool's result: a value, or JSON text already indented the way clients show it.
+pub enum Answer {
+    Json(Value),
+    Pretty(String),
+}
+
+impl Answer {
+    /// As it stands, for a body that carries it whole.
+    pub fn raw(&self) -> String {
+        match self {
+            Answer::Json(v) => v.to_string(),
+            Answer::Pretty(text) => text.clone(),
         }
-        Err((code, message)) => fail(code, &message),
+    }
+
+    pub fn pretty(&self) -> String {
+        match self {
+            Answer::Json(v) => serde_json::to_string_pretty(v).unwrap_or_default(),
+            Answer::Pretty(text) => text.clone(),
+        }
+    }
+}
+
+/// What a caller is told about a call that failed.
+#[derive(Debug, PartialEq)]
+pub struct Failed {
+    pub code: i64,
+    pub message: String,
+}
+
+/// Why a tool failed, and whether the caller may hear it.
+pub struct Reason {
+    pub message: String,
+    pub caller_facing: bool,
+}
+
+/// Runs one of the read tools, its arguments already checked.
+pub async fn call(store: &Store, name: &str, args: &Value) -> Result<Answer, Reason> {
+    match run_tool(store, name, args).await {
+        Ok(Ok(text)) => Ok(Answer::Pretty(text)),
+        Ok(Err(e)) => Err(Reason { caller_facing: e.caller_facing || caller_facing(name, &e.message), message: e.message }),
+        Err((_, message)) => Err(Reason { message, caller_facing: true }),
     }
 }
 

@@ -26,13 +26,13 @@ fn text<'a>(a: &'a Value, key: &str) -> &'a str {
     a[key].as_str().unwrap_or("")
 }
 
-/// A job's row once it has finished, or the last one seen when the wait runs out.
+/// A job's row once it has finished, or the last one seen when the wait runs out or the server stops.
 async fn wait_for(queue: &Arc<Queue>, job: &str, limit: Duration) -> Option<Value> {
     let deadline = Instant::now() + limit;
     let mut row = queue.rows.get(job);
     while Instant::now() < deadline {
         row = queue.rows.get(job);
-        if row.as_ref().is_some_and(|r| matches!(r["status"].as_str(), Some("done" | "failed" | "cancelled"))) {
+        if row.as_ref().is_some_and(|r| matches!(r["status"].as_str(), Some("done" | "failed" | "cancelled"))) || queue.is_stopped() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -40,13 +40,14 @@ async fn wait_for(queue: &Arc<Queue>, job: &str, limit: Duration) -> Option<Valu
     row
 }
 
-pub async fn index_branch(queue: &Arc<Queue>, a: &Value) -> Result<Value> {
+pub async fn index_branch(queue: &Arc<Queue>, a: &Value, refuse: impl FnOnce() -> Result<()>) -> Result<Value> {
     let project = text(a, "project_id");
     if registry::get_project(project).is_none() {
         bail!("Project '{project}' not found");
     }
     let source = a["source_id"].as_str().unwrap_or("primary");
     let (label, content_ref) = plan(text(a, "branch"), a["label"].as_str());
+    refuse()?;
     let started = now_ms();
     let submitted = queue.submit(Request { project: project.to_string(), source: Some(source.to_string()), branch: Some(label.clone()), content_ref: Some(content_ref), ..Default::default() });
     if submitted.status == "rejected" {
@@ -54,6 +55,9 @@ pub async fn index_branch(queue: &Arc<Queue>, a: &Value) -> Result<Value> {
     }
     let row = wait_for(queue, &submitted.job_id, Duration::from_secs(600)).await;
     let Some(row) = row else { bail!("Job '{}' status unavailable", submitted.job_id) };
+    if matches!(row["status"].as_str(), Some("queued" | "running")) && queue.is_stopped() {
+        bail!("the server stopped before job '{}' ended", submitted.job_id);
+    }
     if row["status"] == "failed" {
         bail!("{}", row["error_message"].as_str().map_or_else(|| format!("index_ephemeral failed for label '{label}'"), String::from));
     }

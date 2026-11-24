@@ -20,8 +20,11 @@ const COLD_START_DEFAULT_MS: u64 = 15_000;
 const COLD_START_CEILING_MS: u64 = 20_000;
 const CALL_START_BUDGET: Duration = Duration::from_secs(15);
 const INIT_START_BUDGET: Duration = Duration::from_secs(30);
-const POLL_EVERY: Duration = Duration::from_secs(2);
-const POLL_FOR: Duration = Duration::from_secs(300);
+const POLL_EVERY_MS: u64 = 2_000;
+const POLL_FOR_MS: u64 = 300_000;
+/// The first version whose index format an older server can't read.
+const UPGRADE_BOUNDARY: [u64; 3] = [0, 34, 0];
+const OUT_OF_DATE: &str = "Run: scrybe daemon restart --force   (then reconnect)\n\nscrybe v0.34.0 upgraded lancedb. The running daemon is still on the old version\nand cannot use the new on-disk format helpers. Stop + start refreshes the daemon\nwith the new lancedb binary. Existing data is preserved (lancedb 0.27 reads\n0.14-written tables transparently).\n\nIf the stop command fails with EPERM on Windows, close all Claude Code / IDE\nsessions first — they hold the lancedb native binding open.";
 const RESTART_START_AFTER: Duration = Duration::from_secs(2);
 
 fn data_dir() -> PathBuf {
@@ -68,6 +71,47 @@ fn read_pidfile() -> Option<String> {
 
 fn pidfile_port() -> Option<u16> {
     json::get(&read_pidfile()?, "port")?.parse().ok()
+}
+
+// ─── Versions ────────────────────────────────────────────────────────────────
+
+/// The `major.minor.patch` a version starts with.
+fn parse_version(v: &str) -> Option<[u64; 3]> {
+    let mut parts = v.splitn(3, '.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let rest = parts.next()?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    Some([major, minor, rest[..digits].parse().ok()?])
+}
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum Skew {
+    /// The same version, or one that can't be told.
+    None,
+    /// Another minor or patch version: served, with a warning.
+    Small,
+    /// Too old to read today's index.
+    PreUpgrade,
+    Major,
+}
+
+/// `analyzeVersionSkew`, and the upgrade boundary checked before it.
+fn skew(daemon: &str, own: &str) -> Skew {
+    let (Some(d), Some(o)) = (parse_version(daemon), parse_version(own)) else { return Skew::None };
+    if o >= UPGRADE_BOUNDARY && d < UPGRADE_BOUNDARY {
+        Skew::PreUpgrade
+    } else if d[0] != o[0] {
+        Skew::Major
+    } else if d != o {
+        Skew::Small
+    } else {
+        Skew::None
+    }
+}
+
+fn major_skew_message(daemon: &str, own: &str) -> String {
+    format!("daemon version {daemon} is major-incompatible with shim {own}. Restart to update: scrybe daemon restart")
 }
 
 // ─── HTTP ────────────────────────────────────────────────────────────────────
@@ -152,11 +196,22 @@ fn health(port: u16, timeout: Duration) -> Health {
 
 // ─── Relay ───────────────────────────────────────────────────────────────────
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum Mode {
     Unknown,
     Serving,
     Degraded,
+    /// The server is there, and older than today's index format.
+    PreUpgrade,
+    /// The server is there, under another major version.
+    MajorSkew,
+}
+
+impl Mode {
+    /// The server's own tools aren't offered, so its return is watched for.
+    fn not_serving(self) -> bool {
+        matches!(self, Mode::Degraded | Mode::PreUpgrade | Mode::MajorSkew)
+    }
 }
 
 struct State {
@@ -164,6 +219,21 @@ struct State {
     poll_until: Option<Instant>,
     tools: Option<String>,
     daemon_pid: Option<String>,
+    /// The pid and port of the server whose version was last looked at.
+    checked: Option<(Option<String>, u16)>,
+    daemon_version: String,
+    warned_version: Option<String>,
+}
+
+impl State {
+    fn new() -> Self {
+        State { mode: Mode::Unknown, poll_until: None, tools: None, daemon_pid: None, checked: None, daemon_version: String::new(), warned_version: None }
+    }
+}
+
+struct Manifest {
+    version: String,
+    tools: String,
 }
 
 enum RpcFail {
@@ -178,6 +248,8 @@ struct Relay<W: Write + Send> {
     start_cmd: Vec<String>,
     auto_start: bool,
     cold_budget: Duration,
+    version: &'static str,
+    poll_for: Duration,
     state: Mutex<State>,
     start_gate: Mutex<Option<Instant>>,
     starter_running: Arc<AtomicBool>,
@@ -258,8 +330,8 @@ impl<W: Write + Send> Relay<W> {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let prev = st.mode;
             st.mode = new;
-            if new == Mode::Degraded && prev != Mode::Degraded {
-                st.poll_until = Some(Instant::now() + POLL_FOR);
+            if new.not_serving() && !prev.not_serving() {
+                st.poll_until = Some(Instant::now() + self.poll_for);
             }
             prev != Mode::Unknown && prev != new
         };
@@ -329,12 +401,66 @@ impl<W: Write + Send> Relay<W> {
         }
     }
 
-    fn manifest_tools(&self, port: u16) -> Option<String> {
+    fn manifest(&self, port: u16) -> Option<Manifest> {
         let r = http(port, "GET", "/mcp/manifest", "", "", Duration::from_secs(5)).ok()?;
         if !(200..300).contains(&r.status) {
             return None;
         }
-        json::get(&r.body, "tools").map(str::to_string)
+        let version = json::get(&r.body, "daemon_version").and_then(json::bare).unwrap_or("").to_string();
+        json::get(&r.body, "tools").map(|tools| Manifest { version, tools: tools.to_string() })
+    }
+
+    /// Takes in a server's manifest: which mode its version puts this session in, and its tools if they are served.
+    fn learn(&self, m: &Manifest) {
+        let skew = skew(&m.version, self.version);
+        let warn = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.daemon_version = m.version.clone();
+            let warn = skew == Skew::Small && st.warned_version.as_deref() != Some(m.version.as_str());
+            if warn {
+                st.warned_version = Some(m.version.clone());
+            }
+            warn
+        };
+        if warn {
+            let _ = writeln!(std::io::stderr(), "[scrybe] daemon version {} differs from shim {} (minor/patch) — restart daemon to refresh tool surface", m.version, self.version);
+        }
+        match skew {
+            Skew::PreUpgrade => self.set_mode(Mode::PreUpgrade),
+            Skew::Major => self.set_mode(Mode::MajorSkew),
+            Skew::None | Skew::Small => self.serve_tools(&m.tools),
+        }
+    }
+
+    /// Looks at the version of the server on `port`, once per server. One that gives no manifest is taken as it is.
+    fn check_version(&self, port: u16) {
+        let key = (read_pidfile().and_then(|t| json::get(&t, "pid").map(str::to_string)), port);
+        let known = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.checked.as_ref() == Some(&key) && !matches!(st.mode, Mode::Unknown | Mode::Degraded)
+        };
+        if known {
+            return;
+        }
+        if let Some(m) = self.manifest(port) {
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).checked = Some(key);
+            self.learn(&m);
+        }
+    }
+
+    /// The answer to a call the server's version rules out.
+    fn refusal(&self, name: &str) -> Option<String> {
+        let (mode, version) = {
+            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            (st.mode, st.daemon_version.clone())
+        };
+        let why = match mode {
+            Mode::PreUpgrade if matches!(name, "status" | "doctor" | "init") => return Some(self.offline_answer(name, "")),
+            Mode::PreUpgrade => OUT_OF_DATE.to_string(),
+            Mode::MajorSkew => major_skew_message(&version, self.version),
+            _ => return None,
+        };
+        Some(text_result(&format!(r#"{{"error":{}}}"#, json::quote(&why)), false))
     }
 
     /// Records a served tool list and tells the client if a restarted server changed it.
@@ -359,12 +485,17 @@ impl<W: Write + Send> Relay<W> {
         let first = self.cold_budget_once();
         let may_start = first.is_some_and(|b| !b.is_zero());
         let port = self.ensure(first.unwrap_or(Duration::ZERO), may_start);
-        if let Some(tools) = port.and_then(|p| self.manifest_tools(p)) {
-            self.serve_tools(&tools);
-            return format!(r#"{{"tools":{tools}}}"#);
+        let config_present = data_dir().join("config.json").exists();
+        let Some(m) = port.and_then(|p| self.manifest(p)) else {
+            self.set_mode(Mode::Degraded);
+            return offline_tools(config_present);
+        };
+        self.learn(&m);
+        match skew(&m.version, self.version) {
+            Skew::PreUpgrade => offline_tools(config_present),
+            Skew::Major => format!(r#"{{"tools":[{{"name":"scrybe_daemon_unavailable","description":{},"inputSchema":{{"type":"object","properties":{{}},"required":[]}}}}]}}"#, json::quote(&major_skew_message(&m.version, self.version))),
+            Skew::None | Skew::Small => format!(r#"{{"tools":{}}}"#, m.tools),
         }
-        self.set_mode(Mode::Degraded);
-        offline_tools(data_dir().join("config.json").exists())
     }
 
     fn rpc_once(&self, port: u16, name: &str, args: &str) -> Result<String, RpcFail> {
@@ -397,6 +528,10 @@ impl<W: Write + Send> Relay<W> {
             };
             let Some(port) = port else { continue };
             tried = Some(port);
+            self.check_version(port);
+            if let Some(refusal) = self.refusal(json::bare(name_raw).unwrap_or("")) {
+                return refusal;
+            }
             match self.rpc_once(port, name_raw, args) {
                 Ok(body) => {
                     self.set_mode_after_call();
@@ -466,11 +601,9 @@ impl<W: Write + Send> Relay<W> {
             let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             (st.mode, st.poll_until.is_some_and(|t| Instant::now() < t))
         };
-        if mode == Mode::Degraded && polling {
-            if let Some(port) = pidfile_port().filter(|p| health(*p, Duration::from_secs(2)) == Health::Up) {
-                if let Some(tools) = self.manifest_tools(port) {
-                    self.serve_tools(&tools);
-                }
+        if mode.not_serving() && polling {
+            if let Some(m) = pidfile_port().filter(|p| health(*p, Duration::from_secs(2)) == Health::Up).and_then(|p| self.manifest(p)) {
+                self.learn(&m);
             }
         }
     }
@@ -486,19 +619,19 @@ impl<W: Write + Send> Relay<W> {
             (st.mode, moved)
         };
         if mode == Mode::Serving && moved {
-            if let Some(tools) = pidfile_port().and_then(|p| self.manifest_tools(p)) {
-                self.serve_tools(&tools);
+            if let Some(m) = pidfile_port().and_then(|p| self.manifest(p)) {
+                self.learn(&m);
             }
         }
     }
 }
 
-fn watch_loop<W: Write + Send>(relay: &Relay<W>, heartbeat_every: Duration) {
+fn watch_loop<W: Write + Send>(relay: &Relay<W>, heartbeat_every: Duration, poll_every: Duration) {
     relay.heartbeat();
     relay.restart_check();
     let mut last_beat = Instant::now();
     loop {
-        std::thread::sleep(POLL_EVERY.min(heartbeat_every));
+        std::thread::sleep(poll_every.min(heartbeat_every));
         relay.watch_tick();
         if last_beat.elapsed() >= heartbeat_every {
             last_beat = Instant::now();
@@ -560,6 +693,11 @@ fn parse_int(raw: &str) -> Option<u64> {
     digits.parse::<f64>().ok().map(|n| n * sign).filter(|n| *n >= 0.0).map(|n| n as u64)
 }
 
+/// A wait named by the environment, when that is above zero.
+fn wait_from(raw: Option<String>, default_ms: u64) -> Duration {
+    Duration::from_millis(raw.and_then(|v| parse_int(&v)).filter(|ms| *ms > 0).unwrap_or(default_ms))
+}
+
 fn cold_budget_from(raw: Option<String>) -> Duration {
     let ms = raw.and_then(|v| parse_int(&v)).unwrap_or(COLD_START_DEFAULT_MS);
     Duration::from_millis(ms.min(COLD_START_CEILING_MS))
@@ -578,14 +716,17 @@ fn main() {
         start_cmd: start_cmd_from_args(&args),
         auto_start: std::env::var("SCRYBE_NO_AUTO_DAEMON").as_deref() != Ok("1"),
         cold_budget: cold_budget_from(std::env::var("SCRYBE_MCP_COLD_START_WAIT_MS").ok()),
-        state: Mutex::new(State { mode: Mode::Unknown, poll_until: None, tools: None, daemon_pid: None }),
+        version: VERSION,
+        poll_for: wait_from(std::env::var("SCRYBE_MCP_LISTCHANGED_POLL_CEILING_MS").ok(), POLL_FOR_MS),
+        state: Mutex::new(State::new()),
         start_gate: Mutex::new(None),
         starter_running: Arc::new(AtomicBool::new(false)),
         resolved: AtomicBool::new(false),
     });
-    let beat_ms = std::env::var("SCRYBE_DAEMON_HEARTBEAT_MS").ok().and_then(|v| parse_int(&v)).filter(|ms| *ms > 0).unwrap_or(30_000);
+    let beat = wait_from(std::env::var("SCRYBE_DAEMON_HEARTBEAT_MS").ok(), 30_000);
+    let poll = wait_from(std::env::var("SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS").ok(), POLL_EVERY_MS);
     let watcher = relay.clone();
-    std::thread::spawn(move || watch_loop(&watcher, Duration::from_millis(beat_ms)));
+    std::thread::spawn(move || watch_loop(&watcher, beat, poll));
 
     let mut input = std::io::stdin().lock();
     let mut buf = Vec::new();
@@ -712,6 +853,61 @@ mod tests {
             assert_eq!(cold_budget_from(Some(odd.into())), Duration::from_millis(COLD_START_DEFAULT_MS));
         }
         assert_eq!(cold_budget_from(Some(" 1500ms".into())), Duration::from_millis(1500));
+        for odd in [None, Some("0"), Some("-1"), Some("x")] {
+            assert_eq!(wait_from(odd.map(String::from), POLL_EVERY_MS), Duration::from_secs(2));
+        }
+        assert_eq!(wait_from(Some("75".into()), POLL_FOR_MS), Duration::from_millis(75));
+    }
+
+    #[test]
+    fn versions_are_compared_like_the_old_client() {
+        assert_eq!(parse_version("0.54.0-rs.1"), Some([0, 54, 0]));
+        for odd in ["", "0.54", "v1.2.3", "1.2.x", "a.b.c"] {
+            assert_eq!(parse_version(odd), None, "{odd}");
+        }
+        for (daemon, own, want) in [("0.54.0-rs.1", "0.54.0", Skew::None), ("0.54.0", "0.53.2", Skew::Small), ("0.53.9", "0.54.0", Skew::Small), ("0.33.9", "0.54.0", Skew::PreUpgrade), ("0.33.9", "0.33.0", Skew::Small), ("0.34.0", "0.54.0", Skew::Small), ("1.0.0", "0.54.0", Skew::Major), ("0.54.0", "1.0.0", Skew::Major), ("0.33.0", "1.0.0", Skew::PreUpgrade), ("", "0.54.0", Skew::None)] {
+            assert_eq!(skew(daemon, own), want, "{daemon} {own}");
+        }
+    }
+
+    fn manifest(version: &str) -> Manifest {
+        Manifest { version: version.into(), tools: "[1]".into() }
+    }
+
+    #[test]
+    fn a_server_under_another_major_version_is_refused_until_it_is_replaced() {
+        let r = test_relay();
+        r.learn(&manifest("0.54.0-rs.1"));
+        assert_eq!((r.refusal("search_code"), written(&r).as_str()), (None, ""));
+        r.learn(&manifest("1.0.0"));
+        assert_eq!(written(&r).matches("list_changed").count(), 1);
+        let told = r.refusal("search_code").unwrap();
+        assert!(told.contains("daemon version 1.0.0 is major-incompatible with shim 0.54.0. Restart to update: scrybe daemon restart") && !told.contains("isError"), "{told}");
+        assert!(r.state.lock().unwrap().poll_until.is_some());
+        r.learn(&manifest("0.53.0"));
+        assert_eq!((r.refusal("search_code"), written(&r).matches("list_changed").count()), (None, 2));
+    }
+
+    #[test]
+    fn a_server_from_before_the_index_upgrade_is_refused_but_the_offline_tools_answer() {
+        let r = test_relay();
+        r.learn(&manifest("0.33.2"));
+        assert!(r.refusal("search_code").unwrap().contains("Run: scrybe daemon restart --force"));
+        assert!(r.refusal("status").unwrap().contains("daemon_running"));
+        assert_eq!(r.state.lock().unwrap().mode, Mode::PreUpgrade);
+        r.learn(&manifest("0.54.0"));
+        assert_eq!(r.refusal("search_code"), None);
+    }
+
+    #[test]
+    fn a_small_difference_is_warned_about_once_for_each_version() {
+        let r = test_relay();
+        let warned = |r: &Relay<Vec<u8>>| r.state.lock().unwrap().warned_version.clone();
+        r.learn(&manifest("0.54.0"));
+        assert_eq!(warned(&r), None);
+        r.learn(&manifest("0.55.0"));
+        assert_eq!(warned(&r).as_deref(), Some("0.55.0"));
+        assert_eq!((r.refusal("gc"), r.state.lock().unwrap().mode), (None, Mode::Serving));
     }
 
     fn test_relay() -> Arc<Relay<Vec<u8>>> {
@@ -721,7 +917,9 @@ mod tests {
             start_cmd: vec![],
             auto_start: false,
             cold_budget: Duration::ZERO,
-            state: Mutex::new(State { mode: Mode::Unknown, poll_until: None, tools: None, daemon_pid: None }),
+            version: "0.54.0",
+            poll_for: Duration::from_millis(POLL_FOR_MS),
+            state: Mutex::new(State::new()),
             start_gate: Mutex::new(None),
             starter_running: Arc::new(AtomicBool::new(false)),
             resolved: AtomicBool::new(false),
