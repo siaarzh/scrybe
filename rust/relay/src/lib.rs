@@ -271,6 +271,17 @@ fn text_result(raw_json: &str, is_error: bool) -> String {
     format!(r#"{{"content":[{{"type":"text","text":{}}}]{flag}}}"#, json::quote(&json::pretty(raw_json)))
 }
 
+/// A tool's answer as `tools/call` content. A search may come wrapped with a note about its index, which follows as its own block.
+fn content_of(result: &str) -> String {
+    let results = json::get(result, "results").filter(|r| r.starts_with('[') && json::get(result, "scrybe_envelope") == Some("1"));
+    let Some(results) = results else { return text_result(result, false) };
+    let answer = text_result(results, false);
+    match json::get(result, "note").filter(|n| n.starts_with('"') && *n != "\"\"") {
+        Some(note) => format!(r#"{},{{"type":"text","text":{note}}}]}}"#, &answer[..answer.len() - 2]),
+        None => answer,
+    }
+}
+
 fn error_result(message: &str) -> String {
     text_result(&format!(r#"{{"error":{}}}"#, json::quote(message)), true)
 }
@@ -499,7 +510,7 @@ impl<W: Write + Send> Relay<W> {
     }
 
     fn rpc_once(&self, port: u16, name: &str, args: &str) -> Result<String, RpcFail> {
-        let header = format!("X-Scrybe-Client-Id: {}\r\n", self.client_id);
+        let header = format!("X-Scrybe-Client-Id: {}\r\nX-Scrybe-Envelope: 1\r\n", self.client_id);
         let body = format!(r#"{{"id":"relay","method":{name},"params":{args}}}"#);
         let r = http(port, "POST", "/mcp/rpc", &header, &body, CALL_TIMEOUT).map_err(|e| match e {
             HttpError::Connect(m) => RpcFail::Unreachable(m),
@@ -536,7 +547,7 @@ impl<W: Write + Send> Relay<W> {
                 Ok(body) => {
                     self.set_mode_after_call();
                     return match result_from_rpc(&body) {
-                        Ok(result) => text_result(&result, false),
+                        Ok(result) => content_of(&result),
                         Err(error) => text_result(&error, true),
                     };
                 }
@@ -829,6 +840,17 @@ mod tests {
         assert_eq!(result_from_rpc(r#"{"id":"x","result":{"jobId":"j1","other":1}}"#).unwrap(), r#"{"job_id":"j1","status":"started"}"#);
         assert_eq!(result_from_rpc(r#"{"id":"x","error":{"code":-32602,"message":"bad \"field\""}}"#).unwrap_err(), r#"{"error":"bad \"field\""}"#);
         assert_eq!(result_from_rpc(r#"{"id":"x","error":null,"result":3}"#).unwrap(), "3");
+    }
+
+    #[test]
+    fn a_note_about_the_index_follows_the_results_as_its_own_block() {
+        assert_eq!(content_of(r#"{"scrybe_envelope":1,"results":[1],"note":"still \"building\""}"#), r#"{"content":[{"type":"text","text":"[\n  1\n]"},{"type":"text","text":"still \"building\""}]}"#);
+        for plain in [r#"{"scrybe_envelope":1,"results":[1]}"#, r#"{"scrybe_envelope":1,"results":[1],"note":""}"#] {
+            assert_eq!(content_of(plain), text_result("[1]", false), "{plain}");
+        }
+        for other in ["[1]", "3", r#"{"results":[1],"note":"x"}"#, r#"{"scrybe_envelope":2,"results":[1]}"#, r#"{"scrybe_envelope":1,"results":{}}"#] {
+            assert_eq!(content_of(other), text_result(other, false), "{other}");
+        }
     }
 
     #[test]
