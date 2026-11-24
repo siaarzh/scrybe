@@ -911,11 +911,12 @@ impl Queue {
                 job["finished_at"] = json!(finished);
                 job["error"] = error.as_ref().map_or(Value::Null, |e| json!(e));
             }
-            st.active.remove(&item.job_id);
             st.cancels.remove(&item.job_id);
             (status, error)
         };
+        // The row first: a server on its way out leaves as soon as nothing is active.
         self.rows.finish(&item.job_id, status, finished, error.as_deref());
+        self.lock().active.remove(&item.job_id);
         let name = match status {
             "done" => "job.completed",
             "cancelled" => "job.cancelled",

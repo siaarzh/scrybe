@@ -37,6 +37,8 @@ pub const DEFAULT_PORT: u16 = 58451;
 const DAEMON_TOOLS: &str = include_str!("daemon_tools.json");
 /// How long jobs that aren't index runs may hold up leaving.
 const OTHER_JOBS_CAP: Duration = Duration::from_secs(30);
+/// How long open requests may hold up leaving: one that is never read must not keep the data dir locked.
+const REQUESTS_CAP: Duration = Duration::from_secs(30);
 /// How often a call's memory is read for its record.
 const CALL_POLL: Duration = Duration::from_millis(25);
 
@@ -675,7 +677,12 @@ impl Daemon {
         }
     }
 
-    fn manifest(&self) -> Value {
+    fn manifest(&self) -> &'static Value {
+        static MANIFEST: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+        MANIFEST.get_or_init(Self::build_manifest)
+    }
+
+    fn build_manifest() -> Value {
         let mut all = mcp::tool_list();
         let extra: Value = serde_json::from_str(DAEMON_TOOLS).unwrap_or(json!([]));
         if let (Some(a), Some(e)) = (all.as_array_mut(), extra.as_array()) {
@@ -726,7 +733,8 @@ impl Daemon {
     /// `stopHttpServer`: no more connections, event streams end, and every request being answered gets its answer.
     async fn stop_serving(&self) {
         self.stopping.send_replace(true);
-        while self.in_flight.load(Ordering::SeqCst) > 0 {
+        let end = Instant::now() + REQUESTS_CAP;
+        while self.in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < end {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -909,7 +917,7 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
             let (status, answer) = d.pinned_route(m, pinned_ids(p).unwrap_or_default(), query, &body);
             json_res(&mut s, status, &answer).await
         }
-        ("GET", "/mcp/manifest") => json_res(&mut s, "200 OK", &d.manifest()).await,
+        ("GET", "/mcp/manifest") => json_res(&mut s, "200 OK", d.manifest()).await,
         ("POST", "/mcp/rpc") => {
             let parsed = match read_json(&body) {
                 Ok(Value::Null) => return boom(&mut s, "TypeError: Cannot read properties of null (reading 'id')").await,
@@ -1045,6 +1053,20 @@ fn crash_record(message: &str, at: Option<String>) -> Value {
     json!({ "level": "error", "event": "process.uncaughtException", "error": { "message": message, "stack": stack, "name": "panic" } })
 }
 
+/// As many open files as the system allows this process, as Node asks for at start.
+fn raise_handle_limit() {
+    #[cfg(unix)]
+    // SAFETY: both calls only read and write the local struct.
+    unsafe {
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
+            // macOS refuses more than its own ceiling, whatever the hard limit says.
+            limit.rlim_cur = if cfg!(target_os = "macos") { limit.rlim_max.min(10_240).max(limit.rlim_cur) } else { limit.rlim_max };
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
 fn record_panics() {
     let before = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1097,6 +1119,7 @@ pub async fn serve(store: Store) -> Result<()> {
     jobs::diag(prediction);
     record_panics();
     daemon_log::open();
+    raise_handle_limit();
     let listener = bind_sticky().await?;
     let port = listener.local_addr()?.port();
     let store = Arc::new(store);
@@ -1138,7 +1161,7 @@ pub async fn serve(store: Store) -> Result<()> {
             let leave_now = ticking.lifecycle.lock().unwrap().tick(Instant::now(), active);
             if let Some(reason) = leave_now {
                 daemon_log::line(&format!("[scrybe daemon] no active clients ({}) — shutting down", reason.as_str()));
-                ticking.clone().shutdown(reason.as_str().to_string()).await;
+                return ticking.shutdown(reason.as_str().to_string()).await;
             }
         }
     });
@@ -1147,7 +1170,14 @@ pub async fn serve(store: Store) -> Result<()> {
 
     loop {
         let (socket, _) = tokio::select! {
-            got = listener.accept() => got?,
+            got = listener.accept() => match got {
+                Ok(got) => got,
+                Err(e) => {
+                    daemon_log::line(&format!("[scrybe daemon] a connection could not be taken: {e}"));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            },
             _ = stop.wait_for(|stop| *stop) => break,
         };
         let d = d.clone();

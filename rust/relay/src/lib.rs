@@ -395,7 +395,9 @@ impl<W: Write + Send> Relay<W> {
             match pidfile_port() {
                 Some(port) => {
                     let left = deadline.saturating_duration_since(Instant::now());
-                    match health(port, left.clamp(Duration::from_millis(250), Duration::from_secs(2))) {
+                    // No time to wait for a start is no reason to hurry a busy server.
+                    let wait = if budget.is_zero() { Duration::from_secs(2) } else { left.clamp(Duration::from_millis(250), Duration::from_secs(2)) };
+                    match health(port, wait) {
                         Health::Up => return Some(port),
                         Health::Draining => draining = Some(port),
                         Health::Down if may_start => self.start_server(&mut last_start),

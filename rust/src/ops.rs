@@ -305,17 +305,24 @@ fn plural(n: u64, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
-/// The route through a live server. False means the server wasn't there or didn't answer, and the caller runs the gc itself.
-async fn gc_via_server(projects: &[registry::Project]) -> bool {
-    let Some((_, port)) = pidfile().filter(|(_, port)| *port > 0) else { return false };
-    let Ok(http) = client(Duration::from_secs(2)) else { return false };
-    if !http.get(format!("http://127.0.0.1:{port}/health")).send().await.is_ok_and(|r| r.status().is_success()) {
-        return false;
+/// The route through a live server. False means no server is there, and the caller runs the gc itself. One that is
+/// there and busy is an error: its index runs must not lose rows to a gc beside them.
+async fn gc_via_server(projects: &[registry::Project]) -> Result<bool> {
+    let Some((_, port)) = pidfile().filter(|(_, port)| *port > 0) else { return Ok(false) };
+    let Ok(http) = client(Duration::from_secs(60)) else { return Ok(false) };
+    if !http.get(format!("http://127.0.0.1:{port}/health")).timeout(Duration::from_secs(2)).send().await.is_ok_and(|r| r.status().is_success()) {
+        return Ok(false);
     }
     let scope: Vec<&str> = projects.iter().map(|p| p.id.as_str()).collect();
-    let Ok(res) = http.post(format!("http://127.0.0.1:{port}/gc")).json(&json!({ "scope": scope, "mode": "purge" })).send().await.and_then(reqwest::Response::error_for_status) else { return false };
-    let Ok(result) = res.json::<Value>().await else { return false };
-    let Some(jobs) = result["jobs"].as_array() else { return false };
+    let Ok(res) = http.post(format!("http://127.0.0.1:{port}/gc")).json(&json!({ "scope": scope, "mode": "purge" })).send().await else {
+        return Err(anyhow!("The scrybe daemon did not answer, so no gc was run. Retry in a moment."));
+    };
+    if res.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        return Err(anyhow!(DRAINING));
+    }
+    let Ok(res) = res.error_for_status() else { return Ok(false) };
+    let Ok(result) = res.json::<Value>().await else { return Ok(false) };
+    let Some(jobs) = result["jobs"].as_array() else { return Ok(false) };
     if result["cancelledPending"].as_u64().unwrap_or(0) > 0 {
         println!("Cancelled {} pending auto-gc job(s) (preempted by manual gc).", result["cancelledPending"]);
     }
@@ -324,7 +331,7 @@ async fn gc_via_server(projects: &[registry::Project]) -> bool {
         println!("  {}: job {} ({})", j["projectId"].as_str().unwrap_or(""), j["jobId"].as_str().unwrap_or(""), j["status"].as_str().unwrap_or("queued"));
     }
     println!("Run 'scrybe job list' to monitor progress.");
-    true
+    Ok(true)
 }
 
 /// Projects with no sources: listed on a dry run, offered for removal when a person is at the terminal.
@@ -365,7 +372,7 @@ async fn gc_inner(store: Store, args: GcArgs) -> Result<()> {
     }
     let store = Arc::new(store);
     let queue = Queue::new(store.clone())?;
-    if !args.dry_run && gc_via_server(&projects).await {
+    if !args.dry_run && gc_via_server(&projects).await? {
         if only.is_none() {
             prune_empty(&queue, false).await?;
         }

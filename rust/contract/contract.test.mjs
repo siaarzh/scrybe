@@ -1367,7 +1367,7 @@ describe("the locks on a data dir", () => {
   before(async () => { w = await makeWorld(); await w.cli("projects"); });
   afterEach(async () => {
     await w.killServer();
-    for (const f of ["daemon-owner.lock.db", "daemon-spawn.lock.db"]) rmSync(join(w.data, f), { recursive: true, force: true });
+    for (const f of ["daemon-owner.lock.db", "daemon-spawn.lock.db"]) rmSync(join(w.data, f), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
   after(() => w.stop());
   const upOrSkip = async (t) => {
@@ -4109,7 +4109,12 @@ describe("what the file watcher reacts to", () => {
     const before = jobs();
     change();
     await until(() => jobs() > before, 15_000, `a job for ${what}`);
-    await sleep(1500);
+    await until(async () => {
+      const seen = jobs();
+      await sleep(1500);
+      const q = (await c.call("queue_status")).value;
+      return jobs() === seen && q.running.length + q.queued.length === 0;
+    }, 60_000, "the jobs to settle");
   };
 
   test("a dot-file starts a job", () => starts("a dot-file", () => writeFileSync(join(w.repo, ".eslintrc.json"), '{ "rules": {} }\n')));
@@ -4574,6 +4579,8 @@ describe("the state word", () => {
       assert.equal(await state(), "cold", "the pause is forgotten");
       const line = heard.join("").split("\n").find((l) => l.includes('"state.changed"'));
       assert.deepEqual(Object.keys(JSON.parse(line.slice("data: ".length))), ["ts", "level", "event", "detail"]);
+      // A late report of the change above must not count as a new one.
+      await until(async () => { const n = (await announced()).length; await sleep(3000); return (await announced()).length === n && (await state()) === "cold"; }, 40_000, "quiet");
       const before = await announced();
       assert.equal((await post(server.base, "/resume")).state, "hot");
       await sleep(2500);
@@ -5070,13 +5077,13 @@ describe("the mcp command", () => {
 
   test("starts the shared server and carries the calls", async (t) => {
     if (container) return t.skip("this host counts as a container");
-    const c = w.client({ command, extraEnv: { SCRYBE_MCP_COLD_START_WAIT_MS: "20000" } });
+    const c = w.client({ command, extraEnv: { SCRYBE_MCP_COLD_START_WAIT_MS: "20000", SCRYBE_DAEMON_HEARTBEAT_MS: "1000" } });
     await c.hello();
     assert.equal(w.pidfile(), null, "the handshake needs no server");
     await c.toolNames();
     await until(() => w.health(), 60_000, "the server");
-    const names = await c.toolNames();
-    for (const name of ["search_code", "list_projects", "reindex_project", "gc"]) assert.ok(names.includes(name), name);
+    const wanted = ["search_code", "list_projects", "reindex_project", "gc"];
+    await until(async () => { const names = await c.toolNames(); return wanted.every((n) => names.includes(n)); }, 30_000, "the server's tools");
     const r = await c.call("list_projects");
     assert.equal(r.value[0].id, "demo");
     await until(async () => { const pf = w.pidfile(); return (await (await fetch(`http://127.0.0.1:${pf.port}/status`)).json()).clientCount >= 1; }, 30_000, "the client to be counted");

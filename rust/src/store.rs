@@ -176,7 +176,10 @@ fn is_commit_conflict(msg: &str) -> bool {
 }
 
 fn classify_probe_error(msg: &str) -> Health {
-    if ["EBUSY", "EIO", "EAGAIN"].iter().any(|t| msg.to_uppercase().contains(t)) {
+    // Interrupted, IO, try again, busy, out of handles, and the sharing codes of Windows.
+    const PASSING: [&str; 11] = ["4", "5", "11", "16", "23", "24", "26", "32", "33", "35", "1224"];
+    let code = msg.rsplit_once("os error ").map(|(_, rest)| &rest[..rest.bytes().take_while(u8::is_ascii_digit).count()]);
+    if code.is_some_and(|c| PASSING.contains(&c)) || ["EBUSY", "EIO", "EAGAIN"].iter().any(|t| msg.to_uppercase().contains(t)) {
         return Health::Unknown;
     }
     let data_file = regex::Regex::new(r"(?i)data[\\/][0-9a-f-]+\.lance").expect("a fixed pattern");
@@ -738,6 +741,8 @@ mod tests {
         let f = fault(Fault::corrupt("dimensions_mismatch", json!({ "expected_dimensions": 8, "actual_dimensions": 4 })));
         assert_eq!(f.message("p", "s"), "Source 'p/s' has a dimensions mismatch (indexed at 4, embedder is now 8). Run: scrybe index -P p -S s --full");
         assert_eq!(classify_probe_error("read failed: EIO"), Health::Unknown);
+        assert_eq!(classify_probe_error("Generic LocalFileSystem error: Too many open files (os error 24)"), Health::Unknown);
+        fault(classify_probe_error("Permission denied (os error 13)"));
     }
 
     #[tokio::test]
