@@ -35,6 +35,16 @@ pub fn parse_int(s: &str) -> Option<f64> {
     Some(sign * digits.parse::<f64>().ok()?)
 }
 
+/// `parseInt` of an environment variable, `None` when it is unset or NaN.
+pub fn env_int(name: &str) -> Option<f64> {
+    parse_int(&std::env::var(name).ok()?)
+}
+
+/// `parseInt` of an environment variable when that is above zero.
+pub fn env_pos_int(name: &str) -> Option<f64> {
+    env_int(name).filter(|n| *n > 0.0)
+}
+
 /// `s.split(/^/m)`: breaks after \n, \r, U+2028 and U+2029, with no empty tail.
 pub fn split_lines(s: &str) -> Vec<&str> {
     if s.is_empty() {

@@ -606,7 +606,7 @@ impl Daemon {
         }
         eprintln!("[scrybe daemon] {why} — shutting down");
         self.draining.store(true, Ordering::SeqCst);
-        let cap = std::env::var("SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(30 * 60 * 1000);
+        let cap = crate::jsstr::env_int("SCRYBE_DAEMON_SHUTDOWN_MAX_WAIT_MS").map_or(30 * 60 * 1000, |n| n as u64);
         let end = Instant::now() + Duration::from_millis(cap);
         while self.queue.active_count() > 0 && Instant::now() < end {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -930,6 +930,8 @@ pub async fn serve(store: Store) -> Result<()> {
     ticket_poll::start(queue.clone(), idle.clone(), &projects);
     watch::start(queue.clone(), idle, health, &projects);
     autogc::sweep_ephemeral(&queue);
+    let checker = queue.clone();
+    tokio::spawn(async move { checker.check_tables().await });
 
     let ticking = d.clone();
     tokio::spawn(async move {

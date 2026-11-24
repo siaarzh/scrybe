@@ -3,6 +3,7 @@ use crate::config::{data_dir, Settings};
 use anyhow::Result;
 use crate::chunk::Chunk;
 use crate::gitlab_issues::KnowledgeChunk;
+use crate::jsstr::{env_int, env_pos_int};
 use arrow_array::{Array, ArrayRef, FixedSizeListArray, Float32Array, Float64Array, Int32Array, Int64Array, LargeStringArray, RecordBatch, RecordBatchIterator, StringArray, StringViewArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
@@ -12,9 +13,11 @@ use lancedb::index::Index;
 use lancedb::table::OptimizeAction;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, DistanceType, Table};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 
 pub const CURRENT_CHUNK_ID_SCHEME: i64 = 2;
@@ -43,6 +46,7 @@ pub struct Store {
     db: OnceCell<Connection>,
     tables: Mutex<HashMap<String, Table>>,
     has_vector_index: Mutex<HashMap<String, bool>>,
+    health: Mutex<HashMap<String, (Health, Instant)>>,
     pub settings: Settings,
 }
 
@@ -118,12 +122,52 @@ impl Row<'_> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Health {
     Healthy,
-    Corrupt(String),
+    Corrupt(Fault),
     /// A passing IO error: say nothing about the table.
     Unknown,
+}
+
+/// Why a table can't be used, and the `details` that go with the reason.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fault {
+    pub reason: &'static str,
+    pub details: Map<String, Value>,
+}
+
+impl Fault {
+    fn corrupt(reason: &'static str, details: Value) -> Health {
+        Health::Corrupt(Fault { reason, details: details.as_object().cloned().unwrap_or_default() })
+    }
+
+    /// What a search says about it.
+    pub fn message(&self, project: &str, source: &str) -> String {
+        let what = match self.reason {
+            "dimensions_mismatch" => format!("has a dimensions mismatch (indexed at {}, embedder is now {})", self.details["actual_dimensions"], self.details["expected_dimensions"]),
+            "manifest_missing_data" => {
+                let n = self.details.get("missing_files").and_then(Value::as_array).map_or(1, Vec::len);
+                format!("has a corrupt index (manifest references {n} missing data file{})", if n == 1 { "" } else { "s" })
+            }
+            _ => "has an unreadable index".to_string(),
+        };
+        format!("Source '{project}/{source}' {what}. Run: scrybe index -P {project} -S {source} --full")
+    }
+}
+
+fn health_ttl() -> Duration {
+    Duration::from_millis(env_pos_int("SCRYBE_HEALTH_TTL_MS").map_or(60_000, |n| n as u64))
+}
+
+/// Versions a table may keep before a write compacts it.
+pub fn compact_threshold() -> usize {
+    env_int("SCRYBE_LANCE_COMPACT_THRESHOLD").map_or(10, |n| n as usize)
+}
+
+/// How old a version must be before compaction prunes it, so a search under way keeps its snapshot.
+fn grace() -> chrono::TimeDelta {
+    chrono::TimeDelta::milliseconds(env_int("SCRYBE_LANCE_GRACE_MS").filter(|n| n.is_finite() && *n >= 0.0).map_or(60_000, |n| n.min(1e15) as i64))
 }
 
 fn is_commit_conflict(msg: &str) -> bool {
@@ -135,8 +179,29 @@ fn classify_probe_error(msg: &str) -> Health {
     if ["EBUSY", "EIO", "EAGAIN"].iter().any(|t| msg.to_uppercase().contains(t)) {
         return Health::Unknown;
     }
-    let missing_data = msg.to_lowercase().contains("not found") && regex::Regex::new(r"(?i)data[\\/][0-9a-f-]+\.lance").is_ok_and(|r| r.is_match(msg));
-    Health::Corrupt(if missing_data { "manifest_missing_data" } else { "schema_unreadable" }.into())
+    let data_file = regex::Regex::new(r"(?i)data[\\/][0-9a-f-]+\.lance").expect("a fixed pattern");
+    if !msg.to_lowercase().contains("not found") || !data_file.is_match(msg) {
+        return Fault::corrupt("schema_unreadable", json!({ "error_message": msg }));
+    }
+    let mut files: Vec<String> = vec![];
+    for m in data_file.find_iter(msg).map(|m| m.as_str().replace('\\', "/")) {
+        if !files.contains(&m) {
+            files.push(m);
+        }
+    }
+    Fault::corrupt("manifest_missing_data", json!({ "missing_files": files }))
+}
+
+/// Runs `op` once more, with a fresh handle, when another writer's commit got in first.
+async fn retry_on_conflict<T, F: std::future::Future<Output = Result<T>>>(name: &str, evict: impl Fn(), op: impl Fn() -> F) -> Result<T> {
+    match op().await {
+        Err(e) if is_commit_conflict(&format!("{e:#}")) => {
+            evict();
+            eprintln!("[scrybe] commit conflict on '{name}' — evicting cached table handle and retrying");
+            op().await
+        }
+        other => other,
+    }
 }
 
 #[derive(Default)]
@@ -205,7 +270,7 @@ fn knowledge_schema(dimensions: i32) -> Arc<Schema> {
 
 impl Store {
     pub fn new(settings: Settings) -> Self {
-        Store { db: OnceCell::new(), tables: Mutex::default(), has_vector_index: Mutex::default(), settings }
+        Store { db: OnceCell::new(), tables: Mutex::default(), has_vector_index: Mutex::default(), health: Mutex::default(), settings }
     }
 
     async fn conn(&self) -> Result<&Connection> {
@@ -315,14 +380,22 @@ impl Store {
 
     /// `upsertKnowledge` through `writeWithRetry`.
     pub async fn upsert_knowledge(&self, name: &str, rows: &[(KnowledgeChunk, Vec<f32>)]) -> Result<()> {
-        match self.upsert_knowledge_once(name, rows).await {
-            Err(e) if is_commit_conflict(&format!("{e:#}")) => {
-                self.tables.lock().unwrap().remove(name);
-                eprintln!("[scrybe] commit conflict on '{name}' — evicting cached table handle and retrying");
-                self.upsert_knowledge_once(name, rows).await
+        retry_on_conflict(name, || self.evict(name), || self.upsert_knowledge_once(name, rows)).await
+    }
+
+    fn evict(&self, name: &str) {
+        self.tables.lock().unwrap().remove(name);
+    }
+
+    /// `writeWithRetry` on a table that exists; nothing to do on one that doesn't.
+    async fn write_with_retry<F: std::future::Future<Output = Result<()>>>(&self, name: &str, op: impl Fn(Table) -> F) -> Result<()> {
+        let attempt = || async {
+            match self.open(name).await? {
+                Some(t) => op(t).await,
+                None => Ok(()),
             }
-            other => other,
-        }
+        };
+        retry_on_conflict(name, || self.evict(name), attempt).await
     }
 
     async fn upsert_knowledge_once(&self, name: &str, rows: &[(KnowledgeChunk, Vec<f32>)]) -> Result<()> {
@@ -368,20 +441,14 @@ impl Store {
 
     /// `upsert` through `writeWithRetry`: a commit conflict means a stale handle, so reopen and try once more.
     pub async fn upsert_code(&self, name: &str, rows: &[(Chunk, Vec<f32>)]) -> Result<()> {
-        match self.upsert_once(name, rows).await {
-            Err(e) if is_commit_conflict(&format!("{e:#}")) => {
-                self.tables.lock().unwrap().remove(name);
-                eprintln!("[scrybe] commit conflict on '{name}' — evicting cached table handle and retrying");
-                self.upsert_once(name, rows).await
-            }
-            other => other,
-        }
+        retry_on_conflict(name, || self.evict(name), || self.upsert_once(name, rows)).await
     }
 
     /// `dropTable` plus removing a directory Lance may leave behind.
     pub async fn drop_table_and_files(&self, name: &str) -> Result<()> {
         self.tables.lock().unwrap().remove(name);
         self.has_vector_index.lock().unwrap().remove(name);
+        self.invalidate_health(name);
         let _ = self.conn().await?.drop_table(name, &[]).await;
         let dir = db_path().join(format!("{name}.lance"));
         if dir.exists() {
@@ -400,8 +467,26 @@ impl Store {
         Ok(())
     }
 
+    /// `getTableHealth`: an answer stays good for a minute unless `force`; a passing IO error is never kept.
+    pub async fn table_health(&self, name: &str, expected_dim: Option<i32>, force: bool) -> Health {
+        if !force {
+            if let Some((h, _)) = self.health.lock().unwrap().get(name).filter(|(_, at)| at.elapsed() < health_ttl()) {
+                return h.clone();
+            }
+        }
+        let found = self.probe(name, expected_dim).await;
+        if found != Health::Unknown {
+            self.health.lock().unwrap().insert(name.to_string(), (found.clone(), Instant::now()));
+        }
+        found
+    }
+
+    pub fn invalidate_health(&self, name: &str) {
+        self.health.lock().unwrap().remove(name);
+    }
+
     /// `probeTableHealth`: one retry after 100 ms, because a compaction can hide a file briefly.
-    pub async fn table_health(&self, name: &str, expected_dim: Option<i32>) -> Health {
+    async fn probe(&self, name: &str, expected_dim: Option<i32>) -> Health {
         let first = self.probe_once(name, expected_dim).await;
         if !matches!(first, Health::Corrupt(_)) {
             return first;
@@ -416,12 +501,11 @@ impl Store {
             return Health::Healthy;
         }
         if newest_manifest_is_empty(&dir.join("_versions")) {
-            return Health::Corrupt("schema_unreadable".into());
+            return Fault::corrupt("schema_unreadable", json!({ "error_message": "zero-byte manifest" }));
         }
-        // A fresh handle: a cached one can keep reading a table that has changed underneath it.
-        self.tables.lock().unwrap().remove(name);
         let read = async {
-            let Some(table) = self.open(name).await? else { return anyhow::Ok(None) };
+            // A fresh connection: a cached handle can keep reading a table that has changed underneath it.
+            let table = connect(&db_path().to_string_lossy()).execute().await?.open_table(name).execute().await?;
             let rows = table.count_rows(None).await?;
             let mut dim = None;
             if rows > 0 {
@@ -432,23 +516,18 @@ impl Store {
                     dim = Some(*n);
                 }
             }
-            anyhow::Ok(Some(dim))
+            anyhow::Ok(dim)
         }
         .await;
-        match read {
-            Ok(Some(Some(actual))) if expected_dim.is_some_and(|e| e != actual) => Health::Corrupt("dimensions_mismatch".into()),
-            Ok(_) => Health::Healthy,
-            Err(e) => classify_probe_error(&format!("{e:#}")),
+        match (read, expected_dim) {
+            (Ok(Some(actual)), Some(expected)) if actual != expected => Fault::corrupt("dimensions_mismatch", json!({ "expected_dimensions": expected, "actual_dimensions": actual })),
+            (Ok(_), _) => Health::Healthy,
+            (Err(e), _) => classify_probe_error(&format!("{e:#}")),
         }
     }
 
-    /// `pruneIndexOrphans`: removes index folders no retained manifest mentions.
-    pub fn prune_index_orphans(&self, name: &str) -> usize {
-        self.prune_index_orphans_measured(name).0
-    }
-
-    /// `pruneIndexOrphans` with the bytes the removed folders held.
-    pub fn prune_index_orphans_measured(&self, name: &str) -> (usize, u64) {
+    /// `pruneIndexOrphans`: removes index folders no retained manifest mentions. Returns how many, and the bytes they held.
+    pub fn prune_index_orphans(&self, name: &str) -> (usize, u64) {
         let table_dir = db_path().join(format!("{name}.lance"));
         let (indices, versions) = (table_dir.join("_indices"), table_dir.join("_versions"));
         let (Ok(entries), Ok(manifests)) = (std::fs::read_dir(&indices), std::fs::read_dir(&versions)) else { return (0, 0) };
@@ -501,10 +580,15 @@ impl Store {
 
     /// `deleteProject`.
     pub async fn delete_project_rows(&self, name: &str, project: &str) -> Result<()> {
-        if let Some(table) = self.open(name).await? {
-            table.delete(format!("project_id = '{}'", escape_sql(project)).as_str()).await?;
-        }
-        Ok(())
+        let rows = format!("project_id = '{}'", escape_sql(project));
+        self.write_with_retry(name, |t| {
+            let rows = &rows;
+            async move {
+                t.delete(rows.as_str()).await?;
+                Ok(())
+            }
+        })
+        .await
     }
 
     /// `createFtsIndex`: skipped when a live keyword index is already there.
@@ -518,9 +602,12 @@ impl Store {
         if in_manifest && on_disk {
             return Ok(());
         }
-        let params = FtsIndexBuilder::default().stem(false).lower_case(true);
-        table.create_index(&["content"], Index::FTS(params)).replace(true).execute().await?;
-        Ok(())
+        self.write_with_retry(name, |t| async move {
+            let params = FtsIndexBuilder::default().stem(false).lower_case(true);
+            t.create_index(&["content"], Index::FTS(params)).replace(true).execute().await?;
+            Ok(())
+        })
+        .await
     }
 
     /// `createVectorIndex`: an hnswSq index on `vector`, cosine, one partition. Skipped below the row threshold,
@@ -533,29 +620,16 @@ impl Store {
         if !force && self.vector_index_present(name, &table).await? {
             return Ok(());
         }
-        let build = |t: Table| async move {
+        self.write_with_retry(name, |t| async move {
             let params = IvfHnswSqIndexBuilder::default().distance_type(DistanceType::Cosine).num_partitions(1);
             t.create_index(&["vector"], Index::IvfHnswSq(params)).replace(true).execute().await?;
             // `maybeCompact`: only once enough versions have piled up.
-            let threshold = std::env::var("SCRYBE_LANCE_COMPACT_THRESHOLD").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(10);
-            if t.list_versions().await?.len() >= threshold {
+            if t.list_versions().await?.len() >= compact_threshold() {
                 self.compact_with_grace(name).await?;
             }
-            anyhow::Ok(())
-        };
-        let first = build(table).await;
-        let result = match first {
-            Err(e) if is_commit_conflict(&format!("{e:#}")) => {
-                self.tables.lock().unwrap().remove(name);
-                eprintln!("[scrybe] commit conflict on '{name}' — evicting cached table handle and retrying");
-                match self.open(name).await? {
-                    Some(t) => build(t).await,
-                    None => Ok(()),
-                }
-            }
-            other => other,
-        };
-        result?;
+            Ok(())
+        })
+        .await?;
         self.has_vector_index.lock().unwrap().remove(name);
         self.tables.lock().unwrap().remove(name);
         Ok(())
@@ -565,7 +639,7 @@ impl Store {
     pub async fn compact_with_grace(&self, name: &str) -> Result<()> {
         let Some(table) = self.open(name).await? else { return Ok(()) };
         table.optimize(OptimizeAction::Compact { options: Default::default(), remap_options: None }).await?;
-        table.optimize(OptimizeAction::Prune { older_than: Some(chrono::TimeDelta::seconds(60)), delete_unverified: None, error_if_tagged_old_versions: None }).await?;
+        table.optimize(OptimizeAction::Prune { older_than: Some(grace()), delete_unverified: None, error_if_tagged_old_versions: None }).await?;
         table.optimize(OptimizeAction::Index(Default::default())).await?;
         Ok(())
     }
@@ -581,7 +655,7 @@ impl Store {
         let Some(table) = self.open(name).await? else { return Ok(CompactReport::default()) };
         let dir = db_path().join(format!("{name}.lance"));
         let before = dir_bytes(&dir);
-        let older_than = chrono::TimeDelta::seconds(if purge { 0 } else { 60 });
+        let older_than = if purge { chrono::TimeDelta::zero() } else { grace() };
         let merged = table.optimize(OptimizeAction::Compact { options: Default::default(), remap_options: None }).await?.compaction;
         let pruned = table.optimize(OptimizeAction::Prune { older_than: Some(older_than), delete_unverified: None, error_if_tagged_old_versions: None }).await?.prune;
         table.optimize(OptimizeAction::Index(Default::default())).await?;
@@ -623,14 +697,60 @@ impl Store {
         if ids.is_empty() {
             return Ok(());
         }
-        let Some(table) = self.open(name).await? else { return Ok(()) };
         let list: Vec<String> = ids.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
-        table.delete(&format!("chunk_id IN ({})", list.join(", "))).await?;
-        Ok(())
+        let rows = format!("chunk_id IN ({})", list.join(", "));
+        self.write_with_retry(name, |t| {
+            let rows = &rows;
+            async move {
+                t.delete(rows.as_str()).await?;
+                Ok(())
+            }
+        })
+        .await
     }
 
     pub async fn plain_query(&self, table: &Table, where_: &str, limit: usize) -> Result<Rows> {
         let stream = table.query().only_if(where_).limit(limit).execute().await?;
         Ok(Rows { batches: stream.try_collect().await? })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn fault(h: Health) -> Fault {
+        match h {
+            Health::Corrupt(f) => f,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fault_is_told_in_the_words_a_search_uses() {
+        let f = fault(classify_probe_error("lance error: Not found: /d/lancedb/t.lance/data/0a1b-2c.lance, Not found: x\\data\\0A1B.lance, data/0a1b-2c.lance"));
+        assert_eq!(f.details["missing_files"], json!(["data/0a1b-2c.lance", "data/0A1B.lance"]));
+        assert_eq!(f.message("p", "s"), "Source 'p/s' has a corrupt index (manifest references 2 missing data files). Run: scrybe index -P p -S s --full");
+        let f = fault(classify_probe_error("Not found: t.lance/_versions/3.manifest"));
+        assert_eq!((f.reason, f.details["error_message"].as_str()), ("schema_unreadable", Some("Not found: t.lance/_versions/3.manifest")));
+        assert_eq!(f.message("p", "s"), "Source 'p/s' has an unreadable index. Run: scrybe index -P p -S s --full");
+        let f = fault(Fault::corrupt("dimensions_mismatch", json!({ "expected_dimensions": 8, "actual_dimensions": 4 })));
+        assert_eq!(f.message("p", "s"), "Source 'p/s' has a dimensions mismatch (indexed at 4, embedder is now 8). Run: scrybe index -P p -S s --full");
+        assert_eq!(classify_probe_error("read failed: EIO"), Health::Unknown);
+    }
+
+    #[tokio::test]
+    async fn a_commit_conflict_is_tried_once_more_with_a_fresh_handle_and_other_errors_are_not() {
+        for (errors, calls, evictions, ok) in [(vec![], 1, 0, true), (vec!["Commit conflict for version 3"], 2, 1, true), (vec!["it cannot be automatically resolved", "commit conflict"], 2, 1, false), (vec!["disk full"], 1, 0, false)] {
+            let (n, gone) = (Cell::new(0), Cell::new(0));
+            let result = retry_on_conflict("t", || gone.set(gone.get() + 1), || {
+                let error = errors.get(n.get()).copied();
+                n.set(n.get() + 1);
+                async move { error.map_or(Ok(()), |e| Err(anyhow::anyhow!(e))) }
+            })
+            .await;
+            assert_eq!((n.get(), gone.get(), result.is_ok()), (calls, evictions, ok), "{errors:?}");
+        }
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Two backends: an HTTP rerank endpoint (Voyage-compatible) and a local cross-encoder.
 //! Both blend the reranker's score with the original rank by position.
-use crate::jsstr::{js_len, js_slice};
+use crate::jsstr::{js_len, js_slice, parse_int};
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -88,22 +88,6 @@ pub fn js_parse_float(s: &str) -> f64 {
     t[..i].parse().unwrap_or(f64::NAN)
 }
 
-/// JavaScript `parseInt(s, 10)`, `None` for NaN.
-fn js_parse_int(s: &str) -> Option<i64> {
-    let t = s.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
-    let (neg, rest) = match t.as_bytes().first() {
-        Some(b'-') => (true, &t[1..]),
-        Some(b'+') => (false, &t[1..]),
-        _ => (false, t),
-    };
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-    if end == 0 {
-        return None;
-    }
-    let n: i64 = rest[..end].parse().ok()?;
-    Some(if neg { -n } else { n })
-}
-
 /// `parseBlendWeights`: exactly two comma-separated finite numbers summing to 1 (±0.01).
 pub fn parse_blend_weights(raw: &str, name: &str) -> Result<(f64, f64)> {
     let parts: Vec<&str> = raw.split(',').collect();
@@ -138,8 +122,8 @@ pub fn build(env: impl Fn(&str) -> Option<String>, warn: &mut dyn FnMut(String))
     let blend_top3 = blend("SCRYBE_RERANK_BLEND_TOP3", "0.75,0.25", (0.75, 0.25));
     let blend_tail = blend("SCRYBE_RERANK_BLEND_TAIL", "0.40,0.60", (0.40, 0.60));
     // Today's build passes a non-numeric or non-positive multiplier straight through as a query limit.
-    let fetch_multiplier = js_parse_int(&env("SCRYBE_RERANK_FETCH_MULTIPLIER").unwrap_or_else(|| "5".into()))
-        .filter(|n| *n > 0)
+    let fetch_multiplier = parse_int(&env("SCRYBE_RERANK_FETCH_MULTIPLIER").unwrap_or_else(|| "5".into()))
+        .filter(|n| *n > 0.0)
         .map(|n| n as usize)
         .unwrap_or(5);
     let mut cfg = RerankConfig { backend: None, api_key: env("SCRYBE_RERANK_API_KEY").unwrap_or_default(), fetch_multiplier, blend_top3, blend_tail };
@@ -232,7 +216,7 @@ pub fn apply_blend<T: Rerankable>(candidates: Vec<T>, scores: &[f64], top_k: usi
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::builder().user_agent(crate::config::USER_AGENT).timeout(Duration::from_secs(600)).build().expect("HTTP client"))
+    CLIENT.get_or_init(|| crate::http::builder().timeout(Duration::from_secs(600)).build().expect("HTTP client"))
 }
 
 async fn scores_http(cfg: &RerankConfig, url: &str, model: &str, query: &str, docs: &[&str]) -> Result<Vec<f64>> {

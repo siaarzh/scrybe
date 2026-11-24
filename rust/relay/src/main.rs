@@ -549,8 +549,19 @@ fn start_cmd_from_args(args: &[String]) -> Vec<String> {
     }
 }
 
+/// JavaScript's `parseInt`: leading digits, whatever follows. `None` for NaN and for a number below zero.
+fn parse_int(raw: &str) -> Option<u64> {
+    let t = raw.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
+    let (sign, rest) = match t.strip_prefix('-') {
+        Some(rest) => (-1.0, rest),
+        None => (1.0, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let digits = &rest[..rest.bytes().take_while(u8::is_ascii_digit).count()];
+    digits.parse::<f64>().ok().map(|n| n * sign).filter(|n| *n >= 0.0).map(|n| n as u64)
+}
+
 fn cold_budget_from(raw: Option<String>) -> Duration {
-    let ms = raw.and_then(|v| v.parse::<u64>().ok()).unwrap_or(COLD_START_DEFAULT_MS);
+    let ms = raw.and_then(|v| parse_int(&v)).unwrap_or(COLD_START_DEFAULT_MS);
     Duration::from_millis(ms.min(COLD_START_CEILING_MS))
 }
 
@@ -572,7 +583,7 @@ fn main() {
         starter_running: Arc::new(AtomicBool::new(false)),
         resolved: AtomicBool::new(false),
     });
-    let beat_ms = std::env::var("SCRYBE_DAEMON_HEARTBEAT_MS").ok().and_then(|v| v.parse().ok()).filter(|ms| *ms > 0).unwrap_or(30_000);
+    let beat_ms = std::env::var("SCRYBE_DAEMON_HEARTBEAT_MS").ok().and_then(|v| parse_int(&v)).filter(|ms| *ms > 0).unwrap_or(30_000);
     let watcher = relay.clone();
     std::thread::spawn(move || watch_loop(&watcher, Duration::from_millis(beat_ms)));
 
@@ -697,7 +708,10 @@ mod tests {
         assert_eq!(cold_budget_from(None), Duration::from_millis(COLD_START_DEFAULT_MS));
         assert_eq!(cold_budget_from(Some("0".into())), Duration::ZERO);
         assert_eq!(cold_budget_from(Some("99999".into())), Duration::from_millis(COLD_START_CEILING_MS));
-        assert_eq!(cold_budget_from(Some("junk".into())), Duration::from_millis(COLD_START_DEFAULT_MS));
+        for odd in ["junk", "-5", ""] {
+            assert_eq!(cold_budget_from(Some(odd.into())), Duration::from_millis(COLD_START_DEFAULT_MS));
+        }
+        assert_eq!(cold_budget_from(Some(" 1500ms".into())), Duration::from_millis(1500));
     }
 
     fn test_relay() -> Arc<Relay<Vec<u8>>> {

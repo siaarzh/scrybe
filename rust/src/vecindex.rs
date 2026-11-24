@@ -22,7 +22,7 @@ fn idle_ms() -> f64 {
 }
 
 fn rebuild_rows() -> usize {
-    pos_env("SCRYBE_VECTOR_INDEX_REBUILD_ROWS", 1000.0) as usize
+    crate::jsstr::env_pos_int("SCRYBE_VECTOR_INDEX_REBUILD_ROWS").filter(|n| n.is_finite()).unwrap_or(1000.0) as usize
 }
 
 #[derive(Default)]

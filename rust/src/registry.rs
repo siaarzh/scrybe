@@ -1,10 +1,9 @@
 //! `projects.json` and `config.json`. Mirrors `src/registry.ts` and the preset lookups it needs.
 use crate::config::data_dir;
+use crate::presets;
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
@@ -147,54 +146,12 @@ pub fn raw_project(id: &str) -> Option<Value> {
     load()?.into_iter().find(|p| p["id"] == id)
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct PromptTemplate {
-    #[serde(default)]
-    pub query: String,
-    #[serde(default)]
-    pub passage: String,
+/// The preset name assigned to a slot, if one is.
+pub fn assigned<'a>(cfg: &'a Value, slot: &str) -> Option<&'a str> {
+    cfg["assignments"][slot].as_str().filter(|n| !n.is_empty())
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct Preset {
-    #[serde(default)]
-    pub provider: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub prompt_template: Option<PromptTemplate>,
-    #[serde(default)]
-    pub max_input_tokens: Option<usize>,
-    #[serde(default)]
-    pub credentials: Option<String>,
-    #[serde(default)]
-    pub credentials_from: Option<String>,
-    #[serde(default)]
-    pub dim: Option<i32>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub encoding_format: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct ScrybeConfig {
-    #[serde(default)]
-    pub embedding_presets: HashMap<String, Preset>,
-    #[serde(default)]
-    pub assignments: HashMap<String, String>,
-}
-
-pub fn read_config() -> Result<Option<ScrybeConfig>> {
-    let p = data_dir().join("config.json");
-    if !p.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&p).context("Failed to read config.json")?;
-    Ok(Some(serde_json::from_str(&raw).context("Failed to parse config.json")?))
-}
-
-fn slot(source: &Source) -> &'static str {
+pub fn slot(source: &Source) -> &'static str {
     if source.profile() == Some("text") { "text_preset" } else { "code_preset" }
 }
 
@@ -217,17 +174,6 @@ impl EmbedConfig {
     pub fn char_cap(&self) -> usize {
         self.max_input_tokens.map_or(8000 * 4, |t| t * 4)
     }
-}
-
-/// The catalog in `src/providers.ts`: base URL and dimensions.
-fn catalog(provider: &str, model: &str) -> Result<(String, i32)> {
-    let Some(base) = crate::presets::provider_base_url(provider) else {
-        anyhow::bail!("unknown provider \"{provider}\"");
-    };
-    let Some(spec) = crate::presets::model_spec(provider, model) else {
-        anyhow::bail!("model \"{model}\" not found in provider \"{provider}\"");
-    };
-    Ok((base.to_string(), spec.dim))
 }
 
 /// `${VAR}` in a config value.
@@ -290,75 +236,53 @@ pub fn unset_token_error(label: &str, project_id: &str, token: &str, in_daemon: 
 
 /// `resolveEmbeddingConfig` plus `resolvePreset`.
 pub fn resolve_embedding(source: &Source) -> Result<EmbedConfig> {
-    let Some(cfg) = read_config()? else {
+    let Some(cfg) = presets::read_scrybe_config()? else {
         anyhow::bail!("scrybe is not configured — run 'scrybe init'");
     };
-    let Some(name) = cfg.assignments.get(slot(source)) else {
+    let Some(name) = assigned(&cfg, slot(source)) else {
         anyhow::bail!("scrybe is not configured — run 'scrybe init'");
     };
-    let Some(preset) = cfg.embedding_presets.get(name) else {
-        anyhow::bail!("embedding preset \"{name}\" not found in config");
-    };
-    let (base_url, dimensions) = if preset.provider == "custom" {
-        let Some(dim) = preset.dim else { anyhow::bail!("custom preset \"{name}\" is missing required field \"dim\"") };
-        let Some(url) = preset.base_url.clone().filter(|u| !u.is_empty()) else { anyhow::bail!("custom preset \"{name}\" is missing required field \"base_url\"") };
-        (url, dim)
-    } else {
-        catalog(&preset.provider, &preset.model)?
-    };
-    let raw = match &preset.credentials_from {
-        Some(from) => {
-            let Some(other) = cfg.embedding_presets.get(from) else {
-                anyhow::bail!("preset \"{name}\" references credentials_from \"{from}\", but that preset does not exist");
-            };
-            if let Some(next) = &other.credentials_from {
-                anyhow::bail!("preset \"{name}\" references credentials_from \"{from}\", which itself has credentials_from \"{next}\". credentials_from chains deeper than 1 level are not supported");
-            }
-            other.credentials.clone()
-        }
-        None => preset.credentials.clone(),
-    };
-    let credentials = raw.map(|r| resolve_env_ref(&r)).transpose()?.unwrap_or_default();
-    let local = preset.provider == "local";
-    if !local && credentials.is_empty() {
-        anyhow::bail!("No API key found for model \"{}\".", preset.model);
+    let resolved = presets::resolve_preset(name, slot(source), &cfg, true)?;
+    let preset = &cfg["embedding_presets"][name];
+    let local = resolved.provider == "local";
+    if !local && resolved.credentials.is_empty() {
+        anyhow::bail!("No API key found for model \"{}\".", resolved.model);
     }
-    let template = preset.prompt_template.clone().unwrap_or_default();
+    let Some(dimensions) = resolved.dim.as_f64() else { anyhow::bail!("preset \"{name}\" has a \"dim\" that isn't a number") };
+    let template = |k: &str| preset["prompt_template"][k].as_str().unwrap_or("").to_string();
     Ok(EmbedConfig {
         local,
-        base_url,
-        model: preset.model.clone(),
-        dimensions,
-        credentials,
-        encoding_float: preset.encoding_format.as_deref() == Some("float"),
-        max_input_tokens: preset.max_input_tokens,
-        query_prefix: template.query,
-        passage_prefix: template.passage,
+        base_url: resolved.base_url,
+        model: resolved.model,
+        dimensions: dimensions as i32,
+        credentials: resolved.credentials,
+        encoding_float: preset["encoding_format"] == "float",
+        max_input_tokens: preset["max_input_tokens"].as_f64().map(|n| n as usize),
+        query_prefix: template("query"),
+        passage_prefix: template("passage"),
     })
 }
 
 /// `configuredEmbeddingStatus`, for a config.json setup.
 pub fn embedding_status() -> Value {
     let failed = |message: String| serde_json::json!({ "config_present": true, "code_provider_type": "", "code_model": "", "text_provider_type": "", "text_model": "", "api_key_present": false, "config_error": true, "config_error_message": message, "credential_error_message": null });
-    let cfg = match read_config() {
+    let cfg = match presets::read_scrybe_config() {
         Ok(Some(c)) => c,
         Ok(None) => return serde_json::json!({ "config_present": false, "code_provider_type": "", "code_model": "", "text_provider_type": "", "text_model": "", "api_key_present": false, "config_error": false, "config_error_message": null, "credential_error_message": null }),
         Err(e) => return failed(e.to_string()),
     };
-    let provider_type = |p: &str| if p == "local" { "local" } else { "api" };
-    let (Some(code), Some(text)) = (cfg.assignments.get("code_preset").and_then(|n| cfg.embedding_presets.get(n)), cfg.assignments.get("text_preset").and_then(|n| cfg.embedding_presets.get(n))) else {
-        return failed("scrybe is not configured — run 'scrybe init'".to_string());
+    let resolve = |slot: &str, credentials: bool| presets::resolve_preset(cfg["assignments"][slot].as_str().unwrap_or(""), slot, &cfg, credentials);
+    let (code, text) = match (resolve("code_preset", false), resolve("text_preset", false)) {
+        (Ok(code), Ok(text)) => (code, text),
+        (Err(e), _) | (_, Err(e)) => return failed(e.to_string()),
     };
+    let provider_type = |p: &str| if p == "local" { "local" } else { "api" };
     let mut key_present = code.provider == "local";
     let mut errors = vec![];
-    for (slot, preset) in [("code_preset", code), ("text_preset", text)] {
-        let raw = preset.credentials_from.as_ref().and_then(|f| cfg.embedding_presets.get(f)).map_or(&preset.credentials, |o| &o.credentials);
-        match raw.as_deref().map(resolve_env_ref).transpose() {
-            Ok(value) => {
-                if slot == "code_preset" {
-                    key_present = preset.provider == "local" || value.is_some_and(|v| !v.is_empty());
-                }
-            }
+    for slot in ["code_preset", "text_preset"] {
+        match resolve(slot, true) {
+            Ok(r) if slot == "code_preset" => key_present = r.provider == "local" || !r.credentials.is_empty(),
+            Ok(_) => {}
             Err(e) => errors.push(format!("{slot}: {e}")),
         }
     }
@@ -492,23 +416,23 @@ pub fn is_searchable(source: &Source) -> (bool, Option<String>) {
     if source.table_name.is_none() {
         return (false, Some("Never indexed — run a full index first".into()));
     }
-    let cfg = match read_config() {
+    let cfg = match presets::read_scrybe_config() {
         Ok(Some(c)) => c,
         Ok(None) => return (true, None),
         Err(e) => return (false, Some(e.to_string())),
     };
-    let Some(name) = cfg.assignments.get(slot(source)) else {
+    let Some(name) = assigned(&cfg, slot(source)) else {
         return (false, Some("scrybe is not configured — run 'scrybe init'".into()));
     };
-    let Some(preset) = cfg.embedding_presets.get(name) else {
+    let Some(preset) = cfg["embedding_presets"].get(name) else {
         return (false, Some(format!("Preset \"{name}\" not found in config — run 'scrybe init'")));
     };
-    if preset.provider == "local" {
+    if preset["provider"] == "local" {
         return (true, None);
     }
-    let raw = match &preset.credentials_from {
-        Some(from) => cfg.embedding_presets.get(from).and_then(|p| p.credentials.clone()),
-        None => preset.credentials.clone(),
+    let raw = match preset["credentials_from"].as_str().filter(|f| !f.is_empty()) {
+        Some(from) => cfg["embedding_presets"][from]["credentials"].as_str(),
+        None => preset["credentials"].as_str(),
     };
     let Some(raw) = raw else { return (true, None) };
     let Some(var) = raw.strip_prefix("${").and_then(|r| r.strip_suffix('}')) else { return (true, None) };
@@ -519,7 +443,7 @@ pub fn is_searchable(source: &Source) -> (bool, Option<String>) {
         return (true, None);
     }
     if std::env::var(var).unwrap_or_default().is_empty() {
-        return (false, Some(format!("Requires env var {var} (model: {}) — not set in current environment{}", preset.model, env_ref_remedy(var, false, crate::config::in_server()))));
+        return (false, Some(format!("Requires env var {var} (model: {}) — not set in current environment{}", preset["model"].as_str().unwrap_or(""), env_ref_remedy(var, false, crate::config::in_server()))));
     }
     (true, None)
 }

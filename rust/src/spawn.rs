@@ -2,6 +2,7 @@
 //! environment it needs and, where a systemd user session answers, a memory cap the kernel enforces.
 use crate::config::data_dir;
 use crate::jobs::diag;
+use crate::jsstr::parse_int;
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -179,23 +180,16 @@ pub fn process_env_names(pid: i64) -> ProcessNames {
 
 // ─── The memory cap ──────────────────────────────────────────────────────────
 
-/// `parseInt`: leading digits, whatever follows.
-fn parse_int(raw: &str) -> Option<i64> {
-    let t = raw.trim_start();
-    let (sign, digits) = t.strip_prefix('-').map_or((1, t.strip_prefix('+').unwrap_or(t)), |d| (-1, d));
-    let end = digits.find(|c: char| !c.is_ascii_digit()).unwrap_or(digits.len());
-    digits[..end].parse::<i64>().ok().map(|n| n * sign)
-}
-
 const CAP_MARGIN_MB: i64 = 1024;
 
 /// The cap in MB, 0 for none, and a warning when it had to be lifted above the in-process guard's ceiling.
 fn cap_mb(cap: Option<&str>, hard: Option<&str>) -> (i64, Option<String>) {
-    let configured = parse_int(cap.unwrap_or("4096")).unwrap_or(0);
+    let number = |raw: &str| parse_int(raw).filter(|n| n.is_finite()).map(|n| n as i64);
+    let configured = number(cap.unwrap_or("4096")).unwrap_or(0);
     if configured <= 0 {
         return (0, None);
     }
-    let hard = match parse_int(hard.unwrap_or("")) {
+    let hard = match number(hard.unwrap_or("")) {
         Some(0) => 0,
         Some(n) if n > 0 => n,
         _ => 3072,
@@ -510,8 +504,7 @@ mod tests {
         let (mb, warning) = cap_mb(Some("3072"), None);
         assert_eq!(mb, 4096);
         assert!(warning.unwrap().contains("at or below SCRYBE_DAEMON_MAX_RSS_HARD_MB (3072 MB)"));
-        assert_eq!(parse_int(" 12abc"), Some(12));
-        assert_eq!(parse_int("abc"), None);
+        assert_eq!(cap_mb(Some("\u{feff} 5000abc"), Some("-7")), (5000, None));
     }
 
     #[cfg(target_os = "linux")]

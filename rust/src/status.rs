@@ -90,16 +90,16 @@ async fn daemon_info() -> Value {
 
 /// `model_mismatch`: the table's recorded model, size and provider differ from what the assigned preset says now.
 fn model_mismatch(source: &registry::Source, table: &str, text: bool) -> bool {
-    let Ok(Some(cfg)) = registry::read_config() else { return false };
+    let Ok(Some(cfg)) = crate::presets::read_scrybe_config() else { return false };
     let Some(meta) = std::fs::read_to_string(db_path().join(format!("{table}-meta.json"))).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { return false };
     let (Some(model), Some(dim), Some(provider)) = (meta["model"].as_str(), meta["dim"].as_i64(), meta["provider"].as_str()) else { return false };
-    let Some(preset) = cfg.assignments.get(if text { "text_preset" } else { "code_preset" }).and_then(|n| cfg.embedding_presets.get(n)) else { return false };
+    let Some(preset) = registry::assigned(&cfg, if text { "text_preset" } else { "code_preset" }).and_then(|n| cfg["embedding_presets"].get(n)) else { return false };
     let Ok(resolved) = registry::resolve_embedding(source) else { return false };
-    !(model == preset.model && dim == i64::from(resolved.dimensions) && provider == preset.provider)
+    !(preset["model"] == model && dim == i64::from(resolved.dimensions) && preset["provider"] == provider)
 }
 
 async fn summarise(store: &Store, projects: &[registry::Project]) -> Vec<Summary> {
-    let threshold = std::env::var("SCRYBE_LANCE_COMPACT_THRESHOLD").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(10);
+    let threshold = crate::store::compact_threshold();
     let mut out = vec![];
     for p in projects {
         let mut sources = vec![];
@@ -120,9 +120,9 @@ async fn summarise(store: &Store, projects: &[registry::Project]) -> Vec<Summary
                     flags.push("needs_migration");
                 }
                 if let Ok(cfg) = registry::resolve_embedding(s) {
-                    if let Health::Corrupt(reason) = store.table_health(table, Some(crate::index::expected_dimensions(&cfg, text))).await {
+                    if let Health::Corrupt(fault) = store.table_health(table, Some(crate::index::expected_dimensions(&cfg, text)), false).await {
                         flags.push("corrupt");
-                        health_flag = Some(reason);
+                        health_flag = Some(fault.reason.to_string());
                     }
                 }
                 if model_mismatch(s, table, text) {

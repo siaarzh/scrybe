@@ -1,8 +1,9 @@
 //! OpenAI-compatible embedding client. Mirrors `src/embedder.ts`, `src/embed-batch-state.ts`, and the
 //! request and retry behaviour of the openai package underneath them.
 use crate::config::data_dir;
-use crate::jsstr::{js_len, js_slice};
+use crate::jsstr::{env_int, js_len, js_slice, js_trim};
 use crate::registry::EmbedConfig;
+use crate::rerank::js_parse_float;
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use serde_json::{json, Value};
@@ -25,7 +26,7 @@ pub struct ApiError {
 
 pub fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::builder().user_agent(crate::config::USER_AGENT).timeout(Duration::from_secs(600)).build().expect("HTTP client"))
+    CLIENT.get_or_init(|| crate::http::builder().timeout(Duration::from_secs(600)).build().expect("HTTP client"))
 }
 
 pub fn decode_embedding(v: &Value) -> Option<Vec<f32>> {
@@ -65,21 +66,33 @@ fn retryable(status: u16) -> bool {
     matches!(status, 408 | 409 | 429) || status >= 500
 }
 
-fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
-    if let Some(d) = retry_after.filter(|d| *d < Duration::from_secs(60)) {
-        return d;
+fn backoff(attempt: u32, retry_after_ms: Option<f64>) -> Duration {
+    if let Some(ms) = retry_after_ms.filter(|ms| (0.0..=60_000.0).contains(ms)) {
+        return Duration::from_secs_f64(ms / 1000.0);
     }
     let base = (0.5 * 2f64.powi(attempt as i32)).min(8.0);
     let jitter = 1.0 - 0.25 * (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos()) as f64 / 1e9);
     Duration::from_secs_f64(base * jitter)
 }
 
-fn retry_after(h: &reqwest::header::HeaderMap) -> Option<Duration> {
-    let text = |k: &str| h.get(k).and_then(|v| v.to_str().ok());
-    if let Some(ms) = text("retry-after-ms").and_then(|v| v.parse::<f64>().ok()) {
-        return Some(Duration::from_secs_f64(ms.max(0.0) / 1000.0));
+/// The wait the server asked for, in milliseconds: `retry-after-ms`, or `retry-after` in seconds or as a date.
+fn retry_after(h: &reqwest::header::HeaderMap) -> Option<f64> {
+    let text = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty());
+    let number = |v: &str| Some(js_parse_float(v)).filter(|n| !n.is_nan());
+    if let Some(ms) = text("retry-after-ms").and_then(number) {
+        return Some(ms);
     }
-    text("retry-after").and_then(|v| v.parse::<f64>().ok()).map(|s| Duration::from_secs_f64(s.max(0.0)))
+    let after = text("retry-after")?;
+    number(after).map(|s| s * 1000.0).or_else(|| {
+        let at = chrono::DateTime::parse_from_rfc2822(after).ok()?;
+        Some((at.timestamp_millis() - chrono::Utc::now().timestamp_millis()) as f64)
+    })
+}
+
+/// `OpenAI-Organization` and `OpenAI-Project`, which the openai package takes from the environment.
+fn account_headers(env: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
+    let set = [("OpenAI-Organization", "OPENAI_ORG_ID"), ("OpenAI-Project", "OPENAI_PROJECT_ID")].map(|(header, name)| (header, env(name).map(|v| js_trim(&v).to_string())));
+    set.into_iter().filter_map(|(header, v)| Some((header, v.filter(|v| !v.is_empty())?))).collect()
 }
 
 /// One logical request: the openai package retries twice by itself before anyone else sees an error.
@@ -91,7 +104,11 @@ async fn post(cfg: &EmbedConfig, texts: &[String]) -> Result<Value, ApiError> {
     let body = json!({ "model": cfg.model, "input": input, "encoding_format": encoding });
     let mut attempt = 0;
     loop {
-        let sent = client().post(&url).bearer_auth(&cfg.credentials).json(&body).send().await;
+        let mut request = client().post(&url).bearer_auth(&cfg.credentials).json(&body);
+        for (name, value) in account_headers(|k| std::env::var(k).ok()) {
+            request = request.header(name, value);
+        }
+        let sent = request.send().await;
         let (status, wait, message) = match sent {
             Err(e) => (0, None, format!("Connection error: {e}")),
             Ok(r) => {
@@ -123,7 +140,7 @@ pub async fn embed_texts(cfg: &EmbedConfig, texts: &[String]) -> Result<Vec<Vec<
     if texts.is_empty() {
         return Ok(vec![]);
     }
-    let mut delay: u64 = std::env::var("SCRYBE_EMBED_RETRY_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5000);
+    let mut delay = env_int("SCRYBE_EMBED_RETRY_DELAY_MS").map_or(5000, |n| n as u64);
     for attempt in 0..5 {
         let failure = match post(cfg, texts).await {
             Ok(body) => match parse_vectors(&body, cfg) {
@@ -289,6 +306,35 @@ mod tests {
         assert!(parse_vectors(&json!({ "data": [{ "index": 0, "embedding": ["x"] }] }), &cfg()).unwrap_err().to_string().contains("encoding mismatch"));
         let wrong = parse_vectors(&json!({ "data": [{ "index": 0, "embedding": [1.0] }] }), &EmbedConfig { dimensions: 4, ..cfg() }).unwrap_err().to_string();
         assert!(wrong.contains("returned 1d vectors but config expects 4d") && wrong.contains("encoding_format"), "{wrong}");
+    }
+
+    #[test]
+    fn the_wait_a_server_asks_for_is_read_like_the_openai_package() {
+        let wait = |pairs: &[(&'static str, &str)]| {
+            let h = pairs.iter().map(|(k, v)| (reqwest::header::HeaderName::from_static(k), v.parse().unwrap())).collect();
+            retry_after(&h)
+        };
+        assert_eq!(wait(&[("retry-after", "2")]), Some(2000.0));
+        assert_eq!(wait(&[("retry-after", "1.5s"), ("retry-after-ms", "")]), Some(1500.0));
+        assert_eq!(wait(&[("retry-after", "9"), ("retry-after-ms", "250")]), Some(250.0));
+        assert_eq!(wait(&[("retry-after", "9"), ("retry-after-ms", "soon")]), Some(9000.0));
+        let date = (chrono::Utc::now() + chrono::TimeDelta::seconds(30)).format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let ms = wait(&[("retry-after", &date)]).unwrap();
+        assert!((28_000.0..=30_000.0).contains(&ms), "{ms}");
+        assert_eq!(wait(&[("retry-after", "soon")]), None);
+        assert_eq!(backoff(0, Some(60_000.0)), Duration::from_secs(60));
+        for odd in [Some(60_001.0), Some(-1.0), Some(f64::INFINITY), None] {
+            assert!((375..=500).contains(&backoff(0, odd).as_millis()), "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn account_headers_come_trimmed_and_only_when_set() {
+        let env = |k: &str| match k {
+            "OPENAI_ORG_ID" => Some(" org-1 ".to_string()),
+            _ => Some(" ".to_string()),
+        };
+        assert_eq!(account_headers(env), [("OpenAI-Organization", "org-1".to_string())]);
     }
 
     #[test]

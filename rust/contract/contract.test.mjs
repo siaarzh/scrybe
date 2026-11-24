@@ -1,10 +1,11 @@
 // Same call, same answer: every test here passes against today's TypeScript build, and is written so
 // the Rust build can be held to it. A tool a build doesn't have yet shows as skipped, not passed.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { after, afterEach, before, beforeEach, describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -3858,6 +3859,454 @@ describe("the client named on requests going out", () => {
     } finally {
       await w.stop();
       for (const s of [gl, gh, rr]) s.close();
+    }
+  });
+});
+
+const tableOf = (w, i = 0) => JSON.parse(readFileSync(join(w.data, "projects.json"), "utf8"))[0].sources[i].table_name;
+const changeConfig = (w, change) => {
+  const file = join(w.data, "config.json");
+  const cfg = JSON.parse(readFileSync(file, "utf8"));
+  change(cfg);
+  writeFileSync(file, JSON.stringify(cfg));
+};
+/** The tools over stdio in one process of their own, where a failure keeps its type and details. */
+const stdioTools = (w, extra = {}) => {
+  const p = spawn(CLI[0], [...CLI.slice(1), "mcp", ...(BUILD === "ts" ? ["--legacy-in-process"] : [])], { env: { ...w.env, SCRYBE_NO_AUTO_DAEMON: "1", ...extra }, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
+  const waiting = new Map();
+  let buf = "", next = 0;
+  p.stdout.on("data", (d) => {
+    buf += d;
+    for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      let m;
+      try { m = JSON.parse(line); } catch { continue; }
+      waiting.get(m.id)?.(m);
+    }
+  });
+  const send = (m) => p.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
+  const rpc = (method, params) => new Promise((resolve, reject) => {
+    const id = ++next;
+    const timer = setTimeout(() => reject(new Error(`no answer to ${method}`)), 60_000);
+    waiting.set(id, (m) => { clearTimeout(timer); resolve(m); });
+    send({ id, method, params });
+  });
+  const ready = rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "contract", version: "1" } }).then(() => send({ method: "notifications/initialized" }));
+  return {
+    async call(name, args) {
+      await ready;
+      return JSON.parse((await rpc("tools/call", { name, arguments: { project_id: "demo", query: "widget", ...args } })).result.content[0].text);
+    },
+    stop: () => p.kill("SIGKILL"),
+  };
+};
+const onStdio = async (w, name, args) => {
+  const tools = stdioTools(w);
+  try { return await tools.call(name, args); } finally { tools.stop(); }
+};
+/** Empties the newest manifest of a table, whose file names may count up or down. */
+const emptyManifests = (w, table) => {
+  const dir = join(w.data, "lancedb", `${table}.lance`, "_versions");
+  for (const f of readdirSync(dir).filter((f) => f.endsWith(".manifest"))) writeFileSync(join(dir, f), "");
+};
+
+describe("a table that can't be read", () => {
+  let gl, w;
+  before(async () => {
+    gl = await fakeGitlab();
+    seedGitlab(gl);
+    w = await makeWorld({ extraSources: [ticketSource(gl)], serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN } });
+    await w.index("--full");
+    const r = await indexIssues(w, "--full");
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+  });
+  afterEach(() => w.killServer());
+  after(async () => { await w.stop(); gl.close(); });
+  const onServer = async (tool = "search_code", extra = {}) => {
+    const c = w.client();
+    await c.hello();
+    return c.call(tool, { project_id: "demo", query: "widget", ...extra });
+  };
+  const faultOf = (value, text, reason) => {
+    assert.equal(value.error_type, "table_corrupt", JSON.stringify(value).slice(0, 300));
+    assert.equal(value.error, `Source 'demo/primary' ${text}. Run: scrybe index -P demo -S primary --full`);
+    const { project_id, source_id, reasons, ...details } = value.details;
+    assert.deepEqual([project_id, source_id, reasons], ["demo", "primary", [reason]]);
+    return details;
+  };
+  const withDim = async (dim, f) => {
+    changeConfig(w, (c) => { c.embedding_presets.fake.dim = dim; });
+    try { return await f(); } finally { changeConfig(w, (c) => { c.embedding_presets.fake.dim = 8; }); }
+  };
+
+  test("a search with other vector sizes configured names both", () => withDim(16, async () => {
+    const value = await onStdio(w, "search_code", {});
+    assert.deepEqual(faultOf(value, "has a dimensions mismatch (indexed at 8, embedder is now 16)", "dimensions_mismatch"), { expected_dimensions: 16, actual_dimensions: 8 });
+  }));
+
+  test("a gc that leaves one behind is announced", async () => {
+    const { base } = await startedServer(w);
+    await withDim(16, async () => {
+      const res = await fetch(`${base}/gc`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: ["demo"], mode: "purge" }) });
+      assert.ok(res.ok, `${res.status}`);
+      const [ev] = await until(() => { const found = w.logged("health.post-gc-corruption-detected"); return found.length > 0 && found; }, 20_000, "the announcement");
+      assert.deepEqual([ev.level, ev.projectId, ev.sourceId], ["error", "demo", "primary"]);
+      assert.deepEqual([ev.detail.tableName, ev.detail.reasons, ev.detail.details, ev.detail.gcMode], [tableOf(w), ["dimensions_mismatch"], { expected_dimensions: 16, actual_dimensions: 8 }, "purge"]);
+      assert.match(ev.detail.gcJobId, /^[0-9a-f-]{8,}$/);
+    });
+  });
+
+  test("a search of a table whose data is gone says so, and the server announced it at start", async () => {
+    const dir = join(w.data, "lancedb", `${tableOf(w)}.lance`, "data");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".lance"));
+    const kept = files.map((f) => [f, readFileSync(join(dir, f))]);
+    for (const f of files) rmSync(join(dir, f));
+    const before = w.logged("health.corrupt").length;
+    const value = await onStdio(w, "search_code", {});
+    const details = faultOf(value, "has a corrupt index (manifest references 1 missing data file)", "manifest_missing_data");
+    assert.equal(details.missing_files.length, 1);
+    assert.ok(files.includes(details.missing_files[0].replace(/^data\//, "")), JSON.stringify(details));
+    const all = await onStdio(w, "search_knowledge", {});
+    assert.equal(all.error_type, "table_corrupt", "every source of the project is looked at");
+    assert.ok(Array.isArray(await onStdio(w, "search_knowledge", { source_id: "issues" })));
+    const shell = await w.cli("search", "code", "-P", "demo", "widget");
+    assert.equal(shell.status, 1);
+    assert.match(shell.stderr + shell.stdout, /Source 'demo\/primary' has a corrupt index \(manifest references 1 missing data file\)\. Run: scrybe index -P demo -S primary --full/);
+
+    const masked = await onServer();
+    assert.deepEqual([masked.isError, masked.value], [true, { error: "internal error" }]);
+    const events = await until(() => { const e = w.logged("health.corrupt").slice(before); return e.length > 0 && e; }, 15_000, "the announcement");
+    assert.deepEqual(events.map((e) => [e.level, e.projectId, e.sourceId, e.detail.tableName, e.detail.reasons]), [["warn", "demo", "primary", tableOf(w), ["manifest_missing_data"]]]);
+    assert.deepEqual(events[0].detail.details, details);
+    for (const [f, bytes] of kept) writeFileSync(join(dir, f), bytes);
+    assert.equal((await onServer()).isError, true, "the answer is kept");
+    await w.killServer();
+    assert.equal((await onServer()).isError, false);
+  });
+
+  test("an answer is kept for as long as SCRYBE_HEALTH_TTL_MS says", async () => {
+    const dir = join(w.data, "lancedb", `${tableOf(w)}.lance`, "_versions");
+    const kept = readdirSync(dir).map((f) => [f, readFileSync(join(dir, f))]);
+    const restore = () => { for (const [f, bytes] of kept) writeFileSync(join(dir, f), bytes); };
+    for (const [ttl, answers] of [["600000", true], ["1x", false]]) {
+      const tools = stdioTools(w, { SCRYBE_HEALTH_TTL_MS: ttl });
+      try {
+        assert.ok(Array.isArray(await tools.call("search_code", {})));
+        emptyManifests(w, tableOf(w));
+        await sleep(50);
+        const value = await tools.call("search_code", {});
+        if (answers) assert.ok(Array.isArray(value), JSON.stringify(value).slice(0, 300));
+        else assert.deepEqual(faultOf(value, "has an unreadable index", "schema_unreadable"), { error_message: "zero-byte manifest" });
+        restore();
+        assert.ok(Array.isArray(await tools.call("search_code", {})));
+      } finally {
+        tools.stop();
+        restore();
+      }
+    }
+  });
+});
+
+describe("a config.json with a fault", () => {
+  let w;
+  before(async () => {
+    w = await makeWorld();
+    await w.index("--full");
+  });
+  afterEach(() => w.killServer());
+  after(() => w.stop());
+  const refused = async (change, message) => {
+    const file = join(w.data, "config.json");
+    const good = readFileSync(file, "utf8");
+    changeConfig(w, change);
+    try {
+      const indexed = await w.cli("index", "-P", "demo", "-S", "primary");
+      assert.notEqual(indexed.status, 0);
+      assert.ok((indexed.stderr + indexed.stdout).includes(message), indexed.stderr + indexed.stdout);
+      const searched = await w.cli("search", "code", "-P", "demo", "widget");
+      assert.equal(searched.status, 1);
+      assert.ok((searched.stderr + searched.stdout).includes(message), searched.stderr + searched.stdout);
+      const { base } = await startedServer(w);
+      const res = await fetch(`${base}/mcp/rpc`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: 1, method: "status", params: {} }) });
+      const status = (await res.json()).result;
+      assert.deepEqual([status.config_present, status.config_error, status.config_error_message, status.code_model, status.api_key_present], [true, true, message, "", false]);
+    } finally {
+      writeFileSync(file, good);
+    }
+  };
+
+  test("a model of the wrong kind for its slot is refused when indexing and searching, and status says so", () =>
+    refused((c) => {
+      c.embedding_presets.text = { provider: "voyage", model: "voyage-4", credentials: "k" };
+      c.assignments.code_preset = "text";
+    }, 'preset "text" uses model "voyage-4" with profile "text", but it is assigned to slot "code_preset" which requires profile "code"'));
+
+  test("a preset that isn't there is named", () =>
+    refused((c) => { c.assignments.code_preset = "gone"; }, 'embedding preset "gone" not found in config'));
+
+  test("an unknown provider is named", () =>
+    refused((c) => { c.embedding_presets.fake.provider = "nowhere"; }, 'unknown provider: "nowhere"'));
+
+  for (const [what, change, message] of [
+    ["a missing assignment", (c) => { delete c.assignments.text_preset; }, "config.json: assignments.text_preset missing"],
+    ["a preset field of the wrong type, even in a preset nothing uses", (c) => { c.embedding_presets.spare = { provider: "custom", model: "m", max_input_tokens: "8" }; }, "config.json: embedding_presets.spare.max_input_tokens must be a number"],
+    ["no schema version", (c) => { delete c.schema_version; }, "config.json: missing or non-numeric schema_version"],
+  ]) test(`${what} is refused before anything else`, () => refused(change, message));
+});
+
+describe("ignore files are read like npm's ignore reads them", () => {
+  test("braces are themselves, a byte-order mark goes, and bytes that aren't UTF-8 don't lose the file", async () => {
+    const w = await makeWorld();
+    try {
+      const files = ["a.ts", "b.js", "a{b.ts", "ab.ts", "{x}.ts", "x.ts", "{y,z}.ts", "y.ts", "c.py", "deep/c.py", "deep/top.md", "out/o.ts", "deep/out/o.ts", "style.css", "skipme/s.ts", "q1.ts", "q{.ts", "caf.ts"];
+      for (const f of files) {
+        mkdirSync(join(w.repo, "src", f, ".."), { recursive: true });
+        writeFileSync(join(w.repo, "src", f), `export const v = ${JSON.stringify(f)};\n`);
+      }
+      writeFileSync(join(w.repo, "top.md"), "# top\n");
+      writeFileSync(join(w.repo, ".gitignore"), "*.{ts,js}\r\na{b.ts\r\n\\{x\\}.ts\r\n{y,z}.ts\r\n*.py\r\n/top.md\r\n/src/out/\r\nq[{].ts\r\n");
+      writeFileSync(join(w.repo, ".scrybeignore"), Buffer.concat([Buffer.from("﻿*.css\n# caf"), Buffer.from([0xe9, 0x0a]), Buffer.from("skipme/\n")]));
+      await w.index("--full");
+      const hashes = JSON.parse(readFileSync(join(w.data, "hashes", `demo__primary__${w.main.replace(/\//g, "__")}.json`), "utf8"));
+      const got = Object.keys(hashes).filter((k) => k !== "src/widget.ts").sort();
+      assert.deepEqual(got, ["notes/ignored.ts", ...["a.ts", "ab.ts", "b.js", "caf.ts", "deep/out/o.ts", "deep/top.md", "q1.ts", "x.ts", "y.ts"].map((f) => `src/${f}`)].sort());
+    } finally {
+      await w.stop();
+    }
+  });
+});
+
+describe("what the file watcher reacts to", () => {
+  let w, c;
+  const jobs = () => w.logged("job.started").length;
+  before(async () => {
+    w = await makeWorld({ serverEnv: { SCRYBE_DAEMON_FS_DEBOUNCE_MS: "100", SCRYBE_DAEMON_GIT_DEBOUNCE_MS: "100", SCRYBE_DAEMON_COLD_MULTIPLIER: "1", SCRYBE_DAEMON_NO_FETCH: "1" } });
+    mkdirSync(join(w.repo, ".github/workflows"), { recursive: true });
+    mkdirSync(join(w.repo, "src/vendor"), { recursive: true });
+    mkdirSync(join(w.repo, "vendor"));
+    writeFileSync(join(w.repo, ".github/workflows/ci.ts"), "export function firstWorkflow() {}\n");
+    writeFileSync(join(w.repo, ".scrybeignore"), "!.github/workflows/ci.ts\n");
+    await w.index("--full");
+    c = w.client();
+    await c.hello();
+    await c.rpc("tools/list");
+    await sleep(1500);
+  });
+  after(() => w.stop());
+  const indexed = (name) => until(async () => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: name })).value?.length > 0, 30_000, `${name} to be indexed`);
+  const starts = async (what, change) => {
+    const before = jobs();
+    change();
+    await until(() => jobs() > before, 15_000, `a job for ${what}`);
+    await sleep(1500);
+  };
+
+  test("a dot-file starts a job", () => starts("a dot-file", () => writeFileSync(join(w.repo, ".eslintrc.json"), '{ "rules": {} }\n')));
+
+  test("a file in a folder the indexer skips, unless it is at the top", async () => {
+    await starts("a folder below the top", () => writeFileSync(join(w.repo, "src/vendor/v.ts"), "export const v = 1;\n"));
+    const before = jobs();
+    writeFileSync(join(w.repo, "vendor/v.ts"), "export const v = 1;\n");
+    await sleep(2500);
+    assert.equal(jobs(), before);
+  });
+
+  test("a force-included file in a dot-folder is indexed again when it changes", async () => {
+    writeFileSync(join(w.repo, ".github/workflows/ci.ts"), "export function secondWorkflow() {}\n");
+    await indexed("secondWorkflow");
+  });
+
+  test("a folder moved in is indexed, and watched afterwards", async () => {
+    mkdirSync(join(w.dir, "outside/inner"), { recursive: true });
+    writeFileSync(join(w.dir, "outside/inner/moved.ts"), "export function movedIn() {}\n");
+    renameSync(join(w.dir, "outside"), join(w.repo, "src/arrived"));
+    await indexed("movedIn");
+    await sleep(500);
+    writeFileSync(join(w.repo, "src/arrived/later.ts"), "export function savedInTheMovedFolder() {}\n");
+    await indexed("savedInTheMovedFolder");
+  });
+});
+
+describe("requests to the embedding endpoint", () => {
+  test("no proxy from the environment is used", async () => {
+    const dead = "http://127.0.0.1:9";
+    const w = await makeWorld({ serverEnv: { HTTP_PROXY: dead, http_proxy: dead, HTTPS_PROXY: dead, https_proxy: dead, ALL_PROXY: dead, all_proxy: dead, NO_PROXY: "", no_proxy: "", NODE_USE_ENV_PROXY: "" } });
+    try {
+      await w.index("--full");
+      const c = w.client();
+      await c.hello();
+      assert.equal((await c.call("search_code", { project_id: "demo", query: "widget" })).isError, false);
+    } finally {
+      await w.stop();
+    }
+  });
+
+  test("the account named in the environment goes along, and a retry date is waited for", async () => {
+    const fake = await fakeEmbedder({ refuse: (n) => (n === 1 ? { code: 429, headers: { "Retry-After": new Date(Date.now() + 4000).toUTCString() } } : null) });
+    const w = await makeWorld({ embedder: fake, serverEnv: { OPENAI_ORG_ID: " org-contract ", OPENAI_PROJECT_ID: "proj-contract" } });
+    try {
+      await w.index("--full");
+      assert.deepEqual([...new Set(fake.log.map((l) => `${l.organization}|${l.project}`))], ["org-contract|proj-contract"]);
+      const gap = fake.log[1].at - fake.log[0].at;
+      assert.ok(gap > 2000 && gap < 8000, `waited ${gap} ms`);
+    } finally {
+      await w.stop();
+      fake.close();
+    }
+  });
+
+  test("batch sizes are read from the front of the value", async () => {
+    const w = await makeWorld({ serverEnv: { SCRYBE_EMBED_BATCH_SIZE: " 1abc" } });
+    try {
+      await w.index("--full");
+      assert.deepEqual([...new Set(w.fake.log.map((l) => l.n))], [1]);
+    } finally {
+      await w.stop();
+    }
+  });
+
+  test("a certificate authority named by NODE_EXTRA_CA_CERTS is trusted, and no other", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "scrybe-ca-"));
+    const at = (f) => join(dir, f);
+    const openssl = (...args) => execFileSync("openssl", args, { stdio: "ignore" });
+    try {
+      writeFileSync(at("ca.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=v3\n[dn]\n[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign\nsubjectKeyIdentifier=hash\n");
+      writeFileSync(at("leaf.ext"), "basicConstraints=CA:FALSE\nsubjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n");
+      const key = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes"];
+      openssl("req", "-x509", ...key, "-keyout", at("ca.key"), "-out", at("ca.pem"), "-days", "2", "-subj", "/CN=contract-ca", "-config", at("ca.cnf"));
+      openssl("req", ...key, "-keyout", at("leaf.key"), "-out", at("leaf.csr"), "-subj", "/CN=contract-leaf", "-config", at("ca.cnf"));
+      openssl("x509", "-req", "-in", at("leaf.csr"), "-CA", at("ca.pem"), "-CAkey", at("ca.key"), "-CAcreateserial", "-days", "2", "-extfile", at("leaf.ext"), "-out", at("leaf.pem"));
+    } catch {
+      rmSync(dir, { recursive: true, force: true });
+      return t.skip("no usable openssl on this host");
+    }
+    const fake = await fakeEmbedder({ tls: { key: readFileSync(at("leaf.key")), cert: readFileSync(at("leaf.pem")) } });
+    const w = await makeWorld({ embedder: fake });
+    try {
+      const run = (extra) => w.cliWith(extra, "index", "-P", "demo", "-S", "primary", "--full");
+      for (const extra of [{ NODE_EXTRA_CA_CERTS: "" }, { NODE_EXTRA_CA_CERTS: at("missing.pem") }, { NODE_EXTRA_CA_CERTS: at("leaf.ext") }]) {
+        assert.notEqual((await run(extra)).status, 0);
+      }
+      assert.equal(fake.log.length, 0);
+      const r = await run({ NODE_EXTRA_CA_CERTS: at("ca.pem") });
+      assert.equal(r.status, 0, r.stderr + r.stdout);
+      assert.ok(fake.log.length > 0);
+    } finally {
+      await w.stop();
+      fake.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a NODE_EXTRA_CA_CERTS file that isn't there stops nothing", async () => {
+    const w = await makeWorld({ serverEnv: { NODE_EXTRA_CA_CERTS: join(tmpdir(), "scrybe-no-such-file.pem") } });
+    try {
+      await w.index("--full");
+      assert.ok(w.fake.log.length > 0);
+    } finally {
+      await w.stop();
+    }
+  });
+});
+
+describe("the .env file in the data dir", () => {
+  test("quotes are part of a value, odd bytes and nameless lines are passed over, and the environment wins", async () => {
+    const w = await makeWorld({ serverEnv: { CONTRACT_ENV_WINS: "from the environment" } });
+    try {
+      const write = (...parts) => writeFileSync(join(w.data, ".env"), Buffer.concat(parts.map((p) => Buffer.from(p))));
+      const keySent = async (name) => {
+        changeConfig(w, (c) => { c.embedding_presets.fake.credentials = `\${${name}}`; });
+        const n = w.fake.log.length;
+        await w.index("--full");
+        return w.fake.log[n].auth;
+      };
+      write("﻿CONTRACT_DOT_A=first\r\n# caf", [0xe9], "\r\n=nameless\r\n  CONTRACT_DOT_B = \"two words\" \r\nCONTRACT_DOT_C='single'\r\nCONTRACT_DOT_D=a=b#c\r\nCONTRACT_ENV_WINS=no\r\nCONTRACT_DOT_D=second\r\n");
+      assert.equal(await keySent("CONTRACT_DOT_A"), "Bearer first");
+      assert.equal(await keySent("CONTRACT_DOT_B"), 'Bearer "two words"');
+      assert.equal(await keySent("CONTRACT_DOT_C"), "Bearer 'single'");
+      assert.equal(await keySent("CONTRACT_DOT_D"), "Bearer a=b#c");
+      assert.equal(await keySent("CONTRACT_ENV_WINS"), "Bearer from the environment");
+    } finally {
+      await w.stop();
+    }
+  });
+});
+
+describe("how long old table versions are kept", () => {
+  test("SCRYBE_LANCE_GRACE_MS decides", async () => {
+    const manifests = async (extra) => {
+      const w = await makeWorld({ serverEnv: extra });
+      try {
+        await w.index("--full");
+        return readdirSync(join(w.data, "lancedb", `${tableOf(w)}.lance`, "_versions")).filter((f) => f.endsWith(".manifest")).length;
+      } finally {
+        await w.stop();
+      }
+    };
+    const usual = await manifests({});
+    const none = await manifests({ SCRYBE_LANCE_GRACE_MS: "0" });
+    const odd = await manifests({ SCRYBE_LANCE_GRACE_MS: "-5" });
+    assert.ok(none < usual, `${none} against ${usual}`);
+    assert.equal(odd, usual);
+  });
+});
+
+describe("the indexer's records in the server log", () => {
+  const fieldsOf = (r) => Object.keys(r);
+  const stamp = ["ts", "pid", "event", "projectId", "sourceId", "branch"];
+
+  test("a run says what it found and what it did, and with SCRYBE_DEBUG_INDEXER each batch too", async () => {
+    const w = await makeWorld();
+    try {
+      await w.index("--full");
+      const [scan] = w.logged("indexer.scan.completed"), [job] = w.logged("indexer.job.summary");
+      assert.deepEqual(fieldsOf(scan), [...stamp, "mode", "files_total", "files_to_reindex", "files_to_remove"]);
+      assert.deepEqual([scan.projectId, scan.sourceId, scan.branch, scan.mode, scan.files_total, scan.files_to_reindex, scan.files_to_remove], ["demo", "primary", w.main, "full", 2, 2, 0]);
+      assert.deepEqual(fieldsOf(job), [...stamp, "mode", "files_scanned", "files_reindexed", "chunks_prepared", "chunks_persisted", "total_ms"]);
+      assert.deepEqual([job.files_scanned, job.files_reindexed, job.chunks_persisted], [2, 2, job.chunks_prepared]);
+      for (const quiet of ["indexer.write.completed", "indexer.embed.batch", "indexer.flush.intra_batch_dedup", "indexer.phase1"]) assert.equal(w.logged(quiet).length, 0, quiet);
+
+      rmSync(join(w.repo, "src/gadget.py"));
+      writeFileSync(join(w.repo, "src/extra.ts"), "export function extraOne() { return 1; }\n");
+      const r = await w.cliWith({ SCRYBE_DEBUG_INDEXER: "1" }, "index", "-P", "demo", "-S", "primary");
+      assert.equal(r.status, 0, r.stderr);
+      const [write] = w.logged("indexer.write.completed"), [batch] = w.logged("indexer.embed.batch");
+      assert.deepEqual(fieldsOf(write), [...stamp, "chunks_in_batch", "chunks_actually_added", "cumulative_chunks_persisted"]);
+      assert.deepEqual([write.chunks_in_batch, write.chunks_actually_added, write.cumulative_chunks_persisted], [1, 1, 1]);
+      assert.deepEqual(fieldsOf(batch), [...stamp, "batch_size", "batch_ms", "cumulative_chunks_embedded"]);
+      assert.deepEqual([batch.batch_size, batch.cumulative_chunks_embedded], [1, 1]);
+      const [phase1] = w.logged("indexer.phase1"), [gone] = w.logged("indexer.applyFile"), [result] = w.logged("indexer.result");
+      const debug = ["ts", "debug", "event", "projectId", "sourceId", "branch"];
+      assert.deepEqual(fieldsOf(phase1), [...debug, "mode", "oldHashesCount", "currentSourcesCount", "toRemove", "toReindexCount"]);
+      assert.deepEqual([phase1.oldHashesCount, phase1.currentSourcesCount, phase1.toRemove, phase1.toReindexCount], [2, 2, ["src/gadget.py"], 1]);
+      assert.deepEqual([...fieldsOf(gone), gone.path, gone.kind], [...debug, "path", "kind", "src/gadget.py", "removed"]);
+      assert.deepEqual(fieldsOf(result), [...debug, "mode", "chunksIndexed", "filesScanned", "filesReindexed", "filesRemoved"]);
+      assert.deepEqual([result.chunksIndexed, result.filesScanned, result.filesReindexed, result.filesRemoved], [1, 2, 1, 1]);
+    } finally {
+      await w.stop();
+    }
+  });
+});
+
+describe("SCRYBE_DEBUG_SEARCH", () => {
+  test("names a branch that isn't indexed on the server's standard output", async () => {
+    const w = await makeWorld();
+    let server;
+    try {
+      await w.index("--full");
+      server = spawn(SERVER[0], SERVER.slice(1), { env: { ...w.env, SCRYBE_DEBUG_SEARCH: "1" }, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+      let out = "";
+      server.stdout.on("data", (d) => { out += d; });
+      await until(() => w.health(), 20_000, "the server");
+      const c = w.client();
+      await c.hello();
+      const r = await c.call("search_code", { project_id: "demo", query: "widget", branch: "nowhere" });
+      assert.deepEqual([r.isError, r.value], [false, []], r.text);
+      await until(() => out.includes('[scrybe:search] branch "nowhere" unresolved for source primary (project demo) — returning []'), 5000, "the line");
+    } finally {
+      server?.kill("SIGKILL");
+      await w.stop();
     }
   });
 });

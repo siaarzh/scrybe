@@ -1,6 +1,7 @@
 //! Which files get indexed. Mirrors `walkRepoFiles` and `getLanguage` in `src/chunker.ts`, and
 //! `src/ignore-rules.ts`, including node-ignore's rule that an ignored parent can't be re-included.
 use crate::config::data_dir;
+use crate::jsstr::js_trim;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::{Path, PathBuf};
 
@@ -73,10 +74,44 @@ fn builder(root: &Path) -> GitignoreBuilder {
     b
 }
 
+/// Braces mean themselves in an ignore file, but the matcher would read them as alternatives.
+fn escape_braces(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 4);
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        let mut len = c.len_utf8();
+        match c {
+            '\\' => len += rest[1..].chars().next().map_or(0, char::len_utf8),
+            '{' | '}' => out.push('\\'),
+            '[' => {
+                // In a class every character is already itself, the first `]` included.
+                let skip = 1 + rest[1..].len() - rest[1..].trim_start_matches(['!', '^']).len();
+                let skip = skip + usize::from(rest[skip..].starts_with(']'));
+                len = rest[skip..].find(']').map_or(1, |end| skip + end + 1);
+            }
+            _ => {}
+        }
+        out.push_str(&rest[..len]);
+        rest = &rest[len..];
+    }
+    out
+}
+
 fn add_all(b: &mut GitignoreBuilder, content: &str) {
     for line in content.lines() {
-        let _ = b.add_line(None, line);
+        // A line behind a byte-order mark is a plain pattern, whatever it starts with.
+        let line = match line.strip_prefix('\u{FEFF}') {
+            Some(l) if l.starts_with(['#', '!']) => format!("\\{l}"),
+            Some(l) => l.to_string(),
+            None => line.to_string(),
+        };
+        let _ = b.add_line(None, &escape_braces(&line));
     }
+}
+
+/// An ignore file's text, with any bytes that aren't UTF-8 replaced. `None` when it can't be read.
+fn read_lossy(path: &Path) -> Option<String> {
+    Some(String::from_utf8_lossy(&std::fs::read(path).ok()?).into_owned())
 }
 
 impl IgnoreRules {
@@ -84,25 +119,25 @@ impl IgnoreRules {
         let mut b = builder(root);
         let mut has = false;
         let mut force_patterns = vec![];
-        if let Ok(text) = std::fs::read_to_string(root.join(".gitignore")) {
+        if let Some(text) = read_lossy(&root.join(".gitignore")) {
             add_all(&mut b, &text);
             has = true;
         }
         let collect = |text: &str, force: &mut Vec<String>| {
             for line in text.lines() {
-                let t = line.trim();
+                let t = js_trim(line);
                 if t.len() > 1 && t.starts_with('!') {
                     force.push(t[1..].to_string());
                 }
             }
         };
-        if let Ok(text) = std::fs::read_to_string(root.join(".scrybeignore")) {
+        if let Some(text) = read_lossy(&root.join(".scrybeignore")) {
             add_all(&mut b, &text);
             has = true;
             collect(&text, &mut force_patterns);
         }
         if let (Some(p), Some(s)) = (project, source) {
-            if let Ok(text) = std::fs::read_to_string(data_dir().join("ignores").join(p).join(format!("{s}.gitignore"))) {
+            if let Some(text) = read_lossy(&data_dir().join("ignores").join(p).join(format!("{s}.gitignore"))) {
                 if !text.is_empty() {
                     add_all(&mut b, &text);
                     has = true;
@@ -121,6 +156,10 @@ impl IgnoreRules {
 
     /// node-ignore walks from the top: the first ignored parent decides.
     fn ignored_by(g: &Gitignore, rel: &str) -> bool {
+        Self::ignored_as(g, rel, false)
+    }
+
+    fn ignored_as(g: &Gitignore, rel: &str, is_dir: bool) -> bool {
         let mut end = 0;
         while let Some(i) = rel[end..].find('/') {
             end += i;
@@ -129,11 +168,16 @@ impl IgnoreRules {
             }
             end += 1;
         }
-        g.matched(rel, false).is_ignore()
+        g.matched(rel, is_dir).is_ignore()
     }
 
     pub fn should_ignore(&self, rel: &str) -> bool {
         self.rules.as_ref().is_some_and(|g| Self::ignored_by(g, rel))
+    }
+
+    /// The folder itself is ignored, so everything in it is too.
+    pub fn ignores_dir(&self, rel: &str) -> bool {
+        self.rules.as_ref().is_some_and(|g| Self::ignored_as(g, rel, true))
     }
 
     pub fn is_force_included(&self, rel: &str) -> bool {
@@ -151,7 +195,7 @@ impl IgnoreRules {
 pub fn scan_ref(root: &Path, git_ref: &str, project: Option<&str>, source: Option<&str>) -> Vec<(String, String)> {
     let rules = IgnoreRules::load(root, project, source);
     let Some(listing) = crate::git::output(root, &["ls-tree", "--full-tree", "-r", "-z", git_ref], Some(50 << 20)) else { return vec![] };
-    let max_bytes = std::env::var("SCRYBE_MAX_FILE_BYTES").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0).unwrap_or(1 << 20);
+    let max_bytes = crate::jsstr::env_pos_int("SCRYBE_MAX_FILE_BYTES").map_or(1 << 20, |n| n as usize);
     let mut out = vec![];
     for entry in listing.split('\0').filter(|e| !e.is_empty()) {
         let Some((meta, rel)) = entry.split_once('\t') else { continue };
@@ -229,6 +273,50 @@ mod tests {
         assert_eq!(language_of("x.g.cs"), None);
         assert_eq!(language_of("x.cs"), Some("csharp"));
         assert_eq!(language_of("x.tsx"), Some("tsx"));
+    }
+
+    fn ignores(rules: &str, rel: &str) -> bool {
+        let mut b = builder(Path::new("/r"));
+        add_all(&mut b, rules);
+        IgnoreRules::ignored_by(&b.build().unwrap(), rel)
+    }
+
+    #[test]
+    fn braces_mean_themselves() {
+        for (rule, yes, no) in [
+            ("*.{ts,js}", "a.{ts,js}", "a.ts"),
+            ("a{b", "a{b", "ab"),
+            ("c}d", "c}d", "cd"),
+            ("\\{x\\}", "{x}", "x"),
+            ("{y}/", "{y}/f.ts", "y/f.ts"),
+            ("[{}]z", "}z", "{}z"),
+            ("[!{]q", "aq", "{q"),
+            ("[]{]w", "{w", "\\{w"),
+            ("*.log", "d/x.log", "d/x.logs"),
+            ("/top.ts", "top.ts", "d/top.ts"),
+        ] {
+            assert!(ignores(rule, yes), "{rule} should match {yes}");
+            assert!(!ignores(rule, no), "{rule} should not match {no}");
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_goes_and_leaves_a_plain_pattern() {
+        assert!(ignores("\u{FEFF}*.gen\n", "a.gen"));
+        assert!(ignores("\u{FEFF}#odd\n", "#odd"));
+        assert!(ignores("*.ts\n\u{FEFF}!a.ts\n", "a.ts"));
+        assert!(ignores("\u{FEFF}!b.x\n", "!b.x"));
+    }
+
+    #[test]
+    fn an_ignore_file_that_is_not_utf8_still_counts() {
+        let dir = std::env::temp_dir().join(format!("scrybe-ignore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".gitignore"), b"caf\xe9.ts\r\nkept-rule/\r\n").unwrap();
+        let rules = IgnoreRules::load(&dir, None, None);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(rules.should_ignore("kept-rule/a.ts"));
+        assert!(!rules.should_ignore("other/a.ts"));
     }
 
     #[test]

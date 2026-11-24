@@ -7,7 +7,8 @@ use crate::embed;
 use crate::embed_api::{self, Entry, Halving};
 use crate::github_issues;
 use crate::gitlab_issues::{self, KnowledgeChunk};
-use crate::index::{check_cancel, cursor_path, hashes_path, now_iso, repair_if_corrupt, Mode, Options, Progress};
+use crate::jsstr::env_int;
+use crate::index::{check_cancel, cursor_path, hashes_path, now_iso, repair_if_corrupt, Mode, Options, Progress, Records};
 use crate::phase::{self, Outcome, Phase};
 use crate::registry::{self, EmbedConfig, Source};
 use crate::store::Store;
@@ -105,6 +106,7 @@ struct Run<'a> {
     started: std::time::Instant,
     bytes_embedded: u64,
     phase: Phase,
+    records: Records,
     options: &'a Options,
 }
 
@@ -121,6 +123,7 @@ impl Run<'_> {
         if batches.is_empty() {
             return Ok(());
         }
+        let batch_started = std::time::Instant::now();
         let chunk_count: usize = batches.iter().map(|(_, chunks)| chunks.len()).sum();
         let persisted_before = self.persisted;
         let to_embed: Vec<&KnowledgeChunk> = batches.iter().flat_map(|(_, chunks)| chunks.iter()).filter(|c| !self.known.contains(&c.chunk_id)).collect();
@@ -141,12 +144,14 @@ impl Run<'_> {
                 .filter(|c| by_id.contains_key(&c.chunk_id) && seen.insert(c.chunk_id.clone()))
                 .map(|c| (c.clone(), by_id[&c.chunk_id].clone()))
                 .collect();
+            self.records.deduplicated(owners.len() - rows.len());
             let before = self.store.count_rows(&self.table).await.unwrap_or(0);
             self.store.upsert_knowledge(&self.table, &rows).await?;
             let after = self.store.count_rows(&self.table).await.unwrap_or(0);
             let added = after.saturating_sub(before);
             self.persisted += added;
             vecindex::record_upsert(&self.table, added, after);
+            self.records.written(rows.len(), added, self.persisted);
             self.phase.sample();
         }
         for (key, chunks) in batches.iter() {
@@ -160,6 +165,7 @@ impl Run<'_> {
         self.options.report(Progress::Embed(self.prepared));
         save_hashes(&self.hash_path, &self.hashes)?;
         self.bytes_embedded += batch_bytes;
+        self.records.embedded(chunk_count, batch_started.elapsed(), self.prepared);
         self.phase.add_work(&[
             ("batches", 1),
             ("chunks_prepared", chunk_count as u64),
@@ -202,6 +208,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     let branch = "*";
 
     let ctx = phase::Ctx { project_id: project_id.to_string(), source_id: source_id.to_string(), job_id: options.job_id.clone(), branch: branch.to_string(), mode: if mode == Mode::Full { "full" } else { "incremental" } };
+    let records = Records::new(project_id, source_id, branch, mode);
     phase::emit_job_intent(&ctx, "started", json!({ "is_code": false }));
     let provider = if embedding.local { "local" } else { "api" };
 
@@ -256,6 +263,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     diff_phase.sample();
     diff_phase.set_work(json!({ "files_total": merged.0.len(), "prior_hashes": old_hashes.0.len(), "files_to_reindex": to_index.len(), "files_to_remove": to_remove.len() }));
     diff_phase.end(Outcome::Ok);
+    records.scanned(merged.0.len(), to_index.len(), &to_remove, old_hashes.0.len(), scanned.0.len());
     phase::emit_job_intent(&ctx, "planned", json!({
         "files_total": merged.0.len(),
         "files_to_reindex": if mode == Mode::Full { scanned.0.len() } else { to_index.len() },
@@ -283,6 +291,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
             writer.remove_file(p)?;
             hashes.remove(p);
             stale_phase.sample();
+            records.removed(p);
         }
         for p in &to_index {
             writer.remove_file(p)?;
@@ -293,8 +302,8 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     stale_phase.set_work(json!({ "files_to_reindex": to_index.len(), "files_to_remove": to_remove.len(), "known_chunk_ids": known.len(), "bytes_to_read": 0 }));
     stale_phase.end(Outcome::Ok);
 
-    let ceiling: usize = std::env::var("SCRYBE_EMBED_BATCH_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
-    let delay_ms: u64 = std::env::var("SCRYBE_EMBED_BATCH_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let ceiling = env_int("SCRYBE_EMBED_BATCH_SIZE").map_or(100, |n| n as usize);
+    let delay_ms = env_int("SCRYBE_EMBED_BATCH_DELAY_MS").map_or(0, |n| n as u64);
     let state_key = format!("{project_id}:{source_id}:{}:{}", if embedding.base_url.is_empty() { "local" } else { &embedding.base_url }, embedding.model);
     let state = (!embedding.local).then(|| embed_api::read_entry(&state_key)).flatten();
     let batch_size = if embedding.local { ceiling } else { embed_api::probe_size(state, ceiling) };
@@ -302,7 +311,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
 
     let mut phase = Phase::begin(&ctx, "chunk_embed");
     phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, options };
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, records, options };
     let mut batches: Vec<(String, Vec<KnowledgeChunk>)> = vec![];
     let mut pending = 0;
     let mut chunks_seen = 0usize;
@@ -370,14 +379,16 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
         compact_phase.set_work(json!({ "compacted": compacted }));
         compact_phase.end(Outcome::Ok);
         let mut prune_phase = Phase::begin(&ctx, "prune_orphans");
-        let removed = store.prune_index_orphans(&table);
+        let (removed, freed) = store.prune_index_orphans(&table);
+        run.records.pruned(removed, freed);
         prune_phase.set_work(json!({ "orphans_removed": removed }));
         prune_phase.end(Outcome::Ok);
         if mode == Mode::Full {
             vecindex::mark_full_reindex(&table);
         }
     }
-    Ok(json!({
+    store.invalidate_health(&table);
+    let result = json!({
         "status": "ok",
         "project_id": project_id,
         "source_id": source_id,
@@ -386,7 +397,9 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
         "files_scanned": run.merged.0.len(),
         "files_reindexed": run.files_reindexed,
         "files_removed": to_remove.len(),
-    }))
+    });
+    run.records.finished(&result);
+    Ok(result)
 }
 
 #[cfg(test)]

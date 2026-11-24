@@ -4,9 +4,10 @@
 use crate::branches;
 use crate::git;
 use crate::jobs::{now_iso, Queue, Request};
+use crate::jsstr::env_pos_int;
 use crate::registry::{self, Project};
-use crate::scan::{self, IgnoreRules};
-use notify::event::{CreateKind, EventKind};
+use crate::scan::IgnoreRules;
+use notify::event::{CreateKind, EventKind, ModifyKind};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -24,7 +25,7 @@ const FETCH_RETRY_MAX: Duration = Duration::from_secs(600);
 const MAX_CONCURRENT_FETCHES: usize = 2;
 
 pub(crate) fn env_ms(name: &str, default: u64) -> Duration {
-    Duration::from_millis(std::env::var(name).ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(default))
+    Duration::from_millis(env_pos_int(name).map_or(default, |n| n as u64))
 }
 
 /// Hot after any event, cold again after a quiet minute. Cold waits longer before acting.
@@ -37,7 +38,7 @@ pub struct Idle {
 
 impl Idle {
     pub fn from_env() -> Self {
-        let multiplier = std::env::var("SCRYBE_DAEMON_COLD_MULTIPLIER").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(5);
+        let multiplier = env_pos_int("SCRYBE_DAEMON_COLD_MULTIPLIER").map_or(5, |n| n as u32);
         Idle { last_active: Mutex::new(None), hot_for: env_ms("SCRYBE_DAEMON_HOT_MS", 60_000), cold_multiplier: multiplier, on_hot: Mutex::new(None) }
     }
 
@@ -99,21 +100,27 @@ fn spawn_named(name: String, f: impl FnOnce() + Send + 'static) {
     let _ = std::thread::Builder::new().name(name).stack_size(512 << 10).spawn(f);
 }
 
-/// Every folder the indexer would walk. On Linux each one takes a watch of its own, and this keeps
-/// `node_modules` and friends from using them up.
-fn dirs_to_watch(root: &Path, rules: &IgnoreRules) -> Vec<PathBuf> {
-    let mut out = vec![root.to_path_buf()];
-    let mut stack = vec![root.to_path_buf()];
+/// `IGNORE_DIR_NAMES`: never watched, but only at the top of the tree.
+const NEVER_WATCHED: &[&str] = &[".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next", ".nuxt", "coverage", ".pytest_cache", ".mypy_cache", ".ruff_cache", "target", "bin", "obj", "vendor", ".vs", "android", "ios", "electron", "fastlane", "packages", "TestResults", "publish", "artifacts"];
+
+/// Whether a change at `rel` queues a run: dot-files and folders the indexer skips count too.
+fn watched(rel: &str, rules: &IgnoreRules) -> bool {
+    !rel.is_empty() && !rel.split('/').next().is_some_and(|top| NEVER_WATCHED.contains(&top)) && !rules.should_ignore(rel)
+}
+
+/// `start` and every folder below it whose files could queue a run. On Linux each takes a watch of its own.
+fn dirs_to_watch(root: &Path, start: &Path, rules: &IgnoreRules) -> Vec<PathBuf> {
+    let mut out = vec![start.to_path_buf()];
+    let mut stack = vec![start.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for e in entries.flatten() {
             if !e.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
-            let name = e.file_name().to_string_lossy().into_owned();
             let path = e.path();
             let rel = path.strip_prefix(root).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-            if !scan::skip_dir(&name) && !rules.should_ignore(&rel) {
+            if watched(&rel, rules) && !rules.ignores_dir(&rel) {
                 out.push(path.clone());
                 stack.push(path);
             }
@@ -130,6 +137,10 @@ fn is_change(kind: &EventKind) -> bool {
     matches!(kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
 }
 
+fn brings_folder(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Create(CreateKind::Folder | CreateKind::Any) | EventKind::Modify(ModifyKind::Name(_)))
+}
+
 /// The path relative to `root`. macOS reports real paths (`/private/var/...`), which may not start with `root` as given.
 fn relative_to<'a>(path: &'a Path, root: &Path, real_root: &Path) -> Option<&'a Path> {
     path.strip_prefix(root).or_else(|_| path.strip_prefix(real_root)).ok()
@@ -141,7 +152,7 @@ fn real_path(p: &Path) -> PathBuf {
 
 fn add_file_watches(w: &mut RecommendedWatcher, root: &Path, rules: &IgnoreRules) -> notify::Result<()> {
     if cfg!(target_os = "linux") {
-        for dir in dirs_to_watch(root, rules) {
+        for dir in dirs_to_watch(root, root, rules) {
             w.watch(&dir, RecursiveMode::NonRecursive)?;
         }
         Ok(())
@@ -197,12 +208,12 @@ fn pump_files(ctx: &Ctx, project: &str, root: &Path, rules: &IgnoreRules, w: &mu
                 for path in &event.paths {
                     let Some(rel) = relative_to(path, root, &real_root) else { continue };
                     let rel = rel.to_string_lossy().replace('\\', "/");
-                    if rel.is_empty() || rel.split('/').any(scan::skip_dir) || rules.should_ignore(&rel) {
+                    if !watched(&rel, rules) {
                         continue;
                     }
-                    if cfg!(target_os = "linux") && matches!(event.kind, EventKind::Create(CreateKind::Folder) | EventKind::Create(CreateKind::Any)) && path.is_dir() {
-                        // A new folder needs its own watches, and may already hold files.
-                        for dir in dirs_to_watch(path, rules) {
+                    if cfg!(target_os = "linux") && brings_folder(&event.kind) && path.is_dir() && !path.is_symlink() && !rules.ignores_dir(&rel) {
+                        // A folder made here or moved in needs its own watches, and may already hold files.
+                        for dir in dirs_to_watch(root, path, rules) {
                             let _ = w.watch(&dir, RecursiveMode::NonRecursive);
                         }
                     }
@@ -430,6 +441,25 @@ pub fn start(queue: Arc<Queue>, idle: Arc<Idle>, health: Arc<WatchHealth>, proje
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dot_files_and_skipped_folders_below_the_top_are_watched() {
+        let dir = std::env::temp_dir().join(format!("scrybe-watch-{}", std::process::id()));
+        for d in [".github/workflows", "a/node_modules", "node_modules/x", "logs/deep", "vendor", "out/kept"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join(".gitignore"), "logs/\nout/*\n!out/kept\nx\n").unwrap();
+        let rules = IgnoreRules::load(&dir, None, None);
+        for (rel, want) in [(".eslintrc.json", true), (".github/workflows/ci.yml", true), ("a/node_modules/i.js", true), ("node_modules/i.js", false), (".git/HEAD", false), ("vendor", false), ("logs/a.ts", false), ("out/x.ts", false), ("out/kept/a.ts", true), ("", false)] {
+            assert_eq!(watched(rel, &rules), want, "{rel}");
+        }
+        let mut dirs: Vec<String> = dirs_to_watch(&dir, &dir, &rules).iter().map(|d| d.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
+        dirs.sort();
+        assert_eq!(dirs, ["", ".github", ".github/workflows", "a", "a/node_modules", "out", "out/kept"]);
+        let below: Vec<PathBuf> = dirs_to_watch(&dir, &dir.join("a"), &rules);
+        assert_eq!(below, [dir.join("a"), dir.join("a").join("node_modules")]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn only_ref_changes_count() {

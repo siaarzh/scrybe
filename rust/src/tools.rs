@@ -2,9 +2,10 @@
 //! and `classifyError` in `src/mcp-server.ts`.
 use crate::branches;
 use crate::collate::locale_compare;
+use crate::index::expected_dimensions;
 use crate::registry;
 use crate::search::{self, js_slice, CodeHit, KnowledgeHit};
-use crate::store::{escape_sql, needs_migration, Store};
+use crate::store::{escape_sql, needs_migration, Health, Store};
 use futures::future::try_join_all;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -62,15 +63,16 @@ impl ToolError {
 
 type ToolResult<T> = Result<T, ToolError>;
 
-/// `checkProjectHealth`, minus the manifest-level corruption probe, which isn't ported yet.
-fn check_health(project_id: &str, only: Option<&str>) -> ToolResult<()> {
+/// `checkProjectHealth`.
+async fn check_health(store: &Store, project_id: &str, only: Option<&str>) -> ToolResult<()> {
     let Some(project) = registry::get_project(project_id) else { return Ok(()) };
     for s in &project.sources {
         if only.is_some_and(|o| o != s.source_id) {
             continue;
         }
         let Some(table) = &s.table_name else { continue };
-        registry::resolve_embedding(s)?;
+        let emb = registry::resolve_embedding(s)?;
+        let health = store.table_health(table, Some(expected_dimensions(&emb, s.profile() == Some("text"))), false).await;
         if needs_migration(table) {
             let cmd = format!("scrybe migrate --source-id {} --project-id {project_id}", s.source_id);
             return Err(ToolError {
@@ -80,12 +82,19 @@ fn check_health(project_id: &str, only: Option<&str>) -> ToolResult<()> {
                 caller_facing: false,
             });
         }
+        if let Health::Corrupt(fault) = health {
+            let mut details = json!({ "project_id": project_id, "source_id": s.source_id, "reasons": [fault.reason] });
+            for (k, v) in &fault.details {
+                details[k] = v.clone();
+            }
+            return Err(ToolError { message: fault.message(project_id, &s.source_id), error_type: Some("table_corrupt"), details: Some(details), caller_facing: false });
+        }
     }
     Ok(())
 }
 
 pub async fn search_code(store: &Store, project_id: &str, query: &str, top_k: usize, branch: Option<&str>) -> ToolResult<Vec<CodeHit>> {
-    check_health(project_id, None)?;
+    check_health(store, project_id, None).await?;
     Ok(search::search_code(store, query, project_id, top_k, branch).await?)
 }
 
@@ -142,7 +151,7 @@ fn parse_knowledge(h: KnowledgeHit) -> ParsedKnowledge {
 }
 
 pub async fn search_knowledge(store: &Store, project_id: &str, query: &str, top_k: usize, source_id: Option<&str>, item_types: Option<&[String]>) -> ToolResult<Vec<ParsedKnowledge>> {
-    check_health(project_id, source_id)?;
+    check_health(store, project_id, source_id).await?;
     let hits = search::search_knowledge(store, query, project_id, top_k, source_id, item_types).await?;
     Ok(hits.into_iter().map(parse_knowledge).collect())
 }

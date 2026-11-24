@@ -4,6 +4,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -39,17 +40,26 @@ export function vectorFor(text) {
   return v.map((x) => x / n);
 }
 
-/** An OpenAI-compatible endpoint whose vectors depend only on the text, answering after `delayMs`. */
-export async function fakeEmbedder({ delayMs = 0 } = {}) {
+/**
+ * An OpenAI-compatible endpoint whose vectors depend only on the text, answering after `delayMs`. `refuse(n)` may
+ * turn the nth request away with `{ code, headers }`; `tls` is the key and certificate to serve HTTPS with.
+ */
+export async function fakeEmbedder({ delayMs = 0, refuse, tls } = {}) {
   const log = [];
-  const server = http.createServer((req, res) => {
+  const answer = (req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", async () => {
       if (delayMs) await sleep(delayMs);
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       const input = Array.isArray(body.input) ? body.input : [body.input];
-      log.push({ auth: req.headers.authorization, agent: req.headers["user-agent"], n: input.length, encoding: body.encoding_format });
+      log.push({ at: Date.now(), auth: req.headers.authorization, agent: req.headers["user-agent"], organization: req.headers["openai-organization"], project: req.headers["openai-project"], n: input.length, encoding: body.encoding_format });
+      const refusal = refuse?.(log.length);
+      if (refusal) {
+        res.writeHead(refusal.code, { "Content-Type": "application/json", ...refusal.headers });
+        res.end(JSON.stringify({ error: { message: "try again later" } }));
+        return;
+      }
       const data = input.map((t, index) => {
         const vec = vectorFor(t);
         const embedding = body.encoding_format === "base64" ? Buffer.from(new Float32Array(vec).buffer).toString("base64") : vec;
@@ -58,9 +68,10 @@ export async function fakeEmbedder({ delayMs = 0 } = {}) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ object: "list", model: body.model, data, usage: { prompt_tokens: 1, total_tokens: 1 } }));
     });
-  });
+  };
+  const server = tls ? https.createServer(tls, answer) : http.createServer(answer);
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  return { url: `http://127.0.0.1:${server.address().port}/v1`, log, close: () => server.close() };
+  return { url: `${tls ? "https" : "http"}://127.0.0.1:${server.address().port}/v1`, log, close: () => server.close() };
 }
 
 /** A score that depends only on the query and the document. */

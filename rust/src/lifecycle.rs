@@ -31,7 +31,7 @@ pub struct Lifecycle {
 }
 
 fn env_ms(name: &str, default: u64) -> Duration {
-    Duration::from_millis(std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default))
+    Duration::from_millis(crate::jsstr::env_int(name).map_or(default, |n| n as u64))
 }
 
 impl Lifecycle {

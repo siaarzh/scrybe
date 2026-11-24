@@ -6,7 +6,8 @@ use crate::config::{data_dir, Settings};
 use crate::embed;
 use crate::embed_api::{self, Entry, Halving};
 use crate::git;
-use crate::jsstr::normalize_content;
+use crate::jobs::{append_log, diag};
+use crate::jsstr::{env_int, normalize_content};
 use crate::phase::{self, Outcome, Phase};
 use crate::registry::{self, EmbedConfig, Source};
 use crate::scan;
@@ -142,8 +143,9 @@ fn dedupe(rows: Vec<(Chunk, Vec<f32>)>) -> Vec<(Chunk, Vec<f32>)> {
 pub(crate) fn expected_dimensions(cfg: &EmbedConfig, text: bool) -> i32 {
     let meta: Option<Value> = std::fs::read_to_string(data_dir().join("embedding-meta.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
     let from_meta = meta.and_then(|m| {
-        let own = if text { m["text"]["dimensions"].as_i64() } else { None };
-        own.or(m["code"]["dimensions"].as_i64()).or(m["dimensions"].as_i64())
+        let given = |v: &Value| v.as_i64().filter(|d| *d != 0);
+        let own = if text { given(&m["text"]["dimensions"]) } else { None };
+        own.or(given(&m["code"]["dimensions"])).or(given(&m["dimensions"]))
     });
     from_meta.map_or(cfg.dimensions, |d| d as i32)
 }
@@ -152,24 +154,110 @@ pub(crate) fn expected_dimensions(cfg: &EmbedConfig, text: bool) -> i32 {
 /// code also tries a version rollback, but it calls a method the LanceDB package doesn't have, so it never
 /// runs and that branch isn't ported. Returns the table's state and how it was repaired.
 pub(crate) async fn repair_if_corrupt(store: &Store, table: &str, project: &str, source: &str, cfg: &EmbedConfig, text: bool) -> (&'static str, &'static str) {
-    match store.table_health(table, Some(expected_dimensions(cfg, text))).await {
-        Health::Corrupt(reason) => {
-            eprintln!("[scrybe] table {table} is corrupt ({reason}): rebuilding");
+    match store.table_health(table, Some(expected_dimensions(cfg, text)), true).await {
+        Health::Corrupt(fault) => {
+            eprintln!("[scrybe] table {table} is corrupt ({}): rebuilding", fault.reason);
             let mut repaired = "none";
             if store.drop_table_and_files(table).await.is_ok() {
                 repaired = "rebuild";
-                let line = json!({ "ts": now_iso(), "event": "health.repaired-via-rebuild", "projectId": project, "sourceId": source });
-                let log = std::env::var_os("SCRYBE_DAEMON_LOG_PATH").map_or_else(|| data_dir().join("daemon-log.jsonl"), PathBuf::from);
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
-                    use std::io::Write;
-                    let _ = writeln!(f, "{line}");
-                }
+                debug_emit(json!({ "event": "indexer.repaired", "projectId": project, "sourceId": source, "method": "rebuild" }));
+                append_log(&json!({ "ts": now_iso(), "event": "health.repaired-via-rebuild", "projectId": project, "sourceId": source }).to_string());
             }
             ("corrupt", repaired)
         }
         Health::Healthy => ("healthy", "none"),
         Health::Unknown => ("unknown", "none"),
     }
+}
+
+/// `debugEmit`: only with SCRYBE_DEBUG_INDEXER=1.
+pub(crate) fn debug_emit(record: Value) {
+    if !debug_indexer() {
+        return;
+    }
+    let mut line = json!({ "ts": now_iso(), "debug": true });
+    for (k, v) in record.as_object().into_iter().flatten() {
+        line[k] = v.clone();
+    }
+    append_log(&line.to_string());
+}
+
+/// The indexer's records in the server log, stamped with the run they belong to.
+pub(crate) struct Records {
+    project: String,
+    source: String,
+    branch: String,
+    mode: &'static str,
+    started: std::time::Instant,
+}
+
+impl Records {
+    pub(crate) fn new(project: &str, source: &str, branch: &str, mode: Mode) -> Self {
+        Records { project: project.into(), source: source.into(), branch: branch.into(), mode: if mode == Mode::Full { "full" } else { "incremental" }, started: std::time::Instant::now() }
+    }
+
+    fn stamped(&self, event: &str, with_mode: bool, fields: Value) -> Value {
+        let mut record = json!({ "event": event, "projectId": self.project, "sourceId": self.source, "branch": self.branch });
+        if with_mode {
+            record["mode"] = json!(self.mode);
+        }
+        for (k, v) in fields.as_object().into_iter().flatten() {
+            record[k] = v.clone();
+        }
+        record
+    }
+
+    pub(crate) fn scanned(&self, total: usize, to_index: usize, to_remove: &[String], old: usize, current: usize) {
+        debug_emit(self.stamped("indexer.phase1", true, json!({ "oldHashesCount": old, "currentSourcesCount": current, "toRemove": to_remove, "toReindexCount": to_index })));
+        diag(self.stamped("indexer.scan.completed", true, json!({ "files_total": total, "files_to_reindex": to_index, "files_to_remove": to_remove.len() })));
+    }
+
+    pub(crate) fn removed(&self, path: &str) {
+        debug_emit(self.stamped("indexer.applyFile", false, json!({ "path": path, "kind": "removed" })));
+    }
+
+    pub(crate) fn deduplicated(&self, dropped: usize) {
+        if dropped > 0 {
+            diag(self.stamped("indexer.flush.intra_batch_dedup", false, json!({ "intra_batch_dupes": dropped })));
+        }
+    }
+
+    pub(crate) fn written(&self, rows: usize, added: usize, cumulative: usize) {
+        if debug_indexer() {
+            diag(self.stamped("indexer.write.completed", false, json!({ "chunks_in_batch": rows, "chunks_actually_added": added, "cumulative_chunks_persisted": cumulative })));
+        }
+    }
+
+    pub(crate) fn embedded(&self, chunks: usize, took: std::time::Duration, cumulative: usize) {
+        if debug_indexer() {
+            diag(self.stamped("indexer.embed.batch", false, json!({ "batch_size": chunks, "batch_ms": took.as_millis() as u64, "cumulative_chunks_embedded": cumulative })));
+        }
+    }
+
+    pub(crate) fn pruned(&self, removed: usize, freed: u64) {
+        if removed > 0 {
+            debug_emit(json!({ "event": "indexer.pruneOrphans", "projectId": self.project, "sourceId": self.source, "removed": removed, "bytesFreed": freed }));
+        }
+    }
+
+    /// `result` is what the run answers with.
+    pub(crate) fn finished(&self, result: &Value) {
+        debug_emit(self.stamped("indexer.result", true, json!({ "chunksIndexed": result["chunks_prepared"], "filesScanned": result["files_scanned"], "filesReindexed": result["files_reindexed"], "filesRemoved": result["files_removed"] })));
+        let mut fields = json!({});
+        for k in ["files_scanned", "files_reindexed", "chunks_prepared", "chunks_persisted"] {
+            fields[k] = result[k].clone();
+        }
+        fields["total_ms"] = json!(self.started.elapsed().as_millis() as u64);
+        diag(self.stamped("indexer.job.summary", true, fields));
+    }
+
+    pub(crate) fn sha_not_saved(&self, error: &anyhow::Error) {
+        diag(self.stamped("indexer.branch_state.write_failed", false, json!({ "error": format!("{error:#}") })));
+    }
+}
+
+fn debug_indexer() -> bool {
+    std::env::var("SCRYBE_DEBUG_INDEXER").as_deref() == Ok("1")
 }
 
 fn cursor_present(project: &str, source: &str) -> bool {
@@ -197,6 +285,7 @@ struct Run<'a> {
     started: std::time::Instant,
     bytes_embedded: u64,
     phase: Phase,
+    records: Records,
     options: &'a Options,
 }
 
@@ -213,6 +302,7 @@ impl Run<'_> {
         if batches.is_empty() {
             return Ok(());
         }
+        let batch_started = std::time::Instant::now();
         let chunk_count: usize = batches.iter().map(|(_, chunks)| chunks.len()).sum();
         let persisted_before = self.persisted;
         let mut texts = vec![];
@@ -233,12 +323,14 @@ impl Run<'_> {
             let new_ids: HashSet<&str> = owners.iter().map(|c| c.chunk_id.as_str()).collect();
             self.files_reindexed += batches.iter().filter(|(_, chunks)| chunks.iter().any(|c| new_ids.contains(c.chunk_id.as_str()))).count();
             let rows = dedupe(owners.iter().cloned().zip(vectors).collect());
+            self.records.deduplicated(owners.len() - rows.len());
             let before = self.store.count_rows(&self.table).await.unwrap_or(0);
             self.store.upsert_code(&self.table, &rows).await?;
             let after = self.store.count_rows(&self.table).await.unwrap_or(0);
             let added = after.saturating_sub(before);
             self.persisted += added;
             vecindex::record_upsert(&self.table, added, after);
+            self.records.written(rows.len(), added, self.persisted);
             self.phase.sample();
         }
         for (key, chunks) in batches.iter() {
@@ -253,6 +345,7 @@ impl Run<'_> {
         self.options.report(Progress::Embed(self.prepared));
         save_hashes(&self.hash_path, &self.hashes)?;
         self.bytes_embedded += batch_bytes;
+        self.records.embedded(chunk_count, batch_started.elapsed(), self.prepared);
         self.phase.add_work(&[
             ("batches", 1),
             ("chunks_prepared", chunk_count as u64),
@@ -302,6 +395,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     let settings = Settings::from_env();
 
     let ctx = phase::Ctx { project_id: project_id.to_string(), source_id: source_id.to_string(), job_id: options.job_id.clone(), branch: branch.clone(), mode: if mode == Mode::Full { "full" } else { "incremental" } };
+    let records = Records::new(project_id, source_id, &branch, mode);
     phase::emit_job_intent(&ctx, "started", json!({ "is_code": true }));
     let provider = if embedding.local { "local" } else { "api" };
 
@@ -381,6 +475,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     diff_phase.sample();
     diff_phase.set_work(json!({ "files_total": current.len(), "prior_hashes": old_hashes.len(), "files_to_reindex": to_index.len(), "files_to_remove": to_remove.len() }));
     diff_phase.end(Outcome::Ok);
+    records.scanned(current.len(), to_index.len(), &to_remove, old_hashes.len(), current.len());
     phase::emit_job_intent(&ctx, "planned", json!({
         "files_total": current.len(),
         "files_to_reindex": if mode == Mode::Full { current.len() } else { to_index.len() },
@@ -404,6 +499,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
             writer.remove_file(p)?;
             hashes.remove(p);
             stale_phase.sample();
+            records.removed(p);
         }
         for p in &to_index {
             writer.remove_file(p)?;
@@ -425,8 +521,8 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     stale_phase.set_work(json!({ "files_to_reindex": to_index.len(), "files_to_remove": to_remove.len(), "known_chunk_ids": known.len(), "bytes_to_read": bytes_to_read }));
     stale_phase.end(Outcome::Ok);
 
-    let ceiling: usize = std::env::var("SCRYBE_EMBED_BATCH_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
-    let delay_ms: u64 = std::env::var("SCRYBE_EMBED_BATCH_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let ceiling = env_int("SCRYBE_EMBED_BATCH_SIZE").map_or(100, |n| n as usize);
+    let delay_ms = env_int("SCRYBE_EMBED_BATCH_DELAY_MS").map_or(0, |n| n as u64);
     let state_key = format!("{project_id}:{source_id}:{}:{}", if embedding.base_url.is_empty() { "local" } else { &embedding.base_url }, embedding.model);
     let state = (!embedding.local).then(|| embed_api::read_entry(&state_key)).flatten();
     let batch_size = if embedding.local { ceiling } else { embed_api::probe_size(state, ceiling) };
@@ -434,7 +530,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
 
     let mut phase = Phase::begin(&ctx, "chunk_embed");
     phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, options };
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, writer, hashes, hash_path, known, source_hash: current.clone(), batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), started, bytes_embedded: 0, phase, records, options };
     let mut batches: Vec<(String, Vec<Chunk>)> = vec![];
     let mut pending = 0;
     let mut chunks_seen = 0usize;
@@ -530,19 +626,16 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         compact_phase.set_work(json!({ "compacted": compacted }));
         compact_phase.end(Outcome::Ok);
         let mut prune_phase = Phase::begin(&ctx, "prune_orphans");
-        let removed = store.prune_index_orphans(&table);
+        let (removed, freed) = store.prune_index_orphans(&table);
+        run.records.pruned(removed, freed);
         prune_phase.set_work(json!({ "orphans_removed": removed }));
         prune_phase.end(Outcome::Ok);
         if mode == Mode::Full {
             vecindex::mark_full_reindex(&table);
         }
     }
-    if let Some(sha) = sha {
-        if let Err(e) = run.writer.set_last_indexed_sha(&sha) {
-            eprintln!("[scrybe] could not record the indexed commit: {e:#}");
-        }
-    }
-    Ok(json!({
+    store.invalidate_health(&table);
+    let result = json!({
         "status": "ok",
         "project_id": project_id,
         "source_id": source_id,
@@ -551,7 +644,14 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         "files_scanned": current.len(),
         "files_reindexed": run.files_reindexed,
         "files_removed": to_remove.len(),
-    }))
+    });
+    run.records.finished(&result);
+    if let Some(sha) = sha {
+        if let Err(e) = run.writer.set_last_indexed_sha(&sha) {
+            run.records.sha_not_saved(&e);
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

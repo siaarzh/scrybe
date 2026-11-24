@@ -12,6 +12,7 @@ mod ephemeral;
 mod git;
 mod github_issues;
 mod gitlab_issues;
+mod http;
 mod index;
 mod index_ticket;
 mod jobs;

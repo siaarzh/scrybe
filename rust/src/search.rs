@@ -8,6 +8,7 @@ use anyhow::Result;
 use futures::future::try_join_all;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use tokio::sync::Mutex;
 
 /// Above this many ids the branch filter runs after the query instead of in SQL.
@@ -175,6 +176,10 @@ pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: us
             let mut post: Option<HashSet<String>> = None;
             if !store.settings.skip_branch_filter && want != "*" {
                 let Some((_, ids)) = branches::resolve_for_search(project_id, &source.source_id, &want)? else {
+                    if std::env::var("SCRYBE_DEBUG_SEARCH").as_deref() == Ok("1") {
+                        // `console.debug` writes to standard output.
+                        let _ = writeln!(std::io::stdout(), "[scrybe:search] branch \"{want}\" unresolved for source {} (project {project_id}) — returning []", source.source_id);
+                    }
                     return Ok::<Vec<CodeHit>, anyhow::Error>(vec![]);
                 };
                 if ids.len() <= BRANCH_FILTER_INLINE_LIMIT {

@@ -5,7 +5,7 @@ use crate::branches;
 use crate::config::data_dir;
 use crate::index::{self, Mode, Options};
 use crate::registry;
-use crate::store::Store;
+use crate::store::{Fault, Health, Store};
 use anyhow::Result;
 use rusqlite::{params, types::Value as SqlValue, Connection};
 use serde_json::{json, Map, Value};
@@ -296,7 +296,7 @@ fn log_path() -> PathBuf {
     std::env::var_os("SCRYBE_DAEMON_LOG_PATH").map_or_else(|| data_dir().join("daemon-log.jsonl"), PathBuf::from)
 }
 
-fn append_log(line: &str) {
+pub(crate) fn append_log(line: &str) {
     let path = log_path();
     if std::fs::metadata(&path).is_ok_and(|m| m.len() >= MAX_LOG_BYTES) {
         let (a1, a2) = (format!("{}.1", path.display()), format!("{}.2", path.display()));
@@ -427,7 +427,7 @@ fn classify(message: &str) -> String {
 
 impl Queue {
     pub fn new(store: Arc<Store>) -> Result<Arc<Self>> {
-        let env_num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| *n > 0);
+        let env_num = |k: &str| crate::jsstr::env_pos_int(k).map(|n| n as usize);
         let cpus = std::thread::available_parallelism().map_or(2, |n| n.get());
         let (events, _) = broadcast::channel(256);
         Ok(Arc::new(Queue {
@@ -612,6 +612,8 @@ impl Queue {
                     event["detail"] = json!({ "jobId": item.job_id, "type": "gc", "orphans_deleted": orphans, "bytes_freed": freed });
                     auto = Some(json!({ "ts": now_iso(), "level": "info", "event": "auto-gc.completed", "projectId": item.project, "durationMs": ms, "detail": { "orphans_deleted": orphans, "bytes_freed": freed, "duration_ms": ms } }));
                     me.fire(JobEvent::Completed, &item);
+                    let (checker, checked) = (me.clone(), item.clone());
+                    me.rt.spawn(async move { checker.check_after_gc(&checked, purge).await });
                 }
                 Err(e) => {
                     let message = format!("{e:#}");
@@ -631,6 +633,36 @@ impl Queue {
             me.lock().active.remove(&item.job_id);
             me.drain();
         });
+    }
+
+    /// The server's look at its tables when it starts: each corrupt one is announced.
+    pub async fn check_tables(&self) {
+        for project in registry::list_projects() {
+            for (source, table, fault) in self.corrupt_sources(&project, None).await {
+                self.emit(json!({ "ts": now_iso(), "level": "warn", "event": "health.corrupt", "projectId": project.id, "sourceId": source, "detail": { "tableName": table, "reasons": [fault.reason], "details": fault.details } }));
+            }
+        }
+    }
+
+    /// Looks again after a gc: a table corrupt now was damaged by it.
+    async fn check_after_gc(&self, item: &Item, purge: bool) {
+        let Some(project) = registry::get_project(&item.project) else { return };
+        for (source, table, fault) in self.corrupt_sources(&project, item.source.as_deref()).await {
+            let detail = json!({ "tableName": table, "reasons": [fault.reason], "details": fault.details, "gcJobId": item.job_id, "gcMode": if purge { "purge" } else { "grace" } });
+            self.emit(json!({ "ts": now_iso(), "level": "error", "event": "health.post-gc-corruption-detected", "projectId": item.project, "sourceId": source, "detail": detail }));
+        }
+    }
+
+    async fn corrupt_sources(&self, project: &registry::Project, only: Option<&str>) -> Vec<(String, String, Fault)> {
+        let mut out = vec![];
+        for s in project.sources.iter().filter(|s| only.is_none_or(|o| o == s.source_id)) {
+            let (Some(table), Ok(emb)) = (&s.table_name, registry::resolve_embedding(s)) else { continue };
+            let dim = index::expected_dimensions(&emb, s.profile() == Some("text"));
+            if let Health::Corrupt(fault) = self.store.table_health(table, Some(dim), true).await {
+                out.push((s.source_id.clone(), table.clone(), fault));
+            }
+        }
+        out
     }
 
     /// `runGcJobHandler`: rows no branch refers to go, then the table is compacted.

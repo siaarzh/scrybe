@@ -7,9 +7,9 @@ use crate::store::db_path;
 use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 
-pub struct ModelSpec {
-    pub dim: i32,
-    pub profile: &'static str,
+struct ModelSpec {
+    dim: i32,
+    profile: &'static str,
 }
 
 /// `PROVIDERS[*].embedding_models`: provider, model, dimensions, profile.
@@ -35,7 +35,7 @@ fn provider_known(provider: &str) -> bool {
 }
 
 /// The catalog's embedding base URL; the local provider has none and the custom one takes it from the preset.
-pub fn provider_base_url(provider: &str) -> Option<&'static str> {
+fn provider_base_url(provider: &str) -> Option<&'static str> {
     match provider {
         "voyage" => Some("https://api.voyageai.com/v1"),
         "openai" => Some("https://api.openai.com/v1"),
@@ -44,7 +44,7 @@ pub fn provider_base_url(provider: &str) -> Option<&'static str> {
     }
 }
 
-pub fn model_spec(provider: &str, model: &str) -> Option<ModelSpec> {
+fn model_spec(provider: &str, model: &str) -> Option<ModelSpec> {
     MODELS.iter().find(|(p, m, _, _)| *p == provider && *m == model).map(|(_, _, dim, profile)| ModelSpec { dim: *dim, profile })
 }
 
@@ -107,13 +107,13 @@ fn validate(cfg: &Value) -> Option<String> {
 }
 
 /// `readScrybeConfig`: `None` when there is no file, an error when it can't be read or doesn't validate.
-fn read_scrybe_config() -> Result<Option<Value>> {
+pub fn read_scrybe_config() -> Result<Option<Value>> {
     let path = config_path();
     if !path.exists() {
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("Failed to read config.json: {e}"))?;
-    let parsed: Value = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("config.json is not valid JSON: {e}"))?;
+    let raw = std::fs::read(&path).map_err(|e| anyhow::anyhow!("Failed to read config.json: {e}"))?;
+    let parsed: Value = serde_json::from_str(&String::from_utf8_lossy(&raw)).map_err(|e| anyhow::anyhow!("config.json is not valid JSON: {e}"))?;
     if let Some(problem) = validate(&parsed) {
         bail!(problem);
     }
@@ -227,28 +227,18 @@ fn has(table: Option<&Map<String, Value>>, name: &str) -> bool {
     table.is_some_and(|t| t.contains_key(name)) || inherited(name)
 }
 
-/// What `credentials` turns into: every `${VAR}` must be set, and a daemon says how to fix it.
-fn check_env_refs(value: &str) -> Result<()> {
-    let re = regex::Regex::new(registry::ENV_REF)?;
-    for cap in re.captures_iter(value) {
-        let name = &cap[1];
-        if std::env::var_os(name).is_none() {
-            // These tools run only in the server.
-            bail!("env var {name} not set (referenced in scrybe config){}", registry::env_ref_remedy(name, false, true));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug)]
-struct Resolved {
-    provider: String,
-    model: String,
-    dim: Value,
+pub struct Resolved {
+    pub provider: String,
+    pub model: String,
+    pub dim: Value,
+    pub base_url: String,
+    /// Empty when the preset has none, or they were not asked for.
+    pub credentials: String,
 }
 
-/// `resolvePreset` for an embedding slot, credentials included.
-fn resolve_preset(name: &str, slot: &str, cfg: &Value) -> Result<Resolved> {
+/// `resolvePreset` for an embedding slot.
+pub fn resolve_preset(name: &str, slot: &str, cfg: &Value, with_credentials: bool) -> Result<Resolved> {
     let presets = cfg["embedding_presets"].as_object();
     let Some(preset) = presets.and_then(|p| p.get(name)) else {
         if inherited(name) {
@@ -258,12 +248,10 @@ fn resolve_preset(name: &str, slot: &str, cfg: &Value) -> Result<Resolved> {
     };
     let provider = preset["provider"].as_str().unwrap_or("");
     let model = preset["model"].as_str().unwrap_or("");
-    let dim = if provider == "custom" {
+    let (dim, base_url) = if provider == "custom" {
         let Some(dim) = preset.get("dim") else { bail!("custom preset \"{name}\" is missing required field \"dim\"") };
-        if text(preset, "base_url").is_none() {
-            bail!("custom preset \"{name}\" is missing required field \"base_url\"");
-        }
-        dim.clone()
+        let Some(base_url) = text(preset, "base_url") else { bail!("custom preset \"{name}\" is missing required field \"base_url\"") };
+        (dim.clone(), base_url)
     } else {
         if !provider_known(provider) {
             bail!("unknown provider: \"{provider}\"");
@@ -273,22 +261,21 @@ fn resolve_preset(name: &str, slot: &str, cfg: &Value) -> Result<Resolved> {
         if spec.profile != required && provider != "local" {
             bail!("preset \"{name}\" uses model \"{model}\" with profile \"{}\", but it is assigned to slot \"{slot}\" which requires profile \"{required}\"", spec.profile);
         }
-        json!(spec.dim)
+        (json!(spec.dim), provider_base_url(provider).unwrap_or(""))
     };
-    if let Some(from) = text(preset, "credentials_from") {
+    let raw = if let Some(from) = text(preset, "credentials_from") {
         let Some(source) = presets.and_then(|p| p.get(from)) else {
             bail!("preset \"{name}\" references credentials_from \"{from}\", but that preset does not exist");
         };
         if let Some(next) = text(source, "credentials_from") {
             bail!("preset \"{name}\" references credentials_from \"{from}\", which itself has credentials_from \"{next}\". credentials_from chains deeper than 1 level are not supported");
         }
-        if let Some(c) = text(source, "credentials") {
-            check_env_refs(c)?;
-        }
-    } else if let Some(c) = text(preset, "credentials") {
-        check_env_refs(c)?;
-    }
-    Ok(Resolved { provider: provider.to_string(), model: model.to_string(), dim })
+        text(source, "credentials")
+    } else {
+        text(preset, "credentials")
+    };
+    let credentials = raw.filter(|_| with_credentials).map(registry::resolve_env_ref).transpose()?.unwrap_or_default();
+    Ok(Resolved { provider: provider.to_string(), model: model.to_string(), dim, base_url: base_url.to_string(), credentials })
 }
 
 /// The `(model, dim, provider)` an embedding is stamped with.
@@ -316,7 +303,7 @@ fn triples_equal(a: &Option<Triple>, b: &Option<Triple>) -> bool {
 fn triple_of(name: &str, slot: &str, cfg: &Value) -> Option<Triple> {
     let preset = cfg["embedding_presets"].as_object()?.get(name)?;
     if preset["provider"] != "custom" {
-        return resolve_preset(name, slot, cfg).ok().map(|r| Triple { model: r.model, dim: r.dim, provider: r.provider });
+        return resolve_preset(name, slot, cfg, true).ok().map(|r| Triple { model: r.model, dim: r.dim, provider: r.provider });
     }
     let dim = preset.get("dim")?;
     text(preset, "base_url")?;
@@ -369,7 +356,7 @@ fn assign_inner(a: &Value) -> Result<Value> {
         if !has(cfg["embedding_presets"].as_object(), name) {
             bail!("Preset '{name}' not found in embedding_presets.");
         }
-        resolve_preset(name, key, &cfg)?;
+        resolve_preset(name, key, &cfg, true)?;
         let current = cfg["assignments"][key].as_str().filter(|s| !s.is_empty()).and_then(|n| triple_of(n, key, &cfg));
         let new = triple_of(name, key, &cfg);
         if current.is_some() && !triples_equal(&current, &new) {
@@ -412,24 +399,24 @@ mod tests {
 
     #[test]
     fn a_catalog_model_belongs_to_one_profile_and_local_fits_both_slots() {
-        assert!(resolve_preset("code-local", "code_preset", &cfg()).is_ok());
-        assert!(resolve_preset("code-local", "text_preset", &cfg()).is_ok());
-        let e = resolve_preset("text-api", "code_preset", &cfg()).unwrap_err().to_string();
+        assert!(resolve_preset("code-local", "code_preset", &cfg(), true).is_ok());
+        assert!(resolve_preset("code-local", "text_preset", &cfg(), true).is_ok());
+        let e = resolve_preset("text-api", "code_preset", &cfg(), true).unwrap_err().to_string();
         assert_eq!(e, "preset \"text-api\" uses model \"voyage-4\" with profile \"text\", but it is assigned to slot \"code_preset\" which requires profile \"code\"");
     }
 
     #[test]
     fn credentials_must_resolve_and_may_be_borrowed_one_level() {
         std::env::remove_var("SCRYBE_TEST_PRESET_KEY");
-        let e = resolve_preset("text-api", "text_preset", &cfg()).unwrap_err().to_string();
-        assert!(e.starts_with("env var SCRYBE_TEST_PRESET_KEY not set (referenced in scrybe config). The daemon only has"), "{e}");
-        assert!(resolve_preset("borrow", "code_preset", &cfg()).is_err());
+        let e = resolve_preset("text-api", "text_preset", &cfg(), true).unwrap_err().to_string();
+        assert!(e.starts_with("env var SCRYBE_TEST_PRESET_KEY not set (referenced in scrybe config)"), "{e}");
+        assert!(resolve_preset("borrow", "code_preset", &cfg(), true).is_err());
         std::env::set_var("SCRYBE_TEST_PRESET_KEY", "k");
-        assert!(resolve_preset("text-api", "text_preset", &cfg()).is_ok());
-        assert!(resolve_preset("borrow", "code_preset", &cfg()).is_ok());
+        assert!(resolve_preset("text-api", "text_preset", &cfg(), true).is_ok());
+        assert!(resolve_preset("borrow", "code_preset", &cfg(), true).is_ok());
         let mut chained = cfg();
         chained["embedding_presets"]["text-api"]["credentials_from"] = json!("fake");
-        let e = resolve_preset("borrow", "code_preset", &chained).unwrap_err().to_string();
+        let e = resolve_preset("borrow", "code_preset", &chained, true).unwrap_err().to_string();
         assert!(e.contains("chains deeper than 1 level are not supported"), "{e}");
         std::env::remove_var("SCRYBE_TEST_PRESET_KEY");
     }
@@ -438,10 +425,10 @@ mod tests {
     fn a_custom_preset_needs_its_own_dimensions_and_url() {
         let mut c = cfg();
         c["embedding_presets"]["fake"].as_object_mut().unwrap().remove("dim");
-        assert_eq!(resolve_preset("fake", "code_preset", &c).unwrap_err().to_string(), "custom preset \"fake\" is missing required field \"dim\"");
+        assert_eq!(resolve_preset("fake", "code_preset", &c, true).unwrap_err().to_string(), "custom preset \"fake\" is missing required field \"dim\"");
         let mut c = cfg();
         c["embedding_presets"]["fake"]["base_url"] = json!("");
-        assert_eq!(resolve_preset("fake", "code_preset", &c).unwrap_err().to_string(), "custom preset \"fake\" is missing required field \"base_url\"");
+        assert_eq!(resolve_preset("fake", "code_preset", &c, true).unwrap_err().to_string(), "custom preset \"fake\" is missing required field \"base_url\"");
     }
 
     #[test]
@@ -477,7 +464,7 @@ mod tests {
         assert!(has(Some(&Map::new()), "__proto__"));
         assert!(!has(Some(&Map::new()), "fake"));
         assert!(has(cfg()["embedding_presets"].as_object(), "fake"));
-        assert_eq!(resolve_preset("toString", "code_preset", &cfg()).unwrap_err().to_string(), "unknown provider: \"undefined\"");
+        assert_eq!(resolve_preset("toString", "code_preset", &cfg(), true).unwrap_err().to_string(), "unknown provider: \"undefined\"");
     }
 
     #[test]

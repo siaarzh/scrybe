@@ -10,18 +10,7 @@ use std::time::{Duration, Instant};
 
 /// `parseInt` semantics: a leading integer, anything after it ignored; negative or unparsable falls back.
 fn env_int(name: &str, fallback: u64) -> u64 {
-    let raw = std::env::var(name).unwrap_or_default();
-    let s = raw.trim_start();
-    let (negative, digits) = match s.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, s.strip_prefix('+').unwrap_or(s)),
-    };
-    let digits: String = digits.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return fallback;
-    }
-    let value = digits.bytes().fold(0u64, |n, d| n.saturating_mul(10).saturating_add(u64::from(d - b'0')));
-    if negative && value != 0 { fallback } else { value }
+    crate::jsstr::env_int(name).filter(|n| n.is_finite() && *n >= 0.0).map_or(fallback, |n| n as u64)
 }
 
 fn cached(cell: &'static OnceLock<u64>, name: &str, fallback: u64) -> u64 {

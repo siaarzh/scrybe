@@ -404,7 +404,7 @@ async fn compact_all(store: &Arc<Store>, projects: &[registry::Project]) {
     let mut rows = vec![];
     for (project, source, table) in tables {
         let Ok(report) = store.compact_report(table, true).await else { continue };
-        let (removed, freed) = store.prune_index_orphans_measured(table);
+        let (removed, freed) = store.prune_index_orphans(table);
         rows.push((project, source, report, removed as u64, freed));
     }
     let (real, idle): (Vec<_>, Vec<_>) = rows.iter().partition(|(_, _, r, removed, _)| r.had_real_work || *removed > 0);

@@ -14,6 +14,7 @@ const MAX_CHARS_PER_TOKEN: usize = 64;
 
 pub struct Embedder {
     tokenizer: Tokenizer,
+    pad_id: i64,
     session: Mutex<Session>,
     wants_token_type_ids: bool,
     shrink_arena: bool,
@@ -71,6 +72,15 @@ pub(crate) fn ort_env() -> Result<&'static ort::environment::Environment> {
     Ok(ENV.get_or_init(|| env))
 }
 
+/// The token `tokenizer_config.json` names for padding, or failing that for the end of a text.
+fn pad_token(config: &str) -> Option<String> {
+    let config: serde_json::Value = serde_json::from_str(config).ok()?;
+    ["pad_token", "eos_token"].iter().find_map(|k| {
+        let v = &config[*k];
+        v.as_str().or(v["content"].as_str()).filter(|t| !t.is_empty()).map(String::from)
+    })
+}
+
 impl Embedder {
     /// transformers.js adds special tokens and then cuts at the limit, so a long text loses its end
     /// marker. Hugging Face's own truncation would keep it, and the vector would differ.
@@ -91,6 +101,8 @@ impl Embedder {
             anyhow::bail!("embedding model not found at {}", onnx.display());
         }
         let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
+        let config = std::fs::read_to_string(dir.join("tokenizer_config.json")).unwrap_or_default();
+        let pad_id = pad_token(&config).and_then(|t| tokenizer.token_to_id(&t)).or_else(|| tokenizer.token_to_id("<pad>")).unwrap_or(1) as i64;
         let mut builder = Session::builder(ort_env()?).map_err(|e| anyhow!("onnx: {e}"))?;
         builder = builder.with_intra_threads(thread_count()).map_err(|e| anyhow!("onnx: {e}"))?;
         if std::env::var("SCRYBE_ORT_MEM_PATTERN").as_deref() == Ok("0") {
@@ -117,7 +129,7 @@ impl Embedder {
         }
         let session = builder.commit_from_file(&onnx).map_err(|e| anyhow!("onnx: {e}"))?;
         let wants_token_type_ids = session.inputs().iter().any(|i| i.name() == "token_type_ids");
-        Ok(Embedder { tokenizer, session: Mutex::new(session), wants_token_type_ids, shrink_arena })
+        Ok(Embedder { tokenizer, pad_id, session: Mutex::new(session), wants_token_type_ids, shrink_arena })
     }
 
     /// Mean pooling over the attention mask, then L2 normalize.
@@ -160,8 +172,7 @@ impl Embedder {
         let encs: Vec<Vec<u32>> = texts.iter().map(|t| self.encode_ids(t)).collect::<Result<_>>()?;
         let n = encs.iter().map(Vec::len).max().unwrap_or(0);
         let rows = encs.len();
-        let pad = self.tokenizer.token_to_id("<pad>").unwrap_or(1) as i64;
-        let mut ids = vec![pad; rows * n];
+        let mut ids = vec![self.pad_id; rows * n];
         let mut mask = vec![0i64; rows * n];
         for (r, e) in encs.iter().enumerate() {
             for (c, &id) in e.iter().enumerate() {
@@ -276,7 +287,16 @@ fn download_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     // HTTP/1.1, as today's build fetches: one HTTP/2 stream's flow-control window caps a long-distance
     // download at about a third of the line speed.
-    CLIENT.get_or_init(|| reqwest::Client::builder().user_agent(crate::config::USER_AGENT).http1_only().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
+    CLIENT.get_or_init(|| crate::http::builder().http1_only().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(120)).build().expect("HTTP client"))
+}
+
+/// The access token for a request to the Hugging Face hub itself; no other host is sent one.
+fn hub_token(url: &str, env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || !matches!(url.host_str(), Some("huggingface.co" | "hf.co")) {
+        return None;
+    }
+    env("HF_TOKEN").or_else(|| env("HF_ACCESS_TOKEN")).filter(|t| !t.is_empty())
 }
 
 /// Called with the download's whole percent (0 to 99) each time it changes.
@@ -321,7 +341,11 @@ impl Meter {
 
 async fn download_file(url: &str, dest: &std::path::Path, meter: &mut Meter, index: usize) -> Result<()> {
     use tokio::io::AsyncWriteExt;
-    let mut resp = download_client().get(url).send().await.map_err(|e| anyhow!("fetch failed: {e}"))?;
+    let mut request = download_client().get(url);
+    if let Some(token) = hub_token(url, |k| std::env::var(k).ok()) {
+        request = request.bearer_auth(token);
+    }
+    let mut resp = request.send().await.map_err(|e| anyhow!("fetch failed: {e}"))?;
     if !resp.status().is_success() {
         anyhow::bail!("fetch failed: {} returned {}", url, resp.status());
     }
@@ -676,6 +700,28 @@ mod tests {
         let second = Embedder::load_from(&dir).unwrap().embed("fn main() {}").unwrap();
         assert_eq!(first, second);
         assert!(std::ptr::eq(ort_env().unwrap(), ort_env().unwrap()));
+    }
+
+    #[test]
+    fn the_padding_token_is_the_one_the_tokenizer_names() {
+        assert_eq!(pad_token(r#"{"pad_token":"[PAD]","eos_token":"</s>"}"#).as_deref(), Some("[PAD]"));
+        assert_eq!(pad_token(r#"{"pad_token":{"__type":"AddedToken","content":"<pad>"}}"#).as_deref(), Some("<pad>"));
+        assert_eq!(pad_token(r#"{"pad_token":null,"eos_token":"</s>"}"#).as_deref(), Some("</s>"));
+        assert_eq!(pad_token("{}"), None);
+    }
+
+    #[test]
+    fn the_hub_token_goes_to_the_hub_and_nowhere_else() {
+        let both = |k: &str| Some(k.to_string());
+        for url in ["https://huggingface.co/a/b", "http://hf.co/a"] {
+            assert_eq!(hub_token(url, both).as_deref(), Some("HF_TOKEN"), "{url}");
+        }
+        for url in ["https://huggingface.co.evil.example/a", "https://cdn.huggingface.co/a", "http://127.0.0.1:1/a", "ftp://hf.co/a", "nonsense"] {
+            assert_eq!(hub_token(url, both), None, "{url}");
+        }
+        let hf = "https://hf.co/a";
+        assert_eq!(hub_token(hf, |k| (k == "HF_ACCESS_TOKEN").then(|| "old".into())).as_deref(), Some("old"));
+        assert_eq!(hub_token(hf, |k| Some(if k == "HF_TOKEN" { "" } else { "old" }.into())), None, "an empty one still wins");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 //! Environment and data-dir resolution. Mirrors the read-side subset of `src/config.ts`.
+use crate::jsstr::{env_int, env_pos_int, js_trim};
 use std::collections::HashSet;
 use std::env;
 use std::path::PathBuf;
@@ -49,22 +50,26 @@ pub fn in_server() -> bool {
     IN_SERVER.load(Ordering::Relaxed)
 }
 
+/// The `KEY=value` lines of a `.env` file. Quotes are part of the value.
+fn env_lines(text: &str) -> Vec<(&str, &str)> {
+    let lines = text.split('\n').map(js_trim).filter(|l| !l.is_empty() && !l.starts_with('#'));
+    lines.filter_map(|l| l.split_once('=')).map(|(k, v)| (js_trim(k), js_trim(v))).filter(|(k, _)| !k.is_empty()).collect()
+}
+
 /// Load `<data dir>/.env`. OS env always wins. No rewriting: the read path never writes.
 pub fn load_env_file() {
-    let Ok(text) = std::fs::read_to_string(data_dir().join(".env")) else { return };
+    let Ok(bytes) = std::fs::read(data_dir().join(".env")) else { return };
+    let text = String::from_utf8_lossy(&bytes);
     let mut keys = HashSet::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    for (k, v) in env_lines(&text) {
+        // No environment can hold a NUL.
+        if k.contains('\0') || v.contains('\0') {
             continue;
         }
-        if let Some((k, v)) = line.split_once('=') {
-            let (k, v) = (k.trim(), v.trim().trim_matches('"').trim_matches('\''));
-            keys.insert(k.to_string());
-            if env::var_os(k).is_none() {
-                // Safe: runs in main before any thread starts.
-                unsafe { env::set_var(k, v) };
-            }
+        keys.insert(k.to_string());
+        if env::var_os(k).is_none() {
+            // Safe: runs in main before any thread starts.
+            unsafe { env::set_var(k, v) };
         }
     }
     let _ = DOT_ENV_KEYS.set(keys);
@@ -82,19 +87,30 @@ pub struct Settings {
 }
 
 fn pos_int(name: &str, fallback: u64) -> u64 {
-    env::var(name).ok().and_then(|v| v.parse::<f64>().ok()).filter(|n| n.is_finite() && *n > 0.0).map(|n| n as u64).unwrap_or(fallback)
+    env_pos_int(name).filter(|n| n.is_finite()).map_or(fallback, |n| n as u64)
 }
 
 impl Settings {
     pub fn from_env() -> Self {
         Settings {
             hybrid_enabled: env::var("SCRYBE_HYBRID").as_deref() != Ok("false"),
-            rrf_k: env::var("SCRYBE_RRF_K").ok().and_then(|v| v.parse().ok()).unwrap_or(60.0),
+            rrf_k: env_int("SCRYBE_RRF_K").unwrap_or(60.0),
             vector_index_enabled: env::var("SCRYBE_VECTOR_INDEX").as_deref() != Ok("false"),
             vector_index_min_rows: pos_int("SCRYBE_VECTOR_INDEX_MIN_ROWS", 10000) as usize,
             vector_refine_factor: pos_int("SCRYBE_VECTOR_REFINE_FACTOR", 10) as u32,
             vector_ef: pos_int("SCRYBE_VECTOR_EF", 600) as usize,
             skip_branch_filter: env::var("SCRYBE_SKIP_MIGRATION").as_deref() == Ok("1"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_files_keep_quotes_and_skip_what_has_no_name() {
+        let text = "\u{FEFF}A=1\r\n# no\n  B = \"x y\" \r\n=nameless\nC='q'\nD=\nno equals\nE=a=b#c\n\u{A0}F=2\u{A0}";
+        assert_eq!(env_lines(text), [("A", "1"), ("B", "\"x y\""), ("C", "'q'"), ("D", ""), ("E", "a=b#c"), ("F", "2")]);
     }
 }
