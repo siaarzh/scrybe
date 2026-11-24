@@ -60,6 +60,16 @@ pub fn read_projects() -> Result<Option<Vec<Project>>> {
     Ok(Some(serde_json::from_str(&std::fs::read_to_string(&path)?)?))
 }
 
+/// Project ids, or `None` when projects.json exists and can't be read as a list.
+pub fn project_ids_if_readable() -> Option<Vec<String>> {
+    let path = data_dir().join("projects.json");
+    if !path.exists() {
+        return Some(vec![]);
+    }
+    let list: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(list.as_array()?.iter().filter_map(|p| p["id"].as_str().map(String::from)).collect())
+}
+
 pub fn get_project(id: &str) -> Option<Project> {
     list_projects().into_iter().find(|p| p.id == id)
 }
@@ -147,15 +157,23 @@ fn catalog(provider: &str, model: &str) -> Result<(String, i32)> {
     Ok((base.to_string(), spec.dim))
 }
 
+/// `${VAR}` in a config value.
+pub const ENV_REF: &str = r"\$\{([A-Z_][A-Z0-9_]*)\}";
+
+/// What a `${VAR}` with no value says.
+pub fn unset_env_error(name: &str) -> anyhow::Error {
+    anyhow::Error::new(CallerFacing(format!("env var {name} not set (referenced in scrybe config){}", env_ref_remedy(name, false, crate::config::in_server()))))
+}
+
 /// `resolveEnvRef`: every `${VAR}` must be set.
 pub fn resolve_env_ref(value: &str) -> Result<String> {
-    let re = regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}")?;
+    let re = regex::Regex::new(ENV_REF)?;
     let mut out = String::new();
     let mut last = 0;
     for cap in re.captures_iter(value) {
         let (whole, name) = (cap.get(0).context("match")?, &cap[1]);
         let Ok(v) = std::env::var(name) else {
-            anyhow::bail!("env var {name} not set (referenced in scrybe config)");
+            return Err(unset_env_error(name));
         };
         out.push_str(&value[last..whole.start()]);
         out.push_str(&v);
@@ -165,15 +183,16 @@ pub fn resolve_env_ref(value: &str) -> Result<String> {
     Ok(out)
 }
 
-/// `daemonEnvRefRemedy` for a token checked before it is saved; empty outside the daemon.
-pub fn env_ref_remedy(name: &str, in_daemon: bool) -> String {
+/// `daemonEnvRefRemedy`, empty outside the server. `unsaved`: the token is checked before it is saved.
+pub fn env_ref_remedy(name: &str, unsaved: bool, in_daemon: bool) -> String {
     if !in_daemon {
         return String::new();
     }
-    if cfg!(target_os = "linux") {
+    if unsaved && cfg!(target_os = "linux") {
         return format!(". The daemon only receives variables your saved config already references, so restarting it alone won't help here: name the variable SCRYBE_<something>, list {name} in SCRYBE_DAEMON_ENV_PASSTHROUGH, or put it in <DATA_DIR>/.env, then run `scrybe daemon stop`; or run `scrybe daemon stop`, then add the source with `scrybe source add` from a terminal that has {name} set");
     }
-    format!(". The daemon only has the environment it was started with: run `scrybe daemon stop` and the next scrybe call starts one that has {name}, as long as that call's environment (or <DATA_DIR>/.env) has it")
+    let passthrough = if cfg!(target_os = "linux") { ". Names starting with SCRYBE_, and names listed in SCRYBE_DAEMON_ENV_PASSTHROUGH, reach the daemon even before config references them" } else { "" };
+    format!(". The daemon only has the environment it was started with: run `scrybe daemon stop` and the next scrybe call starts one that has {name}, as long as that call's environment (or <DATA_DIR>/.env) has it{passthrough}")
 }
 
 /// An error whose text is meant for the caller, like `markCallerFacing`.
@@ -190,9 +209,9 @@ impl std::error::Error for CallerFacing {}
 
 /// What the token check says when the token is a `${VAR}` that isn't set.
 pub fn unset_token_error(label: &str, project_id: &str, token: &str, in_daemon: bool) -> anyhow::Error {
-    let found = regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}").ok().and_then(|re| re.captures(token).map(|c| c[1].to_string()));
+    let found = regex::Regex::new(ENV_REF).ok().and_then(|re| re.captures(token).map(|c| c[1].to_string()));
     let name = found.clone().unwrap_or_else(|| token.to_string());
-    let remedy = if found.is_some() { env_ref_remedy(&name, in_daemon) } else { String::new() };
+    let remedy = if found.is_some() { env_ref_remedy(&name, true, in_daemon) } else { String::new() };
     anyhow::Error::new(CallerFacing(format!("Token for {label} source \"{project_id}\" references env var {name} which is not set. Set it in your environment or in <DATA_DIR>/.env: {name}=<your-token>{remedy}")))
 }
 
@@ -443,7 +462,7 @@ pub fn is_searchable(source: &Source) -> (bool, Option<String>) {
         return (true, None);
     }
     if std::env::var(var).unwrap_or_default().is_empty() {
-        return (false, Some(format!("Requires env var {var} (model: {}) — not set in current environment", preset.model)));
+        return (false, Some(format!("Requires env var {var} (model: {}) — not set in current environment{}", preset.model, env_ref_remedy(var, false, crate::config::in_server()))));
     }
     (true, None)
 }

@@ -96,7 +96,7 @@ pub fn branches_for_chunks(project: &str, source: &str, chunk_ids: &[String]) ->
     Ok(map)
 }
 
-pub const SCHEMA: &str = "
+const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS branch_tags (
       project_id  TEXT NOT NULL,
       source_id   TEXT NOT NULL,
@@ -142,6 +142,25 @@ pub const SCHEMA: &str = "
     INSERT OR IGNORE INTO schema_meta(key,value) VALUES('version','1');
 ";
 
+/// Read-only check, so opening an existing database never waits on another process's write lock.
+fn schema_is_complete(conn: &Connection) -> bool {
+    let objects: Vec<&str> = SCHEMA.split("IF NOT EXISTS ").skip(1).filter_map(|rest| rest.split([' ', '(']).next()).collect();
+    let marks = vec!["?"; objects.len()].join(",");
+    let found = conn.query_row(&format!("SELECT count(*) FROM sqlite_master WHERE name IN ({marks})"), rusqlite::params_from_iter(&objects), |r| r.get::<_, i64>(0));
+    found.is_ok_and(|n| n == objects.len() as i64) && conn.query_row("SELECT 1 FROM schema_meta WHERE key='version'", [], |_| Ok(())).is_ok()
+}
+
+/// `branch-tags.db` open for writing, its schema created if it isn't there yet.
+pub fn open_rw(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    if !schema_is_complete(&conn) {
+        conn.execute_batch(SCHEMA)?;
+    }
+    Ok(conn)
+}
+
 /// Read-write side, used only by the indexer. Same schema and statements as `src/branch-state.ts`.
 pub struct Writer {
     conn: Connection,
@@ -152,10 +171,7 @@ pub struct Writer {
 
 impl Writer {
     pub fn open(project: &str, source: &str, branch: &str) -> Result<Self> {
-        let conn = Connection::open(data_dir().join("branch-tags.db"))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.busy_timeout(Duration::from_secs(5))?;
-        conn.execute_batch(SCHEMA)?;
+        let conn = open_rw(&data_dir().join("branch-tags.db"))?;
         Ok(Writer { conn, project: project.into(), source: source.into(), branch: branch.into() })
     }
 
@@ -198,4 +214,28 @@ pub fn all_chunk_ids_for_source(writer: &Writer, project: &str, source: &str) ->
     let mut stmt = writer.conn.prepare("SELECT DISTINCT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?")?;
     let rows = stmt.query_map([project, source], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_existing_database_opens_while_another_process_is_writing() {
+        let dir = std::env::temp_dir().join(format!("scrybe-branches-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("branch-tags.db");
+        let first = open_rw(&path).unwrap();
+        assert!(schema_is_complete(&first));
+        first.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let asked = std::time::Instant::now();
+        open_rw(&path).unwrap();
+        assert!(asked.elapsed() < Duration::from_secs(2), "opening must not wait for the write lock");
+        first.execute_batch("ROLLBACK; DROP TABLE branch_state").unwrap();
+        assert!(!schema_is_complete(&first));
+        assert!(schema_is_complete(&open_rw(&path).unwrap()), "a missing table is made again");
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

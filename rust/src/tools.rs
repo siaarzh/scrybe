@@ -17,11 +17,13 @@ pub struct ToolError {
     pub message: String,
     pub error_type: Option<&'static str>,
     pub details: Option<Value>,
+    /// Safe to show the caller as it is.
+    pub caller_facing: bool,
 }
 
 impl From<anyhow::Error> for ToolError {
     fn from(e: anyhow::Error) -> Self {
-        ToolError { message: format!("{e:#}"), error_type: None, details: None }
+        ToolError { message: format!("{e:#}"), error_type: None, details: None, caller_facing: e.downcast_ref::<crate::registry::CallerFacing>().is_some() }
     }
 }
 
@@ -68,12 +70,14 @@ fn check_health(project_id: &str, only: Option<&str>) -> ToolResult<()> {
             continue;
         }
         let Some(table) = &s.table_name else { continue };
+        registry::resolve_embedding(s)?;
         if needs_migration(table) {
             let cmd = format!("scrybe migrate --source-id {} --project-id {project_id}", s.source_id);
             return Err(ToolError {
                 message: format!("Source '{project_id}/{}' uses an old chunk-ID scheme. Run: {cmd}", s.source_id),
                 error_type: Some("needs_migration"),
                 details: Some(json!({ "project_id": project_id, "source_id": s.source_id, "table_name": table, "migrate_command": cmd })),
+                caller_facing: false,
             });
         }
     }

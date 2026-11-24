@@ -159,7 +159,7 @@ pub fn validate_params(tool: &str, schema: &Value, params: &Value) -> Result<(),
 }
 
 /// Bad content from the caller is safe to echo. Anything else stays masked, like the daemon's RPC route.
-/// Only the two search tools mark their errors this way today.
+/// Besides errors marked where they arise, only the two search tools' do this today.
 fn caller_facing(tool: &str, message: &str) -> bool {
     matches!(tool, "search_code" | "search_knowledge") && ((message.starts_with("Project '") && message.ends_with("not found")) || message.starts_with("NO_CODE_SOURCES") || message.starts_with("NO_KNOWLEDGE_SOURCES"))
 }
@@ -179,7 +179,7 @@ pub async fn rpc(store: &Store, req: &Value) -> String {
     }
     match run_tool(store, name, &args).await {
         Ok(Ok(text)) => format!(r#"{{"id":{id},"result":{text}}}"#),
-        Ok(Err(e)) if caller_facing(name, &e.message) => fail(-32602, &e.message),
+        Ok(Err(e)) if e.caller_facing || caller_facing(name, &e.message) => fail(-32602, &e.message),
         Ok(Err(e)) => {
             eprintln!("tool {name} failed: {}", e.message);
             fail(-32603, "internal error")

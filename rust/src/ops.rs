@@ -1,9 +1,10 @@
 //! The `gc`, `ignore` and `daemon` commands. Mirrors the same-named commands in `src/cli.ts`.
 use crate::cli::{finish, need, say, show};
-use crate::jobs::Queue;
+use crate::jobs::{diag, Queue};
 use crate::jsstr::js_trim;
+use crate::locks::{self, Lock};
 use crate::store::Store;
-use crate::{config, manage, registry, tools};
+use crate::{config, manage, registry, spawn, tools};
 use anyhow::{anyhow, Result};
 use clap::{Args, Subcommand};
 use serde_json::{json, Value};
@@ -586,39 +587,31 @@ pub(crate) fn in_container() -> bool {
         || std::env::var_os("WSL_DISTRO_NAME").is_some()
 }
 
-/// On Windows a child inherits every inheritable handle, so it would hold this process's own output pipes open after it exits.
-#[cfg(windows)]
-fn stop_inheriting_std_handles() {
-    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
-    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: the handles are this process's own standard ones.
-        unsafe {
-            let handle = GetStdHandle(id);
-            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
-                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
-            }
-        }
+/// Ok(draining) when the server in the pidfile answers.
+async fn probe_server(left: Duration) -> Option<bool> {
+    let (_, port) = pidfile().filter(|(_, port)| *port > 0)?;
+    let left = left.clamp(Duration::from_millis(250), Duration::from_secs(2));
+    let res = client(left).unwrap_or_default().get(format!("http://127.0.0.1:{port}/health")).send().await.ok()?;
+    if !res.status().is_success() {
+        return None;
     }
+    Some(res.json::<Value>().await.is_ok_and(|h| h["draining"] == true))
 }
 
-/// The Rust server, detached from this terminal and with no output of its own.
-fn spawn_server() -> std::io::Result<()> {
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+/// Waits for a server that isn't on its way out. At least one probe is made however late it is.
+async fn wait_for_server(deadline: Instant) -> Result<bool, &'static str> {
+    let mut draining = false;
+    loop {
+        match probe_server(deadline.saturating_duration_since(Instant::now())).await {
+            Some(false) => return Ok(false),
+            Some(true) => draining = true,
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            return if draining { Ok(true) } else { Err("health-timeout") };
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000 | 0x0000_0200);
-        stop_inheriting_std_handles();
-    }
-    cmd.spawn().map(|_| ())
 }
 
 /// `ensureRunning` as `daemon up` uses it: Ok(draining) once a server answers, Err(reason) otherwise.
@@ -630,36 +623,32 @@ async fn ensure_running(budget: Duration) -> Result<bool, &'static str> {
         return Err("container");
     }
     let deadline = Instant::now() + budget;
-    let (mut spawned, mut draining) = (false, false);
-    loop {
-        let port = pidfile().map(|(_, port)| port).filter(|p| *p > 0);
-        let up = match port {
-            Some(port) => {
-                let left = deadline.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(250), Duration::from_secs(2));
-                let res = client(left).unwrap_or_default().get(format!("http://127.0.0.1:{port}/health")).send().await;
-                match res {
-                    Ok(r) if r.status().is_success() => {
-                        if r.json::<Value>().await.is_ok_and(|h| h["draining"] == true) {
-                            draining = true;
-                            false
-                        } else {
-                            return Ok(false);
-                        }
-                    }
-                    _ => false,
-                }
-            }
-            None => false,
-        };
-        if !up && !draining && !spawned {
-            spawn_server().map_err(|_| "spawn-failed")?;
-            spawned = true;
-        }
-        if Instant::now() >= deadline {
-            return if draining { Ok(true) } else { Err("health-timeout") };
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    let left = || deadline.saturating_duration_since(Instant::now());
+    match probe_server(left()).await {
+        Some(false) => return Ok(false),
+        Some(true) => return wait_for_server(deadline).await,
+        None => {}
     }
+    // Only one process at a time looks and starts; the others wait for its server.
+    let lock = locks::acquire(locks::SPAWN);
+    match &lock {
+        Lock::Contended(holder) => {
+            diag(json!({ "level": "warn", "event": "daemon.spawn.contended", "heldByPid": holder, "timeoutMs": budget.as_millis() as u64 }));
+            return wait_for_server(deadline).await;
+        }
+        Lock::Unavailable(message) => diag(json!({ "level": "warn", "event": "daemon.spawn.lock_unavailable", "errorCode": null, "errorMessage": message })),
+        Lock::Acquired(_) => {
+            if let Some(draining) = probe_server(left()).await {
+                return Ok(draining);
+            }
+        }
+    }
+    let budget = left();
+    let started = tokio::task::spawn_blocking(move || spawn::spawn_server(budget)).await;
+    if !matches!(started, Ok(Ok(()))) {
+        return Err("spawn-failed");
+    }
+    wait_for_server(deadline).await
 }
 
 async fn up(verbose: bool) -> Result<()> {

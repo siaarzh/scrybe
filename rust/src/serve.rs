@@ -11,6 +11,7 @@ use crate::presets;
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
 use crate::lifecycle::Lifecycle;
+use crate::locks::{self, Lock};
 use crate::manage;
 use crate::mcp;
 use crate::registry;
@@ -506,8 +507,12 @@ impl Daemon {
     }
 }
 
+/// Held for the server's life; `None` on a data dir that can't hold a lock.
+static OWNER: Mutex<Option<locks::Held>> = Mutex::new(None);
+
 fn leave() -> ! {
     let _ = std::fs::remove_file(data_dir().join("daemon.pid"));
+    drop(OWNER.lock().unwrap_or_else(|e| e.into_inner()).take());
     std::process::exit(0)
 }
 
@@ -732,27 +737,57 @@ async fn wait_for_signal() -> &'static str {
     "SIGINT"
 }
 
+/// `reconcileJobsAtStartup`: a failure is reported and the server goes on.
+fn close_orphaned_jobs(queue: &Queue, cutoff: i64) {
+    match queue.rows.reconcile(cutoff, registry::project_ids_if_readable().as_deref()) {
+        Err(e) => eprintln!("[scrybe daemon] job reconciliation failed: {e:#}"),
+        Ok(r) if r.interrupted + r.cancelled > 0 => {
+            let detail = json!({ "interrupted": r.interrupted, "cancelled": r.cancelled, "sampleJobIds": r.sample, "cutoffMs": cutoff });
+            queue.push(json!({ "ts": jobs::now_iso(), "level": "info", "event": "jobs.reconciled", "detail": detail }));
+            jobs::diag(json!({ "level": "info", "event": "jobs.reconciled", "detail": detail }));
+        }
+        Ok(_) => {}
+    }
+}
+
 pub async fn serve(store: Store) -> Result<()> {
     // daemon.pid would point real clients at this unfinished server.
     refuse_live_data_dir()?;
     std::fs::create_dir_all(data_dir())?;
+    crate::config::mark_server();
     // Same lock file as the TypeScript daemon: the operating system drops it if this process dies.
-    let owner = rusqlite::Connection::open(data_dir().join("daemon-owner.lock.db"))?;
-    owner.busy_timeout(Duration::ZERO)?;
-    if owner.execute_batch("BEGIN IMMEDIATE").is_err() {
-        eprintln!("another server owns this data dir");
-        return Ok(());
+    let owned_since = match locks::acquire(locks::OWNER) {
+        Lock::Acquired(held) => {
+            let at = held.at_ms;
+            *OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some(held);
+            Some(at)
+        }
+        Lock::Contended(holder) => {
+            jobs::diag(json!({ "level": "warn", "event": "daemon.ownership.contended", "dataDir": data_dir().to_string_lossy(), "heldByPid": holder }));
+            eprintln!("another server owns this data dir");
+            return Ok(());
+        }
+        Lock::Unavailable(message) => {
+            jobs::diag(json!({ "level": "error", "event": "daemon.ownership.unavailable", "dataDir": data_dir().to_string_lossy(), "errorCode": null, "errorMessage": message }));
+            None
+        }
+    };
+    let exec = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    jobs::diag(json!({ "level": "info", "event": "daemon.start", "version": VERSION, "dataDir": data_dir().to_string_lossy(), "modulePath": exec }));
+    let mut prediction = json!({ "level": "info", "event": "daemon.memory-cap.next-spawn-prediction" });
+    for (k, v) in crate::spawn::cap_prediction().as_object().into_iter().flatten() {
+        prediction[k] = v.clone();
     }
+    jobs::diag(prediction);
     let listener = bind_sticky().await?;
     let port = listener.local_addr()?.port();
     let store = Arc::new(store);
     let queue = Queue::new(store.clone())?;
-    let interrupted = queue.rows.mark_interrupted()?;
-    if interrupted > 0 {
-        eprintln!("[scrybe] marked {interrupted} job(s) from an earlier server as interrupted");
+    // Only the lock holder may treat jobs queued before it took the lock as left behind.
+    if let Some(cutoff) = owned_since {
+        close_orphaned_jobs(&queue, cutoff);
     }
     let started_iso = jobs::now_iso();
-    let exec = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let pid = json!({ "pid": std::process::id(), "port": port, "startedAt": started_iso, "version": VERSION, "dataDir": data_dir().to_string_lossy(), "execPath": exec });
     std::fs::write(data_dir().join("daemon.pid"), pid.to_string())?;
     eprintln!("[scrybe daemon] started pid={} port={port} dataDir={}", std::process::id(), data_dir().display());
@@ -760,7 +795,6 @@ pub async fn serve(store: Store) -> Result<()> {
     let now = Instant::now();
     let (idle, health) = (Arc::new(Idle::from_env()), Arc::new(WatchHealth::default()));
     let d = Arc::new(Daemon { store, queue: queue.clone(), autogc: AutoGc::new(queue.clone()), backfill: vecindex::Backfill::new(queue.clone()), lifecycle: Mutex::new(Lifecycle::from_env(now)), idle: idle.clone(), health: health.clone(), paused: AtomicBool::new(false), started_at: now, started_iso, port, draining: AtomicBool::new(false), closing: AtomicBool::new(false), shutting_down: AtomicBool::new(false) });
-    let _owner = owner;
     d.autogc.start();
     d.backfill.start();
     let projects = registry::list_projects();

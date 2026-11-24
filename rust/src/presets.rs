@@ -229,12 +229,12 @@ fn has(table: Option<&Map<String, Value>>, name: &str) -> bool {
 
 /// What `credentials` turns into: every `${VAR}` must be set, and a daemon says how to fix it.
 fn check_env_refs(value: &str) -> Result<()> {
-    let re = regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)\}")?;
+    let re = regex::Regex::new(registry::ENV_REF)?;
     for cap in re.captures_iter(value) {
         let name = &cap[1];
         if std::env::var_os(name).is_none() {
-            let passthrough = if cfg!(target_os = "linux") { ". Names starting with SCRYBE_, and names listed in SCRYBE_DAEMON_ENV_PASSTHROUGH, reach the daemon even before config references them" } else { "" };
-            bail!("env var {name} not set (referenced in scrybe config). The daemon only has the environment it was started with: run `scrybe daemon stop` and the next scrybe call starts one that has {name}, as long as that call's environment (or <DATA_DIR>/.env) has it{passthrough}");
+            // These tools run only in the server.
+            bail!("env var {name} not set (referenced in scrybe config){}", registry::env_ref_remedy(name, false, true));
         }
     }
     Ok(())

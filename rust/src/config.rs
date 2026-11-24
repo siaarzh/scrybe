@@ -1,8 +1,11 @@
 //! Environment and data-dir resolution. Mirrors the read-side subset of `src/config.ts`.
+use std::collections::HashSet;
 use std::env;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
-pub const VERSION: &str = "0.53.2-rs.1";
+pub const VERSION: &str = "0.54.0-rs.1";
 
 pub fn data_dir() -> PathBuf {
     if let Ok(d) = env::var("SCRYBE_DATA_DIR") {
@@ -21,9 +24,27 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
+static DOT_ENV_KEYS: OnceLock<HashSet<String>> = OnceLock::new();
+static IN_SERVER: AtomicBool = AtomicBool::new(false);
+
+/// Keys `<data dir>/.env` defines; every server loads that file itself at start.
+pub fn in_dot_env(key: &str) -> bool {
+    DOT_ENV_KEYS.get().is_some_and(|k| k.contains(key))
+}
+
+/// From here on this process is the server, so errors can name the server-specific remedy.
+pub fn mark_server() {
+    IN_SERVER.store(true, Ordering::Relaxed);
+}
+
+pub fn in_server() -> bool {
+    IN_SERVER.load(Ordering::Relaxed)
+}
+
 /// Load `<data dir>/.env`. OS env always wins. No rewriting: the read path never writes.
 pub fn load_env_file() {
     let Ok(text) = std::fs::read_to_string(data_dir().join(".env")) else { return };
+    let mut keys = HashSet::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -31,12 +52,14 @@ pub fn load_env_file() {
         }
         if let Some((k, v)) = line.split_once('=') {
             let (k, v) = (k.trim(), v.trim().trim_matches('"').trim_matches('\''));
+            keys.insert(k.to_string());
             if env::var_os(k).is_none() {
                 // Safe: runs in main before any thread starts.
                 unsafe { env::set_var(k, v) };
             }
         }
     }
+    let _ = DOT_ENV_KEYS.set(keys);
 }
 
 #[derive(Clone, Debug)]

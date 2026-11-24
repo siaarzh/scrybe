@@ -52,15 +52,43 @@ fn ticket_config(config: &Value) -> TicketConfig {
 }
 
 /// `validateToken`: GitHub has its own check, every other provider is read as GitLab.
-async fn validate_token(config: &Value) -> Result<()> {
+async fn validate_token(config: &Value, in_server: bool) -> Result<()> {
     if config["type"] != "ticket" {
         return Ok(());
     }
     let cfg = ticket_config(config);
     if config["provider"] == "github" {
-        github_issues::validate_token(&cfg, true).await
+        github_issues::validate_token(&cfg, in_server).await
     } else {
-        gitlab_issues::validate_token(&cfg, true).await
+        gitlab_issues::validate_token(&cfg, in_server).await
+    }
+}
+
+/// The ticket token's `${VAR}` a running server might lack: Linux only, and not one every server gets anyway.
+pub fn env_ref_to_check(config: &Value) -> Option<String> {
+    if !cfg!(target_os = "linux") || config["type"] != "ticket" {
+        return None;
+    }
+    let token = config["token"].as_str()?;
+    let name = regex::Regex::new(registry::ENV_REF).ok()?.captures(token)?[1].to_string();
+    (!crate::spawn::server_keeps(&name) && !crate::config::in_dot_env(&name)).then_some(name)
+}
+
+/// Whether the server in the pidfile lacks `name`; when its environment can't be read, whether config only now references it.
+fn running_server_lacks(name: &str, referenced_before: bool) -> bool {
+    use crate::spawn::ProcessNames;
+    let Some((pid, _)) = crate::ops::pidfile().filter(|(pid, _)| *pid > 0) else { return false };
+    match crate::spawn::process_env_names(pid) {
+        ProcessNames::Gone => false,
+        ProcessNames::Unreadable => !referenced_before,
+        ProcessNames::Names(names) => !names.contains(name),
+    }
+}
+
+/// Says on stderr when the running server can't read the token just saved.
+pub fn warn_if_server_lacks(name: &str, referenced_before: bool) {
+    if running_server_lacks(name, referenced_before) {
+        eprintln!("[scrybe] warning: the running daemon doesn't have {name}, so it can't read this source's token. Run `scrybe daemon stop`; the next scrybe call starts a daemon that has {name} if that call's environment does. To avoid this, name the variable SCRYBE_<something>, list it in SCRYBE_DAEMON_ENV_PASSTHROUGH, or put it in {}/.env.", crate::config::data_dir().display());
     }
 }
 
@@ -71,7 +99,7 @@ pub async fn prepare(a: &Value) -> Result<Value> {
         bail!("{}", status["config_error_message"].as_str().unwrap_or("embedding config error"));
     }
     let config = build_config(a);
-    validate_token(&config).await?;
+    validate_token(&config, crate::config::in_server()).await?;
     Ok(config)
 }
 
@@ -141,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn github_checks_the_user_endpoint_with_the_token() {
         let (url, seen) = serve_once("200 OK");
-        validate_token(&ticket("github", &url, "literal-token")).await.unwrap();
+        validate_token(&ticket("github", &url, "literal-token"), true).await.unwrap();
         let request = seen.recv().unwrap();
         assert!(request.starts_with("get /user http/1.1"), "{request}");
         assert!(request.contains("authorization: bearer literal-token"));
@@ -153,7 +181,7 @@ mod tests {
     async fn github_refuses_a_rejected_token_with_the_scopes_to_grant() {
         for status in ["401 Unauthorized", "403 Forbidden"] {
             let (url, _) = serve_once(status);
-            let e = validate_token(&ticket("github", &url, "t")).await.unwrap_err().to_string();
+            let e = validate_token(&ticket("github", &url, "t"), true).await.unwrap_err().to_string();
             let code = &status[..3];
             assert_eq!(e, format!("GitHub token for project \"acme/widgets\" is invalid or lacks required permissions (HTTP {code}). Ensure the token has Issues: Read-only and Metadata: Read-only scopes (fine-grained PAT) or repo/public_repo (classic PAT)."));
         }
@@ -162,14 +190,14 @@ mod tests {
     #[tokio::test]
     async fn github_names_any_other_failure() {
         let (url, _) = serve_once("500 Internal Server Error");
-        let e = validate_token(&ticket("github", &url, "t")).await.unwrap_err().to_string();
+        let e = validate_token(&ticket("github", &url, "t"), true).await.unwrap_err().to_string();
         assert_eq!(e, "GitHub API error 500 Internal Server Error during token validation");
     }
 
     #[tokio::test]
     async fn gitlab_reads_the_project_with_the_token() {
         let (url, seen) = serve_once("200 OK");
-        validate_token(&ticket("gitlab", &url, "literal-token")).await.unwrap();
+        validate_token(&ticket("gitlab", &url, "literal-token"), true).await.unwrap();
         let request = seen.recv().unwrap();
         assert!(request.starts_with("get /api/v4/projects/acme%2fwidgets http/1.1"), "{request}");
         assert!(request.contains("authorization: bearer literal-token"));
@@ -179,7 +207,7 @@ mod tests {
     async fn gitlab_refuses_a_rejected_token_with_the_fix() {
         for status in ["401 Unauthorized", "403 Forbidden"] {
             let (url, _) = serve_once(status);
-            let e = validate_token(&ticket("gitlab", &url, "t")).await.unwrap_err().to_string();
+            let e = validate_token(&ticket("gitlab", &url, "t"), true).await.unwrap_err().to_string();
             let code = &status[..3];
             assert_eq!(e, format!("GitLab token for project \"acme/widgets\" is expired or invalid (HTTP {code}). Update it with: scrybe update-source --project-id acme/widgets --source-id <source-id> --gitlab-token <new-token>"));
         }
@@ -189,7 +217,7 @@ mod tests {
     async fn an_unset_variable_is_told_to_the_caller_before_any_request() {
         let token = "${SCRYBE_TEST_TOKEN_THAT_IS_NOT_SET}";
         for provider in ["github", "gitlab"] {
-            let e = validate_token(&ticket(provider, "http://127.0.0.1:1", token)).await.unwrap_err();
+            let e = validate_token(&ticket(provider, "http://127.0.0.1:1", token), true).await.unwrap_err();
             assert!(e.downcast_ref::<registry::CallerFacing>().is_some());
             let label = if provider == "github" { "GitHub" } else { "GitLab" };
             assert!(e.to_string().starts_with(&format!("Token for {label} source \"acme/widgets\" references env var SCRYBE_TEST_TOKEN_THAT_IS_NOT_SET which is not set. Set it in your environment or in <DATA_DIR>/.env: SCRYBE_TEST_TOKEN_THAT_IS_NOT_SET=<your-token>. The daemon only")), "{e}");
@@ -198,8 +226,8 @@ mod tests {
 
     #[test]
     fn the_remedy_is_empty_outside_the_server_and_names_the_variable_inside() {
-        assert_eq!(registry::env_ref_remedy("X_TOKEN", false), "");
-        let inside = registry::env_ref_remedy("X_TOKEN", true);
+        assert_eq!(registry::env_ref_remedy("X_TOKEN", true, false), "");
+        let inside = registry::env_ref_remedy("X_TOKEN", true, true);
         assert!(inside.starts_with(". The daemon only "), "{inside}");
         assert!(inside.contains("X_TOKEN"));
         assert!(inside.contains("scrybe daemon stop"));
@@ -209,6 +237,16 @@ mod tests {
     fn a_token_that_is_not_a_reference_is_named_as_it_is() {
         let e = registry::unset_token_error("GitLab", "7", "plain", true).to_string();
         assert_eq!(e, "Token for GitLab source \"7\" references env var plain which is not set. Set it in your environment or in <DATA_DIR>/.env: plain=<your-token>");
+    }
+
+    #[test]
+    fn only_a_ticket_token_the_server_might_lack_is_checked() {
+        let check = |kind: &str, token: &str| env_ref_to_check(&json!({ "type": kind, "token": token }));
+        let expected = cfg!(target_os = "linux").then(|| "GITLAB_PAT_X".to_string());
+        assert_eq!(check("ticket", "${GITLAB_PAT_X}"), expected);
+        assert_eq!(check("ticket", "${SCRYBE_GITLAB_TOKEN}"), None);
+        assert_eq!(check("ticket", "literal"), None);
+        assert_eq!(check("code", "${GITLAB_PAT_X}"), None);
     }
 
     #[test]

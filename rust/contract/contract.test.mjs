@@ -1300,6 +1300,263 @@ describe("the daemon commands", () => {
   });
 });
 
+describe("jobs an earlier server left behind", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); await w.index(); });
+  after(() => w.stop());
+
+  const insert = (rows) => {
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"));
+    const st = db.prepare("INSERT INTO jobs (job_id, project_id, mode, status, queued_at, origin) VALUES (?,?,'incremental',?,?,'daemon')");
+    for (const r of rows) st.run(...r);
+    db.close();
+  };
+  const job = (id) => {
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"), { readOnly: true });
+    try { return db.prepare("SELECT status, error_message, finished_at FROM jobs WHERE job_id=?").get(id); } finally { db.close(); }
+  };
+  const pair = (id) => { const j = job(id); return [j.status, j.error_message]; };
+
+  test("are closed at start, the gone project's as cancelled, and later ones are left alone", async () => {
+    const now = Date.now();
+    insert([["o-run", "demo", "running", now - 3_600_000], ["o-queued", "demo", "queued", now - 7_200_000], ["o-all", "*", "running", now - 10_000_000], ["o-gone", "gone", "queued", now - 9_000_000], ["o-later", "demo", "queued", now + 3_600_000]]);
+    const r = await w.cliBare({}, "daemon", "up", "--verbose");
+    if (r.stdout.startsWith("Skipping daemon start (container)")) return;
+    assert.deepEqual([r.status, r.stdout], [0, "Daemon is running.\n"], r.stderr);
+    for (const id of ["o-run", "o-queued", "o-all"]) assert.deepEqual(pair(id), ["interrupted", "interrupted by daemon restart"], id);
+    assert.deepEqual(pair("o-gone"), ["cancelled", "project no longer exists (zombie cleanup)"]);
+    assert.ok(job("o-run").finished_at >= now);
+    assert.deepEqual(pair("o-later"), ["queued", null]);
+    const events = w.logged("jobs.reconciled");
+    assert.equal(events.length, 1);
+    const { interrupted, cancelled, sampleJobIds, cutoffMs } = events[0].detail;
+    assert.deepEqual({ interrupted, cancelled, sampleJobIds }, { interrupted: 3, cancelled: 1, sampleJobIds: ["o-all", "o-gone", "o-queued", "o-run"] });
+    const [start] = w.logged("daemon.start");
+    assert.equal(start.pid, w.pidfile().pid);
+    assert.ok(cutoffMs >= now && cutoffMs <= Date.parse(start.ts), "the cutoff is when the lock was taken");
+    await w.killServer();
+  });
+
+  test("count as interrupted, not cancelled, when the project list can't be read", async () => {
+    insert([["u-run", "demo", "running", Date.now() - 1000], ["u-gone", "gone", "running", Date.now() - 1000]]);
+    const file = join(w.data, "projects.json");
+    const saved = readFileSync(file, "utf8");
+    writeFileSync(file, "{ not json");
+    const r = await w.cliBare({}, "daemon", "up");
+    writeFileSync(file, saved);
+    if (!w.pidfile()) return;
+    assert.equal(r.status, 0, r.stderr);
+    for (const id of ["u-run", "u-gone"]) assert.deepEqual(pair(id), ["interrupted", "interrupted by daemon restart"], id);
+    await w.killServer();
+  });
+});
+
+describe("the locks on a data dir", () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  afterEach(async () => {
+    await w.killServer();
+    for (const f of ["daemon-owner.lock.db", "daemon-spawn.lock.db"]) rmSync(join(w.data, f), { recursive: true, force: true });
+  });
+  after(() => w.stop());
+  const upOrSkip = async (t) => {
+    const r = await w.cliBare({}, "daemon", "up", "--verbose");
+    if (r.stdout.startsWith("Skipping daemon start (container)")) { t.skip("this host counts as a container"); return null; }
+    return r;
+  };
+
+  test("a lock file that is not a database is thrown away and the server starts", async (t) => {
+    writeFileSync(join(w.data, "daemon-owner.lock.db"), "this is not a database at all. ".repeat(60));
+    const r = await upOrSkip(t);
+    if (!r) return;
+    assert.deepEqual([r.status, r.stdout], [0, "Daemon is running.\n"], r.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(join(w.data, "daemon-owner.lock.db.owner"), "utf8")), { pid: w.pidfile().pid });
+  });
+
+  test("a data dir that can't hold the lock still gets a server, and the log says so", async (t) => {
+    mkdirSync(join(w.data, "daemon-owner.lock.db"));
+    const r = await upOrSkip(t);
+    if (!r) return;
+    assert.deepEqual([r.status, r.stdout], [0, "Daemon is running.\n"], r.stderr);
+    const [event] = w.logged("daemon.ownership.unavailable");
+    assert.equal(event.level, "error");
+    assert.equal(event.dataDir, w.data);
+  });
+
+  test("a second server on the same data dir gives up at once", async (t) => {
+    const r = await upOrSkip(t);
+    if (!r) return;
+    const first = w.pidfile().pid;
+    const second = spawn(SERVER[0], SERVER.slice(1), { env: { ...w.env, SCRYBE_DAEMON_PORT: "0" }, stdio: "ignore", windowsHide: true });
+    const code = await new Promise((resolve) => second.on("exit", resolve));
+    assert.ok(code === 0 || code === 1, `exit ${code}`);
+    assert.equal(w.pidfile().pid, first);
+    assert.ok(await w.health());
+  });
+
+  test("while another process is starting a server, up waits for that one and starts none", async (t) => {
+    const db = new DatabaseSync(join(w.data, "daemon-spawn.lock.db"));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const r = await upOrSkip(t);
+      if (!r) return;
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /Daemon did not become healthy \(health-timeout\)/);
+      assert.equal(w.pidfile(), null);
+      const [event] = w.logged("daemon.spawn.contended");
+      assert.equal(event.level, "warn");
+      assert.equal(event.heldByPid, null);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("two starts at once end with one server", async (t) => {
+    const [a, b] = await Promise.all([upOrSkip(t), upOrSkip(t)]);
+    if (!a || !b) return;
+    assert.deepEqual([a.status, b.status], [0, 0], a.stderr + b.stderr);
+    assert.ok(await w.health());
+    assert.equal(w.logged("daemon.start").filter((e) => e.pid === w.pidfile().pid).length, 1);
+  });
+});
+
+describe("what a background server inherits", { skip: process.platform === "linux" ? false : "Linux only" }, () => {
+  let w;
+  before(async () => { w = await makeWorld(); await w.cli("projects"); });
+  afterEach(() => w.killServer());
+  after(() => w.stop());
+
+  const VARS = {
+    LANG: "C.UTF-8", HTTPS_PROXY: "", GIT_TERMINAL_PROMPT: "0", LANCE_IO_THREADS: "2", npm_config_registry: "http://registry.invalid", SCRYBE_CONTRACT_EXTRA: "1", CONTRACT_PASSED: "1",
+    SCRYBE_DAEMON_ENV_PASSTHROUGH: "CONTRACT_PASSED",
+    CONTRACT_UNRELATED: "1", GH_TOKEN: "x", HF_TOKEN: "x", AWS_SECRET_ACCESS_KEY: "x", GIT_DIR: "/elsewhere/.git", npm_config__authToken: "x", SCRYBE_PRESET_FOO: "x", OPENAI_API_KEY: "x",
+  };
+  const KEPT = ["PATH", "HOME", "LANG", "HTTPS_PROXY", "GIT_TERMINAL_PROMPT", "LANCE_IO_THREADS", "npm_config_registry", "SCRYBE_CONTRACT_EXTRA", "SCRYBE_DATA_DIR", "CONTRACT_PASSED", "CONTRACT_EMBED_KEY", "MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_"];
+  const DROPPED = ["CONTRACT_UNRELATED", "GH_TOKEN", "HF_TOKEN", "AWS_SECRET_ACCESS_KEY", "GIT_DIR", "npm_config__authToken", "SCRYBE_PRESET_FOO", "OPENAI_API_KEY"];
+  const checkNames = (names) => {
+    assert.deepEqual(KEPT.filter((k) => !names.has(k)), [], "missing");
+    assert.deepEqual(DROPPED.filter((k) => names.has(k)), [], "leaked");
+  };
+  const namesOf = (pid) => new Set(readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").filter(Boolean).map((e) => e.split("=")[0]));
+  const skipped = (t, r) => r.stdout.startsWith("Skipping daemon start (container)") && (t.skip("this host counts as a container"), true);
+
+  test("a server started without the memory cap gets only what it needs", async (t) => {
+    const r = await w.cliBare(VARS, "daemon", "up", "--verbose");
+    if (skipped(t, r)) return;
+    assert.deepEqual([r.status, r.stdout], [0, "Daemon is running.\n"], r.stderr);
+    checkNames(namesOf(w.pidfile().pid));
+    const event = w.logged("daemon.spawn.env-filtered").at(-1);
+    assert.equal(event.dropped, DROPPED.length);
+    assert.deepEqual(event.missingRefs, []);
+    assert.equal(w.logged("daemon.cgroup-cap.skipped").at(-1).reason, "disabled-by-config");
+  });
+
+  test("with the cap, systemd-run gets the same request, and the values only through a private file", async (t) => {
+    const bin = join(w.dir, "fakebin"), runtime = join(w.dir, "runtime"), seen = join(w.dir, "seen");
+    for (const d of [bin, runtime, seen]) mkdirSync(d, { recursive: true });
+    // Stands in for systemd-run: notes what it was asked, then fails, so the plain start follows.
+    writeFileSync(join(bin, "systemd-run"), `#!/bin/sh
+printf '%s\\n' "$@" > "${seen}/args"
+for a in "$@"; do case "$a" in EnvironmentFile=*) f="\${a#EnvironmentFile=}"; cp -p "$f" "${seen}/env"; stat -c '%a' "$f" "\${f%/*}" > "${seen}/modes";; esac; done
+exit 3
+`, { mode: 0o755 });
+    const vars = { ...VARS, PATH: `${bin}:${w.env.PATH}`, XDG_RUNTIME_DIR: runtime, SCRYBE_DAEMON_CGROUP_MAX_MB: "", CONTRACT_PASSED: "a \"b\" $c `d` \\e" };
+    const r = await w.cliBare(vars, "daemon", "up", "--verbose");
+    if (skipped(t, r)) return;
+    // An empty cap setting counts as off in both builds, so the real check names one.
+    assert.equal(r.status, 0, r.stderr);
+    await w.killServer();
+    const again = await w.cliBare({ ...vars, SCRYBE_DAEMON_CGROUP_MAX_MB: "5000" }, "daemon", "up", "--verbose");
+    assert.deepEqual([again.status, again.stdout], [0, "Daemon is running.\n"], again.stderr);
+    const args = readFileSync(join(seen, "args"), "utf8").split("\n").filter(Boolean);
+    const end = args.indexOf("--");
+    const unit = args.find((a) => a.startsWith("--unit="));
+    assert.match(unit, /^--unit=scrybe-daemon-\d+-[0-9a-f]{8}\.service$/);
+    const envFile = join(runtime, "scrybe", `${unit.slice("--unit=".length)}.env`);
+    assert.deepEqual(args.slice(0, end).filter((a) => a !== unit), ["--user", "--quiet", "--collect", "--description=scrybe daemon (memory-capped)", "-p", "MemoryMax=5000M", "-p", "MemorySwapMax=0", "-p", "Restart=no", "-p", "KillMode=process", "-p", `WorkingDirectory=-${w.dir}`, "-p", `EnvironmentFile=${envFile}`]);
+    assert.equal(readFileSync(join(seen, "modes"), "utf8"), "600\n700\n");
+    const lines = readFileSync(join(seen, "env"), "utf8").split("\n").filter(Boolean);
+    checkNames(new Set(lines.map((l) => l.split("=")[0])));
+    assert.ok(lines.includes('CONTRACT_PASSED="a \\"b\\" \\$c \\`d\\` \\\\e"'), "the value is quoted for systemd");
+    assert.equal(existsSync(envFile), false, "the file is gone once systemd-run has run");
+    const fallback = w.logged("daemon.cgroup-cap.fallback").at(-1);
+    assert.equal(fallback.reason, "systemd-run exited 3");
+    assert.equal(`--unit=${fallback.unit}`, unit);
+    checkNames(namesOf(w.pidfile().pid));
+  });
+
+  test("with nowhere private for the file, systemd-run gets names and no values", async (t) => {
+    const bin = join(w.dir, "fakebin2"), seen = join(w.dir, "seen2");
+    for (const d of [bin, seen]) mkdirSync(d, { recursive: true });
+    writeFileSync(join(bin, "systemd-run"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${seen}/args"\nexit 1\n`, { mode: 0o755 });
+    const r = await w.cliBare({ ...VARS, PATH: `${bin}:${w.env.PATH}`, XDG_RUNTIME_DIR: "relative/dir", SCRYBE_DAEMON_CGROUP_MAX_MB: "5000" }, "daemon", "up", "--verbose");
+    if (skipped(t, r)) return;
+    assert.equal(r.status, 0, r.stderr);
+    const args = readFileSync(join(seen, "args"), "utf8").split("\n");
+    checkNames(new Set(args.filter((a) => a.startsWith("--setenv=")).map((a) => a.slice("--setenv=".length))));
+    assert.ok(args.filter((a) => a.startsWith("--setenv=")).every((a) => !a.slice("--setenv=".length).includes("=")));
+    assert.equal(w.logged("daemon.spawn.env-file-fallback").at(-1).reason, "runtime-dir-not-absolute");
+  });
+});
+
+describe("a running server that lacks a token's variable", { skip: process.platform === "linux" ? false : "Linux only" }, () => {
+  let w, gl;
+  before(async () => {
+    gl = await fakeGitlab();
+    w = await makeWorld();
+    await w.index("--full");
+  });
+  after(async () => { await w.stop(); gl.close(); });
+
+  const WARNING = (name, data) => `[scrybe] warning: the running daemon doesn't have ${name}, so it can't read this source's token. Run \`scrybe daemon stop\`; the next scrybe call starts a daemon that has ${name} if that call's environment does. To avoid this, name the variable SCRYBE_<something>, list it in SCRYBE_DAEMON_ENV_PASSTHROUGH, or put it in ${data}/.env.\n`;
+  const warnings = (r) => r.stderr.split("\n").filter((l) => l.includes("the running daemon doesn't have")).map((l) => `${l}\n`);
+  const add = (id, variable, extra = {}) => w.cliBare({ [variable]: GITLAB_TOKEN, ...extra }, "source", "add", "-P", "demo", "-S", id, "--type", "ticket", "--url", gl.url, "--project", GITLAB_PROJECT, "--token", `\${${variable}}`);
+
+  test("is warned about when a source is added or changed from the command line, and only then", async (t) => {
+    const up = await w.cliBare({}, "daemon", "up", "--verbose");
+    if (up.stdout.startsWith("Skipping daemon start (container)")) return t.skip("this host counts as a container");
+    let r = await add("t1", "CONTRACT_PAT");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(warnings(r), [WARNING("CONTRACT_PAT", w.data)]);
+    r = await add("t2", "SCRYBE_CONTRACT_PAT");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(warnings(r), [], "SCRYBE_ names always reach a server");
+    r = await add("t3", "CONTRACT_PAT_3", { SCRYBE_DAEMON_ENV_PASSTHROUGH: "CONTRACT_PAT_3" });
+    assert.deepEqual([r.status, warnings(r)], [0, []], r.stderr);
+    r = await w.cliBare({ CONTRACT_PAT_4: GITLAB_TOKEN }, "source", "update", "-P", "demo", "-S", "t2", "--token", "${CONTRACT_PAT_4}");
+    assert.deepEqual([r.status, warnings(r)], [0, [WARNING("CONTRACT_PAT_4", w.data)]], r.stderr);
+  });
+
+  test("is not warned about with no server running", async () => {
+    await w.killServer();
+    const r = await w.cliBare({ CONTRACT_PAT_5: GITLAB_TOKEN }, "source", "update", "-P", "demo", "-S", "t2", "--token", "${CONTRACT_PAT_5}");
+    assert.deepEqual([r.status, warnings(r)], [0, []], r.stderr);
+  });
+
+  test("says so to a search, in list_projects and in status, and how to fix it", async (t) => {
+    const up = await w.cliBare({ CONTRACT_EMBED_KEY: undefined }, "daemon", "up", "--verbose");
+    if (up.stdout.startsWith("Skipping daemon start (container)")) return t.skip("this host counts as a container");
+    const remedy = ". The daemon only has the environment it was started with: run `scrybe daemon stop` and the next scrybe call starts one that has CONTRACT_EMBED_KEY, as long as that call's environment (or <DATA_DIR>/.env) has it. Names starting with SCRYBE_, and names listed in SCRYBE_DAEMON_ENV_PASSTHROUGH, reach the daemon even before config references them";
+    const unset = `env var CONTRACT_EMBED_KEY not set (referenced in scrybe config)${remedy}`;
+    const c = w.client();
+    await c.hello();
+    const r = await c.call("search_code", { project_id: "demo", query: "widget" });
+    assert.deepEqual([r.isError, r.value], [true, { error: unset }]);
+    const [source] = (await c.call("list_projects")).value[0].sources;
+    assert.equal(source.searchable_reason, `Requires env var CONTRACT_EMBED_KEY (model: fake-model) — not set in current environment${remedy}`);
+    assert.equal((await c.call("status")).value.credential_error_message, `code_preset: ${unset}; text_preset: ${unset}`);
+    await w.killServer();
+    assert.deepEqual((await w.cliBare({ CONTRACT_EMBED_KEY: undefined }, "search", "code", "-P", "demo", "widget")).stderr, "[scrybe] env var CONTRACT_EMBED_KEY not set (referenced in scrybe config)\n");
+  });
+
+  test("a token check on the command line doesn't talk about the server", async () => {
+    const r = await w.cliBare({}, "source", "add", "-P", "demo", "-S", "t9", "--type", "ticket", "--url", gl.url, "--project", GITLAB_PROJECT, "--token", "${CONTRACT_NOT_SET}");
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /references env var CONTRACT_NOT_SET which is not set\. Set it in your environment or in <DATA_DIR>\/\.env: CONTRACT_NOT_SET=<your-token>\n/);
+    assert.doesNotMatch(r.stderr, /The daemon only/);
+  });
+});
+
 describe("the status command", () => {
   let w;
   // The first command after an index may print a one-time notice, so it runs before anything is compared.

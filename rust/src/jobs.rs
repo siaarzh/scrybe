@@ -1,7 +1,7 @@
 //! The job queue and its durable rows. Mirrors `src/daemon/queue.ts`, `src/jobs.ts` and `src/jobs-store.ts`:
 //! no two jobs for one project at once, a cap across projects, and rows other processes can read.
 //! Not yet: the ticket poller.
-use crate::branches::SCHEMA;
+use crate::branches;
 use crate::config::data_dir;
 use crate::index::{self, Mode, Options};
 use crate::registry;
@@ -27,7 +27,7 @@ pub fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
     let mut bytes = [0u8; 4];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
@@ -46,6 +46,13 @@ fn random_id() -> String {
 
 pub struct Rows(Mutex<Connection>);
 
+#[derive(Debug, PartialEq)]
+pub struct Reconciled {
+    pub interrupted: usize,
+    pub cancelled: usize,
+    pub sample: Vec<String>,
+}
+
 fn sql_to_json(v: SqlValue) -> Value {
     match v {
         SqlValue::Null => Value::Null,
@@ -59,20 +66,43 @@ fn sql_to_json(v: SqlValue) -> Value {
 impl Rows {
     pub fn open() -> Result<Self> {
         std::fs::create_dir_all(data_dir())?;
-        let conn = Connection::open(data_dir().join("branch-tags.db"))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(Rows(Mutex::new(conn)))
+        Ok(Rows(Mutex::new(branches::open_rw(&data_dir().join("branch-tags.db"))?)))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Jobs a dead server left running can never finish.
-    pub fn mark_interrupted(&self) -> Result<usize> {
-        Ok(self.lock().execute("UPDATE jobs SET status='interrupted', error_message='interrupted by daemon restart', finished_at=?1 WHERE status IN ('running','queued')", [now_ms()])?)
+    /// `reconcileOrphanedJobs`: closes jobs queued before `before_ms`, `interrupted`, or `cancelled` if the project is
+    /// gone. With no project list to go by, nothing counts as gone.
+    pub fn reconcile(&self, before_ms: i64, projects: Option<&[String]>) -> Result<Reconciled> {
+        const PENDING: &str = "status IN ('queued','running') AND queued_at < ?";
+        let (registered, removed, ids) = match projects {
+            Some(p) => {
+                // "*" is the project of a job over every project.
+                let ids: Vec<&str> = p.iter().map(String::as_str).chain(["*"]).collect();
+                let marks = vec!["?"; ids.len()].join(",");
+                (format!("project_id IN ({marks})"), format!("project_id NOT IN ({marks})"), ids)
+            }
+            None => ("1".into(), "0".into(), vec![]),
+        };
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let sample: Vec<String> = {
+            let mut stmt = tx.prepare(&format!("SELECT job_id FROM jobs WHERE {PENDING} ORDER BY queued_at LIMIT 5"))?;
+            let rows = stmt.query_map([before_ms], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let now = now_ms();
+        let close = |status: &str, message: &str, which: &str| -> Result<usize> {
+            let mut vals: Vec<&dyn rusqlite::ToSql> = vec![&now, &before_ms];
+            vals.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+            Ok(tx.execute(&format!("UPDATE jobs SET status='{status}', error_message='{message}', finished_at=? WHERE {PENDING} AND {which}"), &vals[..])?)
+        };
+        let interrupted = close("interrupted", "interrupted by daemon restart", &registered)?;
+        let cancelled = close("cancelled", "project no longer exists (zombie cleanup)", &removed)?;
+        tx.commit()?;
+        Ok(Reconciled { interrupted, cancelled, sample })
     }
 
     fn insert_queued(&self, item: &Item) {
@@ -274,6 +304,17 @@ fn append_log(line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(f, "{line}");
     }
+}
+
+/// `diagEmit`: one line in the server log, stamped with the time and this process.
+pub(crate) fn diag(record: Value) {
+    let mut line = Map::new();
+    line.insert("ts".into(), json!(now_iso()));
+    line.insert("pid".into(), json!(std::process::id()));
+    for (k, v) in record.as_object().into_iter().flatten() {
+        line.insert(k.clone(), v.clone());
+    }
+    append_log(&Value::Object(line).to_string());
 }
 
 // ─── The queue ───────────────────────────────────────────────────────────────
@@ -861,6 +902,47 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rows_with(pending: &[(&str, &str, &str, i64)]) -> (Rows, std::path::PathBuf) {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!("scrybe-jobs-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rows = Rows(Mutex::new(branches::open_rw(&dir.join("branch-tags.db")).unwrap()));
+        for (id, project, status, queued) in pending {
+            rows.lock().execute("INSERT INTO jobs (job_id, project_id, mode, status, queued_at, origin) VALUES (?,?,'incremental',?,?,'daemon')", params![id, project, status, queued]).unwrap();
+        }
+        (rows, dir)
+    }
+
+    #[test]
+    fn jobs_an_earlier_server_left_are_closed_and_later_ones_kept() {
+        let pending = [("live-run", "live", "running", 90), ("live-q", "live", "queued", 80), ("gone-run", "gone", "running", 70), ("gone-q", "gone", "queued", 60), ("all-run", "*", "running", 50), ("live-new", "live", "running", 110), ("gone-new", "gone", "queued", 120)];
+        let (rows, dir) = rows_with(&pending);
+        let projects = ["live".to_string()];
+        let done = rows.reconcile(100, Some(&projects)).unwrap();
+        assert_eq!(done, Reconciled { interrupted: 3, cancelled: 2, sample: ["all-run", "gone-q", "gone-run", "live-q", "live-run"].map(String::from).to_vec() });
+        let got = |id: &str| { let r = rows.get(id).unwrap(); (r["status"].as_str().unwrap().to_string(), r["error_message"].as_str().map(String::from)) };
+        assert_eq!(got("all-run"), ("interrupted".into(), Some("interrupted by daemon restart".into())));
+        assert_eq!(got("gone-q"), ("cancelled".into(), Some("project no longer exists (zombie cleanup)".into())));
+        assert_eq!((got("live-new").0.as_str(), got("gone-new").0.as_str()), ("running", "queued"));
+        assert!(rows.get("live-q").unwrap()["finished_at"].is_i64());
+        assert_eq!(rows.reconcile(100, Some(&projects)).unwrap(), Reconciled { interrupted: 0, cancelled: 0, sample: vec![] });
+        drop(rows);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_project_list_cancels_nothing_and_an_empty_one_cancels_all() {
+        let (rows, dir) = rows_with(&[("a", "live", "running", 1)]);
+        assert_eq!(rows.reconcile(100, None).unwrap().interrupted, 1);
+        drop(rows);
+        let _ = std::fs::remove_dir_all(&dir);
+        let (rows, dir) = rows_with(&[("a", "live", "queued", 1)]);
+        assert_eq!(rows.reconcile(100, Some(&[])).unwrap().cancelled, 1);
+        drop(rows);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn ids_look_like_todays() {

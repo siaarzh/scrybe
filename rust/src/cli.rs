@@ -369,9 +369,14 @@ async fn source_inner(store: Store, action: SourceAction) -> Result<()> {
             put(&mut a, "gitlab_token", gitlab_token);
             let a = Value::Object(a);
             let config = source_add::prepare(&a).await?;
+            let check = source_add::env_ref_to_check(&config);
+            let referenced_before = check.as_ref().is_some_and(|n| crate::spawn::config_env_refs(&crate::config::data_dir()).contains(n));
             let port = live_server().await?;
             source_add::save(&a, config)?;
             if let Some(port) = port {
+                if let Some(name) = check {
+                    source_add::warn_if_server_lacks(&name, referenced_before);
+                }
                 let sent = post(port, "/kick", &json!({ "projectId": project_id, "sourceId": source_id, "mode": "incremental" })).await?;
                 let Some(job) = sent["jobs"][0]["jobId"].as_str() else { bail!("Daemon returned no job") };
                 say(&format!("Added source '{source_id}' to project '{project_id}' — reindex job: {job}"));

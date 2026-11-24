@@ -308,9 +308,17 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
   const cliInput = (input, ...args) => run(input, args);
   /** Like `cli`, but free to use a running server, as the command line is outside the harness. */
   const cliLive = (...args) => run(undefined, args, env);
+  /** Runs with only these variables plus what any process needs, so nothing of the host's leaks into what is checked. */
+  const cliBare = (vars, ...args) => {
+    const bare = {};
+    for (const k of ["PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "SYSTEMROOT", "SystemRoot", "TEMP", "TMP", "TMPDIR", "SCRYBE_DATA_DIR", "CONTRACT_EMBED_KEY", "SCRYBE_DAEMON_CGROUP_MAX_MB", "SCRYBE_DAEMON_NO_FETCH", "SCRYBE_DAEMON_NO_TICKET_FETCH", "SCRYBE_AUTO_GC", "SCRYBE_DAEMON_KEEP_ALIVE"]) {
+      if (env[k] !== undefined) bare[k] = env[k];
+    }
+    return run(undefined, args, { ...bare, ...vars });
+  };
   const clients = [];
   const world = {
-    dir, data, repo, origin, env, fake, cli, cliAt, cliWith, cliInput, cliLive, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
+    dir, data, repo, origin, env, fake, cli, cliAt, cliWith, cliInput, cliLive, cliBare, main: repoInfo.main, git: repoInfo.git, originGit: (...a) => git(origin, ...a),
     pidfile() {
       try { return JSON.parse(readFileSync(join(data, "daemon.pid"), "utf8")); } catch { return null; }
     },
@@ -321,6 +329,12 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
         const r = await fetch(`http://127.0.0.1:${pf.port}/health`, { signal: AbortSignal.timeout(2000) });
         return r.ok ? await r.json() : null;
       } catch { return null; }
+    },
+    /** Records in the server log with this event name. */
+    logged(event) {
+      let text = "";
+      try { text = readFileSync(join(data, "daemon-log.jsonl"), "utf8"); } catch { /* no log yet */ }
+      return text.split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.event === event);
     },
     async index(...extra) {
       const r = await cli("index", "-P", "demo", "-S", "primary", ...extra);

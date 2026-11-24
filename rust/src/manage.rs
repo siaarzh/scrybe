@@ -102,7 +102,12 @@ pub fn update_source(a: &Value) -> Result<Value> {
         for (k, v) in patch {
             config[&k] = v;
         }
+        let check = if crate::config::in_server() { None } else { source_add::env_ref_to_check(&config) };
+        let referenced_before = check.as_ref().is_some_and(|n| crate::spawn::config_env_refs(&data_dir()).contains(n));
         registry::update_source(&project_id, &source_id, &[("source_config", config)])?;
+        if let Some(name) = check {
+            source_add::warn_if_server_lacks(&name, referenced_before);
+        }
     }
     Ok(json!({ "ok": true, "project_id": project_id, "source_id": source_id, "updated": updated }))
 }
