@@ -308,7 +308,8 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
-      p.kill();
+      // A hung command may ignore a polite stop, and would spin on after the run.
+      p.kill("SIGKILL");
       reject(new Error(`scrybe ${args.join(" ")} did not finish in ${CLI_TIMEOUT_MS / 1000} s\nstdout: ${stdout}\nstderr: ${stderr}`));
     }, CLI_TIMEOUT_MS);
     p.on("close", finish);
