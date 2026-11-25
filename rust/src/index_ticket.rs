@@ -103,6 +103,8 @@ struct Run<'a> {
     persisted: usize,
     files_reindexed: usize,
     seen_files: HashSet<String>,
+    /// Written and waiting for their hash.
+    unhashed: Vec<String>,
     bytes_embedded: u64,
     phase: Phase,
     records: Records,
@@ -117,8 +119,9 @@ impl Run<'_> {
         }
     }
 
-    /// `flushBatch`: embed what's new, write it, then checkpoint the hashes. Ticket chunks carry no branch tags.
-    async fn flush(&mut self, batches: &mut Vec<(String, Vec<KnowledgeChunk>)>) -> Result<()> {
+    /// `flushBatch`: embed what's new, write it, then checkpoint the hashes. Ticket chunks carry no branch tags. The
+    /// issue with chunks still to come (`open`) gets its hash with the last of them.
+    async fn flush(&mut self, batches: &mut Vec<(String, Vec<KnowledgeChunk>)>, open: Option<&str>) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
@@ -154,12 +157,15 @@ impl Run<'_> {
             self.phase.sample();
         }
         for (key, chunks) in batches.iter() {
-            // A comment's path has no entry in the scan, so it never gets a hash.
-            if let Some(hash) = self.merged.get(key).map(String::from) {
-                self.hashes.set(key, &hash);
-            }
+            self.unhashed.push(key.clone());
             self.seen_files.insert(key.clone());
             self.prepared += chunks.len();
+        }
+        for key in self.unhashed.extract_if(.., |k| open != Some(k.as_str())) {
+            // A comment's path has no entry in the scan, so it never gets a hash.
+            if let Some(hash) = self.merged.get(&key).map(String::from) {
+                self.hashes.set(&key, &hash);
+            }
         }
         self.options.report(Progress::Embed(self.prepared));
         save_hashes(&self.hash_path, &self.hashes)?;
@@ -267,10 +273,10 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     let mut known = HashSet::new();
     let mut hashes = old_hashes.clone();
     if mode == Mode::Full {
-        store.delete_project_rows(&table, project_id).await?;
-        writer.wipe_branch()?;
         hashes = Ordered::default();
         save_hashes(&hash_path, &hashes)?;
+        writer.wipe_branch()?;
+        store.delete_project_rows(&table, project_id).await?;
         for (k, _) in &scanned.0 {
             if !to_index.contains(k) {
                 to_index.push(k.clone());
@@ -304,7 +310,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
 
     let mut phase = Phase::begin(&ctx, "chunk_embed");
     phase.set_work(json!({ "batch_size": batch_size, "provider": provider }));
-    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), bytes_embedded: 0, phase, records, options };
+    let mut run = Run { store, table: table.clone(), embedding, max_chars, hashes, hash_path, known, merged, batch_size, delay_ms, halving, prepared: 0, persisted: 0, files_reindexed: 0, seen_files: HashSet::new(), unhashed: vec![], bytes_embedded: 0, phase, records, options };
     let mut batches: Vec<(String, Vec<KnowledgeChunk>)> = vec![];
     let mut pending = 0;
     let mut chunks_seen = 0usize;
@@ -313,7 +319,9 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
             check_cancel(options)?;
             let fetched = if github { github_issues::fetch_issue_chunks(project_id, source, key, sizes).await? } else { gitlab_issues::fetch_issue_chunks(project_id, source, key, sizes).await? };
             let Some(chunks) = fetched else { continue };
+            let mut left = chunks.len();
             for c in chunks {
+                left -= 1;
                 match batches.last_mut() {
                     Some((k, list)) if *k == c.item_path => list.push(c),
                     _ => batches.push((c.item_path.clone(), vec![c])),
@@ -325,14 +333,14 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
                 }
                 if pending >= batch_size {
                     check_cancel(options)?;
-                    run.flush(&mut batches).await?;
+                    run.flush(&mut batches, (left > 0).then_some(key.as_str())).await?;
                     pending = 0;
                 }
             }
             // Keeps clear of the trackers' rate limits.
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        run.flush(&mut batches).await
+        run.flush(&mut batches, None).await
     }
     .await;
     if let Err(e) = streamed {

@@ -2273,6 +2273,68 @@ describe("an embedding reply that isn't what was asked for", () => {
   });
 });
 
+describe("a run that ends in the middle of a file", { skip: BUILD === "rust" ? false : "today's build counts the file as done" }, () => {
+  const small = { SCRYBE_EMBED_BATCH_SIZE: "3" };
+  const second = (n) => (n === 2 ? { code: 401 } : undefined);
+
+  test("the next one indexes the rest of it", async () => {
+    const fake = await fakeEmbedder({ refuse: second });
+    const w = await makeWorld({ embedder: fake, serverEnv: small });
+    try {
+      for (const f of ["src/widget.ts", "src/gadget.py"]) rmSync(join(w.repo, f));
+      const names = Array.from({ length: 8 }, (_, i) => `piece${i}`);
+      writeFileSync(join(w.repo, "src/long.ts"), names.map((n) => `export function ${n}(a) {\n  const b = a + ${n.length};\n  return b;\n}\n`).join("\n"));
+      const run = () => w.cli("index", "-P", "demo", "-S", "primary");
+      assert.equal((await run()).status, 1);
+      const again = await run();
+      assert.equal(again.status, 0, again.stderr);
+      const c = w.client();
+      for (const n of names) assert.equal((await c.call("lookup_symbol", { project_id: "demo", symbol_name: n })).value?.length, 1, n);
+    } finally {
+      await w.stop();
+      fake.close();
+    }
+  });
+
+  test("the next one indexes the rest of an issue", async () => {
+    const gl = await fakeGitlab();
+    gl.state.issues = [{ id: 1, iid: 1, title: "one", description: "the body", state: "opened", labels: [], author: { username: "u" }, assignees: [], created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z", web_url: "http://x/1" }];
+    gl.state.notes[1] = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, body: `remark number ${i}`, system: false, author: { username: "c" }, created_at: "2026-01-03T00:00:00Z", updated_at: "2026-01-03T00:00:00Z" }));
+    const fake = await fakeEmbedder({ refuse: second });
+    const w = await makeWorld({ embedder: fake, extraSources: [ticketSource(gl)], serverEnv: { ...small, CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN } });
+    try {
+      assert.equal((await indexIssues(w)).status, 1);
+      const again = await indexIssues(w);
+      assert.equal(again.status, 0, again.stderr);
+      const found = (await w.cli("search", "knowledge", "-P", "demo", "remark")).stdout;
+      for (let i = 0; i < 6; i++) assert.ok(found.includes(`remark number ${i}`), `${i}: ${found}`);
+    } finally {
+      await w.stop();
+      gl.close();
+      fake.close();
+    }
+  });
+});
+
+describe("a chunk another branch is tagged with and a full run deleted", { skip: BUILD === "rust" ? false : "today's build counts it as embedded" }, () => {
+  test("is embedded again when a file brings it back", async () => {
+    const w = await makeWorld();
+    try {
+      await w.index("--full");
+      const side = await w.cli("index", "-P", "demo", "-S", "primary", "--branch", "side");
+      assert.equal(side.status, 0, side.stderr);
+      await w.index("--full");
+      const file = w.git("diff", "--name-only", "--diff-filter=A", w.main, "side").split("\n")[0];
+      writeFileSync(join(w.repo, file), w.git("show", `side:${file}`) + "\n");
+      await w.index();
+      const c = w.client();
+      assert.equal((await c.call("lookup_symbol", { project_id: "demo", symbol_name: "onlyOnTheSideBranch", branch: w.main })).value?.length, 1);
+    } finally {
+      await w.stop();
+    }
+  });
+});
+
 describe("half an emoji in an issue", () => {
   for (const kind of ["gitlab", "github"]) test(`${kind} issues are indexed all the same`, async () => {
     const api = kind === "gitlab" ? await fakeGitlab() : await fakeGithub();

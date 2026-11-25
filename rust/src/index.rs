@@ -295,8 +295,9 @@ impl Run<'_> {
         }
     }
 
-    /// `flushBatch`: embed what's new, write it, then checkpoint tags and hashes.
-    async fn flush(&mut self, batches: &mut Vec<(String, Vec<Chunk>)>) -> Result<()> {
+    /// `flushBatch`: embed what's new, write it, then checkpoint tags and hashes. The file with chunks still to come
+    /// (`open`) gets no hash yet, or a run that ends here would leave it half indexed for good.
+    async fn flush(&mut self, batches: &mut Vec<(String, Vec<Chunk>)>, open: Option<&str>) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
@@ -336,7 +337,9 @@ impl Run<'_> {
             for c in chunks {
                 self.known.insert(c.chunk_id.clone());
             }
-            self.hashes.insert(key.clone(), self.source_hash[key].clone());
+            if open != Some(key.as_str()) {
+                self.hashes.insert(key.clone(), self.source_hash[key].clone());
+            }
             // A hash file that can't be written must not leave every file of the batch tagged.
             if i == 0 || i + 1 == batches.len() {
                 save_hashes(&self.hash_path, &self.hashes)?;
@@ -481,13 +484,19 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
     let mut known = HashSet::new();
     let mut hashes = old_hashes.clone();
     if mode == Mode::Full {
-        store.delete_project_rows(&table, project_id).await?;
-        writer.wipe_branch()?;
+        // The rows last: a run killed in between must not leave an empty table that counts as indexed.
         hashes.clear();
         save_hashes(&hash_path, &hashes)?;
+        writer.wipe_branch()?;
+        store.delete_project_rows(&table, project_id).await?;
         to_index.extend(current.keys().cloned());
     } else {
         known = branches::all_chunk_ids_for_source(&writer, project_id, source_id)?;
+        if !to_index.is_empty() && !known.is_empty() {
+            // A full run of one branch deletes the rows of them all and leaves the others' tags.
+            let present: HashSet<String> = store.list_chunk_ids(&table, project_id).await?.into_iter().collect();
+            known.retain(|id| present.contains(id));
+        }
         for p in &to_remove {
             writer.remove_file(p)?;
             hashes.remove(p);
@@ -549,7 +558,9 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
                 chunk::chunk_file(&p, &s, &r, &text, &lang, Some(max_chars), sizes)
             })
             .await?;
+            let mut left = chunks.len();
             for c in chunks {
+                left -= 1;
                 match batches.last_mut() {
                     Some((key, list)) if *key == rel => list.push(c),
                     _ => batches.push((rel.clone(), vec![c])),
@@ -561,12 +572,12 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
                 }
                 if pending >= batch_size {
                     check_cancel(options)?;
-                    run.flush(&mut batches).await?;
+                    run.flush(&mut batches, (left > 0).then_some(rel.as_str())).await?;
                     pending = 0;
                 }
             }
         }
-        run.flush(&mut batches).await
+        run.flush(&mut batches, None).await
     }
     .await;
     if let Err(e) = streamed {
