@@ -297,12 +297,11 @@ impl TicketPoller {
 
     /// Queues one incremental run and waits for it to leave the queue. Only a full queue is an error here.
     fn poll(&self, p: &Poller) -> Result<(), String> {
-        let sub = self.queue.submit(Request { project: p.project.clone(), source: Some(p.source.clone()), ..Default::default() });
+        let sub = self.queue.submit(Request { project: p.project.clone(), source: Some(p.source.clone()), automatic: true, ..Default::default() });
         if sub.status == "rejected" {
-            let (pending, max) = self.queue.depth();
-            return Err(format!("Queue at capacity ({pending}/{max})"));
+            return Err(self.queue.full());
         }
-        while self.queue.rows.get(&sub.job_id).is_some_and(|row| row["status"] == "queued") {
+        while self.queue.is_waiting(&sub.job_id) {
             std::thread::sleep(Duration::from_millis(200));
         }
         self.emit("info", &p.project, json!({ "phase": "ticket-poller", "sourceId": p.source, "enqueued": true }));

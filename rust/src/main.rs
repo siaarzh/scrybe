@@ -163,7 +163,6 @@ enum Command {
 
 /// `search code`, `search knowledge`, or the deprecated bare `search <query...>`.
 #[derive(clap::Args)]
-#[command(args_conflicts_with_subcommands = true)]
 struct SearchArgs {
     #[command(subcommand)]
     kind: Option<SearchKind>,

@@ -351,6 +351,12 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
         return r.ok ? await r.json() : null;
       } catch { return null; }
     },
+    /** Whether nothing runs or waits in the server's queue, jobs it started itself included. */
+    async idleQueue() {
+      const r = await fetch(`http://127.0.0.1:${world.pidfile().port}/status`, { signal: AbortSignal.timeout(5000) });
+      const { queue } = await r.json();
+      return queue.active + queue.pending === 0;
+    },
     /** Records in the server log with this event name. */
     logged(event) {
       let text = "";

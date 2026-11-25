@@ -348,6 +348,8 @@ pub struct Request {
     pub content_ref: Option<String>,
     pub full: bool,
     pub gc_purge: Option<bool>,
+    /// Started by the server itself (a watcher or poller): it gets no durable row.
+    pub automatic: bool,
 }
 
 /// What a job did, for `onQueueJobEvent` listeners.
@@ -565,6 +567,17 @@ impl Queue {
         (self.lock().pending.len(), self.max_depth)
     }
 
+    /// Whether a job still waits for its turn.
+    pub fn is_waiting(&self, id: &str) -> bool {
+        self.lock().pending.iter().any(|p| p.job_id == id)
+    }
+
+    /// The error of a job the full queue turned away, as `enqueue` rejects.
+    pub fn full(&self) -> String {
+        let (pending, max) = self.depth();
+        format!("Queue at capacity ({pending}/{max})")
+    }
+
     pub fn active_count(&self) -> usize {
         self.lock().active.len()
     }
@@ -592,7 +605,7 @@ impl Queue {
         let duplicate = self.lock().pending.iter().any(|p| p.project == item.project && p.source == item.source && p.mode == item.mode && p.branch == item.branch);
         if item.gc_purge.is_some() {
             self.rows.insert_queued_gc(&item);
-        } else {
+        } else if !req.automatic {
             self.rows.insert_queued(&item);
         }
         self.lock().pending.push_back(item.clone());

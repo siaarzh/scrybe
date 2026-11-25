@@ -433,7 +433,7 @@ impl Daemon {
         let jobs: Vec<Value> = ids
             .into_iter()
             .map(|project| {
-                let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: text("branch"), content_ref: text("contentRef"), full, gc_purge: None });
+                let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: text("branch"), content_ref: text("contentRef"), full, ..Default::default() });
                 let mut job = json!({ "jobId": r.job_id, "projectId": project, "sourceId": source.clone().unwrap_or_else(|| "all".into()), "branch": text("branch").unwrap_or_else(|| "HEAD".into()), "status": r.status });
                 if let Some(q) = r.queue_position {
                     job["queuePosition"] = json!(q);
@@ -455,7 +455,7 @@ impl Daemon {
             anyhow::bail!(jobs::FULL_NEEDS_SOURCES);
         }
         self.refuse_if_draining()?;
-        let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: a["branch"].as_str().map(String::from), content_ref: a["content_ref"].as_str().map(String::from), full, gc_purge: None });
+        let r = self.queue.submit(Request { project: project.clone(), source: source.clone(), branch: a["branch"].as_str().map(String::from), content_ref: a["content_ref"].as_str().map(String::from), full, ..Default::default() });
         let mut out = json!({ "job_id": r.job_id, "status": r.status, "project_id": project });
         if let Some(s) = source {
             out["source_id"] = json!(s);

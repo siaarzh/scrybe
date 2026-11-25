@@ -89,29 +89,23 @@ fn parse_version(v: &str) -> Option<[u64; 3]> {
 enum Skew {
     /// The same version, or one that can't be told.
     None,
-    /// Another minor or patch version: served, with a warning.
-    Small,
+    /// Another version: served, with a warning.
+    Other,
     /// Too old to read today's index.
     PreUpgrade,
-    Major,
 }
 
-/// `analyzeVersionSkew`, and the upgrade boundary checked before it.
+/// `analyzeVersionSkew`, and the upgrade boundary checked before it. Another major version is only warned about: this
+/// is a fixed binary, and would refuse every newer server until it is reinstalled.
 fn skew(daemon: &str, own: &str) -> Skew {
     let (Some(d), Some(o)) = (parse_version(daemon), parse_version(own)) else { return Skew::None };
     if o >= UPGRADE_BOUNDARY && d < UPGRADE_BOUNDARY {
         Skew::PreUpgrade
-    } else if d[0] != o[0] {
-        Skew::Major
     } else if d != o {
-        Skew::Small
+        Skew::Other
     } else {
         Skew::None
     }
-}
-
-fn major_skew_message(daemon: &str, own: &str) -> String {
-    format!("daemon version {daemon} is major-incompatible with shim {own}. Restart to update: scrybe daemon restart")
 }
 
 // ─── HTTP ────────────────────────────────────────────────────────────────────
@@ -203,14 +197,12 @@ enum Mode {
     Degraded,
     /// The server is there, and older than today's index format.
     PreUpgrade,
-    /// The server is there, under another major version.
-    MajorSkew,
 }
 
 impl Mode {
     /// The server's own tools aren't offered, so its return is watched for.
     fn not_serving(self) -> bool {
-        matches!(self, Mode::Degraded | Mode::PreUpgrade | Mode::MajorSkew)
+        matches!(self, Mode::Degraded | Mode::PreUpgrade)
     }
 }
 
@@ -221,13 +213,12 @@ struct State {
     daemon_pid: Option<String>,
     /// The pid and port of the server whose version was last looked at.
     checked: Option<(Option<String>, u16)>,
-    daemon_version: String,
     warned_version: Option<String>,
 }
 
 impl State {
     fn new() -> Self {
-        State { mode: Mode::Unknown, poll_until: None, tools: None, daemon_pid: None, checked: None, daemon_version: String::new(), warned_version: None }
+        State { mode: Mode::Unknown, poll_until: None, tools: None, daemon_pid: None, checked: None, warned_version: None }
     }
 }
 
@@ -428,20 +419,20 @@ impl<W: Write + Send> Relay<W> {
         let skew = skew(&m.version, self.version);
         let warn = {
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            st.daemon_version = m.version.clone();
-            let warn = skew == Skew::Small && st.warned_version.as_deref() != Some(m.version.as_str());
+            let warn = skew == Skew::Other && st.warned_version.as_deref() != Some(m.version.as_str());
             if warn {
                 st.warned_version = Some(m.version.clone());
             }
             warn
         };
         if warn {
-            let _ = writeln!(std::io::stderr(), "[scrybe] daemon version {} differs from shim {} (minor/patch) — restart daemon to refresh tool surface", m.version, self.version);
+            let same_major = matches!((parse_version(&m.version), parse_version(self.version)), (Some(d), Some(o)) if d[0] == o[0]);
+            let (how, advice) = if same_major { ("minor/patch", "restart daemon to refresh tool surface") } else { ("major", "update the older of the two if calls fail") };
+            let _ = writeln!(std::io::stderr(), "[scrybe] daemon version {} differs from shim {} ({how}) — {advice}", m.version, self.version);
         }
         match skew {
             Skew::PreUpgrade => self.set_mode(Mode::PreUpgrade),
-            Skew::Major => self.set_mode(Mode::MajorSkew),
-            Skew::None | Skew::Small => self.serve_tools(&m.tools),
+            Skew::None | Skew::Other => self.serve_tools(&m.tools),
         }
     }
 
@@ -463,17 +454,13 @@ impl<W: Write + Send> Relay<W> {
 
     /// The answer to a call the server's version rules out.
     fn refusal(&self, name: &str) -> Option<String> {
-        let (mode, version) = {
-            let st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            (st.mode, st.daemon_version.clone())
-        };
-        let why = match mode {
-            Mode::PreUpgrade if matches!(name, "status" | "doctor" | "init") => return Some(self.offline_answer(name, "")),
-            Mode::PreUpgrade => OUT_OF_DATE.to_string(),
-            Mode::MajorSkew => major_skew_message(&version, self.version),
-            _ => return None,
-        };
-        Some(text_result(&format!(r#"{{"error":{}}}"#, json::quote(&why)), false))
+        if self.state.lock().unwrap_or_else(|e| e.into_inner()).mode != Mode::PreUpgrade {
+            return None;
+        }
+        Some(match name {
+            "status" | "doctor" | "init" => self.offline_answer(name, ""),
+            _ => text_result(&format!(r#"{{"error":{}}}"#, json::quote(OUT_OF_DATE)), false),
+        })
     }
 
     /// Records a served tool list and tells the client if a restarted server changed it.
@@ -506,8 +493,7 @@ impl<W: Write + Send> Relay<W> {
         self.learn(&m);
         match skew(&m.version, self.version) {
             Skew::PreUpgrade => offline_tools(config_present),
-            Skew::Major => format!(r#"{{"tools":[{{"name":"scrybe_daemon_unavailable","description":{},"inputSchema":{{"type":"object","properties":{{}},"required":[]}}}}]}}"#, json::quote(&major_skew_message(&m.version, self.version))),
-            Skew::None | Skew::Small => format!(r#"{{"tools":{}}}"#, m.tools),
+            Skew::None | Skew::Other => format!(r#"{{"tools":{}}}"#, m.tools),
         }
     }
 
@@ -886,7 +872,7 @@ mod tests {
         for odd in ["", "0.54", "v1.2.3", "1.2.x", "a.b.c"] {
             assert_eq!(parse_version(odd), None, "{odd}");
         }
-        for (daemon, own, want) in [("0.54.0-rs.1", "0.54.0", Skew::None), ("0.54.0", "0.53.2", Skew::Small), ("0.53.9", "0.54.0", Skew::Small), ("0.33.9", "0.54.0", Skew::PreUpgrade), ("0.33.9", "0.33.0", Skew::Small), ("0.34.0", "0.54.0", Skew::Small), ("1.0.0", "0.54.0", Skew::Major), ("0.54.0", "1.0.0", Skew::Major), ("0.33.0", "1.0.0", Skew::PreUpgrade), ("", "0.54.0", Skew::None)] {
+        for (daemon, own, want) in [("0.54.0-rs.1", "0.54.0", Skew::None), ("0.54.0", "0.53.2", Skew::Other), ("0.53.9", "0.54.0", Skew::Other), ("0.33.9", "0.54.0", Skew::PreUpgrade), ("0.33.9", "0.33.0", Skew::Other), ("0.34.0", "0.54.0", Skew::Other), ("1.0.0", "0.54.0", Skew::Other), ("0.54.0", "1.0.0", Skew::Other), ("0.33.0", "1.0.0", Skew::PreUpgrade), ("", "0.54.0", Skew::None)] {
             assert_eq!(skew(daemon, own), want, "{daemon} {own}");
         }
     }
@@ -896,17 +882,15 @@ mod tests {
     }
 
     #[test]
-    fn a_server_under_another_major_version_is_refused_until_it_is_replaced() {
+    fn a_server_under_another_major_version_is_served_with_one_warning() {
         let r = test_relay();
         r.learn(&manifest("0.54.0-rs.1"));
-        assert_eq!((r.refusal("search_code"), written(&r).as_str()), (None, ""));
-        r.learn(&manifest("1.0.0"));
-        assert_eq!(written(&r).matches("list_changed").count(), 1);
-        let told = r.refusal("search_code").unwrap();
-        assert!(told.contains("daemon version 1.0.0 is major-incompatible with shim 0.54.0. Restart to update: scrybe daemon restart") && !told.contains("isError"), "{told}");
-        assert!(r.state.lock().unwrap().poll_until.is_some());
-        r.learn(&manifest("0.53.0"));
-        assert_eq!((r.refusal("search_code"), written(&r).matches("list_changed").count()), (None, 2));
+        for _ in 0..2 {
+            r.learn(&manifest("1.0.0"));
+            assert_eq!((r.refusal("search_code"), r.state.lock().unwrap().mode), (None, Mode::Serving));
+        }
+        assert_eq!(r.state.lock().unwrap().warned_version.as_deref(), Some("1.0.0"));
+        assert_eq!(written(&r), "", "the tools are the same, so the client is told nothing");
     }
 
     #[test]

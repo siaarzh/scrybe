@@ -37,12 +37,14 @@ pub struct Idle {
     hot_for: Duration,
     cold_multiplier: u32,
     on_change: Mutex<Vec<OnChange>>,
+    /// The state last told, held while it is told.
+    told_hot: Mutex<bool>,
 }
 
 impl Idle {
     pub fn from_env() -> Self {
         let multiplier = env_pos_int("SCRYBE_DAEMON_COLD_MULTIPLIER").map_or(5, |n| n as u32);
-        Idle { hot: Mutex::new(None), hot_for: env_ms("SCRYBE_DAEMON_HOT_MS", 60_000), cold_multiplier: multiplier, on_change: Mutex::new(vec![]) }
+        Idle { hot: Mutex::new(None), hot_for: env_ms("SCRYBE_DAEMON_HOT_MS", 60_000), cold_multiplier: multiplier, on_change: Mutex::new(vec![]), told_hot: Mutex::new(false) }
     }
 
     /// Runs `f` on every change, true for hot, like `onStateChange`.
@@ -50,7 +52,13 @@ impl Idle {
         self.on_change.lock().unwrap().push(f);
     }
 
-    fn changed(&self, hot: bool) {
+    /// Tells the state as it is now, so that an event in the instant it turns cold can't be told out of order.
+    fn changed(&self) {
+        let mut told = self.told_hot.lock().unwrap();
+        let hot = self.is_hot();
+        if std::mem::replace(&mut *told, hot) == hot {
+            return;
+        }
         let hooks = self.on_change.lock().unwrap().clone();
         for f in hooks {
             f(hot);
@@ -61,7 +69,7 @@ impl Idle {
         if self.hot.lock().unwrap().replace(Instant::now()).is_some() {
             return;
         }
-        self.changed(true);
+        self.changed();
         let me = self.clone();
         spawn_named("idle".into(), move || me.cool());
     }
@@ -78,7 +86,7 @@ impl Idle {
                 left
             };
             if left.is_zero() {
-                return self.changed(false);
+                return self.changed();
             }
             std::thread::sleep(left);
         }
@@ -153,7 +161,7 @@ fn watcher_event(ctx: &Ctx, level: &str, project: &str, detail: serde_json::Valu
 
 fn enqueue(ctx: &Ctx, project: &str) {
     if !ctx.stopped() {
-        ctx.queue.submit(Request { project: project.to_string(), ..Default::default() });
+        ctx.queue.submit(Request { project: project.to_string(), automatic: true, ..Default::default() });
     }
 }
 
@@ -463,7 +471,10 @@ fn poll_project(ctx: &Ctx, project: &str, source: &str, root: &Path, warned: &mu
             }
             _ => {}
         }
-        ctx.queue.submit(Request { project: project.to_string(), source: Some(source.to_string()), branch: Some(branch.clone()), content_ref: Some(remote), full: false, gc_purge: None });
+        let sub = ctx.queue.submit(Request { project: project.to_string(), source: Some(source.to_string()), branch: Some(branch.clone()), content_ref: Some(remote), automatic: true, ..Default::default() });
+        if sub.status == "rejected" {
+            return Err(ctx.queue.full());
+        }
         changed.push(branch.clone());
     }
     if !changed.is_empty() {
@@ -575,7 +586,7 @@ mod tests {
 
     #[test]
     fn a_cold_server_waits_longer() {
-        let idle = Arc::new(Idle { hot: Mutex::new(None), hot_for: Duration::from_secs(60), cold_multiplier: 5, on_change: Mutex::new(vec![]) });
+        let idle = Arc::new(Idle { hot: Mutex::new(None), hot_for: Duration::from_secs(60), cold_multiplier: 5, on_change: Mutex::new(vec![]), told_hot: Mutex::new(false) });
         assert!(!idle.is_hot());
         assert_eq!(idle.debounce(Duration::from_secs(1)), Duration::from_secs(5));
         idle.touch();
@@ -585,7 +596,7 @@ mod tests {
 
     #[test]
     fn only_a_change_runs_the_hooks() {
-        let idle = Arc::new(Idle { hot: Mutex::new(None), hot_for: Duration::from_millis(200), cold_multiplier: 5, on_change: Mutex::new(vec![]) });
+        let idle = Arc::new(Idle { hot: Mutex::new(None), hot_for: Duration::from_millis(200), cold_multiplier: 5, on_change: Mutex::new(vec![]), told_hot: Mutex::new(false) });
         let seen = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
         idle.add_on_change(Arc::new(move |hot| s.lock().unwrap().push(hot)));

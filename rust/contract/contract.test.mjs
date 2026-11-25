@@ -543,10 +543,10 @@ describe("indexing by itself", () => {
   test("garbage collection removes rows no branch refers to", async (t) => {
     const names = await c.toolNames();
     if (!names.includes("gc")) return t.skip("not ported");
-    await until(async () => (await c.call("queue_status")).value.running.length === 0, 30_000, "the queue to settle");
+    await until(() => w.idleQueue(), 30_000, "the queue to settle");
     rmSync(join(w.repo, "src/widget.ts"));
     await until(async () => (await c.call("lookup_symbol", { project_id: "demo", symbol_name: "frobnicateWidget", branch: w.main })).value.length === 0, 30_000, "the deletion to be noticed");
-    await until(async () => (await c.call("queue_status")).value.running.length === 0, 30_000, "the queue to settle");
+    await until(() => w.idleQueue(), 30_000, "the queue to settle");
     // The side branch still has this file, so only removing that branch's tags could orphan it.
     const started = await c.call("gc", { project_id: "demo" });
     assert.match(started.value.message, /1 gc job\(s\) queued/);
@@ -841,6 +841,8 @@ describe("the command line", () => {
     assert.equal(plain.status, 0, plain.stderr);
     assert.ok(plain.stdout.trim().split("\n").filter((l) => l.startsWith("[")).length > 1, plain.stdout);
     assert.equal(one.stdout, plain.stdout);
+    const before = await w.cli("search", "--top-k", "1", "code", "-P", "demo", "widget");
+    assert.deepEqual([before.status, before.stdout], [one.status, one.stdout], before.stderr);
     const k = await w.cli("search", "knowledge", "-P", "demo", "--top-k", "1", "widget");
     assert.equal(k.stderr, (await w.cli("search", "knowledge", "-P", "demo", "widget")).stderr);
   });
@@ -3727,7 +3729,7 @@ describe("a project list that can't be saved", () => {
   before(async () => {
     w = await makeWorld({ pinned: ["side"] });
     ({ c, port } = await startedServer(w));
-    await until(async () => (await c.call("queue_status")).value.running.length === 0, 30_000, "the queue to settle");
+    await until(() => w.idleQueue(), 30_000, "the queue to settle");
   });
   after(() => w.stop());
 
@@ -4112,10 +4114,20 @@ describe("what the file watcher reacts to", () => {
     await until(async () => {
       const seen = jobs();
       await sleep(1500);
-      const q = (await c.call("queue_status")).value;
-      return jobs() === seen && q.running.length + q.queued.length === 0;
+      return jobs() === seen && (await w.idleQueue());
     }, 60_000, "the jobs to settle");
   };
+
+  test("a job the watcher starts is in the server's queue and not in the job list", async () => {
+    const listed = async () => (await c.call("list_jobs")).value.jobs.map((j) => j.job_id);
+    const [before, seen] = [await listed(), jobs()];
+    await starts("a saved file", () => writeFileSync(join(w.repo, "src/unlisted.ts"), "export function savedUnlisted() {}\n"));
+    await indexed("savedUnlisted");
+    assert.ok(jobs() > seen);
+    assert.deepEqual(await listed(), before);
+    const id = w.logged("job.started").at(-1).detail.jobId;
+    assert.equal((await c.call("reindex_status", { job_id: id })).value.status, "done");
+  });
 
   test("a dot-file starts a job", () => starts("a dot-file", () => writeFileSync(join(w.repo, ".eslintrc.json"), '{ "rules": {} }\n')));
 
@@ -4773,19 +4785,18 @@ describe("SCRYBE_DEBUG_FETCH_POLLER", () => {
 });
 
 describe("the tiny client and a server of another version", () => {
-  let w, fake, port, version, calls;
+  let w, fake, port, version;
   const own = async () => (await w.client({ extraEnv: { SCRYBE_NO_AUTO_DAEMON: "1" } }).hello()).result.serverInfo.version;
   const pidfile = (pid) => writeFileSync(join(w.data, "daemon.pid"), JSON.stringify({ pid, port }));
   const client = (opts = {}) => w.client({ extraEnv: { SCRYBE_NO_AUTO_DAEMON: "1", SCRYBE_MCP_LISTCHANGED_POLL_INTERVAL_MS: "100" }, ...opts });
   before(async () => {
     w = await makeWorld();
-    calls = 0;
     fake = createHttpServer((req, res) => {
       req.resume();
       const answer = (body) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
       if (req.url === "/health") return answer({ ready: true, draining: false });
       if (req.url === "/mcp/manifest") return answer({ daemon_version: version, tools: [{ name: "list_projects", description: "d", inputSchema: { type: "object" } }] });
-      if (req.url === "/mcp/rpc") { calls++; return answer({ id: "x", result: ["served"] }); }
+      if (req.url === "/mcp/rpc") return answer({ id: "x", result: ["served"] });
       answer({ ok: true });
     });
     await new Promise((r) => fake.listen(0, "127.0.0.1", r));
@@ -4817,22 +4828,18 @@ describe("the tiny client and a server of another version", () => {
     assert.equal(c.errors, `[scrybe] daemon version ${version} differs from shim ${mine} (minor/patch) — restart daemon to refresh tool surface\n`);
   });
 
-  test("another major version is refused, and served again once the server is replaced", async () => {
+  // Today's client refuses another major version. The relay is a fixed binary, and would refuse every server of the
+  // next one until it is reinstalled.
+  test("another major version is served, with a warning on standard error", async () => {
     const mine = await own();
     version = "99.1.0";
-    const c = client();
+    const c = client({ keepErrors: true });
     await c.hello();
-    const served = calls;
-    const told = `daemon version 99.1.0 is major-incompatible with shim ${mine}. Restart to update: scrybe daemon restart`;
-    const refused = await c.call("list_projects");
-    assert.deepEqual([refused.value, refused.isError], [{ error: told }, false]);
-    const { tools } = (await c.rpc("tools/list")).result;
-    assert.deepEqual(tools, [{ name: "scrybe_daemon_unavailable", description: told, inputSchema: { type: "object", properties: {}, required: [] } }]);
-    assert.equal(calls, served, "nothing was sent on");
-    version = mine;
-    pidfile(999_999_992);
-    await until(() => c.notes.includes("notifications/tools/list_changed"), 10_000, "the notice");
-    assert.deepEqual((await c.call("list_projects")).value, ["served"]);
+    const answer = await c.call("list_projects");
+    assert.deepEqual([answer.value, answer.isError], [["served"], false]);
+    assert.deepEqual(await c.toolNames(), ["list_projects"]);
+    await until(() => c.errors.includes("\n"), 5000, "the warning");
+    assert.equal(c.errors, `[scrybe] daemon version 99.1.0 differs from shim ${mine} (major) — update the older of the two if calls fail\n`);
   });
 
   test("a server from before the index format changed offers only what needs none", async () => {
