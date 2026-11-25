@@ -298,6 +298,9 @@ fn log_path() -> PathBuf {
 }
 
 pub(crate) fn append_log(line: &str) {
+    // One write per line, one writer at a time: lines from two threads must not interleave.
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let path = log_path();
     if std::fs::metadata(&path).is_ok_and(|m| m.len() >= MAX_LOG_BYTES) {
         let (a1, a2) = (format!("{}.1", path.display()), format!("{}.2", path.display()));
@@ -305,7 +308,7 @@ pub(crate) fn append_log(line: &str) {
         let _ = std::fs::rename(&path, a1);
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{line}");
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }
 

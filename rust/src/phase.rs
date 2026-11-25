@@ -87,9 +87,12 @@ fn stamp(record: Value) -> String {
 }
 
 fn emit_to(path: &Path, record: Value) {
+    // One write per line, one writer at a time: lines from two threads must not interleave.
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     rotate_if_needed(path, log_max_bytes(), log_backups());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{}", stamp(record));
+        let _ = f.write_all(format!("{}\n", stamp(record)).as_bytes());
     }
 }
 
