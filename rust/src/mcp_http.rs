@@ -168,7 +168,7 @@ where
         return refusal("415 Unsupported Media Type", -32000, "Unsupported Media Type: Content-Type must be application/json");
     }
     let text = String::from_utf8_lossy(body);
-    let Ok(parsed) = serde_json::from_str::<Value>(text.strip_prefix('\u{FEFF}').unwrap_or(&text)) else {
+    let Ok(parsed) = crate::jsstr::parse_json(text.strip_prefix('\u{FEFF}').unwrap_or(&text)) else {
         return refusal("400 Bad Request", -32700, "Parse error: Invalid JSON");
     };
     let messages = match parsed {

@@ -37,12 +37,17 @@ impl Sizes {
         Sizes { chunk_size: get("SCRYBE_CHUNK_SIZE", 60), overlap: get("SCRYBE_CHUNK_OVERLAP", 10) }
     }
 
-    /// An overlap as long as the chunk would never move forward.
-    pub fn check(self) -> Result<(), String> {
-        if self.overlap < self.chunk_size {
-            return Ok(());
-        }
-        Err(format!("Invalid chunking config: SCRYBE_CHUNK_OVERLAP ({}) must be less than SCRYBE_CHUNK_SIZE ({}). Defaults: size=60, overlap=10.", self.overlap, self.chunk_size))
+    /// An overlap as long as the chunk would never move forward. A value that isn't a number passes, and the default is used.
+    pub fn check_env() -> Result<(), String> {
+        let get = |k: &str, d: f64| std::env::var(k).map_or(Some(d), |v| parse_int(&v));
+        check(get("SCRYBE_CHUNK_SIZE", 60.0), get("SCRYBE_CHUNK_OVERLAP", 10.0))
+    }
+}
+
+fn check(size: Option<f64>, overlap: Option<f64>) -> Result<(), String> {
+    match (size, overlap) {
+        (Some(size), Some(overlap)) if overlap >= size => Err(format!("Invalid chunking config: SCRYBE_CHUNK_OVERLAP ({overlap}) must be less than SCRYBE_CHUNK_SIZE ({size}). Defaults: size=60, overlap=10.")),
+        _ => Ok(()),
     }
 }
 
@@ -293,6 +298,14 @@ mod tests {
     use super::*;
 
     const SIZES: Sizes = Sizes { chunk_size: 60, overlap: 10 };
+
+    #[test]
+    fn an_overlap_must_be_shorter_than_its_chunk() {
+        assert!(check(Some(11.0), Some(10.0)).is_ok());
+        assert!(check(None, Some(10.0)).is_ok() && check(Some(5.0), None).is_ok());
+        assert_eq!(check(Some(-5.0), Some(10.0)).unwrap_err(), "Invalid chunking config: SCRYBE_CHUNK_OVERLAP (10) must be less than SCRYBE_CHUNK_SIZE (-5). Defaults: size=60, overlap=10.");
+        assert!(check(Some(10.0), Some(10.0)).is_err());
+    }
 
     #[test]
     fn id_matches_node_createhash() {

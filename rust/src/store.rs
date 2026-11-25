@@ -28,6 +28,10 @@ pub fn db_path() -> PathBuf {
 
 /// Mirrors `needsMigration`: no sidecar, a string marker, or an older scheme all count.
 pub fn needs_migration(table: &str) -> bool {
+    // Nothing written yet, or a rebuild that failed: there is nothing to migrate.
+    if !db_path().join(format!("{table}.lance")).exists() {
+        return false;
+    }
     let path = db_path().join(format!("{table}-meta.json"));
     let Ok(text) = std::fs::read_to_string(path) else { return true };
     let Ok(meta) = serde_json::from_str::<serde_json::Value>(&text) else { return true };
@@ -224,6 +228,12 @@ fn dir_bytes(dir: &std::path::Path) -> u64 {
     }).sum()
 }
 
+/// A limit far above any table's size is cut to its rows: a search sizes its heap by it.
+async fn within_rows(table: &Table, limit: usize) -> Result<usize> {
+    const PLAIN: usize = 10_000;
+    Ok(if limit <= PLAIN { limit } else { limit.min(table.count_rows(None).await?.max(1)) })
+}
+
 fn newest_manifest_is_empty(versions: &std::path::Path) -> bool {
     let Ok(dir) = std::fs::read_dir(versions) else { return false };
     let newest = dir.flatten().filter_map(|e| {
@@ -325,6 +335,7 @@ impl Store {
 
     pub async fn vector_search(&self, name: &str, vec: &[f32], where_: &str, top_k: usize) -> Result<Rows> {
         let Some(table) = self.open(name).await? else { return Ok(Rows { batches: vec![] }) };
+        let top_k = within_rows(&table, top_k).await?;
         let mut query = table.query().nearest_to(vec)?.distance_type(DistanceType::Cosine).only_if(where_).limit(top_k);
         if self.settings.vector_index_enabled && self.vector_index_present(name, &table).await? {
             let refine = self.settings.vector_refine_factor;
@@ -339,6 +350,7 @@ impl Store {
     /// Same query the Node binding builds for `table.search(text, "fts", "content")`.
     pub async fn fts_search(&self, name: &str, text: &str, where_: &str, top_k: usize) -> Result<Rows> {
         let Some(table) = self.open(name).await? else { return Ok(Rows { batches: vec![] }) };
+        let top_k = within_rows(&table, top_k).await?;
         let is_phrase = text.len() >= 2 && text.starts_with('"') && text.ends_with('"');
         let fts: FtsQuery = if is_phrase {
             PhraseQuery::new(text[1..text.len() - 1].to_string()).into()
@@ -447,8 +459,8 @@ impl Store {
         retry_on_conflict(name, || self.evict(name), || self.upsert_once(name, rows)).await
     }
 
-    /// `dropTable` plus removing a directory Lance may leave behind.
-    pub async fn drop_table_and_files(&self, name: &str) -> Result<()> {
+    /// `dropTable`: the table, a directory Lance may leave behind, and its sidecar.
+    pub async fn drop_table(&self, name: &str) -> Result<()> {
         self.tables.lock().unwrap().remove(name);
         self.has_vector_index.lock().unwrap().remove(name);
         self.invalidate_health(name);
@@ -457,12 +469,6 @@ impl Store {
         if dir.exists() {
             std::fs::remove_dir_all(dir)?;
         }
-        Ok(())
-    }
-
-    /// `dropTable`: the table, its directory and its sidecar.
-    pub async fn drop_table(&self, name: &str) -> Result<()> {
-        self.drop_table_and_files(name).await?;
         let sidecar = db_path().join(format!("{name}-meta.json"));
         if sidecar.exists() {
             let _ = std::fs::remove_file(sidecar);
@@ -588,7 +594,7 @@ impl Store {
             let rows = &rows;
             async move {
                 t.delete(rows.as_str()).await?;
-                Ok(())
+                self.maybe_compact(name, &t).await
             }
         })
         .await
@@ -608,7 +614,7 @@ impl Store {
         self.write_with_retry(name, |t| async move {
             let params = FtsIndexBuilder::default().stem(false).lower_case(true);
             t.create_index(&["content"], Index::FTS(params)).replace(true).execute().await?;
-            Ok(())
+            self.maybe_compact(name, &t).await
         })
         .await
     }
@@ -626,15 +632,19 @@ impl Store {
         self.write_with_retry(name, |t| async move {
             let params = IvfHnswSqIndexBuilder::default().distance_type(DistanceType::Cosine).num_partitions(1);
             t.create_index(&["vector"], Index::IvfHnswSq(params)).replace(true).execute().await?;
-            // `maybeCompact`: only once enough versions have piled up.
-            if t.list_versions().await?.len() >= compact_threshold() {
-                self.compact_with_grace(name).await?;
-            }
-            Ok(())
+            self.maybe_compact(name, &t).await
         })
         .await?;
         self.has_vector_index.lock().unwrap().remove(name);
         self.tables.lock().unwrap().remove(name);
+        Ok(())
+    }
+
+    /// `maybeCompact`: only once enough versions have piled up.
+    async fn maybe_compact(&self, name: &str, table: &Table) -> Result<()> {
+        if table.list_versions().await?.len() >= compact_threshold() {
+            self.compact_with_grace(name).await?;
+        }
         Ok(())
     }
 
@@ -706,7 +716,7 @@ impl Store {
             let rows = &rows;
             async move {
                 t.delete(rows.as_str()).await?;
-                Ok(())
+                self.maybe_compact(name, &t).await
             }
         })
         .await

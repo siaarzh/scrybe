@@ -31,11 +31,11 @@ pub(crate) fn ticket_fields(a: &Value) -> (String, String, String, String) {
 fn build_config(a: &Value) -> Value {
     match a["source_type"].as_str().unwrap_or("") {
         "code" => {
-            let langs: Vec<String> = match &a["languages"] {
-                Value::Array(l) => l.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).collect(),
-                Value::String(s) if !s.is_empty() => s.split(',').map(|s| s.trim().to_string()).collect(),
-                _ => vec![],
+            let joined = match &a["languages"] {
+                Value::Array(l) => l.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","),
+                other => other.as_str().unwrap_or("").to_string(),
             };
+            let langs: Vec<&str> = if joined.is_empty() { vec![] } else { joined.split(',').map(str::trim).collect() };
             json!({ "type": "code", "root_path": text(a, "root_path").unwrap_or_default(), "languages": langs })
         }
         "ticket" => {

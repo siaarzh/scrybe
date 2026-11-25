@@ -190,14 +190,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
     // Anything but "github" goes to the GitLab plugin.
     let github = source.source_config.get("provider").and_then(Value::as_str) == Some("github");
     let embedding = registry::resolve_embedding(source)?;
-    let table = match &source.table_name {
-        Some(t) => t.clone(),
-        None => {
-            let name = registry::table_name_for(project_id, source, &embedding);
-            registry::update_source(project_id, source_id, &[("table_name", json!(name))])?;
-            name
-        }
-    };
+    let table = registry::assign_table(project_id, source, &embedding)?;
     let max_chars = embedding.char_cap();
     let sizes = Sizes::from_env();
     let settings = Settings::from_env();
@@ -211,6 +204,7 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
 
     check_cancel(options)?;
     if mode == Mode::Full {
+        embed_api::require_key(&embedding)?;
         let mut phase = Phase::begin(&ctx, "preflight_health");
         phase.set_work(json!({ "table_state": "unknown", "repaired": "none" }));
         let (table_state, repaired) = repair_if_corrupt(store, &table, project_id, source_id, &embedding, true).await;
@@ -294,7 +288,9 @@ pub async fn index_ticket_source(store: &Store, project_id: &str, source: &Sourc
             writer.remove_file(p)?;
             stale_phase.sample();
         }
-        save_hashes(&hash_path, &hashes)?;
+        if !to_remove.is_empty() {
+            save_hashes(&hash_path, &hashes)?;
+        }
     }
     stale_phase.set_work(json!({ "files_to_reindex": to_index.len(), "files_to_remove": to_remove.len(), "known_chunk_ids": known.len(), "bytes_to_read": 0 }));
     stale_phase.end(Outcome::Ok);

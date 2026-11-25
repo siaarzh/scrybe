@@ -35,6 +35,16 @@ pub fn parse_int(s: &str) -> Option<f64> {
     Some(sign * digits.parse::<f64>().ok()?)
 }
 
+/// What a number becomes as a 32-bit unsigned argument of a native call.
+pub fn to_uint32(n: f64) -> u32 {
+    if n.is_finite() { n.trunc().rem_euclid(4_294_967_296.0) as u32 } else { 0 }
+}
+
+/// Where `array.slice(0, n)` ends.
+pub fn slice_end(len: usize, n: f64) -> usize {
+    if n < 0.0 { (len as f64 + n.trunc()).max(0.0) as usize } else { len.min(n as usize) }
+}
+
 /// `parseInt` of an environment variable, `None` when it is unset or NaN.
 pub fn env_int(name: &str) -> Option<f64> {
     parse_int(&std::env::var(name).ok()?)
@@ -43,6 +53,35 @@ pub fn env_int(name: &str) -> Option<f64> {
 /// `parseInt` of an environment variable when that is above zero.
 pub fn env_pos_int(name: &str) -> Option<f64> {
     env_int(name).filter(|n| *n > 0.0)
+}
+
+/// `JSON.parse`: a lone half of a surrogate pair, which Rust text can't hold, becomes U+FFFD.
+pub fn parse_json(text: &str) -> serde_json::Result<serde_json::Value> {
+    serde_json::from_str(text).or_else(|e| if text.contains("\\u") { serde_json::from_str(&whole_surrogates(text)) } else { Err(e) })
+}
+
+/// JSON text with every lone surrogate escape replaced.
+fn whole_surrogates(text: &str) -> String {
+    let unit = |at: &str| at.strip_prefix("\\u").and_then(|h| h.get(..4)).and_then(|h| u16::from_str_radix(h, 16).ok());
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('\\') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let taken = match unit(rest) {
+            Some(0xD800..=0xDBFF) if matches!(unit(&rest[6..]), Some(0xDC00..=0xDFFF)) => 12,
+            Some(0xD800..=0xDFFF) => {
+                out.push('\u{FFFD}');
+                rest = &rest[6..];
+                continue;
+            }
+            // The backslash and what it escapes.
+            _ => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+        };
+        out.push_str(&rest[..taken]);
+        rest = &rest[taken..];
+    }
+    out + rest
 }
 
 /// `s.split(/^/m)`: breaks after \n, \r, U+2028 and U+2029, with no empty tail.
@@ -101,6 +140,29 @@ mod tests {
     fn integers_are_read_from_the_front() {
         assert_eq!([" 42", "80abc", "-1", "+7", "0x1F", "70000"].map(parse_int), [42.0, 80.0, -1.0, 7.0, 0.0, 70000.0].map(Some));
         assert_eq!(["", "abc", "-", " ", "é1"].map(parse_int), [None; 5]);
+    }
+
+    #[test]
+    fn counts_are_cut_like_javascript_cuts_them() {
+        assert_eq!([10.0, 1.9, 0.0, -1.0, 1e20, f64::NAN, f64::INFINITY].map(to_uint32), [10, 1, 0, u32::MAX, 1_661_992_960, 0, 0]);
+        assert_eq!([2.9, 0.0, -1.0, -9.0, 1e20, f64::NAN].map(|n| slice_end(5, n)), [2, 0, 4, 0, 5, 0]);
+    }
+
+    #[test]
+    fn a_lone_surrogate_is_replaced_and_nothing_else_is() {
+        for (json, text) in [
+            (r#""a\ud800b""#, "a\u{FFFD}b"),
+            (r#""\uDC00\ud83d\ude00""#, "\u{FFFD}😀"),
+            (r#""\ud83d\ud83d\ude00\ud83d""#, "\u{FFFD}😀\u{FFFD}"),
+            (r#""\\ud800\ud800\n""#, "\\ud800\u{FFFD}\n"),
+            (r#""\ud800\\udc00é""#, "\u{FFFD}\\udc00é"),
+            (r#""\\ud800""#, "\\ud800"),
+        ] {
+            assert_eq!(parse_json(json).unwrap(), text, "{json}");
+        }
+        for bad in [r#""\ud8""#, r#""\ud800"#, r#""\ud800" x"#, r#""\"#, "{", r#""\u+123""#, r#""\ué""#] {
+            assert!(parse_json(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

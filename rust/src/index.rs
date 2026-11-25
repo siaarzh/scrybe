@@ -155,10 +155,9 @@ pub(crate) fn expected_dimensions(cfg: &EmbedConfig, text: bool) -> i32 {
 /// runs and that branch isn't ported. Returns the table's state and how it was repaired.
 pub(crate) async fn repair_if_corrupt(store: &Store, table: &str, project: &str, source: &str, cfg: &EmbedConfig, text: bool) -> (&'static str, &'static str) {
     match store.table_health(table, Some(expected_dimensions(cfg, text)), true).await {
-        Health::Corrupt(fault) => {
-            eprintln!("[scrybe] table {table} is corrupt ({}): rebuilding", fault.reason);
+        Health::Corrupt(_) => {
             let mut repaired = "none";
-            if store.drop_table_and_files(table).await.is_ok() {
+            if store.drop_table(table).await.is_ok() {
                 repaired = "rebuild";
                 debug_emit(json!({ "event": "indexer.repaired", "projectId": project, "sourceId": source, "method": "rebuild" }));
                 append_log(&json!({ "ts": now_iso(), "event": "health.repaired-via-rebuild", "projectId": project, "sourceId": source }).to_string());
@@ -332,17 +331,20 @@ impl Run<'_> {
             self.records.written(rows.len(), added, self.persisted);
             self.phase.sample();
         }
-        for (key, chunks) in batches.iter() {
+        for (i, (key, chunks)) in batches.iter().enumerate() {
             self.writer.add_tags(key, chunks)?;
             for c in chunks {
                 self.known.insert(c.chunk_id.clone());
             }
             self.hashes.insert(key.clone(), self.source_hash[key].clone());
+            // A hash file that can't be written must not leave every file of the batch tagged.
+            if i == 0 || i + 1 == batches.len() {
+                save_hashes(&self.hash_path, &self.hashes)?;
+            }
             self.seen_files.insert(key.clone());
             self.prepared += chunks.len();
         }
         self.options.report(Progress::Embed(self.prepared));
-        save_hashes(&self.hash_path, &self.hashes)?;
         self.bytes_embedded += batch_bytes;
         self.records.embedded(chunk_count, batch_started.elapsed(), self.prepared);
         self.phase.add_work(&[
@@ -376,14 +378,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
         bail!("No plugin registered for source type \"{}\"", source.kind());
     }
     let embedding = registry::resolve_embedding(source)?;
-    let table = match &source.table_name {
-        Some(t) => t.clone(),
-        None => {
-            let name = registry::table_name_for(project_id, source, &embedding);
-            registry::update_source(project_id, source_id, &[("table_name", json!(name))])?;
-            name
-        }
-    };
+    let table = registry::assign_table(project_id, source, &embedding)?;
     let root = PathBuf::from(source.root_path().context("code source without root_path")?);
     let max_chars = embedding.char_cap();
     let branch = options.branch.clone().unwrap_or_else(|| branches::resolve_branch(source));
@@ -410,6 +405,7 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
 
     check_cancel(options)?;
     if mode == Mode::Full {
+        embed_api::require_key(&embedding)?;
         let mut phase = Phase::begin(&ctx, "preflight_health");
         phase.set_work(json!({ "table_state": "unknown", "repaired": "none" }));
         let (table_state, repaired) = repair_if_corrupt(store, &table, project_id, source_id, &embedding, false).await;
@@ -502,7 +498,9 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
             writer.remove_file(p)?;
             stale_phase.sample();
         }
-        save_hashes(&hash_path, &hashes)?;
+        if !to_remove.is_empty() {
+            save_hashes(&hash_path, &hashes)?;
+        }
     }
     let bytes_to_read: u64 = entries
         .iter()
@@ -586,7 +584,9 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
             }
         }
     }
-    save_hashes(&run.hash_path, &run.hashes)?;
+    if zero_chunk_files > 0 {
+        let _ = save_hashes(&run.hash_path, &run.hashes);
+    }
     run.phase.end(Outcome::Ok);
 
     if let Some(session) = &run.halving {

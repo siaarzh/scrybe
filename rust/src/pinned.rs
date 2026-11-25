@@ -149,6 +149,7 @@ pub fn ignore_warning(root: &str, branch: &str, project: &str, source: &str) -> 
 
 /// `list_pinned_branches`: one entry per code source, or only the named one.
 pub fn list_tool(project: &str, source: Option<&str>) -> Result<Value, String> {
+    let source = source.filter(|s| !s.is_empty());
     let p = registry::get_project(project).ok_or_else(|| PinError::ProjectNotFound(project.to_string()).message())?;
     let entries: Vec<Value> = p
         .sources

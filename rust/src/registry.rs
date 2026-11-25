@@ -163,6 +163,8 @@ pub struct EmbedConfig {
     pub model: String,
     pub dimensions: i32,
     pub credentials: String,
+    /// The variable that may hold the key instead of the preset.
+    pub key_env: String,
     pub encoding_float: bool,
     pub max_input_tokens: Option<usize>,
     pub query_prefix: String,
@@ -234,6 +236,12 @@ pub fn unset_token_error(label: &str, project_id: &str, token: &str, in_daemon: 
     anyhow::Error::new(CallerFacing(format!("Token for {label} source \"{project_id}\" references env var {name} which is not set. Set it in your environment or in <DATA_DIR>/.env: {name}=<your-token>{remedy}")))
 }
 
+/// The variable `_injectCredential` uses for a preset.
+fn key_env(preset: &str) -> String {
+    let plain = |c: char| if c.is_ascii_uppercase() || c.is_ascii_digit() { c.to_string() } else { "_".repeat(c.len_utf16()) };
+    format!("SCRYBE_PRESET_{}", preset.to_uppercase().chars().map(plain).collect::<String>())
+}
+
 /// `resolveEmbeddingConfig` plus `resolvePreset`.
 pub fn resolve_embedding(source: &Source) -> Result<EmbedConfig> {
     let Some(cfg) = presets::read_scrybe_config()? else {
@@ -245,17 +253,16 @@ pub fn resolve_embedding(source: &Source) -> Result<EmbedConfig> {
     let resolved = presets::resolve_preset(name, slot(source), &cfg, true)?;
     let preset = &cfg["embedding_presets"][name];
     let local = resolved.provider == "local";
-    if !local && resolved.credentials.is_empty() {
-        anyhow::bail!("No API key found for model \"{}\".", resolved.model);
-    }
     let Some(dimensions) = resolved.dim.as_f64() else { anyhow::bail!("preset \"{name}\" has a \"dim\" that isn't a number") };
+    let key_env = key_env(name);
     let template = |k: &str| preset["prompt_template"][k].as_str().unwrap_or("").to_string();
     Ok(EmbedConfig {
         local,
         base_url: resolved.base_url,
         model: resolved.model,
         dimensions: dimensions as i32,
-        credentials: resolved.credentials,
+        credentials: std::env::var(&key_env).unwrap_or(resolved.credentials),
+        key_env,
         encoding_float: preset["encoding_format"] == "float",
         max_input_tokens: preset["max_input_tokens"].as_f64().map(|n| n as usize),
         query_prefix: template("query"),
@@ -308,6 +315,27 @@ pub fn table_name_for(project: &str, source: &Source, emb: &EmbedConfig) -> Stri
     let prefix = if source.profile() == Some("text") { "knowledge" } else { "code" };
     let hash = sha256_hex(&format!("{project}:{}:{}:{}", source.source_id, emb.model, emb.dimensions));
     format!("{prefix}_{}", &hash[..12])
+}
+
+/// `assignTableName`: the source's table, named and saved if it had none.
+pub fn assign_table(project: &str, source: &Source, emb: &EmbedConfig) -> Result<String> {
+    if let Some(t) = &source.table_name {
+        return Ok(t.clone());
+    }
+    let name = table_name_for(project, source, emb);
+    update_source(project, &source.source_id, &[("table_name", serde_json::json!(name))])?;
+    Ok(name)
+}
+
+/// `assignTableName` for a reader: `None` when the source has no table and none of its name is on disk either.
+pub fn table_to_read(project: &str, source: &Source, emb: &EmbedConfig) -> Result<Option<String>> {
+    if source.table_name.is_none() {
+        let on_disk = crate::store::db_path().join(format!("{}.lance", table_name_for(project, source, emb))).exists();
+        if !on_disk || crate::index::refuse_live_data_dir().is_err() {
+            return Ok(None);
+        }
+    }
+    assign_table(project, source, emb).map(Some)
 }
 
 // One writer at a time, so two calls can't each read the old list and drop the other's change.
@@ -469,6 +497,11 @@ mod tests {
         assert_eq!(text(&list[1]), r#"{"id":"bare","sources":[{"source_id":"primary","source_config":{"type":"code","root_path":"","languages":[]}}]}"#);
         assert_eq!(text(&list[2]), r#"{"sources":[{"source_id":"primary","source_config":{"type":"ticket"},"last_indexed":null}],"id":"own"}"#);
         assert_eq!(migrate(&mut list), [""; 0], "a second look finds nothing to do");
+    }
+
+    #[test]
+    fn a_preset_names_its_key_variable() {
+        assert_eq!(["fake", "my-model.2", "é😀"].map(key_env), ["SCRYBE_PRESET_FAKE", "SCRYBE_PRESET_MY_MODEL_2", "SCRYBE_PRESET____"]);
     }
 
     #[test]

@@ -231,7 +231,7 @@ async fn call_tool(store: &Store, params: &Value) -> Result<Value, (i64, String)
 async fn run_tool(store: &Store, name: &str, a: &Value) -> Result<Result<String, tools::ToolError>, (i64, String)> {
     let pretty = |v: String| Ok::<String, tools::ToolError>(v);
     let text_of = |v: &Value| v["content"][0]["text"].as_str().unwrap_or("null").to_string();
-    let top_k = a.get("top_k").and_then(Value::as_f64).map(|n| n as usize).unwrap_or(10);
+    let top_k = a.get("top_k").and_then(Value::as_f64).unwrap_or(10.0);
     let result: Result<Value, tools::ToolError> = match name {
         "list_projects" => return Ok(pretty(text_of(&text_result(&tools::list_projects())))),
         "search_code" => {
@@ -255,7 +255,7 @@ async fn run_tool(store: &Store, name: &str, a: &Value) -> Result<Result<String,
                 branch: str_arg(a, "branch"),
                 source_id: str_arg(a, "source_id"),
                 case_sensitive: a.get("case_sensitive").and_then(Value::as_bool).unwrap_or(true),
-                limit: a.get("limit").and_then(Value::as_f64).map(|n| n as usize).unwrap_or(50),
+                limit: a.get("limit").and_then(Value::as_f64).unwrap_or(50.0),
             };
             tools::lookup_symbol(store, input).await.map(|r| text_result(&r))
         }
@@ -321,7 +321,7 @@ pub async fn serve(store: &Store) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+        let Ok(req) = crate::jsstr::parse_json(&line) else {
             write(&mut out, &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } })).await?;
             continue;
         };

@@ -8,7 +8,7 @@ use crate::registry::{self, Source};
 use crate::source_add;
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// A string argument that counts as given in JavaScript: present and not empty.
@@ -138,14 +138,28 @@ fn wipe_source(queue: &Arc<Queue>, project: &str, source: &str) -> Result<()> {
     queue.rows.wipe_source(project, source)?;
     let _ = std::fs::remove_file(crate::index::cursor_path(project, source));
     let _ = crate::embed_api::delete_entries_for_source(project, source);
-    let prefix = format!("{project}__{source}__");
-    for entry in std::fs::read_dir(data_dir().join("hashes")).into_iter().flatten().flatten() {
+    remove_hash_files(&data_dir().join("hashes"), &format!("{project}__{source}__"));
+    Ok(())
+}
+
+/// Every hash file whose name starts with `prefix`. A slash in an id makes folders of its first parts.
+fn remove_hash_files(root: &Path, prefix: &str) {
+    let mut parts: Vec<&str> = prefix.split(['/', std::path::MAIN_SEPARATOR]).collect();
+    let start = parts.pop().unwrap_or("");
+    // Never out of the folder.
+    if parts.iter().any(|p| !matches!(Path::new(p).components().collect::<Vec<_>>()[..], [Component::Normal(_)])) {
+        return;
+    }
+    let dir = root.join(parts.iter().collect::<PathBuf>());
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&prefix) && name.ends_with(".json") {
+        if name.starts_with(start) && name.ends_with(".json") {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-    Ok(())
+    for empty in dir.ancestors().take(parts.len()) {
+        let _ = std::fs::remove_dir(empty);
+    }
 }
 
 // ─── Branches ────────────────────────────────────────────────────────────────
@@ -260,6 +274,27 @@ pub fn list_private_ignores(a: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_files_go_with_their_source_and_nothing_outside_the_folder_does() {
+        let dir = scratch("hashes");
+        let root = dir.join("hashes");
+        let files = ["p__a b/c__master.json", "p__a b/d__master.json", "p__../x__master.json", "p__s__master.json", "p__s2__master.json", "../x__s__master.json", "../p__s__master.json"];
+        for f in files {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), "{}").unwrap();
+        }
+        let left = || files.into_iter().filter(|f| root.join(f).exists()).collect::<Vec<_>>();
+        remove_hash_files(&root, "../x__s__");
+        remove_hash_files(&root, "/x__");
+        assert_eq!(left(), files);
+        remove_hash_files(&root, "p__a b/c__");
+        remove_hash_files(&root, "p__../x__");
+        remove_hash_files(&root, "p__s__");
+        assert_eq!(left(), [files[1], files[4], files[5], files[6]]);
+        assert!(!root.join("p__..").exists(), "a folder left empty goes too");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("scrybe-manage-{name}-{}", std::process::id()));

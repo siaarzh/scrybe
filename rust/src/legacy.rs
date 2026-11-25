@@ -167,7 +167,7 @@ async fn old_inner(store: Store, command: OldCommand) -> anyhow::Result<()> {
             let project_id = need(project_id, PROJECT_FLAG);
             warn_deprecated("search-knowledge", "search knowledge");
             let types: Option<Vec<String>> = item_types.filter(|t| !t.is_empty()).map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
-            let hits = tools::search_knowledge(&store, &project_id, &query, parse_int(&top_k).unwrap_or(10), source_id.as_deref(), types.as_deref()).await.map_err(|e| anyhow::anyhow!(e.message))?;
+            let hits = tools::search_knowledge(&store, &project_id, &query, top_k_of(&top_k), source_id.as_deref(), types.as_deref()).await.map_err(|e| anyhow::anyhow!(e.message))?;
             say(&tools::format_knowledge(&hits));
             Ok(())
         }
@@ -213,11 +213,9 @@ pub fn pin(action: PinAction) {
     }
 }
 
-/// `parseInt(value, 10)` for the values a person types: the leading digits, or None.
-fn parse_int(value: &str) -> Option<usize> {
-    let v = value.trim_start();
-    let digits: String = v.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
+/// `parseInt(value, 10)`, its NaN kept.
+fn top_k_of(value: &str) -> f64 {
+    crate::jsstr::parse_int(value).unwrap_or(f64::NAN)
 }
 
 /// `search <query...>` with no verb. With no words it shows the search help, like commander's `help()`.
@@ -236,7 +234,7 @@ pub async fn bare_search(store: &Store, query: Vec<String>, project_id: Option<S
         std::process::exit(1);
     };
     warn_deprecated("search <query>", "search code <query>");
-    let top_k = parse_int(top_k).unwrap_or(10);
+    let top_k = top_k_of(top_k);
     match tools::search_code(store, &project, &text, top_k, branch.as_deref().filter(|b| !b.is_empty())).await {
         Ok(hits) => say(&tools::format_code(&hits)),
         Err(e) => {
@@ -321,9 +319,8 @@ mod tests {
 
     #[test]
     fn the_numbers_people_type_read_like_parse_int() {
-        assert_eq!(parse_int("10"), Some(10));
-        assert_eq!(parse_int("5x"), Some(5));
-        assert_eq!(parse_int("x5"), None);
+        assert_eq!(["10", "5x", "-1"].map(top_k_of), [10.0, 5.0, -1.0]);
+        assert!(top_k_of("x5").is_nan());
     }
 
     #[test]

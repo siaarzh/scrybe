@@ -151,7 +151,7 @@ pub fn knowledge_sources(p: &Project) -> Vec<&Source> {
     p.sources.iter().filter(|s| s.profile() == Some("text")).collect()
 }
 
-pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: usize, branch: Option<&str>) -> Result<Vec<CodeHit>> {
+pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: f64, branch: Option<&str>) -> Result<Vec<CodeHit>> {
     let Some(project) = registry::get_project(project_id) else {
         anyhow::bail!("Project '{project_id}' not found");
     };
@@ -238,7 +238,7 @@ pub async fn search_code(store: &Store, query: &str, project_id: &str, top_k: us
     Ok(hits)
 }
 
-pub async fn search_knowledge(store: &Store, query: &str, project_id: &str, top_k: usize, source_id: Option<&str>, item_types: Option<&[String]>) -> Result<Vec<KnowledgeHit>> {
+pub async fn search_knowledge(store: &Store, query: &str, project_id: &str, top_k: f64, source_id: Option<&str>, item_types: Option<&[String]>) -> Result<Vec<KnowledgeHit>> {
     let Some(project) = registry::get_project(project_id) else {
         anyhow::bail!("Project '{project_id}' not found");
     };

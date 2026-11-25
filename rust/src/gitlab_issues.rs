@@ -59,7 +59,7 @@ async fn gitlab_fetch(url: &str, token: &str, project_id: &str) -> Result<Value>
         .header("Content-Type", "application/json")
         .send()
         .await
-        .map_err(|e| anyhow::Error::new(e).context("fetch failed"))?;
+        .map_err(|e| fetch_error(url, &e))?;
     let status = res.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
         bail!(
@@ -70,7 +70,15 @@ async fn gitlab_fetch(url: &str, token: &str, project_id: &str) -> Result<Value>
     if !status.is_success() {
         bail!("GitLab API error {} {} for {url}", status.as_u16(), status.canonical_reason().unwrap_or(""));
     }
-    res.json::<Value>().await.map_err(|e| anyhow::Error::new(e).context("Unexpected end of JSON input"))
+    crate::http::json_body(res).await
+}
+
+/// What Node's fetch says when there is no answer.
+pub(crate) fn fetch_error(url: &str, e: &reqwest::Error) -> anyhow::Error {
+    if e.is_builder() && reqwest::Url::parse(url).is_err() {
+        return anyhow!("Failed to parse URL from {url}");
+    }
+    anyhow!("fetch failed")
 }
 
 /// `validateGitlabToken`: one authenticated read of the project, as `scrybe source add` does before saving.

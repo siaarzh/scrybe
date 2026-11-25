@@ -432,6 +432,11 @@ impl State {
     }
 }
 
+/// An empty branch or ref is kept in the job's row and counts as none when it runs.
+fn given(v: &Option<String>) -> Option<String> {
+    v.clone().filter(|s| !s.is_empty())
+}
+
 /// What a full run of a project without naming its sources is refused with.
 pub const FULL_NEEDS_SOURCES: &str = "full reindex requires explicit source_ids";
 
@@ -737,10 +742,11 @@ impl Queue {
     async fn corrupt_sources(&self, project: &registry::Project, only: Option<&str>) -> Vec<(String, String, Fault)> {
         let mut out = vec![];
         for s in project.sources.iter().filter(|s| only.is_none_or(|o| o == s.source_id)) {
-            let (Some(table), Ok(emb)) = (&s.table_name, registry::resolve_embedding(s)) else { continue };
+            let Ok(emb) = registry::resolve_embedding(s) else { continue };
+            let Ok(Some(table)) = registry::table_to_read(&project.id, s, &emb) else { continue };
             let dim = index::expected_dimensions(&emb, s.profile() == Some("text"));
-            if let Health::Corrupt(fault) = self.store.table_health(table, Some(dim), true).await {
-                out.push((s.source_id.clone(), table.clone(), fault));
+            if let Health::Corrupt(fault) = self.store.table_health(&table, Some(dim), true).await {
+                out.push((s.source_id.clone(), table, fault));
             }
         }
         out
@@ -780,10 +786,10 @@ impl Queue {
         state["started_at"] = json!(started);
         state["finished_at"] = Value::Null;
         state["error"] = Value::Null;
-        if let Some(b) = &item.branch {
+        if let Some(b) = given(&item.branch) {
             state["branch"] = json!(b);
         }
-        if let Some(c) = &item.content_ref {
+        if let Some(c) = given(&item.content_ref) {
             state["contentRef"] = json!(c);
         }
         let cancels = Cancels { job: Arc::default(), tasks: sources.iter().map(|s| (s.clone(), Arc::default())).collect() };
@@ -854,7 +860,7 @@ impl Queue {
     async fn run(self: Arc<Self>, item: Item, tasks: Vec<(String, Arc<AtomicBool>)>, cancel: Arc<AtomicBool>, started: i64) {
         let mut span = Span::start();
         let provider = provider_of(&item.project, item.source.as_deref());
-        let options = Options { branch: item.branch.clone(), content_ref: item.content_ref.clone(), cancel: None, job_id: Some(item.job_id.clone()), progress: None };
+        let options = Options { branch: given(&item.branch), content_ref: given(&item.content_ref), cancel: None, job_id: Some(item.job_id.clone()), progress: None };
         for (i, (source, task_cancel)) in tasks.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 self.update_job(&item.job_id, |job| {

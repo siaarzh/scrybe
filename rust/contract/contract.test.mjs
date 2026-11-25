@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -875,6 +875,14 @@ describe("the project, source and job commands", () => {
     assert.equal(r.stderr, `[scrybe] ${message}\n`);
   };
 
+  test("a tracker address that can't be read or reached is named as fetch names it", async () => {
+    const add = (url) => w.cli("source", "add", "-P", "demo", "-S", "t", "--type", "ticket", "--provider", "gitlab", "--url", url, "--project", "1", "--token", "abc");
+    for (const [url, said] of [["x", "Failed to parse URL from x/api/v4/projects/1"], ["http://127.0.0.1:9", "fetch failed"]]) {
+      const r = await add(url);
+      assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", `[scrybe] ${said}\n`]);
+    }
+  });
+
   test("projects are listed as text by project list, its alias and the shorthand", async () => {
     const expected = `\ndemo — A demo\n  ○ ${"primary".padEnd(20)} ${"code".padEnd(10)} never\n`;
     for (const args of [["project", "list"], ["project", "ls"], ["projects"]]) {
@@ -1162,6 +1170,16 @@ describe("the gc command", () => {
     r = await w.cli("gc");
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, new RegExp(`^No orphan chunks found\\.${COMPACTING.source}`));
+  });
+
+  test("index folders nothing refers to are counted", async () => {
+    const indices = join(w.data, "lancedb", `${tableOf(w)}.lance`, "_indices");
+    for (const [n, said] of [[1, "1 FTS orphan)"], [2, "2 FTS orphans)"]]) {
+      for (let i = 0; i < n; i++) mkdirSync(join(indices, `00000000-0000-4000-8000-00000000000${i}`));
+      const r = await w.cli("gc");
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(r.stdout.includes(said), r.stdout);
+    }
   });
 
   test("a project with no sources is reported on a dry run, and only without -P", async () => {
@@ -2231,6 +2249,48 @@ function seedGithub(gh) {
 const githubSource = (gh) => ({ source_id: "issues", source_config: { type: "ticket", provider: "github", base_url: gh.url, project_id: GITHUB_PROJECT, token: "${CONTRACT_GITHUB_TOKEN}" } });
 const SCOPES = "Ensure the token has Issues: Read-only and Metadata: Read-only scopes (fine-grained PAT) or repo/public_repo (classic PAT).";
 const GH_LIST = "/repos/acme/widgets/issues";
+
+describe("an embedding reply that isn't what was asked for", () => {
+  const indexed = async (edit) => {
+    const fake = await fakeEmbedder({ edit });
+    const w = await makeWorld({ embedder: fake });
+    try {
+      const r = await w.cli("index", "-P", "demo", "-S", "primary", "--full");
+      return { status: r.status, found: (await w.cli("search", "code", "-P", "demo", "widget")).stdout.includes("frobnicateWidget") };
+    } finally {
+      await w.stop();
+      fake.close();
+    }
+  };
+
+  test("one vector short fails the run, so no text gets another's vector", async () => {
+    assert.deepEqual(await indexed((data) => data.length > 1 ? data.slice(1) : data), { status: 1, found: false });
+  });
+
+  test("base64 in the URL alphabet and without padding is read", async () => {
+    const plain = (s) => s.replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+    assert.deepEqual(await indexed((data) => data.map((d) => ({ ...d, embedding: plain(d.embedding) }))), { status: 0, found: true });
+  });
+});
+
+describe("half an emoji in an issue", () => {
+  for (const kind of ["gitlab", "github"]) test(`${kind} issues are indexed all the same`, async () => {
+    const api = kind === "gitlab" ? await fakeGitlab() : await fakeGithub();
+    const issue = (n, text) => ({ id: n, iid: n, number: n, title: `issue ${n}`, description: text, body: text, state: "opened", labels: [], author: { username: "u" }, user: { login: "u" }, assignees: [], created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-02T00:00:00Z", web_url: `http://x/${n}`, html_url: `http://x/${n}` });
+    api.state.issues = [issue(1, "cut \ud83d here"), issue(2, "whole 😀 here")];
+    const w = await makeWorld({ extraSources: [kind === "gitlab" ? ticketSource(api) : githubSource(api)], serverEnv: { CONTRACT_GITLAB_TOKEN: GITLAB_TOKEN, CONTRACT_GITHUB_TOKEN: GITHUB_TOKEN } });
+    try {
+      await w.index("--full");
+      const r = await indexIssues(w, "--full");
+      assert.equal(r.status, 0, r.stderr);
+      const found = (await w.cli("search", "knowledge", "-P", "demo", "here")).stdout;
+      assert.ok(found.includes("cut \ufffd here") && found.includes("whole 😀 here"), found);
+    } finally {
+      await w.stop();
+      api.close();
+    }
+  });
+});
 
 describe("GitHub issues", () => {
   let gh, w, rows1;
@@ -3382,6 +3442,9 @@ describe("reranking when it can't run", () => {
       assert.equal(isError, false, text);
       assert.equal(value.length, 2);
       assert.ok(value.some((h) => h.symbol_name === "frobnicateWidget"));
+      const listed = await w.cli("project", "list");
+      assert.match(listed.stderr, /^\[scrybe\] SCRYBE_RERANK=true is set but your embedding provider does not support auto-configured reranking\. .* Reranking is DISABLED\.\n$/);
+      assert.equal(listed.status, 0);
     } finally { await w.stop(); }
   });
 });
@@ -3533,6 +3596,220 @@ describe("request bodies", () => {
   });
 });
 
+describe("what arrives on the wire", () => {
+  let w, port, host;
+  /** Sends the text as it is. Returns the status of each answer and the last one's headers and body. */
+  const wire = (text) => new Promise((resolve, reject) => {
+    const s = connect(port, "127.0.0.1");
+    let got = "";
+    const timer = setTimeout(() => s.destroy(), 5000);
+    s.on("data", (d) => { got += d; });
+    s.on("error", () => {});
+    s.on("close", () => {
+      clearTimeout(timer);
+      const at = got.lastIndexOf("HTTP/1.1 ");
+      const [head, ...body] = got.slice(Math.max(at, 0)).split("\r\n\r\n");
+      resolve({ codes: [...got.matchAll(/HTTP\/1\.1 (\d+)/g)].map((m) => Number(m[1])), head: head.toLowerCase(), body: body.join("\r\n\r\n") });
+    });
+    s.on("connect", () => s.write(text, (e) => { if (e) reject(e); }));
+  });
+  const get = (path, { method = "GET", headers = "", hostLine = `Host: ${host}\r\n` } = {}) => wire(`${method} ${path} HTTP/1.1\r\n${hostLine}${headers}Connection: close\r\n\r\n`);
+  before(async () => {
+    w = await makeWorld();
+    await w.index("--full");
+    ({ port } = await startedServer(w));
+    host = `127.0.0.1:${port}`;
+  });
+  after(() => w.stop());
+
+  test("the answer to a HEAD has no body, and OPTIONS names no content", async () => {
+    const none = await get("/nope", { method: "HEAD" });
+    assert.deepEqual([none.codes, none.body], [[404], ""]);
+    assert.match(none.head, /content-type: application\/json/);
+    const options = await get("/status", { method: "OPTIONS" });
+    assert.deepEqual([options.codes, options.body], [[204], ""]);
+    assert.doesNotMatch(options.head, /content-type/);
+  });
+
+  test("a host that isn't the loopback name or address is refused", async () => {
+    for (const name of ["[::1]", "[::1]:99", ""]) assert.deepEqual((await get("/health", { hostLine: `Host: ${name}\r\n` })).codes, [403], name);
+    const missing = await get("/health", { hostLine: "" });
+    assert.deepEqual(missing.codes, [400]);
+  });
+
+  test("what isn't a request is a bare 400", async () => {
+    const H = `Host: ${host}\r\n`;
+    for (const text of [
+      "garbage\r\n\r\n",
+      `get /health HTTP/1.1\r\n${H}\r\n`,
+      `BREW /health HTTP/1.1\r\n${H}\r\n`,
+      `GET /\u00e4 HTTP/1.1\r\n${H}\r\n`,
+      `GET /health HTTP/1.1\r\nHost : ${host}\r\n\r\n`,
+      `GET /health HTTP/1.1\r\n${H} folded: x\r\n\r\n`,
+      `POST /kick HTTP/1.1\r\n${H}Content-Length: 2\r\nContent-Length: 3\r\n\r\n{}}`,
+      `POST /kick HTTP/1.1\r\n${H}Content-Length: abc\r\n\r\n`,
+      `POST /kick HTTP/1.1\r\n${H}Transfer-Encoding: chunked\r\n\r\nzz\r\n`,
+    ]) {
+      const r = await wire(text);
+      assert.deepEqual([r.codes, r.body], [[400], ""], text);
+      assert.doesNotMatch(r.head, /content-type/, text);
+    }
+    const jobs = await (await fetch(`http://${host}/jobs`)).json();
+    assert.equal(jobs.count, 0, "nothing was started");
+  });
+
+  test("headers over 16 KB are too large", async () => {
+    assert.deepEqual((await get("/health", { headers: `X: ${"a".repeat(20_000)}\r\n` })).codes, [431]);
+    assert.deepEqual((await get("/health", { headers: `X: ${"a".repeat(15_000)}\r\n` })).codes, [200]);
+  });
+
+  test("a path is put in its plain form first", async () => {
+    for (const path of ["/../health", "/a/../health", "/./health", "/%2e/health", `http://${host}/health`, "/health?x=1", "/health#x"]) assert.deepEqual((await get(path)).codes, [200], path);
+    assert.deepEqual((await wire(`\r\nGET /health HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)).codes, [200]);
+    assert.deepEqual(JSON.parse((await get("/jobs/")).body), { jobs: [], count: 0 });
+    assert.deepEqual(JSON.parse((await get("/jobs?status=&project_id=")).body), { jobs: [], count: 0 });
+    assert.deepEqual(JSON.parse((await get("/jobs/a%20b", { method: "DELETE" })).body), { job_id: "a%20b", cancelled: false });
+    const bad = await get("/projects/%/sources/y/pinned-branches", { method: "PUT" });
+    assert.deepEqual(bad.codes, [500]);
+    assert.ok(bad.body.includes('{"error":"URIError: URI malformed"}'), bad.body);
+  });
+
+  test("a client that asks first is told to go on", async () => {
+    const body = '{"id": 1, "method": "list_projects"}';
+    const r = await get("/mcp/rpc", { method: "POST", headers: `Expect: 100-continue\r\nContent-Length: ${body.length}\r\n` }).catch(() => null);
+    assert.equal(r?.codes[0], 100);
+    const sent = await wire(`POST /mcp/rpc HTTP/1.1\r\nHost: ${host}\r\nExpect: 100-continue\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+    assert.deepEqual(sent.codes, [100, 200]);
+    assert.deepEqual((await get("/health", { headers: "Expect: a miracle\r\n" })).codes, [417]);
+  });
+
+  test("half of a surrogate pair is taken for text", async () => {
+    const rpc = async (query) => {
+      const r = await rawRequest(port, "POST", "/mcp/rpc", [`{"id": 1, "method": "search_code", "params": {"project_id": "demo", "query": "${query}", "top_k": 2}}`]);
+      return r.body.result?.length;
+    };
+    for (const query of ["widget \\ud800", "\\udc00 widget", "widget \\ud83d\\ude00", "widget \\\\ud800"]) assert.equal(await rpc(query), 2, query);
+    const c = w.client();
+    await c.hello();
+    assert.equal((await c.call("search_code", { project_id: "demo", query: "widget 😀".slice(0, -1), top_k: 2 })).value.length, 2);
+  });
+});
+
+describe("empty and odd values", () => {
+  let w, c;
+  before(async () => {
+    w = await makeWorld();
+    await w.index("--full");
+    ({ c } = await startedServer(w));
+  });
+  after(() => w.stop());
+  const call = async (name, args) => {
+    const r = await c.call(name, args);
+    assert.ok(r.value !== undefined && !r.isError, `${name} ${JSON.stringify(args)}: ${r.text ?? JSON.stringify(r.rpcError)}`);
+    return r.value;
+  };
+  const finished = (id) => until(async () => {
+    const s = (await c.call("reindex_status", { job_id: id })).value;
+    return ["done", "failed", "cancelled"].includes(s?.status) && s;
+  }, 30_000, "the job");
+
+  test("an empty filter is no filter", async () => {
+    const plain = await call("search_code", { project_id: "demo", query: "widget", top_k: 2 });
+    assert.deepEqual(await call("search_code", { project_id: "demo", query: "widget", top_k: 2, branch: "" }), plain);
+    assert.equal((await call("lookup_symbol", { project_id: "demo", symbol_name: "frobnicateWidget", source_id: "" })).length, 1);
+    assert.deepEqual(await call("list_pinned_branches", { project_id: "demo", source_id: "" }), [{ source_id: "primary", branches: [] }]);
+    assert.deepEqual((await call("gc", { project_id: "", source_id: "" })).jobs.map((j) => j.project_id), ["demo"]);
+    assert.deepEqual(Object.keys(await call("queue_status", { project_id: "" })).sort(), ["awaiting_migration", "queued", "running"]);
+    const all = await call("reindex_status", { job_id: "" });
+    assert.equal(all.jobs.length, all.count);
+    assert.ok(all.count >= 1);
+  });
+
+  test("an empty branch or ref indexes what is checked out", async () => {
+    for (const [name, more] of [["reindex_project", {}], ["reindex_source", { source_id: "primary" }]]) {
+      const { job_id } = await call(name, { project_id: "demo", ...more, branch: "", content_ref: "" });
+      assert.equal((await finished(job_id)).status, "done");
+    }
+    assert.deepEqual(await call("list_branches", { project_id: "demo" }), [{ source_id: "primary", branches: [w.main] }]);
+    const r = await w.cli("branch", "list", "-P", "demo", "--pinned", "-S", "");
+    assert.deepEqual(JSON.parse(r.stdout), [{ source_id: "primary", branches: [] }]);
+    const found = await w.cli("search", "code", "-P", "demo", "--branch", "", "frobnicateWidget");
+    assert.match(found.stdout, /frobnicateWidget/);
+  });
+
+  test("a search that finds nothing prints nothing", async () => {
+    const fresh = await makeWorld();
+    try {
+      await fresh.index("--branch", "side");
+      const none = await fresh.cli("search", "code", "-P", "demo", "frobnicateWidget");
+      assert.deepEqual([none.status, none.stdout], [0, ""]);
+    } finally { await fresh.stop(); }
+  });
+
+  test("a count below zero or past any table is cut as JavaScript cuts it", async () => {
+    const search = async (top_k) => (await call("search_code", { project_id: "demo", query: "widget", top_k })).length;
+    const all = await search(50);
+    assert.ok(all > 2);
+    assert.equal(await search(1e20), all);
+    assert.equal(await search(-1), all - 1);
+    assert.equal(await search(-100), 0);
+    assert.equal(await search(1.9), 1);
+    const look = async (limit) => (await call("lookup_symbol", { project_id: "demo", symbol_name: "addWidget", limit })).length;
+    assert.deepEqual([await look(1), await look(-1)], [1, 0]);
+  });
+
+  test("the hash files of a removed source go, whatever its id", async () => {
+    for (const source_id of ["a b/c", "../x"]) {
+      const { job_id } = await call("add_source", { project_id: "demo", source_id, source_type: "code", root_path: w.repo });
+      await finished(job_id);
+      await call("remove_source", { project_id: "demo", source_id });
+    }
+    assert.deepEqual(readdirSync(join(w.data, "hashes"), { recursive: true }).map(String), [`demo__primary__${w.main}.json`]);
+  });
+
+  test("a branch label too long for its hash file leaves its first file tagged and no more", async () => {
+    const label = "x".repeat(300);
+    const { job_id } = await call("reindex_source", { project_id: "demo", source_id: "primary", branch: label, content_ref: w.main });
+    const job = await finished(job_id);
+    assert.equal(job.status, "failed");
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"), { readOnly: true });
+    const files = db.prepare("SELECT DISTINCT file_path FROM branch_tags WHERE branch = ?").all(label);
+    db.close();
+    assert.equal(files.length, 1, JSON.stringify(files));
+  });
+
+  test("a source whose table name was lost is searched and indexed under the same one", async () => {
+    const file = join(w.data, "projects.json");
+    const name = tableOf(w);
+    const lose = () => {
+      const list = JSON.parse(readFileSync(file, "utf8"));
+      delete list[0].sources[0].table_name;
+      writeFileSync(file, JSON.stringify(list));
+    };
+    lose();
+    assert.equal((await call("search_code", { project_id: "demo", query: "frobnicateWidget", top_k: 1 })).length, 1);
+    assert.equal(tableOf(w), name);
+    lose();
+    const r = await w.cli("index", "-P", "demo");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(tableOf(w), name);
+  });
+
+  test("a backslash in a file's name is a slash in its tags, from a ref too", { skip: process.platform === "win32" ? "not a file name on Windows" : false }, async () => {
+    w.git("checkout", "-q", "side");
+    writeFileSync(join(w.repo, "src", "back\\slash.ts"), "export function backslashed() { return 42; }\n");
+    w.git("add", "src");
+    w.git("commit", "-q", "-m", "backslash");
+    w.git("checkout", "-q", w.main);
+    const { job_id } = await call("reindex_source", { project_id: "demo", source_id: "primary", branch: "side" });
+    assert.equal((await finished(job_id)).status, "done");
+    const db = new DatabaseSync(join(w.data, "branch-tags.db"), { readOnly: true });
+    const rows = db.prepare("SELECT file_path FROM branch_tags WHERE branch = 'side' AND file_path LIKE '%slash.ts'").all();
+    db.close();
+    assert.deepEqual(rows.map((x) => x.file_path), ["src/back/slash.ts"]);
+  });
+});
+
 describe("a malformed body on the opt-in MCP endpoint", () => {
   test("is a parse error", async () => {
     const w = await makeWorld();
@@ -3541,6 +3818,8 @@ describe("a malformed body on the opt-in MCP endpoint", () => {
       const { port } = await startedServer(w);
       const r = await rawRequest(port, "POST", "/mcp", ["{nope"], { Accept: "application/json, text/event-stream" });
       assert.deepEqual([r.status, r.body], [400, { jsonrpc: "2.0", error: { code: -32700, message: "Parse error: Invalid JSON" }, id: null }]);
+      const half = await rawRequest(port, "POST", "/mcp", ['{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "search_code", "arguments": {"project_id": "nope", "query": "\\ud800"}}}'], { Accept: "application/json, text/event-stream" });
+      assert.equal(half.status, 200, half.text);
     } finally { await w.stop(); }
   });
 });
@@ -3763,7 +4042,7 @@ describe("start-up settings", () => {
   after(() => w.stop());
 
   test("an overlap as long as the chunk is refused by every command", async () => {
-    for (const [size, overlap, said] of [["10", "10", "(10) must be less than SCRYBE_CHUNK_SIZE (10)"], ["5 lines", "", "(10) must be less than SCRYBE_CHUNK_SIZE (5)"], ["20", "30", "(30) must be less than SCRYBE_CHUNK_SIZE (20)"]]) {
+    for (const [size, overlap, said] of [["10", "10", "(10) must be less than SCRYBE_CHUNK_SIZE (10)"], ["-5", "", "(10) must be less than SCRYBE_CHUNK_SIZE (-5)"], ["5 lines", "", "(10) must be less than SCRYBE_CHUNK_SIZE (5)"], ["20", "30", "(30) must be less than SCRYBE_CHUNK_SIZE (20)"]]) {
       const r = await w.cliWith({ SCRYBE_CHUNK_SIZE: size, ...(overlap ? { SCRYBE_CHUNK_OVERLAP: overlap } : {}) }, "project", "list");
       assert.deepEqual([r.status, r.stdout, r.stderr], [1, "", `scrybe error: Error: Invalid chunking config: SCRYBE_CHUNK_OVERLAP ${said}. Defaults: size=60, overlap=10.\n`]);
     }
@@ -4183,6 +4462,52 @@ describe("requests to the embedding endpoint", () => {
     }
   });
 
+  test("a missing key, an endpoint that isn't there and an address that isn't one are each named", async () => {
+    const w = await makeWorld();
+    const good = readFileSync(join(w.data, "config.json"), "utf8");
+    try {
+      await w.index("--full");
+      for (const [change, said] of [
+        [(p) => { delete p.credentials; }, 'No API key found. Set SCRYBE_PRESET_FAKE to use model "fake-model".'],
+        [(p) => { p.base_url = "http://127.0.0.1:9/v1"; }, "Connection error."],
+        [(p) => { p.base_url = "nope"; }, "Invalid URL"],
+      ]) {
+        writeFileSync(join(w.data, "config.json"), good);
+        changeConfig(w, (c) => change(c.embedding_presets.fake));
+        const idle = await w.cli("index", "-P", "demo");
+        assert.equal(idle.status, 0, idle.stderr);
+        const searched = await w.cli("search", "code", "-P", "demo", "widget");
+        assert.deepEqual([searched.status, searched.stdout, searched.stderr], [1, "", `[scrybe] Embedding API error (HTTP unknown): ${said}\n`]);
+        const full = await w.cli("index", "-P", "demo", "-S", "primary", "--full");
+        assert.deepEqual([full.status, full.stderr], [1, `scrybe error: Error: Embedding API error (HTTP unknown): ${said}\n`]);
+        // Today's build has wiped the source by now.
+        writeFileSync(join(w.data, "config.json"), good);
+        await w.index("--full");
+      }
+      changeConfig(w, (c) => { delete c.embedding_presets.fake.credentials; });
+      const n = w.fake.log.length;
+      const r = await w.cliWith({ SCRYBE_PRESET_FAKE: "from-its-own-variable" }, "search", "code", "-P", "demo", "widget");
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(w.fake.log[n].auth, "Bearer from-its-own-variable");
+    } finally {
+      await w.stop();
+    }
+  });
+
+  test("a full run after the dimensions changed says nothing about the old table", async () => {
+    const w = await makeWorld();
+    try {
+      await w.index("--full");
+      await w.cli("projects");
+      changeConfig(w, (c) => { c.embedding_presets.fake.dim = 4; });
+      const r = await w.cli("index", "-P", "demo", "-S", "primary", "--full");
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /^scrybe error: Error: Embedding API error \(HTTP unknown\): Embedding model "fake-model" returned 8d vectors but config expects 4d\. .*\n$/);
+    } finally {
+      await w.stop();
+    }
+  });
+
   test("batch sizes are read from the front of the value", async () => {
     const w = await makeWorld({ serverEnv: { SCRYBE_EMBED_BATCH_SIZE: " 1abc" } });
     try {
@@ -4276,6 +4601,19 @@ describe("how long old table versions are kept", () => {
     const odd = await manifests({ SCRYBE_LANCE_GRACE_MS: "-5" });
     assert.ok(none < usual, `${none} against ${usual}`);
     assert.equal(odd, usual);
+  });
+
+  test("runs that fail after the wipe don't pile them up", async () => {
+    const w = await makeWorld({ serverEnv: { SCRYBE_LANCE_GRACE_MS: "0", SCRYBE_LANCE_COMPACT_THRESHOLD: "3" } });
+    try {
+      await w.index("--full");
+      changeConfig(w, (c) => { c.embedding_presets.fake.base_url = "nope"; });
+      for (let i = 0; i < 5; i++) assert.equal((await w.cli("index", "-P", "demo", "-S", "primary", "--full")).status, 1);
+      const kept = JSON.parse((await w.cli("status", "--json")).stdout).projects[0].sources[0].versionCount;
+      assert.ok(kept < 5, `${kept} versions`);
+    } finally {
+      await w.stop();
+    }
   });
 });
 

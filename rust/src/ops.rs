@@ -435,7 +435,7 @@ async fn compact_all(store: &Arc<Store>, projects: &[registry::Project]) {
             detail.push(format!("{} pruned", plural(r.versions_pruned, "version")));
         }
         if *removed > 0 {
-            detail.push(format!("{} FTS", plural(*removed, "orphan")));
+            detail.push(plural(*removed, "FTS orphan"));
         }
         let detail = if detail.is_empty() { String::new() } else { format!("   ({})", detail.join(", ")) };
         println!("  {project}/{source}    {} reclaimed{detail}", fmt_size(r.bytes_freed + freed));

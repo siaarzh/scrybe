@@ -1,7 +1,7 @@
 //! The GitHub issues ticket source. Mirrors `src/plugins/github-issues.ts`, including its known defects.
 use crate::chunk::Sizes;
 use crate::embed_api::client;
-use crate::gitlab_issues::{encode_uri_component, field_str, js_str, ticket_config, truthy, Emit, KnowledgeChunk, Meta, TicketConfig};
+use crate::gitlab_issues::{encode_uri_component, fetch_error, field_str, js_str, ticket_config, truthy, Emit, KnowledgeChunk, Meta, TicketConfig};
 use crate::jsstr::{js_trim, normalize_content};
 use crate::registry::{resolve_env_ref, unset_token_error, Source};
 use anyhow::{anyhow, bail, Result};
@@ -46,7 +46,7 @@ async fn github_fetch(url: &str, token: &str, project_id: &str) -> Result<Value>
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await
-            .map_err(|e| anyhow::Error::new(e).context("fetch failed"))?;
+            .map_err(|e| fetch_error(url, &e))?;
         let status = res.status();
 
         let limited = status.as_u16() == 429 || (status.as_u16() == 403 && header(&res, "x-ratelimit-remaining").as_deref() == Some("0"));
@@ -86,7 +86,7 @@ async fn github_fetch(url: &str, token: &str, project_id: &str) -> Result<Value>
             return Err(error);
         }
 
-        return res.json::<Value>().await.map_err(|e| anyhow::Error::new(e).context("Unexpected end of JSON input"));
+        return crate::http::json_body(res).await;
     }
 }
 
@@ -94,14 +94,15 @@ async fn github_fetch(url: &str, token: &str, project_id: &str) -> Result<Value>
 pub async fn validate_token(cfg: &TicketConfig, in_daemon: bool) -> Result<()> {
     let token = resolve_env_ref(&cfg.token).map_err(|_| unset_token_error("GitHub", &cfg.project_id, &cfg.token, in_daemon))?;
     let base_url = if cfg.base_url.is_empty() { DEFAULT_BASE_URL } else { cfg.base_url.as_str() };
+    let url = format!("{base_url}/user");
     let res = client()
-        .get(format!("{base_url}/user"))
+        .get(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await
-        .map_err(|e| anyhow::Error::new(e).context("fetch failed"))?;
+        .map_err(|e| fetch_error(&url, &e))?;
     let status = res.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
         bail!("GitHub token for project \"{}\" is invalid or lacks required permissions (HTTP {}). {SCOPES}", cfg.project_id, status.as_u16());

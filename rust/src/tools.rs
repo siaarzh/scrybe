@@ -4,6 +4,7 @@ use crate::branches;
 use crate::collate::locale_compare;
 use crate::index::expected_dimensions;
 use crate::registry;
+use crate::jsstr::{slice_end, to_uint32};
 use crate::search::{self, js_slice, CodeHit, KnowledgeHit};
 use crate::store::{escape_sql, needs_migration, Health, Store};
 use futures::future::try_join_all;
@@ -70,8 +71,8 @@ async fn check_health(store: &Store, project_id: &str, only: Option<&str>) -> To
         if only.is_some_and(|o| o != s.source_id) {
             continue;
         }
-        let Some(table) = &s.table_name else { continue };
         let emb = registry::resolve_embedding(s)?;
+        let Some(table) = &registry::table_to_read(project_id, s, &emb)? else { continue };
         let health = store.table_health(table, Some(expected_dimensions(&emb, s.profile() == Some("text"))), false).await;
         if needs_migration(table) {
             let cmd = format!("scrybe migrate --source-id {} --project-id {project_id}", s.source_id);
@@ -93,7 +94,8 @@ async fn check_health(store: &Store, project_id: &str, only: Option<&str>) -> To
     Ok(())
 }
 
-pub async fn search_code(store: &Store, project_id: &str, query: &str, top_k: usize, branch: Option<&str>) -> ToolResult<Vec<CodeHit>> {
+pub async fn search_code(store: &Store, project_id: &str, query: &str, top_k: f64, branch: Option<&str>) -> ToolResult<Vec<CodeHit>> {
+    let branch = branch.filter(|b| !b.is_empty());
     check_health(store, project_id, None).await?;
     Ok(search::search_code(store, query, project_id, top_k, branch).await?)
 }
@@ -150,7 +152,8 @@ fn parse_knowledge(h: KnowledgeHit) -> ParsedKnowledge {
     }
 }
 
-pub async fn search_knowledge(store: &Store, project_id: &str, query: &str, top_k: usize, source_id: Option<&str>, item_types: Option<&[String]>) -> ToolResult<Vec<ParsedKnowledge>> {
+pub async fn search_knowledge(store: &Store, project_id: &str, query: &str, top_k: f64, source_id: Option<&str>, item_types: Option<&[String]>) -> ToolResult<Vec<ParsedKnowledge>> {
+    let source_id = source_id.filter(|s| !s.is_empty());
     check_health(store, project_id, source_id).await?;
     let hits = search::search_knowledge(store, query, project_id, top_k, source_id, item_types).await?;
     Ok(hits.into_iter().map(parse_knowledge).collect())
@@ -187,7 +190,7 @@ pub struct LookupInput<'a> {
     pub branch: Option<&'a str>,
     pub source_id: Option<&'a str>,
     pub case_sensitive: bool,
-    pub limit: usize,
+    pub limit: f64,
 }
 
 pub async fn lookup_symbol(store: &Store, input: LookupInput<'_>) -> ToolResult<Vec<LookupHit>> {
@@ -195,7 +198,7 @@ pub async fn lookup_symbol(store: &Store, input: LookupInput<'_>) -> ToolResult<
     if trimmed.is_empty() {
         return Err(anyhow::anyhow!("symbol_name must be non-empty after trimming").into());
     }
-    if input.limit > 200 {
+    if input.limit > 200.0 {
         return Err(anyhow::anyhow!("limit must be ≤ 200").into());
     }
     let project_id = input.project_id;
@@ -203,7 +206,7 @@ pub async fn lookup_symbol(store: &Store, input: LookupInput<'_>) -> ToolResult<
         return Err(anyhow::anyhow!("Project '{project_id}' not found").into());
     };
     let mut sources = search::code_sources(&project);
-    if let Some(sid) = input.source_id {
+    if let Some(sid) = input.source_id.filter(|s| !s.is_empty()) {
         sources.retain(|s| s.source_id == sid);
     }
     let predicate = symbol_predicate(trimmed, input.exact, input.case_sensitive);
@@ -228,7 +231,7 @@ pub async fn lookup_symbol(store: &Store, input: LookupInput<'_>) -> ToolResult<
                     post = Some(ids.into_iter().collect());
                 }
             }
-            let rows = store.plain_query(&table, &where_, limit).await?;
+            let rows = store.plain_query(&table, &where_, to_uint32(limit) as usize).await?;
             let mut out: Vec<LookupHit> = rows
                 .iter()
                 .map(|r| LookupHit {
@@ -256,7 +259,7 @@ pub async fn lookup_symbol(store: &Store, input: LookupInput<'_>) -> ToolResult<
             .then_with(|| locale_compare(&a.item_path, &b.item_path))
             .then_with(|| a.start_line.cmp(&b.start_line))
     });
-    merged.truncate(limit);
+    merged.truncate(slice_end(merged.len(), limit));
     let mut by_source: HashMap<String, Vec<String>> = HashMap::new();
     for h in &merged {
         by_source.entry(h.source_id.clone()).or_default().push(h.chunk_id.clone());

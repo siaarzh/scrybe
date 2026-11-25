@@ -161,6 +161,12 @@ pub fn open_rw(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// `normalizePath`: how a tag spells a path.
+fn tag_path(path: &str) -> String {
+    let forward = path.replace('\\', "/");
+    if cfg!(windows) { forward.to_lowercase() } else { forward }
+}
+
 /// Read-write side, used only by the indexer. Same schema and statements as `src/branch-state.ts`.
 pub struct Writer {
     conn: Connection,
@@ -183,11 +189,12 @@ impl Writer {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=? AND file_path=?", [&self.project, &self.source, &self.branch, &path.to_string()])?;
+        self.conn.execute("DELETE FROM branch_tags WHERE project_id=? AND source_id=? AND branch=? AND file_path=?", [&self.project, &self.source, &self.branch, &tag_path(path)])?;
         Ok(())
     }
 
     pub fn add_tags(&mut self, path: &str, chunks: &[Chunk]) -> Result<()> {
+        let path = tag_path(path);
         let tx = self.conn.transaction()?;
         {
             let mut stmt = tx.prepare_cached("INSERT OR IGNORE INTO branch_tags (project_id, source_id, branch, file_path, chunk_id, start_line, end_line) VALUES (?, ?, ?, ?, ?, ?, ?)")?;
@@ -219,6 +226,12 @@ pub fn all_chunk_ids_for_source(writer: &Writer, project: &str, source: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tag_spells_its_path_with_slashes() {
+        let want = if cfg!(windows) { "src/a/b.ts" } else { "src/a/B.ts" };
+        assert_eq!(tag_path("src\\a/B.ts"), want);
+    }
 
     #[test]
     fn an_existing_database_opens_while_another_process_is_writing() {

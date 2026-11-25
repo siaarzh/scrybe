@@ -8,7 +8,7 @@ use crate::vecindex;
 use crate::config::{data_dir, pidfile_path, VERSION};
 use crate::daemon_log;
 use crate::ephemeral;
-use crate::jsstr::{js_trim, parse_int};
+use crate::jsstr::{js_trim, parse_int, parse_json};
 use crate::presets;
 use crate::index::refuse_live_data_dir;
 use crate::jobs::{self, Queue, Request};
@@ -39,6 +39,7 @@ const DAEMON_TOOLS: &str = include_str!("daemon_tools.json");
 const OTHER_JOBS_CAP: Duration = Duration::from_secs(30);
 /// How long open requests may hold up leaving: one that is never read must not keep the data dir locked.
 const REQUESTS_CAP: Duration = Duration::from_secs(30);
+const BAD_REQUEST: &str = "400 Bad Request";
 /// How often a call's memory is read for its record.
 const CALL_POLL: Duration = Duration::from_millis(25);
 
@@ -116,10 +117,10 @@ fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
 
 /// `readAllowedHosts`: the loopback names, plus plain hostnames from the environment.
 fn allowed_hosts() -> HashSet<String> {
-    let mut hosts: HashSet<String> = ["localhost", "127.0.0.1", "::1"].map(String::from).into();
+    let mut hosts: HashSet<String> = ["localhost", "127.0.0.1"].map(String::from).into();
     if let Ok(extra) = std::env::var("SCRYBE_DAEMON_ALLOWED_HOSTS") {
         for entry in extra.split(',').map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()) {
-            if entry.contains(':') || entry.contains('[') {
+            if entry.contains([':', '[', ']', '/']) || !entry.is_ascii() {
                 eprintln!("[host-gate] SCRYBE_DAEMON_ALLOWED_HOSTS entry '{entry}' is not a plain hostname: ignored");
             } else {
                 hosts.insert(entry);
@@ -144,6 +145,49 @@ fn host_name(value: &str) -> Option<String> {
         }
     }
     Some(v.to_lowercase())
+}
+
+/// The methods Node's parser knows.
+const METHODS: [&str; 35] = ["ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "M-SEARCH", "MERGE", "MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK", "UNSUBSCRIBE"];
+/// `maxHeaderSize`.
+const MAX_HEAD: usize = 16 << 10;
+
+struct RequestLine<'a> {
+    method: &'a str,
+    target: &'a str,
+    /// HTTP/1.1, which must name a host and may ask to continue.
+    modern: bool,
+}
+
+/// The request line, when Node's parser would take it and the headers under it.
+fn request_line(head: &str) -> Option<RequestLine<'_>> {
+    let mut lines = head.split("\r\n");
+    let words: Vec<&str> = lines.next()?.split(' ').filter(|w| !w.is_empty()).collect();
+    let (method, target, version) = match words[..] {
+        [method, target] => (method, target, "HTTP/0.9"),
+        [method, target, version] => (method, target, version),
+        _ => return None,
+    };
+    let known = METHODS.contains(&method) && matches!(version, "HTTP/0.9" | "HTTP/1.0" | "HTTP/1.1" | "HTTP/2.0");
+    if !known || !target.bytes().all(|b| b.is_ascii_graphic()) {
+        return None;
+    }
+    let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    let mut lengths = 0;
+    for line in lines {
+        let (name, value) = line.split_once(':')?;
+        if name.is_empty() || !name.bytes().all(token) || value.bytes().any(|b| (b < b' ' && b != b'\t') || b == 0x7f) {
+            return None;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let value = value.trim();
+            lengths += 1;
+            if lengths > 1 || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+        }
+    }
+    Some(RequestLine { method, target, modern: version == "HTTP/1.1" })
 }
 
 /// Same rule as `checkHostAndOrigin`: only browsers send an Origin, and no scrybe client does.
@@ -181,19 +225,37 @@ fn decode_component(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-async fn respond(s: &mut TcpStream, status: &str, kind: &str, body: &str) -> Result<()> {
+/// A connection being answered. The answer to a HEAD has no body.
+struct Conn {
+    s: TcpStream,
+    bodyless: bool,
+}
+
+async fn respond(c: &mut Conn, status: &str, kind: &str, body: &str) -> Result<()> {
     let head = format!("HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-    s.write_all(head.as_bytes()).await?;
-    s.write_all(body.as_bytes()).await?;
+    c.s.write_all(head.as_bytes()).await?;
+    if !c.bodyless {
+        c.s.write_all(body.as_bytes()).await?;
+    }
     Ok(())
 }
 
-async fn json_res(s: &mut TcpStream, status: &str, body: &Value) -> Result<()> {
+/// An answer that is a status and nothing else.
+async fn respond_bare(s: &mut TcpStream, status: &str) -> Result<()> {
+    s.write_all(format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+    s.shutdown().await?;
+    // Closing with input unread would reset the connection and could lose the answer.
+    let mut rest = [0u8; 4096];
+    let _ = tokio::time::timeout(Duration::from_millis(500), async { while matches!(s.read(&mut rest).await, Ok(1..)) {} }).await;
+    Ok(())
+}
+
+async fn json_res(s: &mut Conn, status: &str, body: &Value) -> Result<()> {
     respond(s, status, "application/json", &body.to_string()).await
 }
 
 /// The server's catch-all answer to a thrown error.
-async fn boom(s: &mut TcpStream, message: &str) -> Result<()> {
+async fn boom(s: &mut Conn, message: &str) -> Result<()> {
     json_res(s, "500 Internal Server Error", &json!({ "error": message })).await
 }
 
@@ -203,7 +265,7 @@ fn read_json(body: &[u8]) -> Result<Value, String> {
     if js_trim(&text).is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(&text).map_err(|e| format!("SyntaxError: {e}"))
+    parse_json(&text).map_err(|e| format!("SyntaxError: {e}"))
 }
 
 /// `read_json`, for a route that then reads fields, `first` before any other.
@@ -222,6 +284,11 @@ fn id_field(body: &Value, key: &str) -> Option<String> {
         Value::Number(n) if n.as_f64() == Some(0.0) => None,
         other => Some(other.to_string()),
     }
+}
+
+/// A string argument that counts as given in JavaScript: present and not empty.
+fn given<'a>(a: &'a Value, key: &str) -> Option<&'a str> {
+    a[key].as_str().filter(|s| !s.is_empty())
 }
 
 /// Reads up to the next line end and returns the line. `None` when it is too long or the sender left.
@@ -354,7 +421,7 @@ impl Daemon {
     }
 
     fn gc_tool(&self, a: &Value) -> Result<Value> {
-        let scope: Vec<String> = match a["project_id"].as_str() {
+        let scope: Vec<String> = match given(a, "project_id") {
             Some(p) => {
                 if registry::get_project(p).is_none() {
                     anyhow::bail!("Project '{p}' not found");
@@ -493,14 +560,20 @@ impl Daemon {
             "reindex_source" => self.submit_tool(a, a["source_id"].as_str().map(String::from)),
             "reindex_status" => {
                 let id = a["job_id"].as_str().unwrap_or("");
+                if id.is_empty() {
+                    // Today's server is asked for `/jobs/`, which is the list.
+                    let rows = self.queue.rows.list(None, None).unwrap_or_default();
+                    let count = rows.len();
+                    return Some(Ok(json!({ "jobs": rows, "count": count })));
+                }
                 self.queue.job_status(id).map(with_projects).with_context(|| format!("Job '{id}' not found"))
             }
             "cancel_reindex" => {
                 let id = a["job_id"].as_str().unwrap_or("");
                 Ok(json!({ "job_id": id, "cancelled": self.queue.cancel(id, a["source_id"].as_str()) }))
             }
-            "list_jobs" => self.queue.list_jobs(a["status"].as_str()).map(|jobs| json!({ "count": jobs.len(), "jobs": jobs })),
-            "queue_status" => self.queue.rows.queue_status(a["project_id"].as_str()).map(|(running, queued)| json!({ "running": running, "queued": queued, "awaiting_migration": [] })),
+            "list_jobs" => self.queue.list_jobs(a["status"].as_str()).map(|jobs| { let count = jobs.len(); json!({ "jobs": jobs, "count": count }) }),
+            "queue_status" => self.queue.rows.queue_status(given(a, "project_id")).map(|(running, queued)| json!({ "running": running, "queued": queued, "awaiting_migration": [] })),
             "status" => Ok(self.status_tool()),
             "gc" => self.gc_tool(a),
             "list_pinned_branches" | "pin_branches" | "unpin_branches" => self.pin_tool(name, a),
@@ -778,31 +851,53 @@ fn leave() -> ! {
     std::process::exit(0)
 }
 
-async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
+async fn handle(mut socket: TcpStream, d: Arc<Daemon>) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let head_end = loop {
-        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        // Empty lines before a request count for nothing.
+        let blank = buf.iter().take_while(|b| matches!(b, b'\r' | b'\n')).count();
+        buf.drain(..blank);
+        let found = buf.windows(4).position(|w| w == b"\r\n\r\n");
+        if found.unwrap_or(buf.len()) > MAX_HEAD {
+            return respond_bare(&mut socket, "431 Request Header Fields Too Large").await;
+        }
+        if let Some(i) = found {
             break i;
         }
         let mut chunk = [0u8; 4096];
-        let n = s.read(&mut chunk).await?;
-        if n == 0 || buf.len() > 64 << 10 {
+        let n = socket.read(&mut chunk).await?;
+        if n == 0 {
             return Ok(());
         }
         buf.extend_from_slice(&chunk[..n]);
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+    let Some(RequestLine { method, target, modern }) = request_line(&head) else {
+        return respond_bare(&mut socket, BAD_REQUEST).await;
+    };
+    if method == "CONNECT" {
+        return Ok(());
+    }
+    if modern && header(&head, "host").is_none() {
+        return respond_bare(&mut socket, BAD_REQUEST).await;
+    }
+    if let Some(expected) = header(&head, "expect").filter(|_| modern) {
+        if !expected.to_lowercase().split(|c: char| !c.is_ascii_alphanumeric() && c != '-').any(|w| w == "100-continue") {
+            return respond_bare(&mut socket, "417 Expectation Failed").await;
+        }
+        socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+    }
+    let mut s = Conn { s: socket, bodyless: method == "HEAD" };
+    let Ok(url) = reqwest::Url::parse("http://localhost").and_then(|base| base.join(target)) else {
+        return boom(&mut s, "TypeError: Invalid URL").await;
+    };
+    let (path, query) = (url.path(), url.query().unwrap_or(""));
     if !allowed(&head) {
         return json_res(&mut s, "403 Forbidden", &json!({ "error": "forbidden" })).await;
     }
-    let request_line = head.lines().next().unwrap_or("");
-    let mut parts = request_line.split_whitespace();
-    let (method, target) = (parts.next().unwrap_or("").to_uppercase(), parts.next().unwrap_or(""));
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let method = method.as_str();
 
     if method == "OPTIONS" {
-        return respond(&mut s, "204 No Content", "text/plain", "").await;
+        return respond_bare(&mut s.s, "204 No Content").await;
     }
     if (method, path) == ("GET", "/health") {
         // Deliberately 200 while draining: clients kill a server that answers anything else.
@@ -821,19 +916,19 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
     let answering = InFlight::new(&d.in_flight);
     let mut stopping = d.stopping.subscribe();
     let body = tokio::select! {
-        body = read_body(&mut s, &head, buf.split_off(head_end + 4)) => body?,
+        body = read_body(&mut s.s, &head, buf.split_off(head_end + 4)) => body?,
         // A sender that stalls must not hold up leaving.
         _ = stopping.wait_for(|stop| *stop) => return Ok(()),
     };
     let Some(body) = body else {
-        return respond(&mut s, "400 Bad Request", "text/plain", "").await;
+        return respond_bare(&mut s.s, BAD_REQUEST).await;
     };
 
     match (method, path) {
         ("GET", "/status") => json_res(&mut s, "200 OK", &d.status()).await,
         ("GET", "/events") => {
             drop(answering);
-            events(s, d, query).await
+            events(s.s, d, query).await
         }
         ("GET", "/projects") => {
             let projects: Vec<Value> = registry::list_projects()
@@ -862,25 +957,25 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
             };
             json_res(&mut s, "200 OK", &d.gc(scope, id_field(&parsed, "sourceId"), purge)).await
         }
-        ("GET", "/jobs") => {
-            let (status, project) = (query_param(query, "status"), query_param(query, "project_id"));
+        ("GET", p) if p == "/jobs" || (p.starts_with("/jobs") && p.len() <= "/jobs/".len()) => {
+            let given = |name: &str| query_param(query, name).filter(|v| !v.is_empty());
+            let (status, project) = (given("status"), given("project_id"));
             let rows = d.queue.rows.list(status.as_deref(), project.as_deref()).unwrap_or_default();
             json_res(&mut s, "200 OK", &json!({ "jobs": rows, "count": rows.len() })).await
         }
-        ("GET", p) if p.starts_with("/jobs/") => {
-            let id = percent_decode(&p["/jobs/".len()..]);
-            match d.queue.rows.get(&id) {
+        ("GET", p) if p.starts_with("/jobs") => {
+            match d.queue.rows.get(&p["/jobs/".len()..]) {
                 Some(row) => json_res(&mut s, "200 OK", &row).await,
                 None => json_res(&mut s, "404 Not Found", &json!({ "error": "not_found" })).await,
             }
         }
         ("DELETE", p) if p.starts_with("/jobs/") => {
-            let id = percent_decode(&p["/jobs/".len()..]);
-            let cancelled = d.queue.cancel(&id, None);
+            let id = &p["/jobs/".len()..];
+            let cancelled = d.queue.cancel(id, None);
             json_res(&mut s, "200 OK", &json!({ "job_id": id, "cancelled": cancelled })).await
         }
-        ("GET", "/queue-status") => {
-            let project = query_param(query, "project_id");
+        ("GET", p) if p.starts_with("/queue-status") => {
+            let project = query_param(query, "project_id").filter(|p| !p.is_empty());
             let (running, queued) = d.queue.rows.queue_status(project.as_deref()).unwrap_or_default();
             json_res(&mut s, "200 OK", &json!({ "running": running, "queued": queued, "awaiting_migration": [] })).await
         }
@@ -917,6 +1012,7 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
             let (status, answer) = d.pinned_route(m, pinned_ids(p).unwrap_or_default(), query, &body);
             json_res(&mut s, status, &answer).await
         }
+        (_, p) if pinned_ids(p).is_some_and(|(a, b)| decode_component(a).and(decode_component(b)).is_none()) => boom(&mut s, "URIError: URI malformed").await,
         ("GET", "/mcp/manifest") => json_res(&mut s, "200 OK", d.manifest()).await,
         ("POST", "/mcp/rpc") => {
             let parsed = match read_json(&body) {
@@ -936,8 +1032,7 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
             d.lifecycle.lock().unwrap().heartbeat("mcp-http", Instant::now());
             if method != "POST" {
                 let r = mcp_http::method_not_allowed();
-                let body = if method == "HEAD" { "" } else { r.body.as_str() };
-                return respond(&mut s, r.status, &format!("{}\r\nAllow: GET, POST, DELETE", r.kind), body).await;
+                return respond(&mut s, r.status, &format!("{}\r\nAllow: GET, POST, DELETE", r.kind), &r.body).await;
             }
             let (me, client) = (&d, client_id(&head));
             let call = |name: String, args: Value| async move { me.dispatch(&name, &args, client).await };
@@ -952,7 +1047,7 @@ async fn handle(mut s: TcpStream, d: Arc<Daemon>) -> Result<()> {
 async fn events(mut s: TcpStream, d: Arc<Daemon>, query: &str) -> Result<()> {
     let mut feed = d.queue.events.subscribe();
     s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n: ping\n\n").await?;
-    if let Some(since) = query_param(query, "since") {
+    if let Some(since) = query_param(query, "since").filter(|s| !s.is_empty()) {
         for e in d.queue.events_since(&since) {
             s.write_all(format!("data: {e}\n\n").as_bytes()).await?;
         }
@@ -1200,12 +1295,27 @@ mod tests {
     fn the_gate_takes_loopback_only_and_no_browsers() {
         assert!(allowed("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:5000"));
         assert!(allowed("POST /mcp HTTP/1.1\r\nHost: LOCALHOST:5000"));
-        assert!(allowed("POST /mcp HTTP/1.1\r\nHost: [::1]:5000"));
+        assert!(!allowed("POST /mcp HTTP/1.1\r\nHost: [::1]:5000"));
         assert!(allowed("POST /mcp HTTP/1.1\r\nHost: localhost"));
         assert!(!allowed("POST /mcp HTTP/1.1\r\nHost: evil.example:5000"));
         assert!(!allowed("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1.evil.example"));
         assert!(!allowed("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:5000\r\nOrigin: null"));
         assert!(!allowed("POST /mcp HTTP/1.1"));
+    }
+
+    #[test]
+    fn a_request_is_taken_when_nodes_parser_takes_it() {
+        let head = |line: &str, headers: &str| request_line(&format!("{line}\r\nHost: localhost{headers}")).map(|r| (r.method.to_string(), r.target.to_string(), r.modern));
+        let some = |m: &str, t: &str, modern| Some((m.to_string(), t.to_string(), modern));
+        assert_eq!(head("GET /a HTTP/1.1", "\r\nX-Odd: caf\u{e9}\t1\r\nEmpty:"), some("GET", "/a", true));
+        assert_eq!(head("GET  /a  HTTP/1.0", ""), some("GET", "/a", false));
+        assert_eq!(head("M-SEARCH /a", "\r\nContent-Length: 12"), some("M-SEARCH", "/a", false));
+        for line in ["get /a HTTP/1.1", "BREW /a HTTP/1.1", "GET /\u{e4} HTTP/1.1", "GET /a b HTTP/1.1", "GET /a HTTP/1.2", "GET /a http/1.1", "GET", "", "GET /a\tHTTP/1.1"] {
+            assert_eq!(head(line, ""), None, "{line:?}");
+        }
+        for headers in ["\r\nName : x", "\r\n folded: x", "\r\nnocolon", "\r\n: x", "\r\nA: b\u{1}", "\r\nA: b\nC: d", "\r\nContent-Length: 2\r\ncontent-length: 2", "\r\nContent-Length:", "\r\nContent-Length: +2", "\r\nContent-Length: -1"] {
+            assert_eq!(head("POST /a HTTP/1.1", headers), None, "{headers:?}");
+        }
     }
 
     #[test]

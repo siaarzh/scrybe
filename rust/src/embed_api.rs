@@ -1,7 +1,7 @@
 //! OpenAI-compatible embedding client. Mirrors `src/embedder.ts`, `src/embed-batch-state.ts`, and the
 //! request and retry behaviour of the openai package underneath them.
 use crate::config::data_dir;
-use crate::jsstr::{env_int, js_len, js_slice, js_trim};
+use crate::jsstr::{env_int, js_len, js_slice, js_trim, parse_json};
 use crate::registry::EmbedConfig;
 use crate::rerank::js_parse_float;
 use anyhow::{bail, Context, Result};
@@ -32,7 +32,9 @@ pub fn client() -> &'static reqwest::Client {
 pub fn decode_embedding(v: &Value) -> Option<Vec<f32>> {
     match v {
         Value::String(s) => {
-            let bytes = base64::engine::general_purpose::STANDARD.decode(s).ok()?;
+            // As `Buffer.from` reads it: either alphabet, padded or not.
+            let plain: String = s.chars().filter(|c| !c.is_whitespace() && *c != '=').map(|c| match c { '-' => '+', '_' => '/', c => c }).collect();
+            let bytes = base64::engine::general_purpose::STANDARD_NO_PAD.decode(plain).ok()?;
             Some(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
         }
         Value::Array(a) => a.iter().map(|x| x.as_f64().map(|n| n as f32)).collect(),
@@ -95,6 +97,18 @@ fn account_headers(env: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, S
     set.into_iter().filter_map(|(header, v)| Some((header, v.filter(|v| !v.is_empty())?))).collect()
 }
 
+fn missing_key(cfg: &EmbedConfig) -> Option<String> {
+    (!cfg.local && cfg.credentials.is_empty()).then(|| format!("No API key found. Set {} to use model \"{}\".", cfg.key_env, cfg.model))
+}
+
+/// Fails a run that could not embed anything, before it wipes what is there.
+pub fn require_key(cfg: &EmbedConfig) -> Result<()> {
+    match missing_key(cfg) {
+        Some(message) => bail!("Embedding API error (HTTP unknown): {message}"),
+        None => Ok(()),
+    }
+}
+
 /// One logical request: the openai package retries twice by itself before anyone else sees an error.
 async fn post(cfg: &EmbedConfig, texts: &[String]) -> Result<Value, ApiError> {
     let url = format!("{}/embeddings", cfg.base_url.trim_end_matches('/'));
@@ -102,6 +116,9 @@ async fn post(cfg: &EmbedConfig, texts: &[String]) -> Result<Value, ApiError> {
     let input: Vec<String> = texts.iter().map(|t| if js_len(t) > cap { js_slice(t, cap) } else { t.clone() }).collect();
     let encoding = if cfg.encoding_float { "float" } else { "base64" };
     let body = json!({ "model": cfg.model, "input": input, "encoding_format": encoding });
+    if reqwest::Url::parse(&url).is_err() {
+        return Err(ApiError { status: 0, message: "Invalid URL".into() });
+    }
     let mut attempt = 0;
     loop {
         let mut request = client().post(&url).bearer_auth(&cfg.credentials).json(&body);
@@ -109,25 +126,29 @@ async fn post(cfg: &EmbedConfig, texts: &[String]) -> Result<Value, ApiError> {
             request = request.header(name, value);
         }
         let sent = request.send().await;
+        let mut retry = false;
         let (status, wait, message) = match sent {
-            Err(e) => (0, None, format!("Connection error: {e}")),
+            Err(e) if e.is_timeout() => (0, None, "Request timed out.".into()),
+            Err(_) => (0, None, "Connection error.".into()),
             Ok(r) => {
                 let status = r.status().as_u16();
                 let wait = retry_after(r.headers());
-                let refuse = r.headers().get("x-should-retry").and_then(|v| v.to_str().ok()) == Some("false");
+                let asked = r.headers().get("x-should-retry").and_then(|v| v.to_str().ok()).map(String::from);
                 let text = r.text().await.unwrap_or_default();
                 if (200..300).contains(&status) {
-                    return serde_json::from_str(&text).map_err(|e| ApiError { status: 0, message: format!("invalid JSON from the embedding endpoint: {e}") });
+                    return parse_json(text.strip_prefix('\u{FEFF}').unwrap_or(&text)).map_err(|e| ApiError { status: 0, message: format!("invalid JSON from the embedding endpoint: {e}") });
                 }
                 let parsed: Option<Value> = serde_json::from_str(&text).ok();
                 let message = parsed.as_ref().and_then(|b| b["error"]["message"].as_str().or(b["message"].as_str()).map(String::from)).unwrap_or_else(|| if text.is_empty() { format!("{status} status code (no body)") } else { format!("{status} {text}") });
-                if refuse {
-                    return Err(ApiError { status, message });
+                match asked.as_deref() {
+                    Some("false") => return Err(ApiError { status, message }),
+                    Some("true") => retry = true,
+                    _ => {}
                 }
                 (status, wait, message)
             }
         };
-        if attempt >= 2 || !(status == 0 || retryable(status)) {
+        if attempt >= 2 || !(retry || status == 0 || retryable(status)) {
             return Err(ApiError { status, message });
         }
         tokio::time::sleep(backoff(attempt, wait)).await;
@@ -142,8 +163,14 @@ pub async fn embed_texts(cfg: &EmbedConfig, texts: &[String]) -> Result<Vec<Vec<
     }
     let mut delay = env_int("SCRYBE_EMBED_RETRY_DELAY_MS").map_or(5000, |n| n as u64);
     for attempt in 0..5 {
-        let failure = match post(cfg, texts).await {
+        let sent = match missing_key(cfg) {
+            Some(message) => Err(ApiError { status: 0, message }),
+            None => post(cfg, texts).await,
+        };
+        let failure = match sent {
             Ok(body) => match parse_vectors(&body, cfg) {
+                // A short reply would put vectors on the wrong texts.
+                Ok(v) if v.len() < texts.len() => ApiError { status: 0, message: format!("the endpoint returned {} vectors for {} texts", v.len(), texts.len()) },
                 Ok(v) => return Ok(v),
                 Err(e) => ApiError { status: 0, message: e.to_string() },
             },
@@ -271,7 +298,7 @@ mod tests {
     use super::*;
 
     fn cfg() -> EmbedConfig {
-        EmbedConfig { local: false, base_url: "http://x/v1".into(), model: "m".into(), dimensions: 2, credentials: "k".into(), encoding_float: false, max_input_tokens: None, query_prefix: String::new(), passage_prefix: String::new() }
+        EmbedConfig { local: false, base_url: "http://x/v1".into(), model: "m".into(), dimensions: 2, credentials: "k".into(), key_env: "SCRYBE_PRESET_P".into(), encoding_float: false, max_input_tokens: None, query_prefix: String::new(), passage_prefix: String::new() }
     }
 
     #[test]
@@ -302,6 +329,10 @@ mod tests {
 
     #[test]
     fn bad_replies_name_the_problem() {
+        for s in ["AACAPwAAAL8=", "AACAPwAAAL8", "AACA PwAA\nAL8="] {
+            assert_eq!(decode_embedding(&json!(s)), Some(vec![1.0, -0.5]), "{s:?}");
+        }
+        assert_eq!(decode_embedding(&json!("__9_fw")), decode_embedding(&json!("//9/fw==")));
         assert!(parse_vectors(&json!({ "data": [] }), &cfg()).unwrap_err().to_string().contains("encoding mismatch"));
         assert!(parse_vectors(&json!({ "data": [{ "index": 0, "embedding": ["x"] }] }), &cfg()).unwrap_err().to_string().contains("encoding mismatch"));
         let wrong = parse_vectors(&json!({ "data": [{ "index": 0, "embedding": [1.0] }] }), &EmbedConfig { dimensions: 4, ..cfg() }).unwrap_err().to_string();

@@ -131,8 +131,8 @@ enum Command {
         project_id: String,
         #[arg(long)]
         exact: bool,
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
+        #[arg(long, default_value_t = 50.0)]
+        limit: f64,
     },
     /// Print token ids for a JSON list of texts in a file (parity checks)
     DebugTokens { file: String, #[arg(long, default_value = "Xenova/multilingual-e5-small")] model: String },
@@ -206,7 +206,7 @@ enum SearchKind {
 }
 
 /// What `search code` and `search knowledge` return from the command line whatever `--top-k` says.
-const CLI_SEARCH_TOP_K: usize = 10;
+const CLI_SEARCH_TOP_K: f64 = 10.0;
 
 /// What `search code` and `search knowledge` print on failure: `[scrybe] <message>`.
 fn search_fail(e: tools::ToolError) -> ! {
@@ -227,7 +227,9 @@ fn main() -> anyhow::Result<()> {
         let exe = std::env::current_exe().map_or_else(|_| "scrybe".to_string(), |p| p.to_string_lossy().into_owned());
         scrybe_relay::run(vec![exe, "daemon".into(), "up".into()]);
     }
-    if let Err(message) = chunk::Sizes::from_env().check() {
+    // For its warnings: today's command line reads this setting whatever the command.
+    rerank::config();
+    if let Err(message) = chunk::Sizes::check_env() {
         eprintln!("scrybe error: Error: {message}");
         std::process::exit(1);
     }
@@ -323,12 +325,12 @@ async fn run(cli: Option<Cli>) -> anyhow::Result<()> {
         Command::Daemon { action } => ops::daemon(store, action).await,
         Command::Search(SearchArgs { kind: Some(SearchKind::Code { query, project_id, branch, .. }), .. }) => {
             let hits = tools::search_code(&store, &project_id, &query, CLI_SEARCH_TOP_K, branch.as_deref()).await.unwrap_or_else(|e| search_fail(e));
-            println!("{}", tools::format_code(&hits));
+            cli::say(&tools::format_code(&hits));
         }
         Command::Search(SearchArgs { kind: Some(SearchKind::Knowledge { query, project_id, source_id, item_types, .. }), .. }) => {
-            let types: Option<Vec<String>> = item_types.map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
+            let types: Option<Vec<String>> = item_types.filter(|t| !t.is_empty()).map(|t| t.split(',').map(|s| s.trim().to_string()).collect());
             let hits = tools::search_knowledge(&store, &project_id, &query, CLI_SEARCH_TOP_K, source_id.as_deref(), types.as_deref()).await.unwrap_or_else(|e| search_fail(e));
-            println!("{}", tools::format_knowledge(&hits));
+            cli::say(&tools::format_knowledge(&hits));
         }
         Command::Search(SearchArgs { kind: None, query, project_id, top_k, branch }) => legacy::bare_search(&store, query, project_id, &top_k, branch).await,
         Command::Pin { action } => legacy::pin(action),

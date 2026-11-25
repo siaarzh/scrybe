@@ -2,7 +2,7 @@
 //!
 //! Two backends: an HTTP rerank endpoint (Voyage-compatible) and a local cross-encoder.
 //! Both blend the reranker's score with the original rank by position.
-use crate::jsstr::{js_len, js_slice, parse_int};
+use crate::jsstr::{js_len, js_slice, parse_int, slice_end, to_uint32};
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -35,8 +35,10 @@ impl RerankConfig {
     }
 
     /// How many candidates each source fetches before the cut to `top_k`.
-    pub fn fetch_count(&self, top_k: usize) -> usize {
-        if self.enabled() { (top_k * self.fetch_multiplier).min(MAX_CANDIDATES) } else { top_k }
+    pub fn fetch_count(&self, top_k: f64) -> usize {
+        let n = if self.enabled() { top_k * self.fetch_multiplier as f64 } else { top_k };
+        let n = if self.enabled() && n > MAX_CANDIDATES as f64 { MAX_CANDIDATES as f64 } else { n };
+        to_uint32(n) as usize
     }
 }
 
@@ -227,13 +229,13 @@ async fn scores_http(cfg: &RerankConfig, url: &str, model: &str, query: &str, do
         "top_k": docs.len(),
         "return_documents": false,
     });
-    let res = http_client().post(url).header("Content-Type", "application/json").header("Authorization", format!("Bearer {}", cfg.api_key)).body(body.to_string()).send().await?;
+    let res = http_client().post(url).header("Content-Type", "application/json").header("Authorization", format!("Bearer {}", cfg.api_key)).body(body.to_string()).send().await.map_err(|e| crate::gitlab_issues::fetch_error(url, &e))?;
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
         bail!("Rerank API error {}: {text}", status.as_u16());
     }
-    let data: serde_json::Value = res.json().await?;
+    let data = crate::http::json_body(res).await?;
     let Some(items) = data["data"].as_array() else { bail!("Rerank API reply has no data list") };
     let mut scores = vec![0.0; docs.len()];
     for item in items {
@@ -248,7 +250,8 @@ async fn scores_http(cfg: &RerankConfig, url: &str, model: &str, query: &str, do
 }
 
 /// `rerank`: reorder `candidates` (best first on entry) and keep `top_k`.
-pub async fn rerank<T: Rerankable>(cfg: &RerankConfig, query: &str, candidates: Vec<T>, top_k: usize) -> Result<Vec<T>> {
+pub async fn rerank<T: Rerankable>(cfg: &RerankConfig, query: &str, candidates: Vec<T>, top_k: f64) -> Result<Vec<T>> {
+    let top_k = slice_end(candidates.len(), top_k);
     let Some(backend) = &cfg.backend else {
         return Ok(candidates.into_iter().take(top_k).collect());
     };
@@ -556,10 +559,10 @@ mod tests {
     #[test]
     fn fetch_count_is_capped() {
         let (mut c, _) = cfg_from(&[("SCRYBE_RERANK", "true"), ("SCRYBE_RERANK_PROVIDER", "local")]);
-        assert_eq!(c.fetch_count(10), 50);
-        assert_eq!(c.fetch_count(200), MAX_CANDIDATES);
+        assert_eq!(c.fetch_count(10.0), 50);
+        assert_eq!(c.fetch_count(200.0), MAX_CANDIDATES);
         c.backend = None;
-        assert_eq!(c.fetch_count(10), 10);
+        assert_eq!(c.fetch_count(10.0), 10);
     }
 
     #[test]

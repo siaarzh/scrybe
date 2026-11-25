@@ -45,7 +45,7 @@ export function vectorFor(text) {
  * turn the nth request away with `{ code, headers }`; `tls` is the key and certificate to serve HTTPS with. While
  * `gate.hold` is a promise, requests wait for it, and `gate.waiting` counts them.
  */
-export async function fakeEmbedder({ delayMs = 0, refuse, tls } = {}) {
+export async function fakeEmbedder({ delayMs = 0, refuse, edit = (data) => data, tls } = {}) {
   const log = [];
   const gate = { hold: null, waiting: 0 };
   const answer = (req, res) => {
@@ -67,11 +67,11 @@ export async function fakeEmbedder({ delayMs = 0, refuse, tls } = {}) {
         res.end(JSON.stringify({ error: { message: "try again later" } }));
         return;
       }
-      const data = input.map((t, index) => {
+      const data = edit(input.map((t, index) => {
         const vec = vectorFor(t);
         const embedding = body.encoding_format === "base64" ? Buffer.from(new Float32Array(vec).buffer).toString("base64") : vec;
         return { object: "embedding", index, embedding };
-      });
+      }));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ object: "list", model: body.model, data, usage: { prompt_tokens: 1, total_tokens: 1 } }));
     });

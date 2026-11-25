@@ -61,6 +61,13 @@ fn parse_bundle(pem: &str) -> (Vec<Certificate>, Option<String>) {
     (certs, problem)
 }
 
+/// `Response.json()`: a byte order mark is dropped, and text Rust can't hold is replaced.
+pub async fn json_body(res: reqwest::Response) -> anyhow::Result<serde_json::Value> {
+    let bytes = res.bytes().await.map_err(|e| anyhow::Error::new(e).context("Unexpected end of JSON input"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    crate::jsstr::parse_json(text.strip_prefix('\u{FEFF}').unwrap_or(&text)).map_err(|e| anyhow::Error::new(e).context("Unexpected end of JSON input"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
