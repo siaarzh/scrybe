@@ -217,6 +217,15 @@ impl Writer {
     }
 }
 
+/// Clears what counts as indexed for a source, on every branch.
+pub fn forget_source(project: &str, source: &str) -> Result<()> {
+    crate::manage::remove_hash_files(&crate::config::data_dir().join("hashes"), &format!("{project}__{source}__"));
+    let conn = open_rw(&crate::config::data_dir().join("branch-tags.db"))?;
+    conn.execute("DELETE FROM branch_tags WHERE project_id=? AND source_id=?", [project, source])?;
+    conn.execute("DELETE FROM branch_state WHERE project_id=? AND source_id=?", [project, source])?;
+    Ok(())
+}
+
 pub fn all_chunk_ids_for_source(writer: &Writer, project: &str, source: &str) -> Result<std::collections::HashSet<String>> {
     let mut stmt = writer.conn.prepare("SELECT DISTINCT chunk_id FROM branch_tags WHERE project_id=? AND source_id=?")?;
     let rows = stmt.query_map([project, source], |r| r.get::<_, String>(0))?;

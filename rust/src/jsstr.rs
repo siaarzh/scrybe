@@ -42,7 +42,8 @@ pub fn to_uint32(n: f64) -> u32 {
 
 /// Where `array.slice(0, n)` ends.
 pub fn slice_end(len: usize, n: f64) -> usize {
-    if n < 0.0 { (len as f64 + n.trunc()).max(0.0) as usize } else { len.min(n as usize) }
+    let n = n.trunc();
+    if n < 0.0 { (len as f64 + n).max(0.0) as usize } else { len.min(n as usize) }
 }
 
 /// `parseInt` of an environment variable, `None` when it is unset or NaN.
@@ -145,7 +146,7 @@ mod tests {
     #[test]
     fn counts_are_cut_like_javascript_cuts_them() {
         assert_eq!([10.0, 1.9, 0.0, -1.0, 1e20, f64::NAN, f64::INFINITY].map(to_uint32), [10, 1, 0, u32::MAX, 1_661_992_960, 0, 0]);
-        assert_eq!([2.9, 0.0, -1.0, -9.0, 1e20, f64::NAN].map(|n| slice_end(5, n)), [2, 0, 4, 0, 5, 0]);
+        assert_eq!([2.9, 0.0, -0.5, -1.0, -9.0, 1e20, f64::NAN].map(|n| slice_end(5, n)), [2, 0, 0, 4, 0, 5, 0]);
     }
 
     #[test]

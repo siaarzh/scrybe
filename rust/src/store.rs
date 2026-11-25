@@ -368,9 +368,10 @@ impl Store {
             return Ok(t);
         }
         std::fs::create_dir_all(db_path())?;
-        let table = self.conn().await?.create_empty_table(name, code_schema(dimensions)).execute().await?;
         let meta = serde_json::json!({ "chunk_id_scheme": CURRENT_CHUNK_ID_SCHEME, "chunk_id_scheme_introduced_in": "0.31.0" });
+        // First, because a table without one counts as too old to search.
         std::fs::write(db_path().join(format!("{name}-meta.json")), serde_json::to_string_pretty(&meta)? + "\n")?;
+        let table = self.conn().await?.create_empty_table(name, code_schema(dimensions)).execute().await?;
         self.tables.lock().unwrap().insert(name.to_string(), table.clone());
         Ok(table)
     }
@@ -381,7 +382,6 @@ impl Store {
             return Ok(t);
         }
         std::fs::create_dir_all(db_path())?;
-        let table = self.conn().await?.create_empty_table(name, knowledge_schema(dimensions)).execute().await?;
         let meta = serde_json::json!({
             "chunk_id_scheme": CURRENT_CHUNK_ID_SCHEME,
             "chunk_id_scheme_introduced_in": "0.31.0",
@@ -389,6 +389,7 @@ impl Store {
             "knowledge_schema_version_introduced_in": "0.41.0",
         });
         std::fs::write(db_path().join(format!("{name}-meta.json")), serde_json::to_string_pretty(&meta)? + "\n")?;
+        let table = self.conn().await?.create_empty_table(name, knowledge_schema(dimensions)).execute().await?;
         self.tables.lock().unwrap().insert(name.to_string(), table.clone());
         Ok(table)
     }

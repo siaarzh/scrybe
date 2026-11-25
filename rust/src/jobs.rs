@@ -1041,6 +1041,29 @@ impl Queue {
         self.lock().cancel(id, source)
     }
 
+    /// Tells the jobs a project has running to stop, those without a row included, and gives them a moment to.
+    pub async fn stop_project(&self, project: &str) {
+        for _ in 0..100 {
+            if !self.cancel_project(project) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Whether the project has a job running, each told to stop.
+    fn cancel_project(&self, project: &str) -> bool {
+        let st = self.lock();
+        let mut any = false;
+        for (id, _) in st.active.iter().filter(|(_, a)| a.project == project) {
+            any = true;
+            if let Some(cancels) = st.cancels.get(id) {
+                cancels.all();
+            }
+        }
+        any
+    }
+
     /// `stopQueue` and `cancelAllJobs`: nothing starts from here on, and what runs is told to stop.
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);

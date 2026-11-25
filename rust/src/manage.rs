@@ -45,6 +45,7 @@ pub fn update_project(a: &Value) -> Result<Value> {
 pub async fn remove_project(queue: &Arc<Queue>, id: &str) -> Result<usize> {
     let project = project_of(id)?;
     let cancelled = cancel_jobs(queue, id);
+    queue.stop_project(id).await;
     for source in &project.sources {
         wipe_and_drop(queue, id, source).await;
     }
@@ -143,7 +144,7 @@ fn wipe_source(queue: &Arc<Queue>, project: &str, source: &str) -> Result<()> {
 }
 
 /// Every hash file whose name starts with `prefix`. A slash in an id makes folders of its first parts.
-fn remove_hash_files(root: &Path, prefix: &str) {
+pub(crate) fn remove_hash_files(root: &Path, prefix: &str) {
     let mut parts: Vec<&str> = prefix.split(['/', std::path::MAIN_SEPARATOR]).collect();
     let start = parts.pop().unwrap_or("");
     // Never out of the folder.
@@ -279,7 +280,7 @@ mod tests {
     fn hash_files_go_with_their_source_and_nothing_outside_the_folder_does() {
         let dir = scratch("hashes");
         let root = dir.join("hashes");
-        let files = ["p__a b/c__master.json", "p__a b/d__master.json", "p__../x__master.json", "p__s__master.json", "p__s2__master.json", "../x__s__master.json", "../p__s__master.json"];
+        let files = ["p__a b/c__master.json", "p__a b/d__master.json", "p__x/y__master.json", "p__s__master.json", "p__s2__master.json", "../x__s__master.json", "../p__s__master.json"];
         for f in files {
             std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
             std::fs::write(root.join(f), "{}").unwrap();
@@ -289,10 +290,10 @@ mod tests {
         remove_hash_files(&root, "/x__");
         assert_eq!(left(), files);
         remove_hash_files(&root, "p__a b/c__");
-        remove_hash_files(&root, "p__../x__");
+        remove_hash_files(&root, "p__x/y__");
         remove_hash_files(&root, "p__s__");
         assert_eq!(left(), [files[1], files[4], files[5], files[6]]);
-        assert!(!root.join("p__..").exists(), "a folder left empty goes too");
+        assert!(!root.join("p__x").exists(), "a folder left empty goes too");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

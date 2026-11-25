@@ -157,7 +157,8 @@ pub(crate) async fn repair_if_corrupt(store: &Store, table: &str, project: &str,
     match store.table_health(table, Some(expected_dimensions(cfg, text)), true).await {
         Health::Corrupt(_) => {
             let mut repaired = "none";
-            if store.drop_table(table).await.is_ok() {
+            // What counts as indexed goes first: a run that ends before it is rebuilt must leave it to be indexed.
+            if branches::forget_source(project, source).is_ok() && store.drop_table(table).await.is_ok() {
                 repaired = "rebuild";
                 debug_emit(json!({ "event": "indexer.repaired", "projectId": project, "sourceId": source, "method": "rebuild" }));
                 append_log(&json!({ "ts": now_iso(), "event": "health.repaired-via-rebuild", "projectId": project, "sourceId": source }).to_string());
@@ -503,12 +504,16 @@ pub async fn index_source(store: &Store, project_id: &str, source_id: &str, mode
             stale_phase.sample();
             records.removed(p);
         }
+        // Before their tags: a file put back as it was after a run that failed must be indexed again.
+        for p in &to_index {
+            hashes.remove(p);
+        }
+        if !(to_remove.is_empty() && to_index.is_empty()) {
+            save_hashes(&hash_path, &hashes)?;
+        }
         for p in &to_index {
             writer.remove_file(p)?;
             stale_phase.sample();
-        }
-        if !to_remove.is_empty() {
-            save_hashes(&hash_path, &hashes)?;
         }
     }
     let bytes_to_read: u64 = entries

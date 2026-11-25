@@ -151,6 +151,9 @@ fn host_name(value: &str) -> Option<String> {
 const METHODS: [&str; 35] = ["ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "M-SEARCH", "MERGE", "MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK", "UNSUBSCRIBE"];
 /// `maxHeaderSize`.
 const MAX_HEAD: usize = 16 << 10;
+/// `headersTimeout` and `requestTimeout`.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(60);
+const BODY_TIMEOUT: Duration = Duration::from_secs(300);
 
 struct RequestLine<'a> {
     method: &'a str,
@@ -240,14 +243,24 @@ async fn respond(c: &mut Conn, status: &str, kind: &str, body: &str) -> Result<(
     Ok(())
 }
 
-/// An answer that is a status and nothing else.
-async fn respond_bare(s: &mut TcpStream, status: &str) -> Result<()> {
-    s.write_all(format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+/// Closing with input unread would reset the connection and could lose the answer.
+async fn read_out(s: &mut TcpStream) -> Result<()> {
     s.shutdown().await?;
-    // Closing with input unread would reset the connection and could lose the answer.
     let mut rest = [0u8; 4096];
     let _ = tokio::time::timeout(Duration::from_millis(500), async { while matches!(s.read(&mut rest).await, Ok(1..)) {} }).await;
     Ok(())
+}
+
+/// The answer to a request whose body isn't wanted.
+async fn refuse(c: &mut Conn, status: &str, body: &Value) -> Result<()> {
+    json_res(c, status, body).await?;
+    read_out(&mut c.s).await
+}
+
+/// An answer that is a status and nothing else.
+async fn respond_bare(s: &mut TcpStream, status: &str) -> Result<()> {
+    s.write_all(format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+    read_out(s).await
 }
 
 async fn json_res(s: &mut Conn, status: &str, body: &Value) -> Result<()> {
@@ -853,6 +866,7 @@ fn leave() -> ! {
 
 async fn handle(mut socket: TcpStream, d: Arc<Daemon>) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
+    let head_by = tokio::time::Instant::now() + HEAD_TIMEOUT;
     let head_end = loop {
         // Empty lines before a request count for nothing.
         let blank = buf.iter().take_while(|b| matches!(b, b'\r' | b'\n')).count();
@@ -865,7 +879,10 @@ async fn handle(mut socket: TcpStream, d: Arc<Daemon>) -> Result<()> {
             break i;
         }
         let mut chunk = [0u8; 4096];
-        let n = socket.read(&mut chunk).await?;
+        let Ok(n) = tokio::time::timeout_at(head_by, socket.read(&mut chunk)).await else {
+            return respond_bare(&mut socket, "408 Request Timeout").await;
+        };
+        let n = n?;
         if n == 0 {
             return Ok(());
         }
@@ -893,7 +910,7 @@ async fn handle(mut socket: TcpStream, d: Arc<Daemon>) -> Result<()> {
     };
     let (path, query) = (url.path(), url.query().unwrap_or(""));
     if !allowed(&head) {
-        return json_res(&mut s, "403 Forbidden", &json!({ "error": "forbidden" })).await;
+        return refuse(&mut s, "403 Forbidden", &json!({ "error": "forbidden" })).await;
     }
 
     if method == "OPTIONS" {
@@ -907,18 +924,22 @@ async fn handle(mut socket: TcpStream, d: Arc<Daemon>) -> Result<()> {
         return json_res(&mut s, "200 OK", &json!({ "ready": true, "draining": d.draining.load(Ordering::SeqCst), "version": VERSION, "uptimeMs": d.uptime_ms(), "pid": std::process::id() })).await;
     }
     if d.closing.load(Ordering::SeqCst) {
-        return json_res(&mut s, "503 Service Unavailable", &json!({ "error": "daemon is shutting down", "draining": true })).await;
+        return refuse(&mut s, "503 Service Unavailable", &json!({ "error": "daemon is shutting down", "draining": true })).await;
     }
     if d.draining.load(Ordering::SeqCst) && work_accepting(method, path) {
-        return json_res(&mut s, "503 Service Unavailable", &json!({ "error": "daemon is shutting down — not accepting new work", "draining": true })).await;
+        return refuse(&mut s, "503 Service Unavailable", &json!({ "error": "daemon is shutting down — not accepting new work", "draining": true })).await;
     }
 
     let answering = InFlight::new(&d.in_flight);
     let mut stopping = d.stopping.subscribe();
     let body = tokio::select! {
-        body = read_body(&mut s.s, &head, buf.split_off(head_end + 4)) => body?,
+        body = read_body(&mut s.s, &head, buf.split_off(head_end + 4)) => Ok(body?),
+        _ = tokio::time::sleep(BODY_TIMEOUT) => Err(()),
         // A sender that stalls must not hold up leaving.
         _ = stopping.wait_for(|stop| *stop) => return Ok(()),
+    };
+    let Ok(body) = body else {
+        return respond_bare(&mut s.s, "408 Request Timeout").await;
     };
     let Some(body) = body else {
         return respond_bare(&mut s.s, BAD_REQUEST).await;

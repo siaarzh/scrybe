@@ -37,10 +37,12 @@ impl Sizes {
         Sizes { chunk_size: get("SCRYBE_CHUNK_SIZE", 60), overlap: get("SCRYBE_CHUNK_OVERLAP", 10) }
     }
 
-    /// An overlap as long as the chunk would never move forward. A value that isn't a number passes, and the default is used.
+    /// An overlap as long as the chunk would never move forward, as given or with a default in place of one that can't be used.
     pub fn check_env() -> Result<(), String> {
         let get = |k: &str, d: f64| std::env::var(k).map_or(Some(d), |v| parse_int(&v));
-        check(get("SCRYBE_CHUNK_SIZE", 60.0), get("SCRYBE_CHUNK_OVERLAP", 10.0))
+        check(get("SCRYBE_CHUNK_SIZE", 60.0), get("SCRYBE_CHUNK_OVERLAP", 10.0))?;
+        let used = Sizes::from_env();
+        check(Some(used.chunk_size as f64), Some(used.overlap as f64))
     }
 }
 

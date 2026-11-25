@@ -37,8 +37,9 @@ impl RerankConfig {
     /// How many candidates each source fetches before the cut to `top_k`.
     pub fn fetch_count(&self, top_k: f64) -> usize {
         let n = if self.enabled() { top_k * self.fetch_multiplier as f64 } else { top_k };
-        let n = if self.enabled() && n > MAX_CANDIDATES as f64 { MAX_CANDIDATES as f64 } else { n };
-        to_uint32(n) as usize
+        let n = to_uint32(if self.enabled() { n.min(MAX_CANDIDATES as f64) } else { n }) as usize;
+        // A negative count wraps to a huge one.
+        if self.enabled() { n.min(MAX_CANDIDATES) } else { n }
     }
 }
 
