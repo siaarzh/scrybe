@@ -114,9 +114,48 @@ pub fn normalize_content(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// `String(n)` for a finite number.
+pub fn js_number(n: f64) -> String {
+    if n == 0.0 {
+        return "0".into();
+    }
+    let a = n.abs();
+    if (1e-6..1e21).contains(&a) {
+        return if n.fract() == 0.0 { format!("{}", n as i64) } else { format!("{n}") };
+    }
+    let e = format!("{n:e}");
+    match e.split_once('e') {
+        Some((m, x)) if !x.starts_with('-') => format!("{m}e+{x}"),
+        _ => e,
+    }
+}
+
+/// `array.join(",")`: null becomes empty, an object `[object Object]`, a nested array is joined in turn.
+pub fn js_join(items: &[serde_json::Value]) -> String {
+    use serde_json::Value;
+    let one = |v: &Value| -> String {
+        match v {
+            Value::Null => String::new(),
+            Value::String(s) => s.clone(),
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => n.as_f64().map_or_else(|| n.to_string(), js_number),
+            Value::Array(a) => js_join(a),
+            Value::Object(_) => "[object Object]".into(),
+        }
+    };
+    items.iter().map(one).collect::<Vec<_>>().join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_follows_javascript() {
+        let v: Vec<serde_json::Value> = serde_json::from_str(r#"["z", null, 1, 1.5, true, {"a": 1}, ["x", null, [2]], 1e21, 0.0000001, -0.0]"#).unwrap();
+        assert_eq!(js_join(&v), "z,,1,1.5,true,[object Object],x,,2,1e+21,1e-7,0");
+        assert_eq!(js_join(&[]), "");
+    }
 
     #[test]
     fn lengths_count_utf16_units() {

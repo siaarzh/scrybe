@@ -338,7 +338,7 @@ pub fn format_knowledge(hits: &[ParsedKnowledge]) -> String {
             if let Some(s) = &r.state {
                 meta.push(format!("state:{s}"));
             }
-            let join = |v: &[Value]| v.iter().map(|x| x.as_str().map(str::to_string).unwrap_or_else(|| x.to_string())).collect::<Vec<_>>().join(",");
+            let join = crate::jsstr::js_join;
             if !r.labels.is_empty() {
                 meta.push(format!("labels:[{}]", join(&r.labels)));
             }
