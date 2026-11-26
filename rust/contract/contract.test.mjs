@@ -4375,6 +4375,8 @@ describe("a table that can't be read", () => {
         if (answers) isList(value, `ttl ${ttl}, manifests emptied`);
         else assert.deepEqual(faultOf(value, "has an unreadable index", "schema_unreadable"), { error_message: "zero-byte manifest" });
         restore();
+        // A fast machine can come back inside the 1 ms the "1x" answer is kept.
+        await sleep(20);
         isList(await tools.call("search_code", {}), `ttl ${ttl}, after restore`);
       } finally {
         tools.stop();
