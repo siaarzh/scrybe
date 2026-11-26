@@ -291,7 +291,7 @@ export async function makeWorld({ embedder, serverEnv = {}, pinned, withOrigin =
 
   const cliEnv = { ...env, SCRYBE_NO_AUTO_DAEMON: "1" };
   // Asynchronous, because the fake embedder lives in this process and has to keep answering.
-  const CLI_TIMEOUT_MS = 90_000;
+  const CLI_TIMEOUT_MS = Number(process.env.SCRYBE_CONTRACT_CLI_TIMEOUT_MS) || 90_000;
   const run = (input, args, runEnv = cliEnv, cwd = dir) => new Promise((resolve, reject) => {
     const p = spawn(CLI[0], [...CLI.slice(1), ...args], { env: runEnv, cwd, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "", done = false;
