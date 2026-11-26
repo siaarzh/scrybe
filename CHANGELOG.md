@@ -7,6 +7,10 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ## [Unreleased]
 
+---
+
+## [0.54.1] — 2026-11-26
+
 ### Security
 
 - On Linux, the daemon no longer inherits every environment variable of the process that started it, only what scrybe and its runtime need plus the variables your config references as `${VAR}`; add others with the new `SCRYBE_DAEMON_ENV_PASSTHROUGH`. A running daemon doesn't pick up a variable you reference for the first time unless its name starts with `SCRYBE_`: list it in `SCRYBE_DAEMON_ENV_PASSTHROUGH` or `<DATA_DIR>/.env`, or rename it, then run `scrybe daemon stop`; `scrybe source add` and `scrybe source update` warn when this applies. Its environment values also no longer appear in `systemctl --user show` or `cat`, except in one fallback `docs/daemon.md` describes.
@@ -78,24 +82,16 @@ Follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and [Semantic V
 
 ---
 
-## [0.51.1] — 2026-08-27
-
-### Fixed
-
-- On Windows, Hyper-V and WSL reserve blocks of TCP ports at boot, and the daemon's usual port can land inside one. It used to refuse to start, with a bare `listen EACCES` and nothing to explain it. It now binds another port and records why it moved, and `doctor` warns when a port it wants has been reserved. Setting `SCRYBE_DAEMON_PORT` still pins the port exactly, so a reserved value there fails rather than falling back, but the message now names the cause.
-
----
-
 ## Older releases
 
-For releases v0.51.0 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
+For releases v0.51.1 and earlier, see [GitHub Releases](https://github.com/siaarzh/scrybe/releases) (auto-generated from git tags).
 
 ---
 
-[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.54.0...HEAD
+[Unreleased]: https://github.com/siaarzh/scrybe/compare/v0.54.1...HEAD
+[0.54.1]: https://github.com/siaarzh/scrybe/compare/v0.54.0...v0.54.1
 [0.54.0]: https://github.com/siaarzh/scrybe/compare/v0.53.2...v0.54.0
 [0.53.2]: https://github.com/siaarzh/scrybe/compare/v0.53.1...v0.53.2
 [0.53.1]: https://github.com/siaarzh/scrybe/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/siaarzh/scrybe/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/siaarzh/scrybe/compare/v0.51.1...v0.52.0
-[0.51.1]: https://github.com/siaarzh/scrybe/compare/v0.51.0...v0.51.1
