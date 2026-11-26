@@ -4364,17 +4364,18 @@ describe("a table that can't be read", () => {
     const dir = join(w.data, "lancedb", `${tableOf(w)}.lance`, "_versions");
     const kept = readdirSync(dir).map((f) => [f, readFileSync(join(dir, f))]);
     const restore = () => { for (const [f, bytes] of kept) writeFileSync(join(dir, f), bytes); };
+    const isList = (value, when) => assert.ok(Array.isArray(value), `${when}: ${JSON.stringify(value).slice(0, 400)}`);
     for (const [ttl, answers] of [["600000", true], ["1x", false]]) {
       const tools = stdioTools(w, { SCRYBE_HEALTH_TTL_MS: ttl });
       try {
-        assert.ok(Array.isArray(await tools.call("search_code", {})));
+        isList(await tools.call("search_code", {}), `ttl ${ttl}, first search`);
         emptyManifests(w, tableOf(w));
         await sleep(50);
         const value = await tools.call("search_code", {});
-        if (answers) assert.ok(Array.isArray(value), JSON.stringify(value).slice(0, 300));
+        if (answers) isList(value, `ttl ${ttl}, manifests emptied`);
         else assert.deepEqual(faultOf(value, "has an unreadable index", "schema_unreadable"), { error_message: "zero-byte manifest" });
         restore();
-        assert.ok(Array.isArray(await tools.call("search_code", {})));
+        isList(await tools.call("search_code", {}), `ttl ${ttl}, after restore`);
       } finally {
         tools.stop();
         restore();
